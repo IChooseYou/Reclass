@@ -153,7 +153,7 @@ void RcxEditor::setupLexer() {
 
     // Dark theme colors
     m_lexer->setColor(QColor("#569cd6"), QsciLexerCPP::Keyword);
-    m_lexer->setColor(QColor("#4ec9b0"), QsciLexerCPP::KeywordSet2);
+    m_lexer->setColor(QColor("#569cd6"), QsciLexerCPP::KeywordSet2);
     m_lexer->setColor(QColor("#b5cea8"), QsciLexerCPP::Number);
     m_lexer->setColor(QColor("#ce9178"), QsciLexerCPP::DoubleQuotedString);
     m_lexer->setColor(QColor("#ce9178"), QsciLexerCPP::SingleQuotedString);
@@ -280,6 +280,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         endInlineEdit();
 
     m_meta = result.meta;
+    m_layout = result.layout;
 
     m_sci->setReadOnly(false);
     m_sci->setText(result.text);
@@ -449,8 +450,8 @@ int RcxEditor::currentNodeIndex() const {
 // ── Column span computation ──
 
 ColumnSpan RcxEditor::typeSpan(const LineMeta& lm)  { return typeSpanFor(lm); }
-ColumnSpan RcxEditor::nameSpan(const LineMeta& lm)  { return nameSpanFor(lm); }
-ColumnSpan RcxEditor::valueSpan(const LineMeta& lm, int lineLength) { return valueSpanFor(lm, lineLength); }
+ColumnSpan RcxEditor::nameSpan(const LineMeta& lm, int nameW)  { return nameSpanFor(lm, nameW); }
+ColumnSpan RcxEditor::valueSpan(const LineMeta& lm, int lineLength, int nameW) { return valueSpanFor(lm, lineLength, nameW); }
 
 // ── Multi-selection ──
 
@@ -591,8 +592,8 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     ColumnSpan s;
     switch (t) {
     case EditTarget::Type:        s = typeSpan(*lm); break;
-    case EditTarget::Name:        s = nameSpan(*lm); break;
-    case EditTarget::Value:       s = valueSpan(*lm, textLen); break;
+    case EditTarget::Name:        s = nameSpan(*lm, m_layout.nameW); break;
+    case EditTarget::Value:       s = valueSpan(*lm, textLen, m_layout.nameW); break;
     case EditTarget::BaseAddress: s = baseAddressSpanFor(*lm, lineText); break;
     }
 
@@ -639,7 +640,8 @@ RcxEditor::HitInfo RcxEditor::hitTest(const QPoint& vp) const {
 static bool hitTestTarget(QsciScintilla* sci,
                           const QVector<LineMeta>& meta,
                           const QPoint& viewportPos,
-                          int& outLine, EditTarget& outTarget)
+                          int& outLine, EditTarget& outTarget,
+                          int nameW = kColName)
 {
     long pos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMPOINTCLOSE,
                                   (unsigned long)viewportPos.x(), (long)viewportPos.y());
@@ -655,8 +657,8 @@ static bool hitTestTarget(QsciScintilla* sci,
 
     const LineMeta& lm = meta[line];
     ColumnSpan ts = RcxEditor::typeSpan(lm);
-    ColumnSpan ns = RcxEditor::nameSpan(lm);
-    ColumnSpan vs = RcxEditor::valueSpan(lm, textLen);
+    ColumnSpan ns = RcxEditor::nameSpan(lm, nameW);
+    ColumnSpan vs = RcxEditor::valueSpan(lm, textLen, nameW);
     ColumnSpan bs = baseAddressSpanFor(lm, lineText);  // Base address for root headers
 
     if (!ns.valid)
@@ -687,13 +689,34 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         && m_editState.active) {
         auto* me = static_cast<QMouseEvent*>(event);
         auto h = hitTest(me->pos());
-        bool insideEdit = false;
+
         if (h.line == m_editState.line) {
             int editEnd = editEndCol();
-            insideEdit = (h.col >= m_editState.spanStart && h.col <= editEnd);
+            bool insideTrimmed = (h.col >= m_editState.spanStart && h.col <= editEnd);
+
+            if (insideTrimmed)
+                return false;  // inside trimmed text: let Scintilla position cursor
+
+            // Check raw span (full column width) - click in padding moves cursor to end
+            const LineMeta* lm = metaForLine(m_editState.line);
+            if (lm) {
+                QString lineText = getLineText(m_sci, h.line);
+                ColumnSpan raw;
+                switch (m_editState.target) {
+                case EditTarget::Type:        raw = typeSpan(*lm); break;
+                case EditTarget::Name:        raw = nameSpan(*lm, m_layout.nameW); break;
+                case EditTarget::Value:       raw = valueSpan(*lm, lineText.size(), m_layout.nameW); break;
+                case EditTarget::BaseAddress: raw = baseAddressSpanFor(*lm, lineText); break;
+                }
+                if (raw.valid && h.col >= raw.start && h.col < raw.end) {
+                    // Within raw span but outside trimmed text → move cursor to end
+                    long endPos = posFromCol(m_sci, m_editState.line, editEnd);
+                    m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, endPos);
+                    return true;  // consume event
+                }
+            }
         }
-        if (insideEdit)
-            return false;   // inside edit span: let Scintilla position cursor
+
         commitInlineEdit();
         m_currentSelIds.clear();   // stale — normal handler will re-establish
         // Fall through to normal click handler below
@@ -725,7 +748,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 // Single-click on editable token of already-selected node → edit
                 if (alreadySelected && plain) {
                     int tLine; EditTarget t;
-                    if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t)) {
+                    if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t, m_layout.nameW)) {
                         m_pendingClickNodeId = 0;
                         return beginInlineEdit(t, tLine);
                     }
@@ -801,7 +824,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         && event->type() == QEvent::MouseButtonDblClick) {
         auto* me = static_cast<QMouseEvent*>(event);
         int line; EditTarget t;
-        if (hitTestTarget(m_sci, m_meta, me->pos(), line, t)) {
+        if (hitTestTarget(m_sci, m_meta, me->pos(), line, t, m_layout.nameW)) {
             m_pendingClickNodeId = 0;   // cancel deferred selection change
             return beginInlineEdit(t, line);
         }
@@ -959,7 +982,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
 
     // Store fixed comment column position for value editing
     if (target == EditTarget::Value) {
-        ColumnSpan cs = commentSpanFor(*lm, lineText.size());
+        ColumnSpan cs = commentSpanFor(*lm, lineText.size(), m_layout.nameW);
         m_editState.commentCol = cs.valid ? cs.start : -1;
         m_editState.lastValidationOk = true;  // original value is always valid
     } else {
@@ -1214,7 +1237,7 @@ void RcxEditor::applyHoverCursor() {
     }
 
     int line; EditTarget t;
-    bool tokenHit = hitTestTarget(m_sci, m_meta, m_lastHoverPos, line, t);
+    bool tokenHit = hitTestTarget(m_sci, m_meta, m_lastHoverPos, line, t, m_layout.nameW);
 
     // Apply hover span indicator (blue text like a link)
     if (tokenHit) {

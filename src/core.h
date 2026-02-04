@@ -434,11 +434,18 @@ struct LineMeta {
     uint32_t markerMask     = 0;
 };
 
+// ── Layout Info ──
+
+struct LayoutInfo {
+    int nameW = 22;  // Effective name column width (default = kColName)
+};
+
 // ── ComposeResult ──
 
 struct ComposeResult {
     QString            text;
     QVector<LineMeta>  meta;
+    LayoutInfo         layout;
 };
 
 // ── Command ──
@@ -479,6 +486,8 @@ inline constexpr int kColValue    = 32;
 inline constexpr int kColComment  = 28;  // "// Enter=Save Esc=Cancel" fits
 inline constexpr int kColBaseAddr = 12;  // "0x" + up to 10 hex digits (40-bit address)
 inline constexpr int kSepWidth    = 2;
+inline constexpr int kMinNameW    = 8;   // Minimum name column width (matches ASCII preview)
+inline constexpr int kMaxNameW    = 22;  // Maximum name column width (= kColName)
 
 inline ColumnSpan typeSpanFor(const LineMeta& lm) {
     if (lm.lineKind != LineKind::Field || lm.isContinuation) return {};
@@ -486,7 +495,7 @@ inline ColumnSpan typeSpanFor(const LineMeta& lm) {
     return {ind, ind + kColType, true};
 }
 
-inline ColumnSpan nameSpanFor(const LineMeta& lm) {
+inline ColumnSpan nameSpanFor(const LineMeta& lm, int nameW = kColName) {
     if (lm.isContinuation || lm.lineKind != LineKind::Field) return {};
 
     int ind = kFoldCol + lm.depth * 3;
@@ -496,10 +505,10 @@ inline ColumnSpan nameSpanFor(const LineMeta& lm) {
     if (isHexPreview(lm.nodeKind))
         return {start, start + 8, true};
 
-    return {start, start + kColName, true};
+    return {start, start + nameW, true};
 }
 
-inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/) {
+inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/, int nameW = kColName) {
     if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer) return {};
     int ind = kFoldCol + lm.depth * 3;
 
@@ -510,7 +519,7 @@ inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/) {
     if (lm.isContinuation) {
         int prefixW = isHexPad
             ? (kColType + kSepWidth + 8 + kSepWidth)
-            : (kColType + kColName + 4);
+            : (kColType + nameW + 4);
         int start = ind + prefixW;
         return {start, start + valWidth, true};
     }
@@ -518,11 +527,11 @@ inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/) {
 
     int start = isHexPad
         ? (ind + kColType + kSepWidth + 8 + kSepWidth)
-        : (ind + kColType + kSepWidth + kColName + kSepWidth);
+        : (ind + kColType + kSepWidth + nameW + kSepWidth);
     return {start, start + valWidth, true};
 }
 
-inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength) {
+inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int nameW = kColName) {
     if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer) return {};
     int ind = kFoldCol + lm.depth * 3;
 
@@ -533,12 +542,12 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength) {
     if (lm.isContinuation) {
         int prefixW = isHexPad
             ? (kColType + kSepWidth + 8 + kSepWidth)
-            : (kColType + kColName + 4);
+            : (kColType + nameW + 4);
         start = ind + prefixW + valWidth;
     } else {
         start = isHexPad
             ? (ind + kColType + kSepWidth + 8 + kSepWidth + valWidth)
-            : (ind + kColType + kSepWidth + kColName + kSepWidth + valWidth);
+            : (ind + kColType + kSepWidth + nameW + kSepWidth + valWidth);
     }
     return {start, lineLength, start < lineLength};
 }
@@ -599,7 +608,7 @@ namespace fmt {
     QString fmtPointer64(uint64_t v);
     QString fmtNodeLine(const Node& node, const Provider& prov,
                         uint64_t addr, int depth, int subLine = 0,
-                        const QString& comment = {});
+                        const QString& comment = {}, int colName = kColName);
     QString fmtOffsetMargin(int64_t relativeOffset, bool isContinuation);
     QString fmtStructHeader(const Node& node, int depth);
     QString fmtStructHeaderWithBase(const Node& node, int depth, uint64_t baseAddress);

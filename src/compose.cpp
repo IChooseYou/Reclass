@@ -16,6 +16,7 @@ struct ComposeState {
     QSet<uint64_t>     visiting;   // cycle detection for struct recursion
     QSet<qulonglong>   ptrVisiting; // cycle guard for pointer expansions
     int                currentLine = 0;
+    int                nameW       = kColName;  // effective name column width
 
     // Precomputed for O(1) lookups
     QHash<uint64_t, QVector<int>> childMap;
@@ -119,7 +120,8 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         lm.markerMask      = computeMarkers(node, prov, absAddr, isCont, depth);
         lm.foldLevel       = computeFoldLevel(depth, false);
 
-        QString lineText = fmt::fmtNodeLine(node, prov, absAddr, depth, sub);
+        QString lineText = fmt::fmtNodeLine(node, prov, absAddr, depth, sub,
+                                            /*comment=*/{}, state.nameW);
         state.emitLine(lineText, lm);
     }
 }
@@ -275,6 +277,17 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
     for (int i = 0; i < tree.nodes.size(); i++)
         state.absOffsets[i] = tree.computeOffset(i);
 
+    // Compute effective name column width from longest name
+    int maxNameLen = kMinNameW;
+    for (const Node& node : tree.nodes) {
+        // Skip hex/padding (they show ASCII preview, not name column)
+        if (isHexPreview(node.kind)) continue;
+        // Skip containers (struct/array headers have different layout)
+        if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) continue;
+        maxNameLen = qMax(maxNameLen, node.name.size());
+    }
+    state.nameW = qBound(kMinNameW, maxNameLen + 1, kMaxNameW);
+
     QVector<int> roots = state.childMap.value(0);
     std::sort(roots.begin(), roots.end(), [&](int a, int b) {
         return tree.nodes[a].offset < tree.nodes[b].offset;
@@ -284,7 +297,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
         composeNode(state, tree, prov, idx, 0);
     }
 
-    return { state.text, state.meta };
+    return { state.text, state.meta, LayoutInfo{state.nameW} };
 }
 
 QSet<uint64_t> NodeTree::normalizePreferAncestors(const QSet<uint64_t>& ids) const {

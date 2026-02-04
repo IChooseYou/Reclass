@@ -213,12 +213,12 @@ QString readValue(const Node& node, const Provider& prov,
 
 QString fmtNodeLine(const Node& node, const Provider& prov,
                     uint64_t addr, int depth, int subLine,
-                    const QString& comment) {
+                    const QString& comment, int colName) {
     QString ind = indent(depth);
     QString type = typeName(node.kind);
-    QString name = fit(node.name, COL_NAME);
+    QString name = fit(node.name, colName);
     // Blank prefix for continuation lines (same width as type+sep+name+sep)
-    const int prefixW = COL_TYPE + COL_NAME + 4; // 2 seps × 2 chars
+    const int prefixW = COL_TYPE + colName + 4; // 2 seps × 2 chars
 
     // Comment suffix (padded or empty)
     QString cmtSuffix = comment.isEmpty() ? QString(COL_COMMENT, ' ')

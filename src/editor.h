@@ -25,8 +25,8 @@ public:
 
     // ── Column span computation ──
     static ColumnSpan typeSpan(const LineMeta& lm);
-    static ColumnSpan nameSpan(const LineMeta& lm);
-    static ColumnSpan valueSpan(const LineMeta& lm, int lineLength);
+    static ColumnSpan nameSpan(const LineMeta& lm, int nameW = kColName);
+    static ColumnSpan valueSpan(const LineMeta& lm, int lineLength, int nameW = kColName);
 
     // ── Multi-selection ──
     QSet<int> selectedNodeIndices() const;
@@ -55,6 +55,7 @@ private:
     QsciScintilla*    m_sci    = nullptr;
     QsciLexerCPP*     m_lexer  = nullptr;
     QVector<LineMeta> m_meta;
+    LayoutInfo        m_layout;  // cached from ComposeResult
 
     int m_marginStyleBase = -1;
     int m_hintLine = -1;
