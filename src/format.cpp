@@ -102,14 +102,23 @@ QString fmtOffsetMargin(int64_t relativeOffset, bool isContinuation) {
 // ── Struct header / footer ──
 
 QString fmtStructHeader(const Node& node, int depth) {
-    return indent(depth) + typeName(node.kind).trimmed() +
-           QStringLiteral(" ") + node.name + QStringLiteral(" {");
+    // Format: "struct TypeName name {" or "struct name {" if no type name
+    QString type = typeName(node.kind).trimmed();
+    if (!node.structTypeName.isEmpty())
+        return indent(depth) + type + QStringLiteral(" ") + node.structTypeName +
+               QStringLiteral(" ") + node.name + QStringLiteral(" {");
+    return indent(depth) + type + QStringLiteral(" ") + node.name + QStringLiteral(" {");
 }
 
 QString fmtStructHeaderWithBase(const Node& node, int depth, uint64_t baseAddress) {
-    // Format: "struct Name { base: 0x00400000" - single space after {
-    QString header = indent(depth) + typeName(node.kind).trimmed() +
-                     QStringLiteral(" ") + node.name + QStringLiteral(" { ");
+    // Format: "struct TypeName Name { // base: 0x..." or "struct Name { // base: 0x..."
+    QString type = typeName(node.kind).trimmed();
+    QString header;
+    if (!node.structTypeName.isEmpty())
+        header = indent(depth) + type + QStringLiteral(" ") + node.structTypeName +
+                 QStringLiteral(" ") + node.name + QStringLiteral(" { ");
+    else
+        header = indent(depth) + type + QStringLiteral(" ") + node.name + QStringLiteral(" { ");
     QString baseHex = QStringLiteral("0x") + QString::number(baseAddress, 16).toUpper();
     return header + QStringLiteral("// base: ") + baseHex;
 }

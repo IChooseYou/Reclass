@@ -246,8 +246,8 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         }
     }
 
-    // Footer line (skip for array element structs - condensed display)
-    if (!isArrayChild) {
+    // Footer line: skip when collapsed (only header shows) or for array element structs
+    if (!isArrayChild && !node.collapsed) {
         LineMeta lm;
         lm.nodeIdx   = nodeIdx;
         lm.nodeId    = node.id;

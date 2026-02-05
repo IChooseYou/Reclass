@@ -233,6 +233,7 @@ struct Node {
     uint64_t id         = 0;
     NodeKind kind       = NodeKind::Hex8;
     QString  name;
+    QString  structTypeName;  // Struct/Array: optional type name (e.g., "IMAGE_DOS_HEADER")
     uint64_t parentId   = 0;   // 0 = root (no parent)
     int      offset     = 0;
     int      arrayLen   = 1;   // Array: element count
@@ -257,6 +258,8 @@ struct Node {
         o["id"]        = QString::number(id);
         o["kind"]      = kindToString(kind);
         o["name"]      = name;
+        if (!structTypeName.isEmpty())
+            o["structTypeName"] = structTypeName;
         o["parentId"]  = QString::number(parentId);
         o["offset"]    = offset;
         o["arrayLen"]  = arrayLen;
@@ -271,6 +274,7 @@ struct Node {
         n.id        = o["id"].toString("0").toULongLong();
         n.kind      = kindFromString(o["kind"].toString());
         n.name      = o["name"].toString();
+        n.structTypeName = o["structTypeName"].toString();
         n.parentId  = o["parentId"].toString("0").toULongLong();
         n.offset    = o["offset"].toInt(0);
         n.arrayLen  = o["arrayLen"].toInt(1);
@@ -304,6 +308,9 @@ struct NodeTree {
         m_idCache.clear();
         return nodes.size() - 1;
     }
+
+    // Reserve a unique ID atomically (for use before pushing undo commands)
+    uint64_t reserveId() { return m_nextId++; }
 
     void invalidateIdCache() const { m_idCache.clear(); }
 

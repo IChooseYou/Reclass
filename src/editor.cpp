@@ -142,11 +142,11 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_BASE_ADDR, QColor("#5a8248"));
 
-    // Hover span indicator — blue text like a link
+    // Hover span indicator — muted teal text (distinct from blue keywords)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HOVER_SPAN, 17 /*INDIC_TEXTFORE*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_HOVER_SPAN, QColor("#569cd6"));
+                         IND_HOVER_SPAN, QColor("#3d9c8a"));
 }
 
 void RcxEditor::setupLexer() {
@@ -175,7 +175,7 @@ void RcxEditor::setupLexer() {
     }
 
     m_sci->setLexer(m_lexer);
-    m_sci->setBraceMatching(QsciScintilla::SloppyBraceMatch);
+    m_sci->setBraceMatching(QsciScintilla::NoBraceMatch);  // Disable - this is a structured viewer
 
     // Add type names to keyword set 2 → teal coloring (distinct from identifiers)
     QByteArray kw2 = allTypeNamesForUI(/*stripBrackets=*/true).join(' ').toLatin1();
@@ -553,20 +553,55 @@ RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
 
 // ── Span helpers ──
 
+// Name span for struct/array headers
+// Format: "struct TYPENAME NAME {" or "struct NAME {" or "type[N] NAME {"
+// Returns span of the last word before " {"
 static ColumnSpan headerNameSpan(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header) return {};
     int bracePos = lineText.lastIndexOf(QStringLiteral(" {"));
     if (bracePos <= 0) return {};
-    int ind = kFoldCol + lm.depth * 3;
-    int typeEnd = lineText.indexOf(' ', ind);
-    if (typeEnd <= ind || typeEnd >= bracePos) return {};
+
+    // Find the last space before " {" - the name starts after that
+    int nameStart = lineText.lastIndexOf(' ', bracePos - 1);
+    if (nameStart < 0) return {};
+    nameStart++;  // Move past the space
 
     // Don't allow editing array element names like "[0]", "[1]", etc.
-    QString name = lineText.mid(typeEnd + 1, bracePos - typeEnd - 1).trimmed();
+    QString name = lineText.mid(nameStart, bracePos - nameStart);
     if (name.startsWith('[') && name.endsWith(']'))
         return {};
 
-    return {typeEnd + 1, bracePos, true};
+    return {nameStart, bracePos, true};
+}
+
+// Type name span for struct headers (not arrays)
+// Format: "struct TYPENAME NAME {" - returns span of TYPENAME
+// For "struct NAME {" (no typename), returns invalid span
+static ColumnSpan headerTypeNameSpan(const LineMeta& lm, const QString& lineText) {
+    if (lm.lineKind != LineKind::Header) return {};
+    if (lm.isArrayHeader) return {};  // Arrays use arrayHeaderTypeSpan instead
+
+    int bracePos = lineText.lastIndexOf(QStringLiteral(" {"));
+    if (bracePos <= 0) return {};
+    int ind = kFoldCol + lm.depth * 3;
+
+    // Find first space (after "struct")
+    int firstSpace = lineText.indexOf(' ', ind);
+    if (firstSpace <= ind || firstSpace >= bracePos) return {};
+
+    // Find second space (after typename, before name)
+    int secondSpace = lineText.indexOf(' ', firstSpace + 1);
+    if (secondSpace <= firstSpace || secondSpace >= bracePos) return {};  // No typename
+
+    // Find third space (after name) - if exists, we have typename
+    int thirdSpace = lineText.indexOf(' ', secondSpace + 1);
+    if (thirdSpace < 0 || thirdSpace > bracePos) {
+        // Only two words: "struct NAME {" - no typename to edit
+        return {};
+    }
+
+    // Three+ words: "struct TYPENAME NAME {" - return typename span
+    return {firstSpace + 1, secondSpace, true};
 }
 
 // Type span for array headers: "int32_t[10]" in "int32_t[10] positions {"
@@ -642,8 +677,11 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     }
 
     // Fallback spans for header lines
-    if (!s.valid && t == EditTarget::Type)
+    if (!s.valid && t == EditTarget::Type) {
         s = arrayHeaderTypeSpan(*lm, lineText);
+        if (!s.valid)
+            s = headerTypeNameSpan(*lm, lineText);
+    }
     if (!s.valid && t == EditTarget::Name)
         s = headerNameSpan(*lm, lineText);
 
@@ -720,8 +758,11 @@ static bool hitTestTarget(QsciScintilla* sci,
     ColumnSpan bs = baseAddressSpanFor(lm, lineText);  // Base address for root headers
 
     // Fallback spans for header lines
-    if (!ts.valid)
+    if (!ts.valid) {
         ts = arrayHeaderTypeSpan(lm, lineText);
+        if (!ts.valid)
+            ts = headerTypeNameSpan(lm, lineText);
+    }
     if (!ns.valid)
         ns = headerNameSpan(lm, lineText);
 

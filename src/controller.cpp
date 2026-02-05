@@ -1,4 +1,5 @@
 #include "controller.h"
+#include <Qsci/qsciscintilla.h>
 #include <QSplitter>
 #include <QFile>
 #include <QJsonDocument>
@@ -338,8 +339,8 @@ void RcxController::insertNode(uint64_t parentId, int offset, NodeKind kind, con
         n.offset = offset;
     }
 
-    // Assign ID before storing
-    n.id = m_doc->tree.m_nextId;
+    // Reserve unique ID atomically before pushing command
+    n.id = m_doc->tree.reserveId();
 
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
 }
@@ -625,6 +626,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         int off = m_doc->tree.nodes[ni].offset;
         QApplication::clipboard()->setText(
             QStringLiteral("+0x") + QString::number(off, 16).toUpper().rightJustified(4, '0'));
+    });
+
+    menu.addAction("Copy All as &Text", [editor]() {
+        QApplication::clipboard()->setText(editor->scintilla()->text());
     });
 
     menu.exec(globalPos);

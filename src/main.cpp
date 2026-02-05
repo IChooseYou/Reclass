@@ -414,12 +414,14 @@ void MainWindow::newFile() {
         return doc->tree.nodes[idx].id;
     };
 
-    auto addStruct = [&](uint64_t parent, int offset, const QString& name) -> uint64_t {
+    auto addStruct = [&](uint64_t parent, int offset, const QString& typeName, const QString& name) -> uint64_t {
         Node n;
         n.kind = NodeKind::Struct;
+        n.structTypeName = typeName;
         n.name = name;
         n.parentId = parent;
         n.offset = offset;
+        n.collapsed = true;  // Auto-collapse structs
         int idx = doc->tree.addNode(n);
         return doc->tree.nodes[idx].id;
     };
@@ -432,12 +434,13 @@ void MainWindow::newFile() {
         n.offset = offset;
         n.arrayLen = count;
         n.elementKind = elemKind;
+        n.collapsed = true;  // Auto-collapse arrays
         int idx = doc->tree.addNode(n);
         return doc->tree.nodes[idx].id;
     };
 
     // ── Root: IMAGE_DOS_HEADER ──
-    uint64_t dosId = addStruct(0, 0x00, "IMAGE_DOS_HEADER");
+    uint64_t dosId = addStruct(0, 0x00, "IMAGE_DOS_HEADER", "dosHeader");
     addField(dosId, 0x00, NodeKind::UInt16, "e_magic");
     addField(dosId, 0x02, NodeKind::UInt16, "e_cblp");
     addField(dosId, 0x04, NodeKind::UInt16, "e_cp");
@@ -458,7 +461,7 @@ void MainWindow::newFile() {
     addField(0, peOff, NodeKind::UInt32, "PE_Signature");
 
     // ── IMAGE_FILE_HEADER ──
-    uint64_t fhId = addStruct(0, fhOff, "IMAGE_FILE_HEADER");
+    uint64_t fhId = addStruct(0, fhOff, "IMAGE_FILE_HEADER", "fileHeader");
     addField(fhId, 0, NodeKind::UInt16, "Machine");
     addField(fhId, 2, NodeKind::UInt16, "NumberOfSections");
     addField(fhId, 4, NodeKind::UInt32, "TimeDateStamp");
@@ -468,7 +471,7 @@ void MainWindow::newFile() {
     addField(fhId, 18, NodeKind::UInt16, "Characteristics");
 
     // ── IMAGE_OPTIONAL_HEADER64 ──
-    uint64_t ohId = addStruct(0, ohOff, "IMAGE_OPTIONAL_HEADER64");
+    uint64_t ohId = addStruct(0, ohOff, "IMAGE_OPTIONAL_HEADER64", "optionalHeader");
     addField(ohId, 0, NodeKind::UInt16, "Magic");
     addField(ohId, 2, NodeKind::UInt8, "MajorLinkerVersion");
     addField(ohId, 3, NodeKind::UInt8, "MinorLinkerVersion");
@@ -508,7 +511,7 @@ void MainWindow::newFile() {
         "IAT", "DelayImport", "CLR", "Reserved"
     };
     for (int i = 0; i < 16; i++) {
-        uint64_t entryId = addStruct(ddArrId, i * 8, QString("[%1] %2").arg(i).arg(ddNames[i]));
+        uint64_t entryId = addStruct(ddArrId, i * 8, "IMAGE_DATA_DIRECTORY", QString("%1").arg(ddNames[i]));
         addField(entryId, 0, NodeKind::UInt32, "VirtualAddress");
         addField(entryId, 4, NodeKind::UInt32, "Size");
     }
@@ -517,7 +520,7 @@ void MainWindow::newFile() {
     uint64_t shArrId = addArray(0, shOff, "SectionHeaders", 4, NodeKind::Struct);
     const char* secNames[4] = {".text", ".rdata", ".data", ".pdata"};
     for (int i = 0; i < 4; i++) {
-        uint64_t secId = addStruct(shArrId, i * 40, QString("[%1] %2").arg(i).arg(secNames[i]));
+        uint64_t secId = addStruct(shArrId, i * 40, "IMAGE_SECTION_HEADER", QString("%1").arg(secNames[i]));
         // Name is 8 bytes - show as UTF8 string
         Node nameNode;
         nameNode.kind = NodeKind::UTF8;
