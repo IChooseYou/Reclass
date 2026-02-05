@@ -260,187 +260,281 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
 void MainWindow::newFile() {
     auto* doc = new RcxDocument(this);
 
-    // Autoload self as binary data
-    doc->loadData(QCoreApplication::applicationFilePath());
-    doc->tree.baseAddress = 0;
+    // ══════════════════════════════════════════════════════════════════════════
+    // PE Header Demo - Realistic PE32+ (64-bit) executable structure
+    // ══════════════════════════════════════════════════════════════════════════
+    // Layout:
+    //   0x000: DOS Header (64 bytes)
+    //   0x040: DOS Stub (64 bytes padding)
+    //   0x080: PE Signature (4 bytes)
+    //   0x084: File Header (20 bytes)
+    //   0x098: Optional Header PE32+ (240 bytes)
+    //     - Standard fields (24 bytes)
+    //     - Windows fields (88 bytes)
+    //     - Data Directories (16 * 8 = 128 bytes)
+    //   0x188: Section Headers (4 * 40 = 160 bytes)
+    //   0x228: End of headers (total 552 bytes)
+    // ══════════════════════════════════════════════════════════════════════════
 
-    // Read e_lfanew to find PE header offset
-    uint32_t lfanew = doc->provider->readU32(0x3C);
-    if (lfanew < 0x40 || lfanew >= (uint32_t)doc->provider->size())
-        lfanew = 0x40;
-    uint32_t pe  = lfanew;          // PE signature
-    uint32_t fh  = pe + 4;          // IMAGE_FILE_HEADER
-    uint32_t oh  = fh + 20;         // IMAGE_OPTIONAL_HEADER (PE32+)
+    QByteArray peData(0x300, '\0');  // 768 bytes
+    char* d = peData.data();
 
-    Node root;
-    root.kind = NodeKind::Struct;
-    root.name = "PE_HEADER";
-    root.parentId = 0;
-    root.offset = 0;
-    int ri = doc->tree.addNode(root);
-    uint64_t rootId = doc->tree.nodes[ri].id;
-
-    auto add = [&](NodeKind k, const QString& name, int off) {
-        Node n;
-        n.kind = k;
-        n.name = name;
-        n.offset = off;
-        n.parentId = rootId;
-        doc->tree.addNode(n);
-    };
-
-    // ── IMAGE_DOS_HEADER (0x00 – 0x3F) ──
-    add(NodeKind::UInt16, "e_magic",     0x00);
-    add(NodeKind::UInt16, "e_cblp",      0x02);
-    add(NodeKind::UInt16, "e_cp",        0x04);
-    add(NodeKind::UInt16, "e_crlc",      0x06);
-    add(NodeKind::UInt16, "e_cparhdr",   0x08);
-    add(NodeKind::UInt16, "e_minalloc",  0x0A);
-    add(NodeKind::UInt16, "e_maxalloc",  0x0C);
-    add(NodeKind::UInt16, "e_ss",        0x0E);
-    add(NodeKind::UInt16, "e_sp",        0x10);
-    add(NodeKind::UInt16, "e_csum",      0x12);
-    add(NodeKind::UInt16, "e_ip",        0x14);
-    add(NodeKind::UInt16, "e_cs",        0x16);
-    add(NodeKind::UInt16, "e_lfarlc",    0x18);
-    add(NodeKind::UInt16, "e_ovno",      0x1A);
-    add(NodeKind::Hex64,  "e_res",       0x1C);
-    add(NodeKind::UInt16, "e_oemid",     0x24);
-    add(NodeKind::UInt16, "e_oeminfo",   0x26);
-    add(NodeKind::Hex64,  "e_res2_0",    0x28);
-    add(NodeKind::Hex64,  "e_res2_1",    0x30);
-    add(NodeKind::Hex32,  "e_res2_2",    0x38);
-    add(NodeKind::UInt32, "e_lfanew",    0x3C);
-
-    // ── DOS Stub (0x40 to PE signature) — fill with Hex nodes ──
-    {
-        int cursor = 0x40;
-        while (cursor + 8 <= (int)pe) {
-            add(NodeKind::Hex64,
-                QString("stub_%1").arg(cursor, 4, 16, QChar('0')),
-                cursor);
-            cursor += 8;
-        }
-        if (cursor + 4 <= (int)pe) {
-            add(NodeKind::Hex32,
-                QString("stub_%1").arg(cursor, 4, 16, QChar('0')),
-                cursor);
-            cursor += 4;
-        }
-        if (cursor + 2 <= (int)pe) {
-            add(NodeKind::Hex16,
-                QString("stub_%1").arg(cursor, 4, 16, QChar('0')),
-                cursor);
-            cursor += 2;
-        }
-        if (cursor + 1 <= (int)pe) {
-            add(NodeKind::Hex8,
-                QString("stub_%1").arg(cursor, 4, 16, QChar('0')),
-                cursor);
-            cursor += 1;
-        }
-    }
+    // ── DOS Header (IMAGE_DOS_HEADER) ──
+    d[0x00] = 'M'; d[0x01] = 'Z';                    // e_magic
+    *(uint16_t*)(d + 0x02) = 0x0090;                 // e_cblp (bytes on last page)
+    *(uint16_t*)(d + 0x04) = 0x0003;                 // e_cp (pages in file)
+    *(uint16_t*)(d + 0x06) = 0x0000;                 // e_crlc (relocations)
+    *(uint16_t*)(d + 0x08) = 0x0004;                 // e_cparhdr (header size in paragraphs)
+    *(uint16_t*)(d + 0x0A) = 0x0000;                 // e_minalloc
+    *(uint16_t*)(d + 0x0C) = 0xFFFF;                 // e_maxalloc
+    *(uint16_t*)(d + 0x0E) = 0x0000;                 // e_ss
+    *(uint16_t*)(d + 0x10) = 0x00B8;                 // e_sp
+    *(uint16_t*)(d + 0x12) = 0x0000;                 // e_csum
+    *(uint16_t*)(d + 0x14) = 0x0000;                 // e_ip
+    *(uint16_t*)(d + 0x16) = 0x0000;                 // e_cs
+    *(uint16_t*)(d + 0x18) = 0x0040;                 // e_lfarlc
+    *(uint16_t*)(d + 0x1A) = 0x0000;                 // e_ovno
+    // e_res[4] at 0x1C-0x23 (zeroed)
+    *(uint16_t*)(d + 0x24) = 0x0000;                 // e_oemid
+    *(uint16_t*)(d + 0x26) = 0x0000;                 // e_oeminfo
+    // e_res2[10] at 0x28-0x3B (zeroed)
+    *(uint32_t*)(d + 0x3C) = 0x00000080;             // e_lfanew → PE header at 0x80
 
     // ── PE Signature ──
-    add(NodeKind::UInt32, "Signature",   pe);
+    const int peOff = 0x80;
+    d[peOff+0] = 'P'; d[peOff+1] = 'E'; d[peOff+2] = 0; d[peOff+3] = 0;
 
-    // ── IMAGE_FILE_HEADER (nested struct) ──
-    {
-        Node fhStruct;
-        fhStruct.kind = NodeKind::Struct;
-        fhStruct.name = "IMAGE_FILE_HEADER";
-        fhStruct.parentId = rootId;
-        fhStruct.offset = fh;
-        int fi = doc->tree.addNode(fhStruct);
-        uint64_t fhId = doc->tree.nodes[fi].id;
+    // ── File Header (IMAGE_FILE_HEADER) ──
+    const int fhOff = peOff + 4;  // 0x84
+    *(uint16_t*)(d + fhOff + 0)  = 0x8664;           // Machine (AMD64)
+    *(uint16_t*)(d + fhOff + 2)  = 0x0004;           // NumberOfSections
+    *(uint32_t*)(d + fhOff + 4)  = 0x65A3B2C1;       // TimeDateStamp
+    *(uint32_t*)(d + fhOff + 8)  = 0x00000000;       // PointerToSymbolTable
+    *(uint32_t*)(d + fhOff + 12) = 0x00000000;       // NumberOfSymbols
+    *(uint16_t*)(d + fhOff + 16) = 0x00F0;           // SizeOfOptionalHeader (240)
+    *(uint16_t*)(d + fhOff + 18) = 0x0022;           // Characteristics (EXECUTABLE|LARGE_ADDRESS_AWARE)
 
-        auto addFH = [&](NodeKind k, const QString& name, int off) {
-            Node n;
-            n.kind = k;
-            n.name = name;
-            n.offset = off;
-            n.parentId = fhId;
-            doc->tree.addNode(n);
-        };
+    // ── Optional Header PE32+ (IMAGE_OPTIONAL_HEADER64) ──
+    const int ohOff = fhOff + 20;  // 0x98
+    *(uint16_t*)(d + ohOff + 0)  = 0x020B;           // Magic (PE32+)
+    *(uint8_t*)(d + ohOff + 2)   = 0x0E;             // MajorLinkerVersion
+    *(uint8_t*)(d + ohOff + 3)   = 0x00;             // MinorLinkerVersion
+    *(uint32_t*)(d + ohOff + 4)  = 0x00012000;       // SizeOfCode
+    *(uint32_t*)(d + ohOff + 8)  = 0x00008000;       // SizeOfInitializedData
+    *(uint32_t*)(d + ohOff + 12) = 0x00000000;       // SizeOfUninitializedData
+    *(uint32_t*)(d + ohOff + 16) = 0x00001000;       // AddressOfEntryPoint
+    *(uint32_t*)(d + ohOff + 20) = 0x00001000;       // BaseOfCode
 
-        addFH(NodeKind::UInt16, "Machine",              0x00);
-        addFH(NodeKind::UInt16, "NumberOfSections",     0x02);
-        addFH(NodeKind::UInt32, "TimeDateStamp",        0x04);
-        addFH(NodeKind::UInt32, "PtrToSymbolTable",     0x08);
-        addFH(NodeKind::UInt32, "NumberOfSymbols",      0x0C);
-        addFH(NodeKind::UInt16, "SizeOfOptionalHeader", 0x10);
-        addFH(NodeKind::UInt16, "Characteristics",      0x12);
+    // Windows-specific fields (PE32+)
+    *(uint64_t*)(d + ohOff + 24) = 0x0000000140000000ULL; // ImageBase
+    *(uint32_t*)(d + ohOff + 32) = 0x00001000;       // SectionAlignment
+    *(uint32_t*)(d + ohOff + 36) = 0x00000200;       // FileAlignment
+    *(uint16_t*)(d + ohOff + 40) = 0x0006;           // MajorOperatingSystemVersion
+    *(uint16_t*)(d + ohOff + 42) = 0x0000;           // MinorOperatingSystemVersion
+    *(uint16_t*)(d + ohOff + 44) = 0x0000;           // MajorImageVersion
+    *(uint16_t*)(d + ohOff + 46) = 0x0000;           // MinorImageVersion
+    *(uint16_t*)(d + ohOff + 48) = 0x0006;           // MajorSubsystemVersion
+    *(uint16_t*)(d + ohOff + 50) = 0x0000;           // MinorSubsystemVersion
+    *(uint32_t*)(d + ohOff + 52) = 0x00000000;       // Win32VersionValue
+    *(uint32_t*)(d + ohOff + 56) = 0x00025000;       // SizeOfImage
+    *(uint32_t*)(d + ohOff + 60) = 0x00000200;       // SizeOfHeaders
+    *(uint32_t*)(d + ohOff + 64) = 0x00000000;       // CheckSum
+    *(uint16_t*)(d + ohOff + 68) = 0x0003;           // Subsystem (CONSOLE)
+    *(uint16_t*)(d + ohOff + 70) = 0x8160;           // DllCharacteristics (DYNAMIC_BASE|NX_COMPAT|TERMINAL_SERVER_AWARE)
+    *(uint64_t*)(d + ohOff + 72) = 0x0000000000100000ULL; // SizeOfStackReserve
+    *(uint64_t*)(d + ohOff + 80) = 0x0000000000001000ULL; // SizeOfStackCommit
+    *(uint64_t*)(d + ohOff + 88) = 0x0000000000100000ULL; // SizeOfHeapReserve
+    *(uint64_t*)(d + ohOff + 96) = 0x0000000000001000ULL; // SizeOfHeapCommit
+    *(uint32_t*)(d + ohOff + 104) = 0x00000000;      // LoaderFlags
+    *(uint32_t*)(d + ohOff + 108) = 0x00000010;      // NumberOfRvaAndSizes (16)
+
+    // ── Data Directories (16 entries × 8 bytes) ──
+    const int ddOff = ohOff + 112;  // 0x108
+    // Each entry: VirtualAddress (4) + Size (4)
+    struct { uint32_t rva; uint32_t size; } dataDirs[16] = {
+        {0x00000000, 0x00000000},  // 0: Export
+        {0x00014000, 0x000000A0},  // 1: Import
+        {0x00000000, 0x00000000},  // 2: Resource
+        {0x00000000, 0x00000000},  // 3: Exception
+        {0x00000000, 0x00000000},  // 4: Security
+        {0x00000000, 0x00000000},  // 5: BaseReloc
+        {0x00013000, 0x00000038},  // 6: Debug
+        {0x00000000, 0x00000000},  // 7: Architecture
+        {0x00000000, 0x00000000},  // 8: GlobalPtr
+        {0x00000000, 0x00000000},  // 9: TLS
+        {0x00000000, 0x00000000},  // 10: LoadConfig
+        {0x00000000, 0x00000000},  // 11: BoundImport
+        {0x00014050, 0x00000048},  // 12: IAT
+        {0x00000000, 0x00000000},  // 13: DelayImport
+        {0x00000000, 0x00000000},  // 14: CLR
+        {0x00000000, 0x00000000},  // 15: Reserved
+    };
+    for (int i = 0; i < 16; i++) {
+        *(uint32_t*)(d + ddOff + i*8 + 0) = dataDirs[i].rva;
+        *(uint32_t*)(d + ddOff + i*8 + 4) = dataDirs[i].size;
     }
 
-    // ── IMAGE_OPTIONAL_HEADER64 (nested struct) ──
-    {
-        Node ohStruct;
-        ohStruct.kind = NodeKind::Struct;
-        ohStruct.name = "IMAGE_OPTIONAL_HEADER64";
-        ohStruct.parentId = rootId;
-        ohStruct.offset = oh;
-        int oi = doc->tree.addNode(ohStruct);
-        uint64_t ohId = doc->tree.nodes[oi].id;
-
-        auto addOH = [&](NodeKind k, const QString& name, int off) {
-            Node n;
-            n.kind = k;
-            n.name = name;
-            n.offset = off;
-            n.parentId = ohId;
-            doc->tree.addNode(n);
-        };
-
-        addOH(NodeKind::UInt16, "Magic",                0x00);
-        addOH(NodeKind::UInt8,  "MajorLinkerVersion",   0x02);
-        addOH(NodeKind::UInt8,  "MinorLinkerVersion",   0x03);
-        addOH(NodeKind::UInt32, "SizeOfCode",           0x04);
-        addOH(NodeKind::UInt32, "SizeOfInitData",       0x08);
-        addOH(NodeKind::UInt32, "SizeOfUninitData",     0x0C);
-        addOH(NodeKind::UInt32, "AddressOfEntryPoint",  0x10);
-        addOH(NodeKind::UInt32, "BaseOfCode",           0x14);
-        addOH(NodeKind::UInt64, "ImageBase",            0x18);
-        addOH(NodeKind::UInt32, "SectionAlignment",     0x20);
-        addOH(NodeKind::UInt32, "FileAlignment",        0x24);
-        addOH(NodeKind::UInt16, "MajorOSVersion",       0x28);
-        addOH(NodeKind::UInt16, "MinorOSVersion",       0x2A);
-        addOH(NodeKind::UInt16, "MajorImageVersion",    0x2C);
-        addOH(NodeKind::UInt16, "MinorImageVersion",    0x2E);
-        addOH(NodeKind::UInt16, "MajorSubsysVersion",   0x30);
-        addOH(NodeKind::UInt16, "MinorSubsysVersion",   0x32);
-        addOH(NodeKind::UInt32, "Win32VersionValue",    0x34);
-        addOH(NodeKind::UInt32, "SizeOfImage",          0x38);
-        addOH(NodeKind::UInt32, "SizeOfHeaders",        0x3C);
-        addOH(NodeKind::UInt32, "CheckSum",             0x40);
-        addOH(NodeKind::UInt16, "Subsystem",            0x44);
-        addOH(NodeKind::UInt16, "DllCharacteristics",   0x46);
-        addOH(NodeKind::UInt64, "SizeOfStackReserve",   0x48);
-        addOH(NodeKind::UInt64, "SizeOfStackCommit",    0x50);
-        addOH(NodeKind::UInt64, "SizeOfHeapReserve",    0x58);
-        addOH(NodeKind::UInt64, "SizeOfHeapCommit",     0x60);
-        addOH(NodeKind::UInt32, "LoaderFlags",          0x68);
-        addOH(NodeKind::UInt32, "NumberOfRvaAndSizes",  0x6C);
-
-        // Data directories (16 entries × 8 bytes)
-        static const char* dirNames[] = {
-            "Export", "Import", "Resource", "Exception",
-            "Security", "BaseReloc", "Debug", "Architecture",
-            "GlobalPtr", "TLS", "LoadConfig", "BoundImport",
-            "IAT", "DelayImport", "CLR", "Reserved"
-        };
-        for (int i = 0; i < 16; i++) {
-            int doff = 0x70 + i * 8;
-            addOH(NodeKind::UInt32, QString("%1_RVA").arg(dirNames[i]),  doff);
-            addOH(NodeKind::UInt32, QString("%1_Size").arg(dirNames[i]), doff + 4);
-        }
+    // ── Section Headers (4 sections × 40 bytes) ──
+    const int shOff = ddOff + 128;  // 0x188
+    struct SectionDef { const char* name; uint32_t vsize; uint32_t vaddr; uint32_t rawsz; uint32_t rawptr; uint32_t chars; };
+    SectionDef sections[4] = {
+        {".text",   0x00011234, 0x00001000, 0x00011400, 0x00000200, 0x60000020},  // CODE|EXECUTE|READ
+        {".rdata",  0x00002ABC, 0x00013000, 0x00002C00, 0x00011600, 0x40000040},  // INITIALIZED|READ
+        {".data",   0x00001000, 0x00016000, 0x00000400, 0x00014200, 0xC0000040},  // INITIALIZED|READ|WRITE
+        {".pdata",  0x00000800, 0x00017000, 0x00000800, 0x00014600, 0x40000040},  // INITIALIZED|READ
+    };
+    for (int i = 0; i < 4; i++) {
+        int off = shOff + i * 40;
+        memcpy(d + off, sections[i].name, 8);                    // Name[8]
+        *(uint32_t*)(d + off + 8)  = sections[i].vsize;          // VirtualSize
+        *(uint32_t*)(d + off + 12) = sections[i].vaddr;          // VirtualAddress
+        *(uint32_t*)(d + off + 16) = sections[i].rawsz;          // SizeOfRawData
+        *(uint32_t*)(d + off + 20) = sections[i].rawptr;         // PointerToRawData
+        *(uint32_t*)(d + off + 24) = 0x00000000;                 // PointerToRelocations
+        *(uint32_t*)(d + off + 28) = 0x00000000;                 // PointerToLinenumbers
+        *(uint16_t*)(d + off + 32) = 0x0000;                     // NumberOfRelocations
+        *(uint16_t*)(d + off + 34) = 0x0000;                     // NumberOfLinenumbers
+        *(uint32_t*)(d + off + 36) = sections[i].chars;          // Characteristics
     }
 
-    // ── Fill with Hex64 until 0x6000 for stress testing ──
-    int padStart = oh + 0xF0;  // end of optional header
-    for (int off = padStart; off < 0x6000; off += 8) {
-        add(NodeKind::Hex64,
-            QString("data_%1").arg(off, 4, 16, QChar('0')),
-            off);
+    doc->loadData(peData);
+    doc->tree.baseAddress = 0x140000000;  // Typical 64-bit image base
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Build Node Tree
+    // ══════════════════════════════════════════════════════════════════════════
+
+    auto addField = [&](uint64_t parent, int offset, NodeKind kind, const QString& name) -> uint64_t {
+        Node n;
+        n.kind = kind;
+        n.name = name;
+        n.parentId = parent;
+        n.offset = offset;
+        int idx = doc->tree.addNode(n);
+        return doc->tree.nodes[idx].id;
+    };
+
+    auto addStruct = [&](uint64_t parent, int offset, const QString& name) -> uint64_t {
+        Node n;
+        n.kind = NodeKind::Struct;
+        n.name = name;
+        n.parentId = parent;
+        n.offset = offset;
+        int idx = doc->tree.addNode(n);
+        return doc->tree.nodes[idx].id;
+    };
+
+    auto addArray = [&](uint64_t parent, int offset, const QString& name, int count, NodeKind elemKind) -> uint64_t {
+        Node n;
+        n.kind = NodeKind::Array;
+        n.name = name;
+        n.parentId = parent;
+        n.offset = offset;
+        n.arrayLen = count;
+        n.elementKind = elemKind;
+        int idx = doc->tree.addNode(n);
+        return doc->tree.nodes[idx].id;
+    };
+
+    // ── Root: IMAGE_DOS_HEADER ──
+    uint64_t dosId = addStruct(0, 0x00, "IMAGE_DOS_HEADER");
+    addField(dosId, 0x00, NodeKind::UInt16, "e_magic");
+    addField(dosId, 0x02, NodeKind::UInt16, "e_cblp");
+    addField(dosId, 0x04, NodeKind::UInt16, "e_cp");
+    addField(dosId, 0x06, NodeKind::UInt16, "e_crlc");
+    addField(dosId, 0x08, NodeKind::UInt16, "e_cparhdr");
+    addField(dosId, 0x0A, NodeKind::UInt16, "e_minalloc");
+    addField(dosId, 0x0C, NodeKind::UInt16, "e_maxalloc");
+    addField(dosId, 0x0E, NodeKind::UInt16, "e_ss");
+    addField(dosId, 0x10, NodeKind::UInt16, "e_sp");
+    addField(dosId, 0x12, NodeKind::UInt16, "e_csum");
+    addField(dosId, 0x14, NodeKind::UInt16, "e_ip");
+    addField(dosId, 0x16, NodeKind::UInt16, "e_cs");
+    addField(dosId, 0x18, NodeKind::UInt16, "e_lfarlc");
+    addField(dosId, 0x1A, NodeKind::UInt16, "e_ovno");
+    addField(dosId, 0x3C, NodeKind::UInt32, "e_lfanew");
+
+    // ── PE Signature ──
+    addField(0, peOff, NodeKind::UInt32, "PE_Signature");
+
+    // ── IMAGE_FILE_HEADER ──
+    uint64_t fhId = addStruct(0, fhOff, "IMAGE_FILE_HEADER");
+    addField(fhId, 0, NodeKind::UInt16, "Machine");
+    addField(fhId, 2, NodeKind::UInt16, "NumberOfSections");
+    addField(fhId, 4, NodeKind::UInt32, "TimeDateStamp");
+    addField(fhId, 8, NodeKind::UInt32, "PointerToSymbolTable");
+    addField(fhId, 12, NodeKind::UInt32, "NumberOfSymbols");
+    addField(fhId, 16, NodeKind::UInt16, "SizeOfOptionalHeader");
+    addField(fhId, 18, NodeKind::UInt16, "Characteristics");
+
+    // ── IMAGE_OPTIONAL_HEADER64 ──
+    uint64_t ohId = addStruct(0, ohOff, "IMAGE_OPTIONAL_HEADER64");
+    addField(ohId, 0, NodeKind::UInt16, "Magic");
+    addField(ohId, 2, NodeKind::UInt8, "MajorLinkerVersion");
+    addField(ohId, 3, NodeKind::UInt8, "MinorLinkerVersion");
+    addField(ohId, 4, NodeKind::UInt32, "SizeOfCode");
+    addField(ohId, 8, NodeKind::UInt32, "SizeOfInitializedData");
+    addField(ohId, 12, NodeKind::UInt32, "SizeOfUninitializedData");
+    addField(ohId, 16, NodeKind::UInt32, "AddressOfEntryPoint");
+    addField(ohId, 20, NodeKind::UInt32, "BaseOfCode");
+    addField(ohId, 24, NodeKind::UInt64, "ImageBase");
+    addField(ohId, 32, NodeKind::UInt32, "SectionAlignment");
+    addField(ohId, 36, NodeKind::UInt32, "FileAlignment");
+    addField(ohId, 40, NodeKind::UInt16, "MajorOSVersion");
+    addField(ohId, 42, NodeKind::UInt16, "MinorOSVersion");
+    addField(ohId, 44, NodeKind::UInt16, "MajorImageVersion");
+    addField(ohId, 46, NodeKind::UInt16, "MinorImageVersion");
+    addField(ohId, 48, NodeKind::UInt16, "MajorSubsystemVersion");
+    addField(ohId, 50, NodeKind::UInt16, "MinorSubsystemVersion");
+    addField(ohId, 52, NodeKind::UInt32, "Win32VersionValue");
+    addField(ohId, 56, NodeKind::UInt32, "SizeOfImage");
+    addField(ohId, 60, NodeKind::UInt32, "SizeOfHeaders");
+    addField(ohId, 64, NodeKind::UInt32, "CheckSum");
+    addField(ohId, 68, NodeKind::UInt16, "Subsystem");
+    addField(ohId, 70, NodeKind::UInt16, "DllCharacteristics");
+    addField(ohId, 72, NodeKind::UInt64, "SizeOfStackReserve");
+    addField(ohId, 80, NodeKind::UInt64, "SizeOfStackCommit");
+    addField(ohId, 88, NodeKind::UInt64, "SizeOfHeapReserve");
+    addField(ohId, 96, NodeKind::UInt64, "SizeOfHeapCommit");
+    addField(ohId, 104, NodeKind::UInt32, "LoaderFlags");
+    addField(ohId, 108, NodeKind::UInt32, "NumberOfRvaAndSizes");
+
+    // ── Data Directories Array (16 entries) ──
+    uint64_t ddArrId = addArray(ohId, 112, "DataDirectory", 16, NodeKind::Struct);
+    const char* ddNames[16] = {
+        "Export", "Import", "Resource", "Exception",
+        "Security", "BaseReloc", "Debug", "Architecture",
+        "GlobalPtr", "TLS", "LoadConfig", "BoundImport",
+        "IAT", "DelayImport", "CLR", "Reserved"
+    };
+    for (int i = 0; i < 16; i++) {
+        uint64_t entryId = addStruct(ddArrId, i * 8, QString("[%1] %2").arg(i).arg(ddNames[i]));
+        addField(entryId, 0, NodeKind::UInt32, "VirtualAddress");
+        addField(entryId, 4, NodeKind::UInt32, "Size");
+    }
+
+    // ── Section Headers Array (4 sections) ──
+    uint64_t shArrId = addArray(0, shOff, "SectionHeaders", 4, NodeKind::Struct);
+    const char* secNames[4] = {".text", ".rdata", ".data", ".pdata"};
+    for (int i = 0; i < 4; i++) {
+        uint64_t secId = addStruct(shArrId, i * 40, QString("[%1] %2").arg(i).arg(secNames[i]));
+        // Name is 8 bytes - show as UTF8 string
+        Node nameNode;
+        nameNode.kind = NodeKind::UTF8;
+        nameNode.name = "Name";
+        nameNode.parentId = secId;
+        nameNode.offset = 0;
+        nameNode.strLen = 8;
+        doc->tree.addNode(nameNode);
+        addField(secId, 8, NodeKind::UInt32, "VirtualSize");
+        addField(secId, 12, NodeKind::UInt32, "VirtualAddress");
+        addField(secId, 16, NodeKind::UInt32, "SizeOfRawData");
+        addField(secId, 20, NodeKind::UInt32, "PointerToRawData");
+        addField(secId, 24, NodeKind::UInt32, "PointerToRelocations");
+        addField(secId, 28, NodeKind::UInt32, "PointerToLinenumbers");
+        addField(secId, 32, NodeKind::UInt16, "NumberOfRelocations");
+        addField(secId, 34, NodeKind::UInt16, "NumberOfLinenumbers");
+        addField(secId, 36, NodeKind::UInt32, "Characteristics");
     }
 
     createTab(doc);

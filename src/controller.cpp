@@ -11,6 +11,9 @@
 
 namespace rcx {
 
+// Footer selection ID: set high bit to distinguish footer-only selections from node selections
+static constexpr uint64_t kFooterIdBit = 0x8000000000000000ULL;
+
 // ── RcxDocument ──
 
 RcxDocument::RcxDocument(QObject* parent)
@@ -137,9 +140,33 @@ void RcxController::connectEditor(RcxEditor* editor) {
             break;
         }
         case EditTarget::Type: {
-            bool ok;
-            NodeKind k = kindFromTypeName(text, &ok);
-            if (ok) changeNodeKind(nodeIdx, k);
+            // Check for array type syntax: "type[count]" e.g. "int32_t[10]"
+            int bracketPos = text.indexOf('[');
+            if (bracketPos > 0 && text.endsWith(']')) {
+                QString elemTypeName = text.left(bracketPos).trimmed();
+                QString countStr = text.mid(bracketPos + 1, text.size() - bracketPos - 2);
+                bool countOk;
+                int newCount = countStr.toInt(&countOk);
+                if (countOk && newCount > 0) {
+                    bool typeOk;
+                    NodeKind elemKind = kindFromTypeName(elemTypeName, &typeOk);
+                    if (typeOk && nodeIdx < m_doc->tree.nodes.size()) {
+                        Node& node = m_doc->tree.nodes[nodeIdx];
+                        if (node.kind == NodeKind::Array) {
+                            // Update element kind and count (no undo for now)
+                            node.elementKind = elemKind;
+                            node.arrayLen = newCount;
+                            if (node.viewIndex >= newCount)
+                                node.viewIndex = qMax(0, newCount - 1);
+                        }
+                    }
+                }
+            } else {
+                // Regular type change
+                bool ok;
+                NodeKind k = kindFromTypeName(text, &ok);
+                if (ok) changeNodeKind(nodeIdx, k);
+            }
             break;
         }
         case EditTarget::Value:
@@ -197,6 +224,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             break;
         }
+        case EditTarget::ArrayIndex:
+        case EditTarget::ArrayCount:
+            // Array navigation removed - these cases are unreachable
+            break;
         }
         // Always refresh to restore canonical text (handles parse failures, no-ops, etc.)
         refresh();
@@ -640,20 +671,30 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     bool ctrl  = mods & Qt::ControlModifier;
     bool shift = mods & Qt::ShiftModifier;
 
+    // Compute effective selection ID: footers use nodeId | kFooterIdBit
+    auto effectiveId = [this](int ln, uint64_t nid) -> uint64_t {
+        if (ln >= 0 && ln < m_lastResult.meta.size() &&
+            m_lastResult.meta[ln].lineKind == LineKind::Footer)
+            return nid | kFooterIdBit;
+        return nid;
+    };
+
+    uint64_t selId = effectiveId(line, nodeId);
+
     if (!ctrl && !shift) {
         m_selIds.clear();
-        m_selIds.insert(nodeId);
+        m_selIds.insert(selId);
         m_anchorLine = line;
     } else if (ctrl && !shift) {
-        if (m_selIds.contains(nodeId))
-            m_selIds.remove(nodeId);
+        if (m_selIds.contains(selId))
+            m_selIds.remove(selId);
         else
-            m_selIds.insert(nodeId);
+            m_selIds.insert(selId);
         m_anchorLine = line;
     } else if (shift && !ctrl) {
         if (m_anchorLine < 0) {
             m_selIds.clear();
-            m_selIds.insert(nodeId);
+            m_selIds.insert(selId);
             m_anchorLine = line;
         } else {
             m_selIds.clear();
@@ -661,19 +702,19 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
             int to   = qMax(m_anchorLine, line);
             for (int i = from; i <= to && i < m_lastResult.meta.size(); i++) {
                 uint64_t nid = m_lastResult.meta[i].nodeId;
-                if (nid != 0) m_selIds.insert(nid);
+                if (nid != 0) m_selIds.insert(effectiveId(i, nid));
             }
         }
     } else { // Ctrl+Shift
         if (m_anchorLine < 0) {
-            m_selIds.insert(nodeId);
+            m_selIds.insert(selId);
             m_anchorLine = line;
         } else {
             int from = qMin(m_anchorLine, line);
             int to   = qMax(m_anchorLine, line);
             for (int i = from; i <= to && i < m_lastResult.meta.size(); i++) {
                 uint64_t nid = m_lastResult.meta[i].nodeId;
-                if (nid != 0) m_selIds.insert(nid);
+                if (nid != 0) m_selIds.insert(effectiveId(i, nid));
             }
         }
     }
@@ -682,7 +723,8 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
 
     if (m_selIds.size() == 1) {
         uint64_t sid = *m_selIds.begin();
-        int idx = m_doc->tree.indexOfId(sid);
+        // Strip footer bit for node lookup
+        int idx = m_doc->tree.indexOfId(sid & ~kFooterIdBit);
         if (idx >= 0) emit nodeSelected(idx);
     }
 }

@@ -16,11 +16,23 @@ struct ComposeState {
     QSet<uint64_t>     visiting;   // cycle detection for struct recursion
     QSet<qulonglong>   ptrVisiting; // cycle guard for pointer expansions
     int                currentLine = 0;
-    int                nameW       = kColName;  // effective name column width
+    int                typeW       = kColType;  // global type column width (fallback)
+    int                nameW       = kColName;  // global name column width (fallback)
 
     // Precomputed for O(1) lookups
     QHash<uint64_t, QVector<int>> childMap;
     QVector<int64_t>              absOffsets;  // indexed by node index
+
+    // Per-scope column widths (containerId -> width for direct children)
+    QHash<uint64_t, int> scopeTypeW;
+    QHash<uint64_t, int> scopeNameW;
+
+    int effectiveTypeW(uint64_t scopeId) const {
+        return scopeTypeW.value(scopeId, typeW);
+    }
+    int effectiveNameW(uint64_t scopeId) const {
+        return scopeNameW.value(scopeId, nameW);
+    }
 
     void emitLine(const QString& lineText, LineMeta lm) {
         if (currentLine > 0) text += '\n';
@@ -93,8 +105,12 @@ static inline uint64_t resolveAddr(const ComposeState& state,
 
 void composeLeaf(ComposeState& state, const NodeTree& tree,
                  const Provider& prov, int nodeIdx,
-                 int depth, uint64_t absAddr) {
+                 int depth, uint64_t absAddr, uint64_t scopeId) {
     const Node& node = tree.nodes[nodeIdx];
+
+    // Get per-scope widths (falls back to global if no scope entry)
+    int typeW = state.effectiveTypeW(scopeId);
+    int nameW = state.effectiveNameW(scopeId);
 
     // Line count: padding wraps at 8 bytes per line
     int numLines;
@@ -119,9 +135,11 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         lm.offsetText      = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, isCont);
         lm.markerMask      = computeMarkers(node, prov, absAddr, isCont, depth);
         lm.foldLevel       = computeFoldLevel(depth, false);
+        lm.effectiveTypeW  = typeW;
+        lm.effectiveNameW  = nameW;
 
         QString lineText = fmt::fmtNodeLine(node, prov, absAddr, depth, sub,
-                                            /*comment=*/{}, state.nameW);
+                                            /*comment=*/{}, typeW, nameW);
         state.emitLine(lineText, lm);
     }
 }
@@ -129,14 +147,17 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
 // Forward declarations (base/rootId default to 0 = use precomputed offsets)
 void composeNode(ComposeState& state, const NodeTree& tree,
                  const Provider& prov, int nodeIdx, int depth,
-                 uint64_t base = 0, uint64_t rootId = 0);
+                 uint64_t base = 0, uint64_t rootId = 0, bool isArrayChild = false,
+                 uint64_t scopeId = 0, int arrayElementIdx = -1);
 void composeParent(ComposeState& state, const NodeTree& tree,
                    const Provider& prov, int nodeIdx, int depth,
-                   uint64_t base = 0, uint64_t rootId = 0);
+                   uint64_t base = 0, uint64_t rootId = 0, bool isArrayChild = false,
+                   uint64_t scopeId = 0, int arrayElementIdx = -1);
 
 void composeParent(ComposeState& state, const NodeTree& tree,
                    const Provider& prov, int nodeIdx, int depth,
-                   uint64_t base, uint64_t rootId) {
+                   uint64_t base, uint64_t rootId, bool isArrayChild,
+                   uint64_t scopeId, int arrayElementIdx) {
     const Node& node = tree.nodes[nodeIdx];
     uint64_t absAddr = resolveAddr(state, tree, nodeIdx, base, rootId);
 
@@ -157,8 +178,23 @@ void composeParent(ComposeState& state, const NodeTree& tree,
     }
     state.visiting.insert(node.id);
 
-    // Header line
-    {
+    // Array element separator: show [N] to indicate which element this is
+    if (isArrayChild && arrayElementIdx >= 0) {
+        LineMeta lm;
+        lm.nodeIdx    = nodeIdx;
+        lm.nodeId     = node.id;
+        lm.depth      = depth;
+        lm.lineKind   = LineKind::ArrayElementSeparator;
+        lm.offsetText = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, false);
+        lm.nodeKind   = node.kind;
+        lm.foldLevel  = computeFoldLevel(depth, false);
+        lm.markerMask = 0;
+        lm.arrayElementIdx = arrayElementIdx;
+        state.emitLine(fmt::indent(depth) + QStringLiteral("[%1]").arg(arrayElementIdx), lm);
+    }
+
+    // Header line (skip for array element structs - condensed display)
+    if (!isArrayChild) {
         LineMeta lm;
         lm.nodeIdx    = nodeIdx;
         lm.nodeId     = node.id;
@@ -170,28 +206,46 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.foldCollapsed = node.collapsed;
         lm.foldLevel  = computeFoldLevel(depth, true);
         lm.markerMask = (1u << M_STRUCT_BG);
-        lm.isRootHeader = (node.parentId == 0);  // Root-level struct
+        lm.isRootHeader = (node.parentId == 0 && node.kind == NodeKind::Struct);
 
-        // Root structs show base address, nested structs show normal header
-        QString headerText = lm.isRootHeader
-            ? fmt::fmtStructHeaderWithBase(node, depth, tree.baseAddress)
-            : fmt::fmtStructHeader(node, depth);
+        QString headerText;
+        if (node.kind == NodeKind::Array) {
+            // Array header with navigation: "uint32_t[16]  name  { <0/16>"
+            lm.isArrayHeader = true;
+            lm.elementKind   = node.elementKind;
+            lm.arrayViewIdx  = node.viewIndex;
+            lm.arrayCount    = node.arrayLen;
+            headerText = fmt::fmtArrayHeader(node, depth, node.viewIndex);
+        } else if (lm.isRootHeader) {
+            // Root structs show base address
+            headerText = fmt::fmtStructHeaderWithBase(node, depth, tree.baseAddress);
+        } else {
+            // Nested structs show normal header
+            headerText = fmt::fmtStructHeader(node, depth);
+        }
         state.emitLine(headerText, lm);
     }
 
-    if (!node.collapsed) {
+    if (!node.collapsed || isArrayChild) {
         QVector<int> children = state.childMap.value(node.id);
         std::sort(children.begin(), children.end(), [&](int a, int b) {
             return tree.nodes[a].offset < tree.nodes[b].offset;
         });
 
+        // For arrays, render children as condensed (no header/footer for struct elements)
+        bool childrenAreArrayElements = (node.kind == NodeKind::Array);
+        int elementIdx = 0;
         for (int childIdx : children) {
-            composeNode(state, tree, prov, childIdx, depth + 1, base, rootId);
+            // Pass this container's id as the scope for children (for per-scope widths)
+            // For array elements, also pass the element index for [N] separator
+            composeNode(state, tree, prov, childIdx, depth + 1, base, rootId,
+                        childrenAreArrayElements, node.id,
+                        childrenAreArrayElements ? elementIdx++ : -1);
         }
     }
 
-    // Footer line
-    {
+    // Footer line (skip for array element structs - condensed display)
+    if (!isArrayChild) {
         LineMeta lm;
         lm.nodeIdx   = nodeIdx;
         lm.nodeId    = node.id;
@@ -210,9 +264,14 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
 void composeNode(ComposeState& state, const NodeTree& tree,
                  const Provider& prov, int nodeIdx, int depth,
-                 uint64_t base, uint64_t rootId) {
+                 uint64_t base, uint64_t rootId, bool isArrayChild,
+                 uint64_t scopeId, int arrayElementIdx) {
     const Node& node = tree.nodes[nodeIdx];
     uint64_t absAddr = resolveAddr(state, tree, nodeIdx, base, rootId);
+
+    // Get per-scope widths for this node
+    int typeW = state.effectiveTypeW(scopeId);
+    int nameW = state.effectiveNameW(scopeId);
 
     // Pointer deref expansion
     if ((node.kind == NodeKind::Pointer32 || node.kind == NodeKind::Pointer64)
@@ -229,7 +288,9 @@ void composeNode(ComposeState& state, const NodeTree& tree,
             lm.foldCollapsed = node.collapsed;
             lm.foldLevel  = computeFoldLevel(depth, true);
             lm.markerMask = computeMarkers(node, prov, absAddr, false, depth);
-            state.emitLine(fmt::fmtNodeLine(node, prov, absAddr, depth, 0), lm);
+            lm.effectiveTypeW = typeW;
+            lm.effectiveNameW = nameW;
+            state.emitLine(fmt::fmtNodeLine(node, prov, absAddr, depth, 0, {}, typeW, nameW), lm);
         }
         if (!node.collapsed) {
             int sz = node.byteSize();
@@ -257,9 +318,9 @@ void composeNode(ComposeState& state, const NodeTree& tree,
     }
 
     if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) {
-        composeParent(state, tree, prov, nodeIdx, depth, base, rootId);
+        composeParent(state, tree, prov, nodeIdx, depth, base, rootId, isArrayChild, scopeId, arrayElementIdx);
     } else {
-        composeLeaf(state, tree, prov, nodeIdx, depth, absAddr);
+        composeLeaf(state, tree, prov, nodeIdx, depth, absAddr, scopeId);
     }
 }
 
@@ -277,6 +338,20 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
     for (int i = 0; i < tree.nodes.size(); i++)
         state.absOffsets[i] = tree.computeOffset(i);
 
+    // Compute effective type column width from longest type name
+    int maxTypeLen = kMinTypeW;
+    for (const Node& node : tree.nodes) {
+        QString typeName;
+        if (node.kind == NodeKind::Array) {
+            // Array type: "int32_t[10]", "char[64]", etc.
+            typeName = fmt::arrayTypeName(node.elementKind, node.arrayLen);
+        } else {
+            typeName = fmt::typeNameRaw(node.kind);
+        }
+        maxTypeLen = qMax(maxTypeLen, typeName.size());
+    }
+    state.typeW = qBound(kMinTypeW, maxTypeLen + 1, kMaxTypeW);
+
     // Compute effective name column width from longest name
     int maxNameLen = kMinNameW;
     for (const Node& node : tree.nodes) {
@@ -288,6 +363,38 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
     }
     state.nameW = qBound(kMinNameW, maxNameLen + 1, kMaxNameW);
 
+    // Pre-compute per-scope widths (each container gets widths based on direct children only)
+    for (int i = 0; i < tree.nodes.size(); i++) {
+        const Node& container = tree.nodes[i];
+        if (container.kind != NodeKind::Struct && container.kind != NodeKind::Array)
+            continue;
+
+        int scopeMaxType = kMinTypeW;
+        int scopeMaxName = kMinNameW;
+
+        for (int childIdx : state.childMap.value(container.id)) {
+            const Node& child = tree.nodes[childIdx];
+
+            // Type width
+            QString childTypeName;
+            if (child.kind == NodeKind::Array) {
+                childTypeName = fmt::arrayTypeName(child.elementKind, child.arrayLen);
+            } else {
+                childTypeName = fmt::typeNameRaw(child.kind);
+            }
+            scopeMaxType = qMax(scopeMaxType, childTypeName.size());
+
+            // Name width (skip hex/padding and containers)
+            if (!isHexPreview(child.kind) &&
+                child.kind != NodeKind::Struct && child.kind != NodeKind::Array) {
+                scopeMaxName = qMax(scopeMaxName, child.name.size());
+            }
+        }
+
+        state.scopeTypeW[container.id] = qBound(kMinTypeW, scopeMaxType + 1, kMaxTypeW);
+        state.scopeNameW[container.id] = qBound(kMinNameW, scopeMaxName + 1, kMaxNameW);
+    }
+
     QVector<int> roots = state.childMap.value(0);
     std::sort(roots.begin(), roots.end(), [&](int a, int b) {
         return tree.nodes[a].offset < tree.nodes[b].offset;
@@ -297,7 +404,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
         composeNode(state, tree, prov, idx, 0);
     }
 
-    return { state.text, state.meta, LayoutInfo{state.nameW} };
+    return { state.text, state.meta, LayoutInfo{state.typeW, state.nameW} };
 }
 
 QSet<uint64_t> NodeTree::normalizePreferAncestors(const QSet<uint64_t>& ids) const {

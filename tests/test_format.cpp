@@ -9,12 +9,13 @@ private slots:
     void testTypeName() {
         QString s = fmt::typeName(NodeKind::Float);
         QVERIFY(s.trimmed() == "float");
-        QCOMPARE(s.size(), 10); // COL_TYPE
+        QCOMPARE(s.size(), 14); // kColType
     }
 
     void testFmtInt32() {
-        QCOMPARE(fmt::fmtInt32(-42), QString("-42"));
-        QCOMPARE(fmt::fmtInt32(0),   QString("0"));
+        // fmtInt32 outputs hex representation (0xffffffd6 for -42)
+        QCOMPARE(fmt::fmtInt32(-42), QString("0xffffffd6"));
+        QCOMPARE(fmt::fmtInt32(0),   QString("0x0"));
     }
 
     void testFmtFloat() {
@@ -224,25 +225,15 @@ private slots:
         QVERIFY(!ok);
     }
 
-    void testFmtStructFooterWithSize() {
+    void testFmtStructFooterSimple() {
         Node n;
         n.kind = NodeKind::Struct;
         n.name = "Test";
 
-        // With size
-        QString s1 = fmt::fmtStructFooter(n, 0, 0x14);
-        QVERIFY(s1.contains("};"));
-        QVERIFY(s1.contains("sizeof(Test)=0x14"));
-
-        // Size 0 → no sizeof
-        QString s2 = fmt::fmtStructFooter(n, 0, 0);
-        QVERIFY(s2.contains("};"));
-        QVERIFY(!s2.contains("sizeof"));
-
-        // Default (no size arg) → no sizeof
-        QString s3 = fmt::fmtStructFooter(n, 0);
-        QVERIFY(s3.contains("};"));
-        QVERIFY(!s3.contains("sizeof"));
+        // Footer is always just "};" (no sizeof comment)
+        QString s = fmt::fmtStructFooter(n, 0, 0x14);
+        QVERIFY(s.contains("};"));
+        QVERIFY(!s.contains("sizeof"));  // No sizeof comment
     }
 };
 

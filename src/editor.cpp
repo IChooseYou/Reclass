@@ -26,6 +26,9 @@ static constexpr int IND_HEX_DIM    = 9;
 static constexpr int IND_BASE_ADDR  = 10;  // Green color for base address
 static constexpr int IND_HOVER_SPAN = 11;  // Blue text on hover (link-like)
 
+// Footer selection ID: set high bit to distinguish footer-only selections from node selections
+static constexpr uint64_t kFooterIdBit = 0x8000000000000000ULL;
+
 static QString g_fontName = "Consolas";
 
 static QFont editorFont() {
@@ -388,9 +391,15 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (unsigned long)0, docLen);
 
     for (int i = 0; i < m_meta.size(); i++) {
-        if (selIds.contains(m_meta[i].nodeId)) {
+        uint64_t nodeId = m_meta[i].nodeId;
+        bool isFooter = (m_meta[i].lineKind == LineKind::Footer);
+
+        // Footers check for footerId, non-footers check for plain nodeId
+        uint64_t checkId = isFooter ? (nodeId | kFooterIdBit) : nodeId;
+        if (selIds.contains(checkId)) {
             m_sci->markerAdd(i, M_SELECTED);
-            paintEditableSpans(i);
+            if (!isFooter)
+                paintEditableSpans(i);
         }
     }
 
@@ -406,10 +415,25 @@ void RcxEditor::applyHoverHighlight() {
     if (m_editState.active) return;
     if (!m_hoverInside) return;
     if (m_hoveredNodeId == 0) return;
-    if (m_currentSelIds.contains(m_hoveredNodeId)) return;
-    for (int i = 0; i < m_meta.size(); i++) {
-        if (m_meta[i].nodeId == m_hoveredNodeId)
-            m_sci->markerAdd(i, M_HOVER);
+
+    // Check if hovered line is a footer - footers highlight independently
+    bool hoveringFooter = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size() &&
+                           m_meta[m_hoveredLine].lineKind == LineKind::Footer);
+
+    // Check if the hovered item is already selected (using appropriate ID)
+    uint64_t checkId = hoveringFooter ? (m_hoveredNodeId | kFooterIdBit) : m_hoveredNodeId;
+    if (m_currentSelIds.contains(checkId)) return;
+
+    if (hoveringFooter) {
+        // Footer: only highlight this specific line
+        m_sci->markerAdd(m_hoveredLine, M_HOVER);
+    } else {
+        // Non-footer: highlight all matching lines except footers
+        for (int i = 0; i < m_meta.size(); i++) {
+            if (m_meta[i].nodeId == m_hoveredNodeId &&
+                m_meta[i].lineKind != LineKind::Footer)
+                m_sci->markerAdd(i, M_HOVER);
+        }
     }
 }
 
@@ -449,9 +473,9 @@ int RcxEditor::currentNodeIndex() const {
 
 // ── Column span computation ──
 
-ColumnSpan RcxEditor::typeSpan(const LineMeta& lm)  { return typeSpanFor(lm); }
-ColumnSpan RcxEditor::nameSpan(const LineMeta& lm, int nameW)  { return nameSpanFor(lm, nameW); }
-ColumnSpan RcxEditor::valueSpan(const LineMeta& lm, int lineLength, int nameW) { return valueSpanFor(lm, lineLength, nameW); }
+ColumnSpan RcxEditor::typeSpan(const LineMeta& lm, int typeW)  { return typeSpanFor(lm, typeW); }
+ColumnSpan RcxEditor::nameSpan(const LineMeta& lm, int typeW, int nameW)  { return nameSpanFor(lm, typeW, nameW); }
+ColumnSpan RcxEditor::valueSpan(const LineMeta& lm, int lineLength, int typeW, int nameW) { return valueSpanFor(lm, lineLength, typeW, nameW); }
 
 // ── Multi-selection ──
 
@@ -538,7 +562,22 @@ static ColumnSpan headerNameSpan(const LineMeta& lm, const QString& lineText) {
     int ind = kFoldCol + lm.depth * 3;
     int typeEnd = lineText.indexOf(' ', ind);
     if (typeEnd <= ind || typeEnd >= bracePos) return {};
+
+    // Don't allow editing array element names like "[0]", "[1]", etc.
+    QString name = lineText.mid(typeEnd + 1, bracePos - typeEnd - 1).trimmed();
+    if (name.startsWith('[') && name.endsWith(']'))
+        return {};
+
     return {typeEnd + 1, bracePos, true};
+}
+
+// Type span for array headers: "int32_t[10]" in "int32_t[10] positions {"
+static ColumnSpan arrayHeaderTypeSpan(const LineMeta& lm, const QString& lineText) {
+    if (lm.lineKind != LineKind::Header || !lm.isArrayHeader) return {};
+    int ind = kFoldCol + lm.depth * 3;
+    int typeEnd = lineText.indexOf(' ', ind);
+    if (typeEnd <= ind) return {};
+    return {ind, typeEnd, true};
 }
 
 RcxEditor::NormalizedSpan RcxEditor::normalizeSpan(
@@ -589,14 +628,24 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     QString lineText = getLineText(m_sci, line);
     int textLen = lineText.size();
 
+    // Use per-line effective widths (set during compose based on containing scope)
+    int typeW = lm->effectiveTypeW;
+    int nameW = lm->effectiveNameW;
+
     ColumnSpan s;
     switch (t) {
-    case EditTarget::Type:        s = typeSpan(*lm); break;
-    case EditTarget::Name:        s = nameSpan(*lm, m_layout.nameW); break;
-    case EditTarget::Value:       s = valueSpan(*lm, textLen, m_layout.nameW); break;
+    case EditTarget::Type:        s = typeSpan(*lm, typeW); break;
+    case EditTarget::Name:        s = nameSpan(*lm, typeW, nameW); break;
+    case EditTarget::Value:       s = valueSpan(*lm, textLen, typeW, nameW); break;
     case EditTarget::BaseAddress: s = baseAddressSpanFor(*lm, lineText); break;
+    case EditTarget::ArrayIndex:
+    case EditTarget::ArrayCount:
+        break;  // Array navigation removed
     }
 
+    // Fallback spans for header lines
+    if (!s.valid && t == EditTarget::Type)
+        s = arrayHeaderTypeSpan(*lm, lineText);
     if (!s.valid && t == EditTarget::Name)
         s = headerNameSpan(*lm, lineText);
 
@@ -640,8 +689,7 @@ RcxEditor::HitInfo RcxEditor::hitTest(const QPoint& vp) const {
 static bool hitTestTarget(QsciScintilla* sci,
                           const QVector<LineMeta>& meta,
                           const QPoint& viewportPos,
-                          int& outLine, EditTarget& outTarget,
-                          int nameW = kColName)
+                          int& outLine, EditTarget& outTarget)
 {
     long pos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMPOINTCLOSE,
                                   (unsigned long)viewportPos.x(), (long)viewportPos.y());
@@ -656,17 +704,28 @@ static bool hitTestTarget(QsciScintilla* sci,
     int textLen = lineText.size();
 
     const LineMeta& lm = meta[line];
-    ColumnSpan ts = RcxEditor::typeSpan(lm);
-    ColumnSpan ns = RcxEditor::nameSpan(lm, nameW);
-    ColumnSpan vs = RcxEditor::valueSpan(lm, textLen, nameW);
-    ColumnSpan bs = baseAddressSpanFor(lm, lineText);  // Base address for root headers
 
-    if (!ns.valid)
-        ns = headerNameSpan(lm, lineText);
+    // Array element separators are not interactive
+    if (lm.lineKind == LineKind::ArrayElementSeparator) return false;
+
+    // Use per-line effective widths from LineMeta
+    int typeW = lm.effectiveTypeW;
+    int nameW = lm.effectiveNameW;
 
     auto inSpan = [&](const ColumnSpan& s) {
         return s.valid && col >= s.start && col < s.end;
     };
+
+    ColumnSpan ts = RcxEditor::typeSpan(lm, typeW);
+    ColumnSpan ns = RcxEditor::nameSpan(lm, typeW, nameW);
+    ColumnSpan vs = RcxEditor::valueSpan(lm, textLen, typeW, nameW);
+    ColumnSpan bs = baseAddressSpanFor(lm, lineText);  // Base address for root headers
+
+    // Fallback spans for header lines
+    if (!ts.valid)
+        ts = arrayHeaderTypeSpan(lm, lineText);
+    if (!ns.valid)
+        ns = headerNameSpan(lm, lineText);
 
     if (inSpan(bs))      outTarget = EditTarget::BaseAddress;
     else if (inSpan(ts)) outTarget = EditTarget::Type;
@@ -701,12 +760,17 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             const LineMeta* lm = metaForLine(m_editState.line);
             if (lm) {
                 QString lineText = getLineText(m_sci, h.line);
+                // Use per-line effective widths
+                int typeW = lm->effectiveTypeW;
+                int nameW = lm->effectiveNameW;
                 ColumnSpan raw;
                 switch (m_editState.target) {
-                case EditTarget::Type:        raw = typeSpan(*lm); break;
-                case EditTarget::Name:        raw = nameSpan(*lm, m_layout.nameW); break;
-                case EditTarget::Value:       raw = valueSpan(*lm, lineText.size(), m_layout.nameW); break;
+                case EditTarget::Type:        raw = typeSpan(*lm, typeW); break;
+                case EditTarget::Name:        raw = nameSpan(*lm, typeW, nameW); break;
+                case EditTarget::Value:       raw = valueSpan(*lm, lineText.size(), typeW, nameW); break;
                 case EditTarget::BaseAddress: raw = baseAddressSpanFor(*lm, lineText); break;
+                case EditTarget::ArrayIndex:  raw = arrayIndexSpanFor(*lm, lineText); break;
+                case EditTarget::ArrayCount:  raw = arrayCountSpanFor(*lm, lineText); break;
                 }
                 if (raw.valid && h.col >= raw.start && h.col < raw.end) {
                     // Within raw span but outside trimmed text → move cursor to end
@@ -732,8 +796,9 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_hoverInside = true;
             auto h = hitTest(me->pos());
             uint64_t newHoverId = (h.line >= 0) ? h.nodeId : 0;
-            if (newHoverId != m_hoveredNodeId) {
+            if (newHoverId != m_hoveredNodeId || h.line != m_hoveredLine) {
                 m_hoveredNodeId = newHoverId;
+                m_hoveredLine = h.line;
                 applyHoverHighlight();
             }
 
@@ -746,9 +811,9 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
                 // Single-click on editable token of already-selected node → edit
-                if (alreadySelected && plain) {
-                    int tLine; EditTarget t;
-                    if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t, m_layout.nameW)) {
+                int tLine; EditTarget t;
+                if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t)) {
+                    if (alreadySelected && plain) {
                         m_pendingClickNodeId = 0;
                         return beginInlineEdit(t, tLine);
                     }
@@ -824,7 +889,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         && event->type() == QEvent::MouseButtonDblClick) {
         auto* me = static_cast<QMouseEvent*>(event);
         int line; EditTarget t;
-        if (hitTestTarget(m_sci, m_meta, me->pos(), line, t, m_layout.nameW)) {
+        if (hitTestTarget(m_sci, m_meta, me->pos(), line, t)) {
             m_pendingClickNodeId = 0;   // cancel deferred selection change
             return beginInlineEdit(t, line);
         }
@@ -856,6 +921,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         } else if (event->type() == QEvent::Leave) {
             m_hoverInside = false;
             m_hoveredNodeId = 0;
+            m_hoveredLine = -1;
             applyHoverHighlight();
         } else if (event->type() == QEvent::Wheel) {
             m_lastHoverPos = m_sci->viewport()->mapFromGlobal(QCursor::pos());
@@ -866,8 +932,10 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
          || event->type() == QEvent::Wheel) {
             auto h = hitTest(m_lastHoverPos);
             uint64_t newHoverId = (m_hoverInside && h.line >= 0) ? h.nodeId : 0;
-            if (newHoverId != m_hoveredNodeId) {
+            int newHoverLine = (m_hoverInside && h.line >= 0) ? h.line : -1;
+            if (newHoverId != m_hoveredNodeId || newHoverLine != m_hoveredLine) {
                 m_hoveredNodeId = newHoverId;
+                m_hoveredLine = newHoverLine;
                 applyHoverHighlight();
             }
         }
@@ -948,6 +1016,7 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
 bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
     if (m_editState.active) return false;
     m_hoveredNodeId = 0;
+    m_hoveredLine = -1;
     applyHoverHighlight();
     // Clear editable-token color hints (de-emphasize non-active tokens)
     clearIndicatorLine(IND_EDITABLE, m_hintLine);
@@ -982,7 +1051,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
 
     // Store fixed comment column position for value editing
     if (target == EditTarget::Value) {
-        ColumnSpan cs = commentSpanFor(*lm, lineText.size(), m_layout.nameW);
+        ColumnSpan cs = commentSpanFor(*lm, lineText.size(), lm->effectiveTypeW, lm->effectiveNameW);
         m_editState.commentCol = cs.valid ? cs.start : -1;
         m_editState.lastValidationOk = true;  // original value is always valid
     } else {
@@ -1172,7 +1241,8 @@ void RcxEditor::updateTypeListFilter() {
 
 void RcxEditor::paintEditableSpans(int line) {
     NormalizedSpan norm;
-    for (EditTarget t : {EditTarget::Type, EditTarget::Name, EditTarget::Value}) {
+    for (EditTarget t : {EditTarget::Type, EditTarget::Name, EditTarget::Value,
+                         EditTarget::BaseAddress}) {
         if (resolvedSpanFor(line, t, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
     }
@@ -1191,13 +1261,21 @@ void RcxEditor::updateEditableIndicators(int line) {
         return;
     }
 
+    // Helper to check if a line's node is selected (handles footer IDs)
+    auto isLineSelected = [this](const LineMeta* lm) -> bool {
+        if (!lm) return false;
+        bool isFooter = (lm->lineKind == LineKind::Footer);
+        uint64_t checkId = isFooter ? (lm->nodeId | kFooterIdBit) : lm->nodeId;
+        return m_currentSelIds.contains(checkId);
+    };
+
     // If new line is selected, its indicators are managed by applySelectionOverlay
     // But we still need to clear the old non-selected hint line
     const LineMeta* newLm = metaForLine(line);
-    if (newLm && m_currentSelIds.contains(newLm->nodeId)) {
+    if (isLineSelected(newLm)) {
         if (m_hintLine >= 0) {
             const LineMeta* oldLm = metaForLine(m_hintLine);
-            if (!oldLm || !m_currentSelIds.contains(oldLm->nodeId))
+            if (!isLineSelected(oldLm))
                 clearIndicatorLine(IND_EDITABLE, m_hintLine);
         }
         m_hintLine = line;
@@ -1207,7 +1285,7 @@ void RcxEditor::updateEditableIndicators(int line) {
     // Clear old cursor line (only if not a selected node)
     if (m_hintLine >= 0) {
         const LineMeta* oldLm = metaForLine(m_hintLine);
-        if (!oldLm || !m_currentSelIds.contains(oldLm->nodeId))
+        if (!isLineSelected(oldLm))
             clearIndicatorLine(IND_EDITABLE, m_hintLine);
     }
 
@@ -1251,9 +1329,9 @@ void RcxEditor::applyHoverCursor() {
     }
 
     int line; EditTarget t;
-    bool tokenHit = hitTestTarget(m_sci, m_meta, m_lastHoverPos, line, t, m_layout.nameW);
+    bool tokenHit = hitTestTarget(m_sci, m_meta, m_lastHoverPos, line, t);
 
-    // Apply hover span indicator (blue text like a link)
+    // Apply hover span indicator (blue text like a link) for editable spans
     if (tokenHit) {
         NormalizedSpan span;
         if (resolvedSpanFor(line, t, span)) {

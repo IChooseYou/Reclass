@@ -24,9 +24,9 @@ public:
     int currentNodeIndex() const;
 
     // ── Column span computation ──
-    static ColumnSpan typeSpan(const LineMeta& lm);
-    static ColumnSpan nameSpan(const LineMeta& lm, int nameW = kColName);
-    static ColumnSpan valueSpan(const LineMeta& lm, int lineLength, int nameW = kColName);
+    static ColumnSpan typeSpan(const LineMeta& lm, int typeW = kColType);
+    static ColumnSpan nameSpan(const LineMeta& lm, int typeW = kColType, int nameW = kColName);
+    static ColumnSpan valueSpan(const LineMeta& lm, int lineLength, int typeW = kColType, int nameW = kColName);
 
     // ── Multi-selection ──
     QSet<int> selectedNodeIndices() const;
@@ -65,6 +65,7 @@ private:
     bool   m_hoverInside = false;
     bool   m_cursorOverridden = false;
     uint64_t m_hoveredNodeId = 0;
+    int      m_hoveredLine = -1;
     QSet<uint64_t> m_currentSelIds;
     int m_hoverSpanLine = -1;  // Line with hover span indicator
     // ── Drag selection ──

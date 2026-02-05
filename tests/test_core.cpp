@@ -326,17 +326,17 @@ private slots:
         auto ts = rcx::typeSpanFor(lm);
         QVERIFY(ts.valid);
         QCOMPARE(ts.start, 6);
-        QCOMPARE(ts.end, 16);   // 6 + 10
+        QCOMPARE(ts.end, 20);   // 6 + 14 (kColType)
 
         auto ns = rcx::nameSpanFor(lm);
         QVERIFY(ns.valid);
-        QCOMPARE(ns.start, 18); // 6 + 10 + 2
-        QCOMPARE(ns.end, 42);   // 18 + 24
+        QCOMPARE(ns.start, 22); // 6 + 14 + 2
+        QCOMPARE(ns.end, 44);   // 22 + 22 (kColName)
 
-        auto vs = rcx::valueSpanFor(lm, 60);
+        auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
-        QCOMPARE(vs.start, 44); // 18 + 24 + 2
-        QCOMPARE(vs.end, 60);
+        QCOMPARE(vs.start, 46); // 22 + 22 + 2
+        QCOMPARE(vs.end, 78);   // 46 + 32 (kColValue)
     }
 
     void testColumnSpan_continuation() {
@@ -349,10 +349,10 @@ private slots:
         QVERIFY(!rcx::typeSpanFor(lm).valid);
         QVERIFY(!rcx::nameSpanFor(lm).valid);
 
-        auto vs = rcx::valueSpanFor(lm, 60);
+        auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
-        QCOMPARE(vs.start, 6 + 10 + 24 + 4);  // kFoldCol+indent + COL_TYPE + COL_NAME + 4
-        QCOMPARE(vs.end, 60);
+        QCOMPARE(vs.start, 6 + 14 + 22 + 4);  // kFoldCol+indent + kColType(14) + kColName(22) + 4
+        QCOMPARE(vs.end, 46 + 32);   // start + kColValue
     }
 
     void testColumnSpan_headerFooter() {
@@ -382,17 +382,17 @@ private slots:
         auto ts = rcx::typeSpanFor(lm);
         QVERIFY(ts.valid);
         QCOMPARE(ts.start, 3);
-        QCOMPARE(ts.end, 13);   // 3 + 10
+        QCOMPARE(ts.end, 17);   // 3 + 14 (kColType)
 
         auto ns = rcx::nameSpanFor(lm);
         QVERIFY(ns.valid);
-        QCOMPARE(ns.start, 15); // 3 + 10 + 2
-        QCOMPARE(ns.end, 39);   // 15 + 24
+        QCOMPARE(ns.start, 19); // 3 + 14 + 2
+        QCOMPARE(ns.end, 41);   // 19 + 22 (kColName)
 
-        auto vs = rcx::valueSpanFor(lm, 50);
+        auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
-        QCOMPARE(vs.start, 41); // 15 + 24 + 2
-        QCOMPARE(vs.end, 50);
+        QCOMPARE(vs.start, 43); // 19 + 22 + 2
+        QCOMPARE(vs.end, 75);   // 43 + 32 (kColValue)
     }
 
     void testNodeIdJsonRoundTrip() {

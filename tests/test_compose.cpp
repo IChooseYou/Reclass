@@ -608,7 +608,7 @@ private slots:
         QCOMPARE(result.meta[2].lineKind, LineKind::Header); // Recursive header (expansion)
     }
 
-    void testStructFooterSizeof() {
+    void testStructFooterSimple() {
         NodeTree tree;
         tree.baseAddress = 0;
 
@@ -627,13 +627,6 @@ private slots:
         f1.offset = 0;
         tree.addNode(f1);
 
-        Node f2;
-        f2.kind = NodeKind::UInt64;
-        f2.name = "b";
-        f2.parentId = rootId;
-        f2.offset = 4;
-        tree.addNode(f2);
-
         NullProvider prov;
         ComposeResult result = compose(tree, prov);
 
@@ -641,9 +634,10 @@ private slots:
         int lastLine = result.meta.size() - 1;
         QCOMPARE(result.meta[lastLine].lineKind, LineKind::Footer);
 
-        // Footer text should contain sizeof(Sized)=0xC (4+8=12=0xC)
+        // Footer text should just be "};" (no sizeof)
         QString footerText = result.text.split('\n').last();
-        QVERIFY(footerText.contains("sizeof(Sized)=0xC"));
+        QVERIFY(footerText.contains("};"));
+        QVERIFY(!footerText.contains("sizeof"));
     }
 
     void testLineMetaHasNodeId() {
@@ -669,115 +663,6 @@ private slots:
         }
     }
 
-    void testSizeofUpdatesAfterDelete() {
-        // Test that sizeof recalculates after deleting a node
-        NodeTree tree;
-        tree.baseAddress = 0;
-
-        Node root;
-        root.kind = NodeKind::Struct;
-        root.name = "Test";
-        root.parentId = 0;
-        root.offset = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        Node f1;
-        f1.kind = NodeKind::UInt32;
-        f1.name = "a";
-        f1.parentId = rootId;
-        f1.offset = 0;
-        tree.addNode(f1);
-
-        Node f2;
-        f2.kind = NodeKind::UInt64;
-        f2.name = "b";
-        f2.parentId = rootId;
-        f2.offset = 4;
-        int f2i = tree.addNode(f2);
-        uint64_t f2Id = tree.nodes[f2i].id;
-
-        NullProvider prov;
-
-        // First compose: sizeof should be 0xC (4+8=12)
-        ComposeResult result1 = compose(tree, prov);
-        QString footer1 = result1.text.split('\n').last();
-        QVERIFY2(footer1.contains("sizeof(Test)=0xC"),
-                 qPrintable("Before delete: " + footer1));
-
-        // Delete the second field
-        int idx = tree.indexOfId(f2Id);
-        QVERIFY(idx >= 0);
-        tree.nodes.remove(idx);
-        tree.invalidateIdCache();
-
-        // Second compose: sizeof should be 0x4 (only UInt32 remains)
-        ComposeResult result2 = compose(tree, prov);
-        QString footer2 = result2.text.split('\n').last();
-        QVERIFY2(footer2.contains("sizeof(Test)=0x4"),
-                 qPrintable("After delete: " + footer2));
-    }
-
-    void testNestedStructSizeofUpdates() {
-        // Test nested struct sizeof updates when child is deleted
-        NodeTree tree;
-        tree.baseAddress = 0;
-
-        // Root struct
-        Node root;
-        root.kind = NodeKind::Struct;
-        root.name = "Root";
-        root.parentId = 0;
-        root.offset = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        // Nested struct (like IMAGE_FILE_HEADER)
-        Node nested;
-        nested.kind = NodeKind::Struct;
-        nested.name = "Nested";
-        nested.parentId = rootId;
-        nested.offset = 0;
-        int ni = tree.addNode(nested);
-        uint64_t nestedId = tree.nodes[ni].id;
-
-        // Field in nested struct
-        Node f1;
-        f1.kind = NodeKind::UInt32;
-        f1.name = "a";
-        f1.parentId = nestedId;
-        f1.offset = 0;
-        tree.addNode(f1);
-
-        Node f2;
-        f2.kind = NodeKind::UInt32;
-        f2.name = "b";
-        f2.parentId = nestedId;
-        f2.offset = 4;
-        int f2i = tree.addNode(f2);
-        uint64_t f2Id = tree.nodes[f2i].id;
-
-        NullProvider prov;
-
-        // First compose
-        ComposeResult result1 = compose(tree, prov);
-        // Find nested struct footer
-        QString text1 = result1.text;
-        QVERIFY2(text1.contains("sizeof(Nested)=0x8"),
-                 qPrintable("Before delete nested sizeof: " + text1));
-
-        // Delete field from nested struct
-        int idx = tree.indexOfId(f2Id);
-        QVERIFY(idx >= 0);
-        tree.nodes.remove(idx);
-        tree.invalidateIdCache();
-
-        // Second compose - nested sizeof should update
-        ComposeResult result2 = compose(tree, prov);
-        QString text2 = result2.text;
-        QVERIFY2(text2.contains("sizeof(Nested)=0x4"),
-                 qPrintable("After delete nested sizeof: " + text2));
-    }
 };
 
 QTEST_MAIN(TestCompose)
