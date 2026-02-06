@@ -53,9 +53,9 @@ private slots:
         QCOMPARE(result.meta[4].lineKind, LineKind::Footer);
 
         // Offset text
-        QCOMPARE(result.meta[1].offsetText, QString("0x0"));
-        QCOMPARE(result.meta[2].offsetText, QString("0x0"));
-        QCOMPARE(result.meta[3].offsetText, QString("0x4"));
+        QCOMPARE(result.meta[1].offsetText, QString("0"));
+        QCOMPARE(result.meta[2].offsetText, QString("0"));
+        QCOMPARE(result.meta[3].offsetText, QString("4"));
 
         // Header is expanded by default (fold indicator in line text)
         QVERIFY(!result.meta[1].foldCollapsed);
@@ -87,7 +87,7 @@ private slots:
 
         // Line 2 (first Vec3 component): not continuation
         QVERIFY(!result.meta[2].isContinuation);
-        QCOMPARE(result.meta[2].offsetText, QString("0x0"));
+        QCOMPARE(result.meta[2].offsetText, QString("0"));
 
         // Lines 3-4: continuation
         QVERIFY(result.meta[3].isContinuation);
@@ -146,7 +146,7 @@ private slots:
 
         // Provider with zeros (null ptr)
         QByteArray data(64, '\0');
-        FileProvider prov(data);
+        BufferProvider prov(data);
         ComposeResult result = compose(tree, prov);
 
         QCOMPARE(result.meta.size(), 4);
@@ -202,7 +202,7 @@ private slots:
 
         // Provider with only 4 bytes — not enough for Pointer64 (8 bytes)
         QByteArray data(4, '\0');
-        FileProvider prov(data);
+        BufferProvider prov(data);
         ComposeResult result = compose(tree, prov);
 
         QCOMPARE(result.meta.size(), 4);
@@ -390,7 +390,7 @@ private slots:
         memcpy(data.data() + 100, &v1, 8);
         uint64_t v2 = 0xCAFEBABE;
         memcpy(data.data() + 108, &v2, 8);
-        FileProvider prov(data);
+        BufferProvider prov(data);
 
         ComposeResult result = compose(tree, prov);
 
@@ -467,7 +467,7 @@ private slots:
 
         // All zeros = null pointer
         QByteArray data(256, '\0');
-        FileProvider prov(data);
+        BufferProvider prov(data);
 
         ComposeResult result = compose(tree, prov);
 
@@ -525,7 +525,7 @@ private slots:
         QByteArray data(256, '\0');
         uint64_t ptrVal = 100;
         memcpy(data.data(), &ptrVal, 8);
-        FileProvider prov(data);
+        BufferProvider prov(data);
 
         ComposeResult result = compose(tree, prov);
 
@@ -594,7 +594,7 @@ private slots:
         uint64_t ptrVal = 100;
         memcpy(data.data(), &ptrVal, 8);       // main ptr → 100
         memcpy(data.data() + 104, &ptrVal, 8); // backPtr at 104 → 100
-        FileProvider prov(data);
+        BufferProvider prov(data);
 
         ComposeResult result = compose(tree, prov);
 

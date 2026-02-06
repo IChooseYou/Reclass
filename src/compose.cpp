@@ -39,7 +39,7 @@ struct ComposeState {
         if (currentLine > 0) text += '\n';
         // 3-char fold indicator column: " - " expanded, " + " collapsed, "   " other
         if (lm.lineKind == LineKind::CommandRow)
-            text += QStringLiteral(" * ");
+            text += QStringLiteral("   ");
         else if (lm.foldHead)
             text += lm.foldCollapsed ? QStringLiteral(" + ") : QStringLiteral(" - ");
         else
@@ -135,7 +135,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         lm.isContinuation  = isCont;
         lm.lineKind        = isCont ? LineKind::Continuation : LineKind::Field;
         lm.nodeKind        = node.kind;
-        lm.offsetText      = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, isCont);
+        lm.offsetText      = fmt::fmtOffsetMargin(absAddr, isCont);
         lm.markerMask      = computeMarkers(node, prov, absAddr, isCont, depth);
         lm.foldLevel       = computeFoldLevel(depth, false);
         lm.effectiveTypeW  = typeW;
@@ -171,7 +171,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.nodeId     = node.id;
         lm.depth      = depth;
         lm.lineKind   = LineKind::Field;
-        lm.offsetText = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, false);
+        lm.offsetText = fmt::fmtOffsetMargin(absAddr, false);
         lm.nodeKind   = node.kind;
         lm.markerMask = (1u << M_CYCLE) | (1u << M_ERR);
         lm.foldLevel  = computeFoldLevel(depth, false);
@@ -188,7 +188,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.nodeId     = node.id;
         lm.depth      = depth;
         lm.lineKind   = LineKind::ArrayElementSeparator;
-        lm.offsetText = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, false);
+        lm.offsetText = fmt::fmtOffsetMargin(absAddr, false);
         lm.nodeKind   = node.kind;
         lm.foldLevel  = computeFoldLevel(depth, false);
         lm.markerMask = 0;
@@ -207,7 +207,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.nodeId     = node.id;
         lm.depth      = depth;
         lm.lineKind   = LineKind::Header;
-        lm.offsetText = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, false);
+        lm.offsetText = fmt::fmtOffsetMargin(absAddr, false);
         lm.nodeKind   = node.kind;
         lm.foldHead      = true;
         lm.foldCollapsed = node.collapsed;
@@ -289,7 +289,7 @@ void composeNode(ComposeState& state, const NodeTree& tree,
             lm.nodeId     = node.id;
             lm.depth      = depth;
             lm.lineKind   = LineKind::Field;
-            lm.offsetText = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, false);
+            lm.offsetText = fmt::fmtOffsetMargin(absAddr, false);
             lm.nodeKind   = node.kind;
             lm.foldHead      = true;
             lm.foldCollapsed = node.collapsed;
@@ -445,7 +445,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
         lm.markerMask = 0;
         lm.effectiveTypeW = state.typeW;
         lm.effectiveNameW = state.nameW;
-        state.emitLine(QStringLiteral("SRC: File : 0x0"), lm);
+        state.emitLine(QStringLiteral("File  Address: 0x0"), lm);
     }
 
     QVector<int> roots = state.childMap.value(0);

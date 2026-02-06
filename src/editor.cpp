@@ -11,6 +11,7 @@
 #include <QFocusEvent>
 #include <QTimer>
 #include <QCursor>
+#include <QMenu>
 #include <QApplication>
 
 namespace rcx {
@@ -79,8 +80,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     connect(m_sci, &QsciScintilla::userListActivated,
             this, [this](int id, const QString& text) {
         if (!m_editState.active) return;
-        if ((id == 1 && m_editState.target == EditTarget::Type) ||
-            (id == 2 && m_editState.target == EditTarget::Source)) {
+        if (id == 1 && m_editState.target == EditTarget::Type) {
             auto info = endInlineEdit();
             emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text);
         }
@@ -150,7 +150,7 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HOVER_SPAN, 17 /*INDIC_TEXTFORE*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_HOVER_SPAN, QColor("#3d9c8a"));
+                         IND_HOVER_SPAN, QColor("#E6B450"));
 
     // Command-row pill background (shadcn-ish chip)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
@@ -267,6 +267,10 @@ void RcxEditor::setupMarkers() {
     // M_SELECTED (7): full-row selection highlight (higher = wins over hover)
     m_sci->markerDefine(QsciScintilla::Background, M_SELECTED);
     m_sci->setMarkerBackgroundColor(QColor(35, 35, 35), M_SELECTED);
+
+    // M_CMD_ROW (8): distinct background for CommandRow bar
+    m_sci->markerDefine(QsciScintilla::Background, M_CMD_ROW);
+    m_sci->setMarkerBackgroundColor(QColor("#252526"), M_CMD_ROW);
 }
 
 void RcxEditor::allocateMarginStyles() {
@@ -311,7 +315,6 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     applyMarkers(result.meta);
     applyFoldLevels(result.meta);
     applyHexDimming(result.meta);
-    applyBaseAddressColoring(result.meta);
     applyCommandRowPills();
 
     // Reset hint line - applySelectionOverlay will repaint indicators
@@ -340,8 +343,12 @@ void RcxEditor::applyMarkers(const QVector<LineMeta>& meta) {
     for (int m = M_CONT; m <= M_STRUCT_BG; m++) {
         m_sci->markerDeleteAll(m);
     }
+    m_sci->markerDeleteAll(M_CMD_ROW);
     for (int i = 0; i < meta.size(); i++) {
-        if (isSyntheticLine(meta[i])) continue;
+        if (meta[i].lineKind == LineKind::CommandRow) {
+            m_sci->markerAdd(i, M_CMD_ROW);
+            continue;
+        }
         uint32_t mask = meta[i].markerMask;
         for (int m = M_CONT; m <= M_STRUCT_BG; m++) {
             if (mask & (1u << m)) {
@@ -463,6 +470,7 @@ ViewState RcxEditor::saveViewState() const {
     m_sci->getCursorPosition(&line, &col);
     vs.cursorLine = line;
     vs.cursorCol  = col;
+    vs.xOffset = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETXOFFSET);
     return vs;
 }
 
@@ -475,6 +483,8 @@ void RcxEditor::restoreViewState(const ViewState& vs) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, (unsigned long)pos);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
                          (unsigned long)vs.scrollLine);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETXOFFSET,
+                         (unsigned long)vs.xOffset);
 }
 
 const LineMeta* RcxEditor::metaForLine(int line) const {
@@ -1068,6 +1078,17 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     case Qt::Key_Return:
     case Qt::Key_Enter:
         return beginInlineEdit(EditTarget::Value);
+    case Qt::Key_Tab: {
+        EditTarget order[] = {EditTarget::Name, EditTarget::Type, EditTarget::Value};
+        int start = 0;
+        for (int i = 0; i < 3; i++)
+            if (order[i] == m_lastTabTarget) { start = (i + 1) % 3; break; }
+        for (int i = 0; i < 3; i++) {
+            EditTarget t = order[(start + i) % 3];
+            if (beginInlineEdit(t)) { m_lastTabTarget = t; return true; }
+        }
+        return true;
+    }
     default:
         return false;
     }
@@ -1082,7 +1103,10 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
     switch (ke->key()) {
     case Qt::Key_Return:
     case Qt::Key_Enter:
+        commitInlineEdit();
+        return true;
     case Qt::Key_Tab:
+        m_lastTabTarget = m_editState.target;
         commitInlineEdit();
         return true;
     case Qt::Key_Escape:
@@ -1178,8 +1202,8 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, (long)0);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETWIDTH, 1);
     m_sci->setReadOnly(false);
-    // Switch to I-beam for editing (skip for Type which uses dropdown picker)
-    if (target != EditTarget::Type) {
+    // Switch to I-beam for editing (skip for Type/Source which use popup pickers)
+    if (target != EditTarget::Type && target != EditTarget::Source) {
         if (m_cursorOverridden) {
             QApplication::changeOverrideCursor(Qt::IBeamCursor);
         } else {
@@ -1297,6 +1321,8 @@ void RcxEditor::cancelInlineEdit() {
 // ── Type picker (user list) ──
 
 void RcxEditor::showTypeAutocomplete() {
+    if (!m_editState.active || m_editState.target != EditTarget::Type)
+        return;
     // Replace original type with spaces (keeps layout, clears for typing)
     int len = m_editState.original.size();
     QString spaces(len, ' ');
@@ -1333,10 +1359,26 @@ void RcxEditor::showTypeListFiltered(const QString& filter) {
 }
 
 void RcxEditor::showSourcePicker() {
-    m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, m_editState.posStart);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSETSEPARATOR, (long)' ');
-    m_sci->SendScintilla(QsciScintillaBase::SCI_USERLISTSHOW,
-                         (uintptr_t)2, "File Process");
+    if (!m_editState.active || m_editState.target != EditTarget::Source)
+        return;
+    QMenu menu;
+    menu.addAction("File");
+    menu.addAction("Process");
+
+    int lineH = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
+    int x = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION,
+                                       0, m_editState.posStart);
+    int y = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION,
+                                       0, m_editState.posStart);
+    QPoint pos = m_sci->viewport()->mapToGlobal(QPoint(x, y + lineH));
+
+    QAction* sel = menu.exec(pos);
+    if (sel) {
+        auto info = endInlineEdit();
+        emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, sel->text());
+    } else {
+        cancelInlineEdit();
+    }
 }
 
 void RcxEditor::updateTypeListFilter() {
@@ -1589,7 +1631,6 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCURRENTPOS, savedPos);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETANCHOR, savedAnchor);
     m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, start, start + utf8.size());
-    applyBaseAddressColoring(m_meta);
     applyCommandRowPills();
 }
 

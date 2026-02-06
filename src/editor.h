@@ -99,6 +99,9 @@ private:
     };
     InlineEditState m_editState;
 
+    // ── Tab cycling state ──
+    EditTarget m_lastTabTarget = EditTarget::Value;
+
     // ── Reentrancy guards ──
     bool m_clampingSelection = false;
     bool m_updatingComment = false;

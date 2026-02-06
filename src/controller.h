@@ -86,6 +86,7 @@ public:
 
 signals:
     void nodeSelected(int nodeIdx);
+    void selectionChanged(int count);
 
 private:
     RcxDocument*       m_doc;
@@ -97,6 +98,7 @@ private:
     void connectEditor(RcxEditor* editor);
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
     void updateCommandRow();
+    void attachToProcess(uint32_t pid, const QString& processName);
 };
 
 } // namespace rcx

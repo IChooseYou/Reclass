@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport)
 
@@ -19,6 +20,9 @@ add_executable(ReclassX
     src/controller.cpp
     src/compose.cpp
     src/format.cpp
+    src/processpicker.h
+    src/processpicker.cpp
+    src/processpicker.ui
     src/resources.qrc
 )
 
@@ -29,6 +33,7 @@ target_link_libraries(ReclassX PRIVATE
     Qt6::PrintSupport
     QScintilla::QScintilla
     dbghelp
+    psapi
 )
 
 add_custom_target(screenshot ALL
@@ -43,6 +48,10 @@ file(WRITE ${_combine_script} "
 set(_out \"${CMAKE_BINARY_DIR}/h_cpp_combined.txt\")
 file(WRITE \${_out} \"\")
 foreach(_f
+    \"${CMAKE_SOURCE_DIR}/src/providers/provider.h\"
+    \"${CMAKE_SOURCE_DIR}/src/providers/buffer_provider.h\"
+    \"${CMAKE_SOURCE_DIR}/src/providers/null_provider.h\"
+    \"${CMAKE_SOURCE_DIR}/src/providers/process_provider.h\"
     \"${CMAKE_SOURCE_DIR}/src/core.h\"
     \"${CMAKE_SOURCE_DIR}/src/editor.h\"
     \"${CMAKE_SOURCE_DIR}/src/editor.cpp\"
@@ -90,4 +99,22 @@ if(BUILD_TESTING)
         Qt6::Widgets Qt6::PrintSupport Qt6::Test
         QScintilla::QScintilla)
     add_test(NAME test_editor COMMAND test_editor)
+
+    add_executable(test_provider tests/test_provider.cpp)
+    target_include_directories(test_provider PRIVATE src)
+    target_link_libraries(test_provider PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME test_provider COMMAND test_provider)
+
+    add_executable(test_command_row tests/test_command_row.cpp)
+    target_include_directories(test_command_row PRIVATE src)
+    target_link_libraries(test_command_row PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME test_command_row COMMAND test_command_row)
+
+    add_executable(test_provider_getSymbol tests/test_provider_getSymbol.cpp)
+    target_include_directories(test_provider_getSymbol PRIVATE src)
+    target_link_libraries(test_provider_getSymbol PRIVATE Qt6::Core Qt6::Test)
+    if(WIN32)
+        target_link_libraries(test_provider_getSymbol PRIVATE psapi)
+    endif()
+    add_test(NAME test_provider_getSymbol COMMAND test_provider_getSymbol)
 endif()

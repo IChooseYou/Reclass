@@ -94,7 +94,7 @@ QString indent(int depth) {
 
 QString fmtOffsetMargin(uint64_t absoluteOffset, bool isContinuation) {
     if (isContinuation) return QStringLiteral("  \u00B7");
-    return QStringLiteral("0x") + QString::number(absoluteOffset, 16).toUpper();
+    return QString::number(absoluteOffset, 16).toUpper();
 }
 
 // ── Struct type name (for width calculation) ──
@@ -208,8 +208,22 @@ static QString readValueImpl(const Node& node, const Provider& prov,
     case NodeKind::Float:     { auto s = fmtFloat(prov.readF32(addr));   return display ? s : s.trimmed(); }
     case NodeKind::Double:    { auto s = fmtDouble(prov.readF64(addr));  return display ? s : s.trimmed(); }
     case NodeKind::Bool:      return fmtBool(prov.readU8(addr));
-    case NodeKind::Pointer32: return display ? fmtPointer32(prov.readU32(addr)) : rawHex(prov.readU32(addr), 8);
-    case NodeKind::Pointer64: return display ? fmtPointer64(prov.readU64(addr)) : rawHex(prov.readU64(addr), 16);
+    case NodeKind::Pointer32: {
+        uint32_t val = prov.readU32(addr);
+        if (!display) return rawHex(val, 8);
+        QString s = fmtPointer32(val);
+        QString sym = prov.getSymbol((uint64_t)val);
+        if (!sym.isEmpty()) s += QStringLiteral("  ") + sym;
+        return s;
+    }
+    case NodeKind::Pointer64: {
+        uint64_t val = prov.readU64(addr);
+        if (!display) return rawHex(val, 16);
+        QString s = fmtPointer64(val);
+        QString sym = prov.getSymbol(val);
+        if (!sym.isEmpty()) s += QStringLiteral("  ") + sym;
+        return s;
+    }
     case NodeKind::Vec2:
     case NodeKind::Vec3:
     case NodeKind::Vec4: {

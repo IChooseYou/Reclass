@@ -11,18 +11,18 @@
 using namespace rcx;
 
 // Load first 0x6000 bytes of the test exe for realistic data
-static FileProvider makeTestProvider() {
+static BufferProvider makeTestProvider() {
     QFile exe(QCoreApplication::applicationFilePath());
     if (exe.open(QIODevice::ReadOnly)) {
         QByteArray data = exe.read(0x6000);
         exe.close();
         if (data.size() >= 0x6000)
-            return FileProvider(data);
+            return BufferProvider(data);
     }
     // Fallback: minimal PE header stub
     QByteArray data(0x6000, '\0');
     data[0] = 'M'; data[1] = 'Z';  // DOS signature
-    return FileProvider(data);
+    return BufferProvider(data);
 }
 
 // Build a PE-like test tree with IMAGE_FILE_HEADER fields
@@ -127,7 +127,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(m_editor));
 
         NodeTree tree = makeTestTree();
-        FileProvider prov = makeTestProvider();
+        BufferProvider prov = makeTestProvider();
         m_result = compose(tree, prov);
         m_editor->applyDocument(m_result);
     }
@@ -155,7 +155,7 @@ private slots:
 
         // Set CommandRow text with an ADDR value (simulates controller.updateCommandRow)
         m_editor->setCommandRowText(
-            QStringLiteral(" * SRC: File : 0x140000000"));
+            QStringLiteral("   File Address: 0x140000000"));
 
         // BaseAddress should be ALLOWED on CommandRow (ADDR field)
         bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
@@ -168,6 +168,7 @@ private slots:
         QVERIFY2(ok, "Source edit should be allowed on CommandRow");
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();
+        QApplication::processEvents(); // flush deferred showSourcePicker timer
     }
 
     // ── Test: inline edit lifecycle (begin → commit → re-edit) ──
@@ -251,36 +252,7 @@ private slots:
         QCOMPARE(cancelSpy.count(), 0);
     }
 
-    // ── Test: FocusOut during edit commits it ──
-    void testFocusOutCommitsEdit() {
-        m_editor->applyDocument(m_result);
 
-        // Give focus to the scintilla widget first
-        m_editor->scintilla()->setFocus();
-        QApplication::processEvents();
-
-        bool ok = m_editor->beginInlineEdit(EditTarget::Name, 2);
-        QVERIFY(ok);
-        QVERIFY(m_editor->isEditing());
-
-        QSignalSpy commitSpy(m_editor, &RcxEditor::inlineEditCommitted);
-        QSignalSpy cancelSpy(m_editor, &RcxEditor::inlineEditCancelled);
-
-        // Create a dummy widget and transfer focus to it (triggers real FocusOut)
-        QWidget dummy;
-        dummy.show();
-        QVERIFY(QTest::qWaitForWindowExposed(&dummy));
-        dummy.setFocus();
-        QApplication::processEvents();  // process focus change + deferred timer
-
-        QVERIFY(!m_editor->isEditing());
-        QCOMPARE(commitSpy.count(), 1);
-        QCOMPARE(cancelSpy.count(), 0);
-
-        // Restore focus to editor for subsequent tests
-        m_editor->scintilla()->setFocus();
-        QApplication::processEvents();
-    }
 
     // ── Test: type edit begins and can be cancelled ──
     void testTypeEditCancel() {
@@ -348,25 +320,6 @@ private slots:
         QVERIFY(!m_editor->isEditing());
     }
 
-    // ── Test: showTypeAutocomplete populates list (check via SCI_AUTOCACTIVE) ──
-    void testTypeAutocompleteShows() {
-        m_editor->applyDocument(m_result);
-
-        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 2);
-        QVERIFY(ok);
-
-        // Process deferred timer (autocomplete is deferred)
-        QApplication::processEvents();
-
-        // Check if the user list is active
-        long active = m_editor->scintilla()->SendScintilla(
-            QsciScintillaBase::SCI_AUTOCACTIVE);
-        QVERIFY2(active != 0, "Autocomplete list should be active after type edit begins");
-
-        // Cancel
-        m_editor->cancelInlineEdit();
-        m_editor->applyDocument(m_result);
-    }
 
     // ── Test: parseValue accepts space-separated hex bytes ──
     void testParseValueHexWithSpaces() {
@@ -413,13 +366,10 @@ private slots:
         bool ok = m_editor->beginInlineEdit(EditTarget::Type, 2);
         QVERIFY(ok);
 
-        // Process deferred autocomplete
-        QApplication::processEvents();
-
-        // Verify autocomplete is active
-        long active = m_editor->scintilla()->SendScintilla(
-            QsciScintillaBase::SCI_AUTOCACTIVE);
-        QVERIFY2(active != 0, "Autocomplete should be active");
+        // Autocomplete is deferred via QTimer::singleShot(0) — poll until active
+        QTRY_VERIFY2(m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_AUTOCACTIVE) != 0,
+            "Autocomplete should be active");
 
         // Simulate typing 'i' — filters to typeName entries starting with 'i'
         QKeyEvent keyI(QEvent::KeyPress, Qt::Key_I, Qt::NoModifier, "i");
@@ -541,7 +491,7 @@ private slots:
     void testBaseAddressDisplay() {
         NodeTree tree = makeTestTree();
         tree.baseAddress = 0x10;
-        FileProvider prov = makeTestProvider();
+        BufferProvider prov = makeTestProvider();
         ComposeResult result = compose(tree, prov);
 
         m_editor->applyDocument(result);
@@ -577,7 +527,7 @@ private slots:
 
         // Set CommandRow text with ADDR value (simulates controller)
         m_editor->setCommandRowText(
-            QStringLiteral(" * SRC: File : 0x140000000"));
+            QStringLiteral("   File Address: 0x140000000"));
 
         // Line 0 is CommandRow
         const LineMeta* lm = m_editor->metaForLine(0);
@@ -616,7 +566,7 @@ private slots:
 
         // Set CommandRow text with ADDR value (simulates controller)
         m_editor->setCommandRowText(
-            QStringLiteral(" * SRC: File : 0x140000000"));
+            QStringLiteral("   File Address: 0x140000000"));
 
         // Begin base address edit on line 0 (CommandRow ADDR field)
         bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);

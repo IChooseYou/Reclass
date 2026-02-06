@@ -5,12 +5,15 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QByteArray>
-#include <QFile>
 #include <QHash>
 #include <QSet>
 #include <cstdint>
 #include <memory>
 #include <variant>
+
+#include "providers/provider.h"
+#include "providers/buffer_provider.h"
+#include "providers/null_provider.h"
 
 namespace rcx {
 
@@ -144,87 +147,7 @@ enum Marker : int {
     M_STRUCT_BG = 5,
     M_HOVER     = 6,
     M_SELECTED  = 7,
-};
-
-// ── Provider interface ──
-
-class Provider {
-public:
-    virtual ~Provider() = default;
-    virtual uint8_t  readU8 (uint64_t addr) const = 0;
-    virtual uint16_t readU16(uint64_t addr) const = 0;
-    virtual uint32_t readU32(uint64_t addr) const = 0;
-    virtual uint64_t readU64(uint64_t addr) const = 0;
-    virtual float    readF32(uint64_t addr) const = 0;
-    virtual double   readF64(uint64_t addr) const = 0;
-    virtual QByteArray readBytes(uint64_t addr, int len) const = 0;
-    virtual bool     isValid() const = 0;
-    virtual bool     isReadable(uint64_t addr, int len) const = 0;
-    virtual int      size() const = 0;
-    virtual bool     isWritable() const { return false; }
-    virtual bool     writeBytes(uint64_t addr, const QByteArray& data) {
-        Q_UNUSED(addr); Q_UNUSED(data); return false;
-    }
-};
-
-class FileProvider : public Provider {
-    QByteArray m_data;
-
-    template<class T>
-    T readT(uint64_t a) const {
-        if (a + sizeof(T) > (uint64_t)m_data.size()) return T{};
-        T v; memcpy(&v, m_data.data() + a, sizeof(T)); return v;
-    }
-
-public:
-    explicit FileProvider(const QByteArray& data) : m_data(data) {}
-    static FileProvider fromFile(const QString& path) {
-        QFile f(path);
-        if (f.open(QIODevice::ReadOnly)) return FileProvider(f.readAll());
-        return FileProvider({});
-    }
-
-    bool isValid() const override { return !m_data.isEmpty(); }
-    bool isReadable(uint64_t addr, int len) const override {
-        if (len <= 0) return len == 0;
-        if (addr > (uint64_t)m_data.size()) return false;
-        return (uint64_t)len <= (uint64_t)m_data.size() - addr;
-    }
-    int  size()    const override { return m_data.size(); }
-
-    uint8_t  readU8 (uint64_t a) const override { return readT<uint8_t>(a); }
-    uint16_t readU16(uint64_t a) const override { return readT<uint16_t>(a); }
-    uint32_t readU32(uint64_t a) const override { return readT<uint32_t>(a); }
-    uint64_t readU64(uint64_t a) const override { return readT<uint64_t>(a); }
-    float    readF32(uint64_t a) const override { return readT<float>(a); }
-    double   readF64(uint64_t a) const override { return readT<double>(a); }
-
-    QByteArray readBytes(uint64_t a, int len) const override {
-        if (a >= (uint64_t)m_data.size()) return {};
-        int avail = qMin(len, (int)((uint64_t)m_data.size() - a));
-        return m_data.mid((int)a, avail);
-    }
-
-    bool isWritable() const override { return true; }
-    bool writeBytes(uint64_t addr, const QByteArray& data) override {
-        if (addr + data.size() > (uint64_t)m_data.size()) return false;
-        memcpy(m_data.data() + addr, data.data(), data.size());
-        return true;
-    }
-};
-
-class NullProvider : public Provider {
-public:
-    uint8_t  readU8 (uint64_t) const override { return 0; }
-    uint16_t readU16(uint64_t) const override { return 0; }
-    uint32_t readU32(uint64_t) const override { return 0; }
-    uint64_t readU64(uint64_t) const override { return 0; }
-    float    readF32(uint64_t) const override { return 0.0f; }
-    double   readF64(uint64_t) const override { return 0.0; }
-    QByteArray readBytes(uint64_t, int) const override { return {}; }
-    bool     isValid() const override { return false; }
-    bool     isReadable(uint64_t, int) const override { return false; }
-    int      size()    const override { return 0; }
+    M_CMD_ROW   = 8,
 };
 
 // ── Node ──
@@ -610,26 +533,24 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW =
 }
 
 // ── CommandRow spans ──
-// Line format: " * SRC: File : 0x140000000  path > here"
+// Line format: "   File 'name' Address: 0x140000000"
 
 inline ColumnSpan commandRowSrcSpan(const QString& lineText) {
-    int idx = lineText.indexOf(QStringLiteral(" : "));
+    int idx = lineText.indexOf(QStringLiteral(" Address: "));
     if (idx < 0) return {};
-    // Skip past "SRC: " label to expose just the source name
-    int srcTag = lineText.indexOf(QStringLiteral("SRC: "));
-    int start = (srcTag >= 0 && srcTag < idx) ? srcTag + 5 : 0;
-    while (start < idx && !lineText[start].isLetterOrNumber()) start++;
+    int start = 0;
+    while (start < idx && !lineText[start].isLetterOrNumber()
+           && lineText[start] != '<') start++;
     if (start >= idx) return {};
     return {start, idx, true};
 }
 
 inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
-    int idx = lineText.indexOf(QStringLiteral(" : "));
-    if (idx < 0) return {};
-    int start = idx + 3;  // after " : "
-    int end = lineText.indexOf(QStringLiteral("  "), start);  // next double-space
-    if (end < 0) end = lineText.size();
-    while (end > start && lineText[end-1].isSpace()) end--;
+    int tag = lineText.indexOf(QStringLiteral(" Address: "));
+    if (tag < 0) return {};
+    int start = tag + 10;  // after " Address: "
+    int end = start;
+    while (end < lineText.size() && !lineText[end].isSpace()) end++;
     if (end <= start) return {};
     return {start, end, true};
 }
@@ -673,6 +594,7 @@ struct ViewState {
     int scrollLine = 0;
     int cursorLine = 0;
     int cursorCol  = 0;
+    int xOffset    = 0;  // horizontal scroll in pixels
 };
 
 // ── Format function forward declarations ──

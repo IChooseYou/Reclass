@@ -39,8 +39,8 @@ private slots:
     }
 
     void testFmtOffsetMargin_primary() {
-        QCOMPARE(fmt::fmtOffsetMargin(0x10, false), QString("0x10"));
-        QCOMPARE(fmt::fmtOffsetMargin(0, false),    QString("0x0"));
+        QCOMPARE(fmt::fmtOffsetMargin(0x10, false), QString("10"));
+        QCOMPARE(fmt::fmtOffsetMargin(0, false),    QString("0"));
     }
 
     void testFmtOffsetMargin_continuation() {
@@ -224,7 +224,7 @@ private slots:
     void testReadValueBoundsCheck() {
         // Vec2 subLine=2 (out of bounds) should return "?"
         QByteArray data(16, '\0');
-        FileProvider prov(data);
+        BufferProvider prov(data);
         Node n;
         n.kind = NodeKind::Vec2;
         n.name = "v";
@@ -244,7 +244,7 @@ private slots:
         // Write a known float value
         float val = 3.14f;
         memcpy(data.data(), &val, 4);
-        FileProvider prov(data);
+        BufferProvider prov(data);
 
         Node n;
         n.kind = NodeKind::Float;

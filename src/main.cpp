@@ -112,6 +112,7 @@ private slots:
     void removeNode();
     void changeNodeType();
     void renameNodeAction();
+    void duplicateNodeAction();
     void splitView();
     void unsplitView();
 
@@ -205,6 +206,8 @@ void MainWindow::createMenus() {
     actType->setText("Change &Type\tT");
     auto* actName = node->addAction("Re&name", this, &MainWindow::renameNodeAction);
     actName->setText("Re&name\tF2");
+    node->addAction("D&uplicate", QKeySequence(Qt::CTRL | Qt::Key_D),
+                     this, &MainWindow::duplicateNodeAction);
 
     // Help
     auto* help = menuBar()->addMenu("&Help");
@@ -243,7 +246,7 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
         if (nodeIdx >= 0 && nodeIdx < ctrl->document()->tree.nodes.size()) {
             auto& node = ctrl->document()->tree.nodes[nodeIdx];
             m_statusLabel->setText(
-                QString("%1 %2  offset: +0x%3  size: %4 bytes")
+                QString("%1 %2  offset: 0x%3  size: %4 bytes")
                     .arg(kindToString(node.kind))
                     .arg(node.name)
                     .arg(node.offset, 4, 16, QChar('0'))
@@ -251,6 +254,13 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
         } else {
             m_statusLabel->setText("Ready");
         }
+    });
+    connect(ctrl, &RcxController::selectionChanged,
+            this, [this](int count) {
+        if (count == 0)
+            m_statusLabel->setText("Ready");
+        else if (count > 1)
+            m_statusLabel->setText(QString("%1 nodes selected").arg(count));
     });
 
     ctrl->refresh();
@@ -638,6 +648,15 @@ void MainWindow::renameNodeAction() {
     auto* primary = ctrl->primaryEditor();
     if (!primary) return;
     primary->beginInlineEdit(EditTarget::Name);
+}
+
+void MainWindow::duplicateNodeAction() {
+    auto* ctrl = activeController();
+    if (!ctrl) return;
+    auto* primary = ctrl->primaryEditor();
+    if (!primary || primary->isEditing()) return;
+    int ni = primary->currentNodeIndex();
+    if (ni >= 0) ctrl->duplicateNode(ni);
 }
 
 void MainWindow::splitView() {

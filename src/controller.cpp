@@ -1,4 +1,6 @@
 #include "controller.h"
+#include "providers/process_provider.h"
+#include "processpicker.h"
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
 #include <QFile>
@@ -11,6 +13,10 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QFileDialog>
+#include <QMessageBox>
+#ifdef _WIN32
+#include <psapi.h>
+#endif
 
 namespace rcx {
 
@@ -94,7 +100,8 @@ void RcxDocument::loadData(const QString& binaryPath) {
     if (!file.open(QIODevice::ReadOnly))
         return;
     undoStack.clear();
-    provider = std::make_unique<FileProvider>(file.readAll());
+    provider = std::make_unique<BufferProvider>(
+        file.readAll(), QFileInfo(binaryPath).fileName());
     dataPath = binaryPath;
     tree.baseAddress = 0;
     emit documentChanged();
@@ -102,7 +109,7 @@ void RcxDocument::loadData(const QString& binaryPath) {
 
 void RcxDocument::loadData(const QByteArray& data) {
     undoStack.clear();
-    provider = std::make_unique<FileProvider>(data);
+    provider = std::make_unique<BufferProvider>(data);
     tree.baseAddress = 0;
     emit documentChanged();
 }
@@ -266,7 +273,16 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 QString path = QFileDialog::getOpenFileName(w, "Load Binary Data", {}, "All Files (*)");
                 if (!path.isEmpty()) m_doc->loadData(path);
             }
-            // "Process" is a placeholder — no action yet
+            else if (text == QStringLiteral("Process")) {
+#ifdef _WIN32
+                auto* w = qobject_cast<QWidget*>(parent());
+                ProcessPicker picker(w);
+                if (picker.exec() == QDialog::Accepted) {
+                    attachToProcess(picker.selectedProcessId(),
+                                    picker.selectedProcessName());
+                }
+#endif
+            }
             break;
         }
         case EditTarget::ArrayIndex:
@@ -619,22 +635,22 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                       && node.kind != NodeKind::Padding && node.kind != NodeKind::Mat4x4
                       && m_doc->provider->isWritable();
     if (isEditable) {
-        menu.addAction("Edit &Value", [editor, line]() {
+        menu.addAction("Edit &Value\tEnter", [editor, line]() {
             editor->beginInlineEdit(EditTarget::Value, line);
         });
     }
 
-    menu.addAction("Re&name", [editor, line]() {
+    menu.addAction("Re&name\tF2", [editor, line]() {
         editor->beginInlineEdit(EditTarget::Name, line);
     });
 
-    menu.addAction("Change &Type", [editor, line]() {
+    menu.addAction("Change &Type\tT", [editor, line]() {
         editor->beginInlineEdit(EditTarget::Type, line);
     });
 
     menu.addSeparator();
 
-    menu.addAction("&Add Field Below", [this, parentId]() {
+    menu.addAction("&Add Field Below\tInsert", [this, parentId]() {
         insertNode(parentId, -1, NodeKind::Hex64, "newField");
     });
 
@@ -649,11 +665,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
     }
 
-    menu.addAction("D&uplicate", [this, nodeId]() {
+    menu.addAction("D&uplicate\tCtrl+D", [this, nodeId]() {
         int ni = m_doc->tree.indexOfId(nodeId);
         if (ni >= 0) duplicateNode(ni);
     });
-    menu.addAction("&Delete", [this, nodeId]() {
+    menu.addAction("&Delete\tDelete", [this, nodeId]() {
         int ni = m_doc->tree.indexOfId(nodeId);
         if (ni >= 0) removeNode(ni);
     });
@@ -803,29 +819,87 @@ void RcxController::applySelectionOverlays() {
 }
 
 void RcxController::updateCommandRow() {
+    // -- Source label: driven by provider metadata --
     QString src;
-    if (!m_doc->filePath.isEmpty())
-        src = QFileInfo(m_doc->filePath).fileName();
-    else
-        src = QStringLiteral("File");
-    if (!m_doc->dataPath.isEmpty())
-        src += QStringLiteral(" @ ") + QFileInfo(m_doc->dataPath).fileName();
+    QString provName = m_doc->provider->name();
+    if (provName.isEmpty()) {
+        src = QStringLiteral("<Select Source>");
+    } else {
+        src = QStringLiteral("%1 '%2'")
+            .arg(m_doc->provider->kind(), provName);
+    }
 
-    QString addr = QStringLiteral("0x") +
-        QString::number(m_doc->tree.baseAddress, 16).toUpper();
-    QString path;
+    // -- Symbol for selected node (getSymbol integration) --
+    QString sym;
     if (m_selIds.size() == 1) {
         uint64_t sid = *m_selIds.begin();
         int idx = m_doc->tree.indexOfId(sid & ~kFooterIdBit);
-        if (idx >= 0)
-            path = crumbFor(m_doc->tree, m_doc->tree.nodes[idx].id);
+        if (idx >= 0) {
+            const auto& node = m_doc->tree.nodes[idx];
+            uint64_t addr = m_doc->tree.baseAddress + node.offset;
+            sym = m_doc->provider->getSymbol(addr);
+        }
     }
 
-    QString row = QStringLiteral(" * SRC: %1 : %2  %3")
-        .arg(elide(src, 40), elide(addr, 24), elideLeft(path, 120));
+    QString addr = QStringLiteral("0x") +
+        QString::number(m_doc->tree.baseAddress, 16).toUpper();
+
+    // Build the row. If we have a symbol, append it after the address.
+    QString row;
+    if (sym.isEmpty()) {
+        row = QStringLiteral("   %1 Address: %2")
+            .arg(elide(src, 40), elide(addr, 24));
+    } else {
+        row = QStringLiteral("   %1 Address: %2  %3")
+            .arg(elide(src, 40), elide(addr, 24), elide(sym, 40));
+    }
 
     for (auto* ed : m_editors)
         ed->setCommandRowText(row);
+    emit selectionChanged(m_selIds.size());
+}
+
+void RcxController::attachToProcess(uint32_t pid, const QString& processName) {
+#ifdef _WIN32
+    HANDLE hProc = OpenProcess(
+        PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION
+        | PROCESS_QUERY_INFORMATION,
+        FALSE, pid);
+    if (!hProc) {
+        QMessageBox::warning(qobject_cast<QWidget*>(parent()),
+            "Attach Failed",
+            QString("Could not open process %1 (PID %2).\n"
+                    "Try running as administrator.")
+                .arg(processName).arg(pid));
+        return;
+    }
+
+    // Grab main module for initial view region
+    HMODULE hMod = nullptr;
+    DWORD needed = 0;
+    uint64_t base = 0;
+    int regionSize = 0x10000;
+
+    if (EnumProcessModulesEx(hProc, &hMod, sizeof(hMod), &needed, LIST_MODULES_ALL)
+        && hMod)
+    {
+        MODULEINFO mi{};
+        if (GetModuleInformation(hProc, hMod, &mi, sizeof(mi))) {
+            base = (uint64_t)mi.lpBaseOfDll;
+            regionSize = (int)mi.SizeOfImage;
+        }
+    }
+
+    m_doc->undoStack.clear();
+    m_doc->provider = std::make_unique<ProcessProvider>(
+        hProc, base, regionSize, processName);
+    m_doc->dataPath.clear();
+    m_doc->tree.baseAddress = base;
+    emit m_doc->documentChanged();
+    refresh();
+#else
+    Q_UNUSED(pid); Q_UNUSED(processName);
+#endif
 }
 
 void RcxController::handleMarginClick(RcxEditor* editor, int margin,

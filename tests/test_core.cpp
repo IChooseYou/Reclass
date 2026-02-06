@@ -111,13 +111,13 @@ private slots:
         QCOMPARE(tree2.nodes[1].offset, 8);
     }
 
-    void testFileProvider() {
+    void testBufferProvider() {
         QByteArray data(16, '\0');
         data[0] = 0x42;
         data[4] = 0x10;
         data[5] = 0x20;
 
-        rcx::FileProvider prov(data);
+        rcx::BufferProvider prov(data);
         QVERIFY(prov.isValid());
         QCOMPARE(prov.size(), 16);
         QCOMPARE(prov.readU8(0), (uint8_t)0x42);
@@ -134,7 +134,7 @@ private slots:
 
     void testIsReadable() {
         QByteArray data(16, '\0');
-        rcx::FileProvider prov(data);
+        rcx::BufferProvider prov(data);
         QVERIFY(prov.isReadable(0, 4));
         QVERIFY(prov.isReadable(0, 16));
         QVERIFY(!prov.isReadable(0, 17));
@@ -191,7 +191,7 @@ private slots:
 
     void testIsReadableOverflow() {
         QByteArray data(16, '\0');
-        rcx::FileProvider prov(data);
+        rcx::BufferProvider prov(data);
         // Normal cases
         QVERIFY(prov.isReadable(0, 16));
         QVERIFY(!prov.isReadable(0, 17));
@@ -260,7 +260,7 @@ private slots:
 
     void testProviderWrite() {
         QByteArray data(16, '\0');
-        rcx::FileProvider prov(data);
+        rcx::BufferProvider prov(data);
         QVERIFY(prov.isWritable());
 
         QByteArray patch;
