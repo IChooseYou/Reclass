@@ -7,7 +7,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport)
+find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport Svg)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 find_package(QScintilla REQUIRED)
@@ -24,6 +24,8 @@ add_executable(ReclassX
     src/processpicker.cpp
     src/processpicker.ui
     src/resources.qrc
+    src/core.h
+    src/providers/buffer_provider.h src/providers/null_provider.h src/providers/process_provider.h src/providers/provider.h
 )
 
 target_include_directories(ReclassX PRIVATE src)
@@ -31,6 +33,7 @@ target_include_directories(ReclassX PRIVATE src)
 target_link_libraries(ReclassX PRIVATE
     Qt6::Widgets
     Qt6::PrintSupport
+    Qt6::Svg
     QScintilla::QScintilla
     dbghelp
     psapi

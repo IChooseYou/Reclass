@@ -1,10 +1,31 @@
 <RCC>
-  <qresource prefix="/icons">
-    <file alias="chevron-right.png">icons/chevron-right.png</file>
-    <file alias="chevron-down.png">icons/chevron-down.png</file>
-  </qresource>
-  <qresource prefix="/fonts">
-    <file alias="Iosevka-Regular.ttf">fonts/Iosevka-Regular.ttf</file>
-    <file alias="codicon.ttf">fonts/codicon.ttf</file>
-  </qresource>
+    <qresource prefix="/icons">
+        <file alias="chevron-right.png">icons/chevron-right.png</file>
+        <file alias="chevron-down.png">icons/chevron-down.png</file>
+    </qresource>
+    <qresource prefix="/fonts">
+        <file alias="Iosevka-Regular.ttf">fonts/Iosevka-Regular.ttf</file>
+    </qresource>
+    <qresource prefix="/vsicons">
+        <file alias="file.svg">vsicons/file.svg</file>
+        <file alias="folder-opened.svg">vsicons/folder-opened.svg</file>
+        <file alias="save.svg">vsicons/save.svg</file>
+        <file alias="save-as.svg">vsicons/save-as.svg</file>
+        <file alias="save-all.svg">vsicons/save-all.svg</file>
+        <file alias="file-binary.svg">vsicons/file-binary.svg</file>
+        <file alias="debug.svg">vsicons/debug.svg</file>
+        <file alias="close.svg">vsicons/close.svg</file>
+        <file alias="arrow-left.svg">vsicons/arrow-left.svg</file>
+        <file alias="arrow-right.svg">vsicons/arrow-right.svg</file>
+        <file alias="split-horizontal.svg">vsicons/split-horizontal.svg</file>
+        <file alias="chrome-close.svg">vsicons/chrome-close.svg</file>
+        <file alias="text-size.svg">vsicons/text-size.svg</file>
+        <file alias="add.svg">vsicons/add.svg</file>
+        <file alias="remove.svg">vsicons/remove.svg</file>
+        <file alias="symbol-structure.svg">vsicons/symbol-structure.svg</file>
+        <file alias="edit.svg">vsicons/edit.svg</file>
+        <file alias="files.svg">vsicons/files.svg</file>
+        <file alias="extensions.svg">vsicons/extensions.svg</file>
+        <file alias="question.svg">vsicons/question.svg</file>
+    </qresource>
 </RCC>

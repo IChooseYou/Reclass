@@ -18,6 +18,8 @@
 #include <QDir>
 #include <QMetaObject>
 #include <QFontDatabase>
+#include <QPainter>
+#include <QSvgRenderer>
 #include <QSettings>
 
 #ifdef _WIN32
@@ -134,6 +136,7 @@ private:
 
     void createMenus();
     void createStatusBar();
+    QIcon makeIcon(const QString& svgPath);
 
     RcxController* activeController() const;
     TabState* activeTab();
@@ -158,30 +161,49 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             this, [this](QMdiSubWindow*) { updateWindowTitle(); });
 }
 
+QIcon MainWindow::makeIcon(const QString& svgPath) {
+    // Render SVG at 14x14 (2px smaller)
+    QSvgRenderer renderer(svgPath);
+    QPixmap svgPixmap(14, 14);
+    svgPixmap.fill(Qt::transparent);
+    QPainter svgPainter(&svgPixmap);
+    renderer.render(&svgPainter);
+    svgPainter.end();
+    
+    // Center it in a 16x16 canvas
+    QPixmap pixmap(16, 16);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.drawPixmap(1, 1, svgPixmap);  // Offset by 1px on each side
+    painter.end();
+    
+    return QIcon(pixmap);
+}
+
 void MainWindow::createMenus() {
     // File
     auto* file = menuBar()->addMenu("&File");
-    file->addAction("&New",            QKeySequence::New,    this, &MainWindow::newFile);
-    file->addAction("&Open...",        QKeySequence::Open,   this, &MainWindow::openFile);
+    file->addAction(makeIcon(":/vsicons/file.svg"), "&New", QKeySequence::New, this, &MainWindow::newFile);
+    file->addAction(makeIcon(":/vsicons/folder-opened.svg"), "&Open...", QKeySequence::Open, this, &MainWindow::openFile);
     file->addSeparator();
-    file->addAction("&Save",           QKeySequence::Save,   this, &MainWindow::saveFile);
-    file->addAction("Save &As...",     QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
+    file->addAction(makeIcon(":/vsicons/save.svg"), "&Save", QKeySequence::Save, this, &MainWindow::saveFile);
+    file->addAction(makeIcon(":/vsicons/save-as.svg"), "Save &As...", QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
     file->addSeparator();
-    file->addAction("Load &Binary...", this, &MainWindow::loadBinary);
+    file->addAction(makeIcon(":/vsicons/file-binary.svg"), "Load &Binary...", this, &MainWindow::loadBinary);
     file->addSeparator();
-    file->addAction("E&xit",           QKeySequence::Quit,   this, &QMainWindow::close);
+    file->addAction(makeIcon(":/vsicons/close.svg"), "E&xit", QKeySequence(Qt::Key_Close), this, &QMainWindow::close);
 
     // Edit
     auto* edit = menuBar()->addMenu("&Edit");
-    edit->addAction("&Undo", QKeySequence::Undo, this, &MainWindow::undo);
-    edit->addAction("&Redo", QKeySequence::Redo, this, &MainWindow::redo);
+    edit->addAction(makeIcon(":/vsicons/arrow-left.svg"), "&Undo", QKeySequence::Undo, this, &MainWindow::undo);
+    edit->addAction(makeIcon(":/vsicons/arrow-right.svg"), "&Redo", QKeySequence::Redo, this, &MainWindow::redo);
 
     // View
     auto* view = menuBar()->addMenu("&View");
-    view->addAction("Split &Horizontal", this, &MainWindow::splitView);
-    view->addAction("&Unsplit",          this, &MainWindow::unsplitView);
+    view->addAction(makeIcon(":/vsicons/split-horizontal.svg"), "Split &Horizontal", this, &MainWindow::splitView);
+    view->addAction(makeIcon(":/vsicons/chrome-close.svg"), "&Unsplit", this, &MainWindow::unsplitView);
     view->addSeparator();
-    auto* fontMenu = view->addMenu("&Font");
+    auto* fontMenu = view->addMenu(makeIcon(":/vsicons/text-size.svg"), "&Font");
     auto* fontGroup = new QActionGroup(this);
     fontGroup->setExclusive(true);
     auto* actConsolas = fontMenu->addAction("Consolas");
@@ -200,18 +222,15 @@ void MainWindow::createMenus() {
 
     // Node
     auto* node = menuBar()->addMenu("&Node");
-    node->addAction("&Add Field",    QKeySequence(Qt::Key_Insert), this, &MainWindow::addNode);
-    node->addAction("&Remove Field", QKeySequence::Delete,         this, &MainWindow::removeNode);
-    auto* actType = node->addAction("Change &Type", this, &MainWindow::changeNodeType);
-    actType->setText("Change &Type\tT");
-    auto* actName = node->addAction("Re&name", this, &MainWindow::renameNodeAction);
-    actName->setText("Re&name\tF2");
-    node->addAction("D&uplicate", QKeySequence(Qt::CTRL | Qt::Key_D),
-                     this, &MainWindow::duplicateNodeAction);
+    node->addAction(makeIcon(":/vsicons/add.svg"), "&Add Field", QKeySequence(Qt::Key_Insert), this, &MainWindow::addNode);
+    node->addAction(makeIcon(":/vsicons/remove.svg"), "&Remove Field", QKeySequence::Delete, this, &MainWindow::removeNode);
+    node->addAction(makeIcon(":/vsicons/symbol-structure.svg"), "Change &Type", QKeySequence(Qt::Key_T), this, &MainWindow::changeNodeType);
+    node->addAction(makeIcon(":/vsicons/edit.svg"), "Re&name", QKeySequence(Qt::Key_F2), this, &MainWindow::renameNodeAction);
+    node->addAction(makeIcon(":/vsicons/files.svg"), "D&uplicate", this, &MainWindow::duplicateNodeAction)->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
 
     // Help
     auto* help = menuBar()->addMenu("&Help");
-    help->addAction("&About ReclassX", this, &MainWindow::about);
+    help->addAction(makeIcon(":/vsicons/question.svg"), "&About ReclassX", this, &MainWindow::about);
 }
 
 void MainWindow::createStatusBar() {
