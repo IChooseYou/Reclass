@@ -24,6 +24,12 @@ static QString elide(QString s, int max) {
     return s.left(max - 1) + QChar(0x2026);
 }
 
+static QString elideLeft(const QString& s, int max) {
+    if (s.size() <= max) return s;
+    if (max <= 1) return QStringLiteral("\u2026").left(max);
+    return QStringLiteral("\u2026") + s.right(max - 1);
+}
+
 static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
     QStringList parts;
     QSet<uint64_t> seen;
@@ -37,7 +43,9 @@ static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
         cur = n.parentId;
     }
     std::reverse(parts.begin(), parts.end());
-    return parts.join(QStringLiteral(" > "));
+    if (parts.size() > 4)
+        parts = {parts.front(), QStringLiteral("\u2026"), parts[parts.size() - 2], parts.back()};
+    return parts.join(QStringLiteral(" \u203A "));
 }
 
 // ── RcxDocument ──
@@ -814,7 +822,7 @@ void RcxController::updateCommandRow() {
     }
 
     QString row = QStringLiteral(" * SRC: %1 : %2  %3")
-        .arg(elide(src, 40), elide(addr, 24), elide(path, 120));
+        .arg(elide(src, 40), elide(addr, 24), elideLeft(path, 120));
 
     for (auto* ed : m_editors)
         ed->setCommandRowText(row);

@@ -25,6 +25,7 @@ static constexpr int IND_EDITABLE   = 8;
 static constexpr int IND_HEX_DIM    = 9;
 static constexpr int IND_BASE_ADDR  = 10;  // Green color for base address
 static constexpr int IND_HOVER_SPAN = 11;  // Blue text on hover (link-like)
+static constexpr int IND_CMD_PILL   = 12;  // Rounded chip behind command row spans
 
 // Footer selection ID: set high bit to distinguish footer-only selections from node selections
 static constexpr uint64_t kFooterIdBit = 0x8000000000000000ULL;
@@ -150,6 +151,16 @@ void RcxEditor::setupScintilla() {
                          IND_HOVER_SPAN, 17 /*INDIC_TEXTFORE*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HOVER_SPAN, QColor("#3d9c8a"));
+
+    // Command-row pill background (shadcn-ish chip)
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_CMD_PILL, 7 /*INDIC_ROUNDBOX*/);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_CMD_PILL, QColor("#2a2a2a"));
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
+                         IND_CMD_PILL, (long)90);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
+                         IND_CMD_PILL, (long)1);
 
 }
 
@@ -301,6 +312,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     applyFoldLevels(result.meta);
     applyHexDimming(result.meta);
     applyBaseAddressColoring(result.meta);
+    applyCommandRowPills();
 
     // Reset hint line - applySelectionOverlay will repaint indicators
     m_hintLine = -1;
@@ -517,18 +529,32 @@ static QString getLineText(QsciScintilla* sci, int line) {
 }
 
 void RcxEditor::applyBaseAddressColoring(const QVector<LineMeta>& meta) {
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_BASE_ADDR);
-    // Color the ADDR span on CommandRow (line 0)
-    if (!meta.isEmpty() && meta[0].lineKind == LineKind::CommandRow) {
-        QString lineText = getLineText(m_sci, 0);
-        ColumnSpan span = commandRowAddrSpan(lineText);
-        if (span.valid) {
-            long posA = posFromCol(m_sci, 0, span.start);
-            long posB = posFromCol(m_sci, 0, span.end);
-            if (posB > posA)
-                m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, posA, posB - posA);
-        }
-    }
+    if (meta.isEmpty() || meta[0].lineKind != LineKind::CommandRow) return;
+
+    clearIndicatorLine(IND_BASE_ADDR, 0);
+    QString lineText = getLineText(m_sci, 0);
+    ColumnSpan span = commandRowAddrSpan(lineText);
+    if (span.valid)
+        fillIndicatorCols(IND_BASE_ADDR, 0, span.start, span.end);
+}
+
+void RcxEditor::applyCommandRowPills() {
+    if (m_meta.isEmpty() || m_meta[0].lineKind != LineKind::CommandRow) return;
+
+    constexpr int line = 0;
+    QString t = getLineText(m_sci, line);
+
+    clearIndicatorLine(IND_CMD_PILL, line);
+
+    auto fillPadded = [&](ColumnSpan s) {
+        if (!s.valid) return;
+        int a = qMax(0, s.start - 1);
+        int b = qMin(t.size(), s.end + 1);
+        fillIndicatorCols(IND_CMD_PILL, line, a, b);
+    };
+
+    fillPadded(commandRowSrcSpan(t));
+    fillPadded(commandRowAddrSpan(t));
 }
 
 // ── Shared inline-edit shutdown ──
@@ -1563,6 +1589,8 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCURRENTPOS, savedPos);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETANCHOR, savedAnchor);
     m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, start, start + utf8.size());
+    applyBaseAddressColoring(m_meta);
+    applyCommandRowPills();
 }
 
 void RcxEditor::setEditorFont(const QString& fontName) {
