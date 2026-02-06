@@ -38,7 +38,9 @@ struct ComposeState {
     void emitLine(const QString& lineText, LineMeta lm) {
         if (currentLine > 0) text += '\n';
         // 3-char fold indicator column: " - " expanded, " + " collapsed, "   " other
-        if (lm.foldHead)
+        if (lm.lineKind == LineKind::CommandRow)
+            text += QStringLiteral(" * ");
+        else if (lm.foldHead)
             text += lm.foldCollapsed ? QStringLiteral(" + ") : QStringLiteral(" - ");
         else
             text += QStringLiteral("   ");
@@ -196,6 +198,10 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
     // Header line (skip for array element structs - condensed display)
     if (!isArrayChild) {
+        // Get per-scope widths for this header's parent scope
+        int typeW = state.effectiveTypeW(scopeId);
+        int nameW = state.effectiveNameW(scopeId);
+
         LineMeta lm;
         lm.nodeIdx    = nodeIdx;
         lm.nodeId     = node.id;
@@ -209,21 +215,20 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.markerMask = (1u << M_STRUCT_BG);
         lm.isRootHeader = (node.parentId == 0 && node.kind == NodeKind::Struct && !state.baseEmitted);
         if (lm.isRootHeader) state.baseEmitted = true;
+        lm.effectiveTypeW = typeW;
+        lm.effectiveNameW = nameW;
 
         QString headerText;
         if (node.kind == NodeKind::Array) {
-            // Array header with navigation: "uint32_t[16]  name  { <0/16>"
+            // Array header with navigation: "uint32_t[16]  name  {" (no brace when collapsed)
             lm.isArrayHeader = true;
             lm.elementKind   = node.elementKind;
             lm.arrayViewIdx  = node.viewIndex;
             lm.arrayCount    = node.arrayLen;
-            headerText = fmt::fmtArrayHeader(node, depth, node.viewIndex);
-        } else if (lm.isRootHeader) {
-            // Root structs show base address
-            headerText = fmt::fmtStructHeaderWithBase(node, depth, tree.baseAddress);
+            headerText = fmt::fmtArrayHeader(node, depth, node.viewIndex, node.collapsed, typeW, nameW);
         } else {
-            // Nested structs show normal header
-            headerText = fmt::fmtStructHeader(node, depth);
+            // All structs (root and nested) use the same header format
+            headerText = fmt::fmtStructHeader(node, depth, node.collapsed, typeW, nameW);
         }
         state.emitLine(headerText, lm);
     }
@@ -254,7 +259,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.depth     = depth;
         lm.lineKind   = LineKind::Footer;
         lm.nodeKind   = node.kind;
-        lm.offsetText = QStringLiteral("  ---");
+        lm.offsetText.clear();
         lm.foldLevel  = computeFoldLevel(depth, false);
         lm.markerMask = 0;
         int sz = tree.structSpan(node.id, &state.childMap);
@@ -341,27 +346,30 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
         state.absOffsets[i] = tree.computeOffset(i);
 
     // Compute effective type column width from longest type name
+    // Include struct/array headers which use "struct TypeName" or "type[count]" format
     int maxTypeLen = kMinTypeW;
     for (const Node& node : tree.nodes) {
         QString typeName;
         if (node.kind == NodeKind::Array) {
             // Array type: "int32_t[10]", "char[64]", etc.
             typeName = fmt::arrayTypeName(node.elementKind, node.arrayLen);
+        } else if (node.kind == NodeKind::Struct) {
+            // Struct type: "struct TypeName" or "struct"
+            typeName = fmt::structTypeName(node);
         } else {
             typeName = fmt::typeNameRaw(node.kind);
         }
-        maxTypeLen = qMax(maxTypeLen, typeName.size());
+        maxTypeLen = qMax(maxTypeLen, (int)typeName.size());
     }
     state.typeW = qBound(kMinTypeW, maxTypeLen, kMaxTypeW);
 
     // Compute effective name column width from longest name
+    // Include struct/array names - they now use columnar layout too
     int maxNameLen = kMinNameW;
     for (const Node& node : tree.nodes) {
         // Skip hex/padding (they show ASCII preview, not name column)
         if (isHexPreview(node.kind)) continue;
-        // Skip containers (struct/array headers have different layout)
-        if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) continue;
-        maxNameLen = qMax(maxNameLen, node.name.size());
+        maxNameLen = qMax(maxNameLen, (int)node.name.size());
     }
     state.nameW = qBound(kMinNameW, maxNameLen, kMaxNameW);
 
@@ -377,17 +385,19 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
         for (int childIdx : state.childMap.value(container.id)) {
             const Node& child = tree.nodes[childIdx];
 
-            // Skip containers - their headers don't use columnar layout
-            if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
-                continue;
+            // Type width - include struct/array headers too (they now use columnar layout)
+            QString childTypeName;
+            if (child.kind == NodeKind::Array)
+                childTypeName = fmt::arrayTypeName(child.elementKind, child.arrayLen);
+            else if (child.kind == NodeKind::Struct)
+                childTypeName = fmt::structTypeName(child);
+            else
+                childTypeName = fmt::typeNameRaw(child.kind);
+            scopeMaxType = qMax(scopeMaxType, (int)childTypeName.size());
 
-            // Type width
-            QString childTypeName = fmt::typeNameRaw(child.kind);
-            scopeMaxType = qMax(scopeMaxType, childTypeName.size());
-
-            // Name width (skip hex/padding)
+            // Name width (skip hex/padding, but include containers)
             if (!isHexPreview(child.kind)) {
-                scopeMaxName = qMax(scopeMaxName, child.name.size());
+                scopeMaxName = qMax(scopeMaxName, (int)child.name.size());
             }
         }
 
@@ -396,24 +406,46 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
     }
 
     // Compute scope widths for root level (parentId == 0)
+    // Include struct/array headers - they now use columnar layout too
     {
         int rootMaxType = kMinTypeW;
         int rootMaxName = kMinNameW;
         for (int childIdx : state.childMap.value(0)) {
             const Node& child = tree.nodes[childIdx];
 
-            // Skip containers - their headers don't use columnar layout
-            if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
-                continue;
+            // Type width - include struct/array headers
+            QString childTypeName;
+            if (child.kind == NodeKind::Array)
+                childTypeName = fmt::arrayTypeName(child.elementKind, child.arrayLen);
+            else if (child.kind == NodeKind::Struct)
+                childTypeName = fmt::structTypeName(child);
+            else
+                childTypeName = fmt::typeNameRaw(child.kind);
+            rootMaxType = qMax(rootMaxType, (int)childTypeName.size());
 
-            QString childTypeName = fmt::typeNameRaw(child.kind);
-            rootMaxType = qMax(rootMaxType, childTypeName.size());
+            // Name width (skip hex/padding, include containers)
             if (!isHexPreview(child.kind)) {
-                rootMaxName = qMax(rootMaxName, child.name.size());
+                rootMaxName = qMax(rootMaxName, (int)child.name.size());
             }
         }
         state.scopeTypeW[0] = qBound(kMinTypeW, rootMaxType, kMaxTypeW);
         state.scopeNameW[0] = qBound(kMinNameW, rootMaxName, kMaxNameW);
+    }
+
+    // Emit CommandRow as line 0 (synthetic UI line)
+    {
+        LineMeta lm;
+        lm.nodeIdx   = -1;
+        lm.nodeId    = kCommandRowId;
+        lm.depth     = 0;
+        lm.lineKind  = LineKind::CommandRow;
+        lm.foldLevel = SC_FOLDLEVELBASE;
+        lm.foldHead  = false;
+        lm.offsetText.clear();
+        lm.markerMask = 0;
+        lm.effectiveTypeW = state.typeW;
+        lm.effectiveNameW = state.nameW;
+        state.emitLine(QStringLiteral("SRC: File : 0x0"), lm);
     }
 
     QVector<int> roots = state.childMap.value(0);

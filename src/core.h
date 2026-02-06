@@ -243,6 +243,7 @@ struct Node {
     NodeKind elementKind = NodeKind::UInt8;  // Array: element type
     int      viewIndex  = 0;   // Array: current view offset (transient)
 
+    // Note: Returns 0 for Array-of-Struct/Array. Use tree.structSpan() for accurate size.
     int byteSize() const {
         switch (kind) {
         case NodeKind::UTF8:    return strLen;
@@ -388,7 +389,14 @@ struct NodeTree {
     }
 
     int structSpan(uint64_t structId,
-                   const QHash<uint64_t, QVector<int>>* childMap = nullptr) const {
+                   const QHash<uint64_t, QVector<int>>* childMap = nullptr,
+                   QSet<uint64_t>* visited = nullptr) const {
+        QSet<uint64_t> localVisited;
+        if (!visited) visited = &localVisited;
+
+        if (visited->contains(structId)) return 0;  // Cycle detected
+        visited->insert(structId);
+
         int idx = indexOfId(structId);
         if (idx < 0) return 0;
 
@@ -400,7 +408,7 @@ struct NodeTree {
         for (int ci : kids) {
             const Node& c = nodes[ci];
             int sz = (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
-                ? structSpan(c.id, childMap) : c.byteSize();
+                ? structSpan(c.id, childMap, visited) : c.byteSize();
             int end = c.offset + sz;
             if (end > maxEnd) maxEnd = end;
         }
@@ -440,8 +448,13 @@ struct NodeTree {
 // ── LineMeta ──
 
 enum class LineKind : uint8_t {
+    CommandRow,   // line 0 only, synthetic UI
     Header, Field, Continuation, Footer, ArrayElementSeparator
 };
+
+static constexpr uint64_t kCommandRowId   = UINT64_MAX;
+static constexpr int      kCommandRowLine = 0;
+static constexpr int      kFirstDataLine  = 1;
 
 struct LineMeta {
     int      nodeIdx        = -1;
@@ -465,6 +478,10 @@ struct LineMeta {
     int      effectiveTypeW = 14;  // Per-line type column width used for rendering
     int      effectiveNameW = 22;  // Per-line name column width used for rendering
 };
+
+inline bool isSyntheticLine(const LineMeta& lm) {
+    return lm.lineKind == LineKind::CommandRow;
+}
 
 // ── Layout Info ──
 
@@ -513,7 +530,7 @@ struct ColumnSpan {
     bool valid = false;
 };
 
-enum class EditTarget { Name, Type, Value, BaseAddress, ArrayIndex, ArrayCount };
+enum class EditTarget { Name, Type, Value, BaseAddress, Source, ArrayIndex, ArrayCount };
 
 // Column layout constants (shared with format.cpp span computation)
 inline constexpr int kFoldCol     = 3;   // 3-char fold indicator prefix per line
@@ -524,9 +541,9 @@ inline constexpr int kColComment  = 28;  // "// Enter=Save Esc=Cancel" fits
 inline constexpr int kColBaseAddr = 12;  // "0x" + up to 10 hex digits (40-bit address)
 inline constexpr int kSepWidth    = 1;
 inline constexpr int kMinTypeW    = 8;   // Minimum type column width (fits "uint64_t")
-inline constexpr int kMaxTypeW    = 14;  // Maximum type column width (fits "uint64_t[999]")
+inline constexpr int kMaxTypeW    = 128; // Maximum type column width
 inline constexpr int kMinNameW    = 8;   // Minimum name column width (matches ASCII preview)
-inline constexpr int kMaxNameW    = 22;  // Maximum name column width (= kColName)
+inline constexpr int kMaxNameW    = 128; // Maximum name column width
 
 inline ColumnSpan typeSpanFor(const LineMeta& lm, int typeW = kColType) {
     if (lm.lineKind != LineKind::Field || lm.isContinuation) return {};
@@ -592,31 +609,29 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW =
     return {start, lineLength, start < lineLength};
 }
 
-// Base address span (only valid for root struct headers)
-// Line format: " - struct Name { // base: 0x00400000"
-inline ColumnSpan baseAddressSpanFor(const LineMeta& lm, const QString& lineText) {
-    if (lm.lineKind != LineKind::Header || !lm.isRootHeader) return {};
-    // Find "// base: " after the opening brace
-    int baseIdx = lineText.indexOf(QStringLiteral("// base: "));
-    if (baseIdx < 0) return {};
-    int startPos = baseIdx + 9;  // after "// base: "
-    // Value goes to end of line
-    int endPos = lineText.size();
-    while (endPos > startPos && lineText[endPos-1].isSpace())
-        endPos--;
-    if (endPos <= startPos) return {};
-    return {startPos, endPos, true};
+// ── CommandRow spans ──
+// Line format: " * SRC: File : 0x140000000  path > here"
+
+inline ColumnSpan commandRowSrcSpan(const QString& lineText) {
+    int idx = lineText.indexOf(QStringLiteral(" : "));
+    if (idx < 0) return {};
+    // Skip past "SRC: " label to expose just the source name
+    int srcTag = lineText.indexOf(QStringLiteral("SRC: "));
+    int start = (srcTag >= 0 && srcTag < idx) ? srcTag + 5 : 0;
+    while (start < idx && !lineText[start].isLetterOrNumber()) start++;
+    if (start >= idx) return {};
+    return {start, idx, true};
 }
 
-// Full "// base: 0x..." span for coloring (includes "// base: " prefix)
-inline ColumnSpan baseAddressFullSpanFor(const LineMeta& lm, const QString& lineText) {
-    if (lm.lineKind != LineKind::Header || !lm.isRootHeader) return {};
-    int baseIdx = lineText.indexOf(QStringLiteral("// base: "));
-    if (baseIdx < 0) return {};
-    int endPos = lineText.size();
-    while (endPos > baseIdx && lineText[endPos-1].isSpace())
-        endPos--;
-    return {baseIdx, endPos, true};
+inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
+    int idx = lineText.indexOf(QStringLiteral(" : "));
+    if (idx < 0) return {};
+    int start = idx + 3;  // after " : "
+    int end = lineText.indexOf(QStringLiteral("  "), start);  // next double-space
+    if (end < 0) end = lineText.size();
+    while (end > start && lineText[end-1].isSpace()) end--;
+    if (end <= start) return {};
+    return {start, end, true};
 }
 
 // ── Array navigation spans ──
@@ -683,11 +698,11 @@ namespace fmt {
     QString fmtNodeLine(const Node& node, const Provider& prov,
                         uint64_t addr, int depth, int subLine = 0,
                         const QString& comment = {}, int colType = kColType, int colName = kColName);
-    QString fmtOffsetMargin(int64_t relativeOffset, bool isContinuation);
-    QString fmtStructHeader(const Node& node, int depth);
-    QString fmtStructHeaderWithBase(const Node& node, int depth, uint64_t baseAddress);
+    QString fmtOffsetMargin(uint64_t absoluteOffset, bool isContinuation);
+    QString fmtStructHeader(const Node& node, int depth, bool collapsed, int colType = kColType, int colName = kColName);
     QString fmtStructFooter(const Node& node, int depth, int totalSize = -1);
-    QString fmtArrayHeader(const Node& node, int depth, int viewIdx);
+    QString fmtArrayHeader(const Node& node, int depth, int viewIdx, bool collapsed, int colType = kColType, int colName = kColName);
+    QString structTypeName(const Node& node);  // Full type string for struct headers
     QString arrayTypeName(NodeKind elemKind, int count);
     QString validateBaseAddress(const QString& text);
     QString indent(int depth);

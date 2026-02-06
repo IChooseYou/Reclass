@@ -77,7 +77,9 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
 
     connect(m_sci, &QsciScintilla::userListActivated,
             this, [this](int id, const QString& text) {
-        if (id == 1 && m_editState.active && m_editState.target == EditTarget::Type) {
+        if (!m_editState.active) return;
+        if ((id == 1 && m_editState.target == EditTarget::Type) ||
+            (id == 2 && m_editState.target == EditTarget::Source)) {
             auto info = endInlineEdit();
             emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text);
         }
@@ -88,6 +90,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
 
     connect(m_sci, &QsciScintilla::textChanged, this, [this]() {
         if (!m_editState.active) return;
+        if (m_updatingComment) return;  // Skip queuing during comment update
         if (m_editState.target == EditTarget::Value)
             QTimer::singleShot(0, this, &RcxEditor::validateEditLive);
         if (m_editState.target == EditTarget::Type)
@@ -147,6 +150,7 @@ void RcxEditor::setupScintilla() {
                          IND_HOVER_SPAN, 17 /*INDIC_TEXTFORE*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HOVER_SPAN, QColor("#3d9c8a"));
+
 }
 
 void RcxEditor::setupLexer() {
@@ -188,7 +192,7 @@ void RcxEditor::setupMargins() {
 
     // Margin 0: Offset text
     m_sci->setMarginType(0, QsciScintilla::TextMarginRightJustified);
-    m_sci->setMarginWidth(0, "  +0x00000000  ");
+    m_sci->setMarginWidth(0, "  0x00000000  ");
     m_sci->setMarginsBackgroundColor(kBgMargin);
     m_sci->setMarginsForegroundColor(kFgMarginDim);
     m_sci->setMarginSensitivity(0, true);
@@ -307,6 +311,7 @@ void RcxEditor::applyMarginText(const QVector<LineMeta>& meta) {
     m_sci->clearMarginText(-1);
 
     for (int i = 0; i < meta.size(); i++) {
+        if (isSyntheticLine(meta[i])) continue;
         const auto& lm = meta[i];
         if (lm.offsetText.isEmpty()) continue;
 
@@ -324,6 +329,7 @@ void RcxEditor::applyMarkers(const QVector<LineMeta>& meta) {
         m_sci->markerDeleteAll(m);
     }
     for (int i = 0; i < meta.size(); i++) {
+        if (isSyntheticLine(meta[i])) continue;
         uint32_t mask = meta[i].markerMask;
         for (int m = M_CONT; m <= M_STRUCT_BG; m++) {
             if (mask & (1u << m)) {
@@ -391,6 +397,7 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (unsigned long)0, docLen);
 
     for (int i = 0; i < m_meta.size(); i++) {
+        if (isSyntheticLine(m_meta[i])) continue;
         uint64_t nodeId = m_meta[i].nodeId;
         bool isFooter = (m_meta[i].lineKind == LineKind::Footer);
 
@@ -511,16 +518,16 @@ static QString getLineText(QsciScintilla* sci, int line) {
 
 void RcxEditor::applyBaseAddressColoring(const QVector<LineMeta>& meta) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_BASE_ADDR);
-    for (int i = 0; i < meta.size(); i++) {
-        const LineMeta& lm = meta[i];
-        if (!lm.isRootHeader) continue;
-        QString lineText = getLineText(m_sci, i);
-        ColumnSpan span = baseAddressFullSpanFor(lm, lineText);
-        if (!span.valid) continue;
-        long posA = posFromCol(m_sci, i, span.start);
-        long posB = posFromCol(m_sci, i, span.end);
-        if (posB > posA)
-            m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, posA, posB - posA);
+    // Color the ADDR span on CommandRow (line 0)
+    if (!meta.isEmpty() && meta[0].lineKind == LineKind::CommandRow) {
+        QString lineText = getLineText(m_sci, 0);
+        ColumnSpan span = commandRowAddrSpan(lineText);
+        if (span.valid) {
+            long posA = posFromCol(m_sci, 0, span.start);
+            long posB = posFromCol(m_sci, 0, span.end);
+            if (posB > posA)
+                m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, posA, posB - posA);
+        }
     }
 }
 
@@ -553,55 +560,63 @@ RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
 
 // ── Span helpers ──
 
-// Name span for struct/array headers
-// Format: "struct TYPENAME NAME {" or "struct NAME {" or "type[N] NAME {"
-// Returns span of the last word before " {"
+// Name span for struct/array headers - uses column-based positioning
+// Format: [fold][indent][type col][sep][name col][sep][suffix]
 static ColumnSpan headerNameSpan(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header) return {};
-    int bracePos = lineText.lastIndexOf(QStringLiteral(" {"));
-    if (bracePos <= 0) return {};
 
-    // Find the last space before " {" - the name starts after that
-    int nameStart = lineText.lastIndexOf(' ', bracePos - 1);
-    if (nameStart < 0) return {};
-    nameStart++;  // Move past the space
+    int ind = kFoldCol + lm.depth * 3;
+    int typeW = lm.effectiveTypeW;
+    int nameW = lm.effectiveNameW;
+    int nameStart = ind + typeW + kSepWidth;
+    int nameEnd = nameStart + nameW;
+
+    // Clamp to line length
+    if (nameStart >= lineText.size()) return {};
+    if (nameEnd > lineText.size()) nameEnd = lineText.size();
 
     // Don't allow editing array element names like "[0]", "[1]", etc.
-    QString name = lineText.mid(nameStart, bracePos - nameStart);
+    QString name = lineText.mid(nameStart, nameEnd - nameStart).trimmed();
     if (name.startsWith('[') && name.endsWith(']'))
         return {};
 
-    return {nameStart, bracePos, true};
+    return {nameStart, nameEnd, true};
 }
 
 // Type name span for struct headers (not arrays)
-// Format: "struct TYPENAME NAME {" - returns span of TYPENAME
+// Format: "struct TYPENAME NAME {" or collapsed variants
 // For "struct NAME {" (no typename), returns invalid span
 static ColumnSpan headerTypeNameSpan(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header) return {};
     if (lm.isArrayHeader) return {};  // Arrays use arrayHeaderTypeSpan instead
 
-    int bracePos = lineText.lastIndexOf(QStringLiteral(" {"));
-    if (bracePos <= 0) return {};
     int ind = kFoldCol + lm.depth * 3;
+    int typeW = lm.effectiveTypeW;
+    int typeEnd = ind + typeW;
+
+    // Clamp to actual line content
+    if (typeEnd > lineText.size()) typeEnd = lineText.size();
+
+    // Extract the type column text and check if it has a typename
+    // Format: "struct" or "struct TYPENAME"
+    QString typeCol = lineText.mid(ind, typeEnd - ind).trimmed();
 
     // Find first space (after "struct")
-    int firstSpace = lineText.indexOf(' ', ind);
-    if (firstSpace <= ind || firstSpace >= bracePos) return {};
+    int firstSpace = typeCol.indexOf(' ');
+    if (firstSpace < 0) return {};  // Just "struct", no typename
 
-    // Find second space (after typename, before name)
-    int secondSpace = lineText.indexOf(' ', firstSpace + 1);
-    if (secondSpace <= firstSpace || secondSpace >= bracePos) return {};  // No typename
+    // If there's content after "struct ", that's the typename
+    QString typename_ = typeCol.mid(firstSpace + 1).trimmed();
+    if (typename_.isEmpty()) return {};
 
-    // Find third space (after name) - if exists, we have typename
-    int thirdSpace = lineText.indexOf(' ', secondSpace + 1);
-    if (thirdSpace < 0 || thirdSpace > bracePos) {
-        // Only two words: "struct NAME {" - no typename to edit
-        return {};
-    }
+    // Return span of the typename within the type column
+    int typenameStart = ind + firstSpace + 1;
+    // Find where the typename actually ends (skip padding)
+    int typenameEnd = typenameStart;
+    while (typenameEnd < typeEnd && lineText[typenameEnd] != ' ')
+        typenameEnd++;
 
-    // Three+ words: "struct TYPENAME NAME {" - return typename span
-    return {firstSpace + 1, secondSpace, true};
+    return {typenameStart, typenameEnd, true};
 }
 
 // Type span for array headers: "int32_t[10]" in "int32_t[10] positions {"
@@ -656,7 +671,21 @@ RcxEditor::NormalizedSpan RcxEditor::normalizeSpan(
 bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
                                 NormalizedSpan& out, QString* lineTextOut) const {
     const LineMeta* lm = metaForLine(line);
-    if (!lm || lm->nodeIdx < 0) return false;
+    if (!lm) return false;
+
+    // CommandRow: BaseAddress (ADDR) and Source (SRC) editing
+    if (lm->lineKind == LineKind::CommandRow) {
+        if (t != EditTarget::BaseAddress && t != EditTarget::Source) return false;
+        QString lineText = getLineText(m_sci, line);
+        ColumnSpan s = (t == EditTarget::Source)
+            ? commandRowSrcSpan(lineText)
+            : commandRowAddrSpan(lineText);
+        out = normalizeSpan(s, lineText, t, /*skipPrefixes=*/(t == EditTarget::BaseAddress));
+        if (lineTextOut) *lineTextOut = lineText;
+        return out.valid;
+    }
+
+    if (lm->nodeIdx < 0) return false;
 
     QString lineText = getLineText(m_sci, line);
     int textLen = lineText.size();
@@ -670,7 +699,7 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     case EditTarget::Type:        s = typeSpan(*lm, typeW); break;
     case EditTarget::Name:        s = nameSpan(*lm, typeW, nameW); break;
     case EditTarget::Value:       s = valueSpan(*lm, textLen, typeW, nameW); break;
-    case EditTarget::BaseAddress: s = baseAddressSpanFor(*lm, lineText); break;
+    case EditTarget::BaseAddress: break;  // No longer on header lines
     case EditTarget::ArrayIndex:
     case EditTarget::ArrayCount:
         break;  // Array navigation removed
@@ -741,21 +770,28 @@ static bool hitTestTarget(QsciScintilla* sci,
 
     const LineMeta& lm = meta[line];
 
-    // Array element separators are not interactive
     if (lm.lineKind == LineKind::ArrayElementSeparator) return false;
-
-    // Use per-line effective widths from LineMeta
-    int typeW = lm.effectiveTypeW;
-    int nameW = lm.effectiveNameW;
 
     auto inSpan = [&](const ColumnSpan& s) {
         return s.valid && col >= s.start && col < s.end;
     };
 
+    // CommandRow: SRC and ADDR fields are interactive
+    if (lm.lineKind == LineKind::CommandRow) {
+        ColumnSpan ss = commandRowSrcSpan(lineText);
+        if (inSpan(ss)) { outTarget = EditTarget::Source; outLine = line; return true; }
+        ColumnSpan as = commandRowAddrSpan(lineText);
+        if (inSpan(as)) { outTarget = EditTarget::BaseAddress; outLine = line; return true; }
+        return false;
+    }
+
+    // Use per-line effective widths from LineMeta
+    int typeW = lm.effectiveTypeW;
+    int nameW = lm.effectiveNameW;
+
     ColumnSpan ts = RcxEditor::typeSpan(lm, typeW);
     ColumnSpan ns = RcxEditor::nameSpan(lm, typeW, nameW);
     ColumnSpan vs = RcxEditor::valueSpan(lm, textLen, typeW, nameW);
-    ColumnSpan bs = baseAddressSpanFor(lm, lineText);  // Base address for root headers
 
     // Fallback spans for header lines
     if (!ts.valid) {
@@ -766,8 +802,7 @@ static bool hitTestTarget(QsciScintilla* sci,
     if (!ns.valid)
         ns = headerNameSpan(lm, lineText);
 
-    if (inSpan(bs))      outTarget = EditTarget::BaseAddress;
-    else if (inSpan(ts)) outTarget = EditTarget::Type;
+    if (inSpan(ts))      outTarget = EditTarget::Type;
     else if (inSpan(ns)) outTarget = EditTarget::Name;
     else if (inSpan(vs)) outTarget = EditTarget::Value;
     else return false;
@@ -807,7 +842,8 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 case EditTarget::Type:        raw = typeSpan(*lm, typeW); break;
                 case EditTarget::Name:        raw = nameSpan(*lm, typeW, nameW); break;
                 case EditTarget::Value:       raw = valueSpan(*lm, lineText.size(), typeW, nameW); break;
-                case EditTarget::BaseAddress: raw = baseAddressSpanFor(*lm, lineText); break;
+                case EditTarget::BaseAddress: raw = commandRowAddrSpan(lineText); break;
+                case EditTarget::Source:      raw = commandRowSrcSpan(lineText); break;
                 case EditTarget::ArrayIndex:  raw = arrayIndexSpanFor(*lm, lineText); break;
                 case EditTarget::ArrayCount:  raw = arrayCountSpanFor(*lm, lineText); break;
                 }
@@ -844,6 +880,13 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             if (h.inFoldCol) {
                 emit marginClicked(0, h.line, me->modifiers());
                 return true;
+            }
+            // CommandRow: try ADDR edit or consume
+            if (h.nodeId == kCommandRowId) {
+                int tLine; EditTarget t;
+                if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t))
+                    beginInlineEdit(t, tLine);
+                return true;  // consume all CommandRow clicks
             }
             if (h.nodeId != 0) {
                 bool alreadySelected = m_currentSelIds.contains(h.nodeId);
@@ -1024,8 +1067,12 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
     case Qt::Key_PageUp:
     case Qt::Key_PageDown:
         return true;  // block line navigation
-    case Qt::Key_Delete:
-        return true;  // block to prevent eating trailing content
+    case Qt::Key_Delete: {
+        int line, col;
+        m_sci->getCursorPosition(&line, &col);
+        if (col >= editEndCol()) return true;  // block at end
+        return false;  // allow delete within span
+    }
     case Qt::Key_Left:
     case Qt::Key_Backspace: {
         int line, col;
@@ -1067,7 +1114,11 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
     int col;
     m_sci->getCursorPosition(&line, &col);
     auto* lm = metaForLine(line);
-    if (!lm || lm->nodeIdx < 0) return false;
+    if (!lm) return false;
+    // Allow nodeIdx=-1 only for CommandRow BaseAddress/Source editing
+    if (lm->nodeIdx < 0 && !(lm->lineKind == LineKind::CommandRow &&
+        (target == EditTarget::BaseAddress || target == EditTarget::Source)))
+        return false;
 
     QString lineText;
     NormalizedSpan norm;
@@ -1134,6 +1185,8 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
 
     if (target == EditTarget::Type)
         QTimer::singleShot(0, this, &RcxEditor::showTypeAutocomplete);
+    if (target == EditTarget::Source)
+        QTimer::singleShot(0, this, &RcxEditor::showSourcePicker);
 
     return true;
 }
@@ -1147,9 +1200,8 @@ int RcxEditor::editEndCol() const {
 void RcxEditor::clampEditSelection() {
     if (!m_editState.active) return;
 
-    static bool s_clamping = false;
-    if (s_clamping) return;
-    s_clamping = true;
+    if (m_clampingSelection) return;
+    m_clampingSelection = true;
 
     int selStartLine, selStartCol, selEndLine, selEndCol;
     m_sci->getSelection(&selStartLine, &selStartCol, &selEndLine, &selEndCol);
@@ -1159,7 +1211,7 @@ void RcxEditor::clampEditSelection() {
 
     // Don't fight cursor positioning - only clamp actual selections
     if (isCursor) {
-        s_clamping = false;
+        m_clampingSelection = false;
         return;
     }
 
@@ -1170,7 +1222,7 @@ void RcxEditor::clampEditSelection() {
     if (selStartLine != m_editState.line || selEndLine != m_editState.line) {
         m_sci->setSelection(m_editState.line, m_editState.spanStart,
                            m_editState.line, editEnd);
-        s_clamping = false;
+        m_clampingSelection = false;
         return;
     }
 
@@ -1182,7 +1234,7 @@ void RcxEditor::clampEditSelection() {
     if (clamped)
         m_sci->setSelection(selStartLine, selStartCol, selEndLine, selEndCol);
 
-    s_clamping = false;
+    m_clampingSelection = false;
 }
 
 // ── Commit inline edit ──
@@ -1254,6 +1306,13 @@ void RcxEditor::showTypeListFiltered(const QString& filter) {
     // Arrow cursor for popup is handled by applyHoverCursor() via isListActive()
 }
 
+void RcxEditor::showSourcePicker() {
+    m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, m_editState.posStart);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSETSEPARATOR, (long)' ');
+    m_sci->SendScintilla(QsciScintillaBase::SCI_USERLISTSHOW,
+                         (uintptr_t)2, "File Process");
+}
+
 void RcxEditor::updateTypeListFilter() {
     if (!m_editState.active || m_editState.target != EditTarget::Type)
         return;
@@ -1279,9 +1338,19 @@ void RcxEditor::updateTypeListFilter() {
 // ── Editable-field text-color indicator ──
 
 void RcxEditor::paintEditableSpans(int line) {
+    const LineMeta* lm = metaForLine(line);
+    if (!lm) return;
+    // CommandRow: paint Source and BaseAddress spans
+    if (isSyntheticLine(*lm)) {
+        NormalizedSpan norm;
+        if (resolvedSpanFor(line, EditTarget::Source, norm))
+            fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
+        if (resolvedSpanFor(line, EditTarget::BaseAddress, norm))
+            fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
+        return;
+    }
     NormalizedSpan norm;
-    for (EditTarget t : {EditTarget::Type, EditTarget::Name, EditTarget::Value,
-                         EditTarget::BaseAddress}) {
+    for (EditTarget t : {EditTarget::Type, EditTarget::Name, EditTarget::Value}) {
         if (resolvedSpanFor(line, t, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
     }
@@ -1403,9 +1472,8 @@ void RcxEditor::setEditComment(const QString& comment) {
     if (m_editState.commentCol < 0) return;
 
     // Prevent re-entrancy from textChanged signal
-    static bool s_updating = false;
-    if (s_updating) return;
-    s_updating = true;
+    if (m_updatingComment) return;
+    m_updatingComment = true;
 
     QString lineText = getLineText(m_sci, m_editState.line);
 
@@ -1414,7 +1482,7 @@ void RcxEditor::setEditComment(const QString& comment) {
     int startCol = valueEnd + 2;  // 2 spaces after value
     int endCol = lineText.size();
     int availWidth = endCol - startCol;
-    if (availWidth <= 0) { s_updating = false; return; }
+    if (availWidth <= 0) { m_updatingComment = false; return; }
 
     // Format as "//<comment>" (no space after //)
     QString formatted = QStringLiteral("//") + comment;
@@ -1434,7 +1502,7 @@ void RcxEditor::setEditComment(const QString& comment) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_BASE_ADDR);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, posA, posB - posA);
 
-    s_updating = false;
+    m_updatingComment = false;
 }
 
 void RcxEditor::validateEditLive() {
@@ -1443,7 +1511,9 @@ void RcxEditor::validateEditLive() {
     int editedLen = m_editState.original.size() + delta;
     QString text = (editedLen > 0)
         ? lineText.mid(m_editState.spanStart, editedLen).trimmed() : QString();
-    QString errorMsg = fmt::validateValue(m_editState.editKind, text);
+    QString errorMsg = (m_editState.target == EditTarget::BaseAddress)
+        ? fmt::validateBaseAddress(text)
+        : fmt::validateValue(m_editState.editKind, text);
 
     const LineMeta* lm = metaForLine(m_editState.line);
     const bool isSelected = lm && m_currentSelIds.contains(lm->nodeId);
@@ -1464,6 +1534,35 @@ void RcxEditor::validateEditLive() {
         m_sci->markerAdd(m_editState.line, M_ERR);
         if (stateChanged) setEditComment("! " + errorMsg);
     }
+}
+
+void RcxEditor::setCommandRowText(const QString& line) {
+    if (m_sci->lines() <= 0) return;
+    QString s = line;
+    s.replace('\n', ' ');
+    s.replace('\r', ' ');
+
+    bool wasReadOnly = m_sci->isReadOnly();
+    bool wasModified = m_sci->SendScintilla(QsciScintillaBase::SCI_GETMODIFY);
+    long savedPos    = m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS);
+    long savedAnchor = m_sci->SendScintilla(QsciScintillaBase::SCI_GETANCHOR);
+
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, 0);
+    m_sci->setReadOnly(false);
+
+    long start = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, 0);
+    long end   = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION, 0);
+    QByteArray utf8 = s.toUtf8();
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, start);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, end);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET, (uintptr_t)utf8.size(), utf8.constData());
+
+    if (wasReadOnly) m_sci->setReadOnly(true);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, 1);
+    if (!wasModified) m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETCURRENTPOS, savedPos);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETANCHOR, savedAnchor);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, start, start + utf8.size());
 }
 
 void RcxEditor::setEditorFont(const QString& fontName) {

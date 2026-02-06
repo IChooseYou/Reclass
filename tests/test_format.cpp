@@ -39,8 +39,8 @@ private slots:
     }
 
     void testFmtOffsetMargin_primary() {
-        QCOMPARE(fmt::fmtOffsetMargin(0x10, false), QString("+0x10"));
-        QCOMPARE(fmt::fmtOffsetMargin(0, false),    QString("+0x0"));
+        QCOMPARE(fmt::fmtOffsetMargin(0x10, false), QString("0x10"));
+        QCOMPARE(fmt::fmtOffsetMargin(0, false),    QString("0x0"));
     }
 
     void testFmtOffsetMargin_continuation() {
@@ -51,10 +51,17 @@ private slots:
         Node n;
         n.kind = NodeKind::Struct;
         n.name = "Test";
-        QString s = fmt::fmtStructHeader(n, 0);
+        // Expanded header should contain opening brace
+        QString s = fmt::fmtStructHeader(n, 0, /*collapsed=*/false);
         QVERIFY(s.contains("struct"));
         QVERIFY(s.contains("Test"));
         QVERIFY(s.contains("{"));
+
+        // Collapsed header should not contain opening brace
+        QString collapsed = fmt::fmtStructHeader(n, 0, /*collapsed=*/true);
+        QVERIFY(collapsed.contains("struct"));
+        QVERIFY(collapsed.contains("Test"));
+        QVERIFY(!collapsed.contains("{"));
     }
 
     void testFmtStructFooter() {

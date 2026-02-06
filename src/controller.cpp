@@ -2,6 +2,7 @@
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -9,11 +10,35 @@
 #include <QInputDialog>
 #include <QClipboard>
 #include <QApplication>
+#include <QFileDialog>
 
 namespace rcx {
 
 // Footer selection ID: set high bit to distinguish footer-only selections from node selections
 static constexpr uint64_t kFooterIdBit = 0x8000000000000000ULL;
+
+static QString elide(QString s, int max) {
+    if (max <= 0) return {};
+    if (s.size() <= max) return s;
+    if (max == 1) return QStringLiteral("\u2026");
+    return s.left(max - 1) + QChar(0x2026);
+}
+
+static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
+    QStringList parts;
+    QSet<uint64_t> seen;
+    uint64_t cur = nodeId;
+    while (cur != 0 && !seen.contains(cur)) {
+        seen.insert(cur);
+        int idx = t.indexOfId(cur);
+        if (idx < 0) break;
+        const auto& n = t.nodes[idx];
+        parts << (n.name.isEmpty() ? QStringLiteral("<unnamed>") : n.name);
+        cur = n.parentId;
+    }
+    std::reverse(parts.begin(), parts.end());
+    return parts.join(QStringLiteral(" > "));
+}
 
 // ── RcxDocument ──
 
@@ -62,6 +87,7 @@ void RcxDocument::loadData(const QString& binaryPath) {
         return;
     undoStack.clear();
     provider = std::make_unique<FileProvider>(file.readAll());
+    dataPath = binaryPath;
     tree.baseAddress = 0;
     emit documentChanged();
 }
@@ -102,6 +128,7 @@ RcxEditor* RcxController::addSplitEditor(QSplitter* splitter) {
     if (!m_lastResult.text.isEmpty()) {
         editor->applyDocument(m_lastResult);
     }
+    updateCommandRow();
     return editor;
 }
 
@@ -127,7 +154,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // Inline editing signals
     connect(editor, &RcxEditor::inlineEditCommitted,
             this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text) {
-        if (nodeIdx < 0) { refresh(); return; }
+        // CommandRow BaseAddress/Source edit has nodeIdx=-1
+        if (nodeIdx < 0 && target != EditTarget::BaseAddress && target != EditTarget::Source) { refresh(); return; }
         switch (target) {
         case EditTarget::Name: {
             if (text.isEmpty()) break;
@@ -224,6 +252,15 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             break;
         }
+        case EditTarget::Source: {
+            if (text == QStringLiteral("File")) {
+                auto* w = qobject_cast<QWidget*>(parent());
+                QString path = QFileDialog::getOpenFileName(w, "Load Binary Data", {}, "All Files (*)");
+                if (!path.isEmpty()) m_doc->loadData(path);
+            }
+            // "Process" is a placeholder — no action yet
+            break;
+        }
         case EditTarget::ArrayIndex:
         case EditTarget::ArrayCount:
             // Array navigation removed - these cases are unreachable
@@ -242,8 +279,9 @@ void RcxController::refresh() {
     // Prune stale selections (nodes removed by undo/redo/delete)
     QSet<uint64_t> valid;
     for (uint64_t id : m_selIds) {
-        if (m_doc->tree.indexOfId(id) >= 0)
-            valid.insert(id);
+        uint64_t nodeId = id & ~kFooterIdBit;  // Strip footer bit for lookup
+        if (m_doc->tree.indexOfId(nodeId) >= 0)
+            valid.insert(id);  // Keep original ID (with footer bit if present)
     }
     m_selIds = valid;
 
@@ -253,6 +291,7 @@ void RcxController::refresh() {
         editor->restoreViewState(vs);
     }
     applySelectionOverlays();
+    updateCommandRow();
 }
 
 void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
@@ -445,7 +484,8 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             tree.baseAddress = isUndo ? c.oldBase : c.newBase;
         } else if constexpr (std::is_same_v<T, cmd::WriteBytes>) {
             const QByteArray& bytes = isUndo ? c.oldBytes : c.newBytes;
-            m_doc->provider->writeBytes(c.addr, bytes);
+            if (!m_doc->provider->writeBytes(c.addr, bytes))
+                qWarning() << "WriteBytes failed at address" << Qt::hex << c.addr;
         } else if constexpr (std::is_same_v<T, cmd::ChangeArrayMeta>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0) {
@@ -732,6 +772,7 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     }
 
     applySelectionOverlays();
+    updateCommandRow();
 
     if (m_selIds.size() == 1) {
         uint64_t sid = *m_selIds.begin();
@@ -745,11 +786,38 @@ void RcxController::clearSelection() {
     m_selIds.clear();
     m_anchorLine = -1;
     applySelectionOverlays();
+    updateCommandRow();
 }
 
 void RcxController::applySelectionOverlays() {
     for (auto* editor : m_editors)
         editor->applySelectionOverlay(m_selIds);
+}
+
+void RcxController::updateCommandRow() {
+    QString src;
+    if (!m_doc->filePath.isEmpty())
+        src = QFileInfo(m_doc->filePath).fileName();
+    else
+        src = QStringLiteral("File");
+    if (!m_doc->dataPath.isEmpty())
+        src += QStringLiteral(" @ ") + QFileInfo(m_doc->dataPath).fileName();
+
+    QString addr = QStringLiteral("0x") +
+        QString::number(m_doc->tree.baseAddress, 16).toUpper();
+    QString path;
+    if (m_selIds.size() == 1) {
+        uint64_t sid = *m_selIds.begin();
+        int idx = m_doc->tree.indexOfId(sid & ~kFooterIdBit);
+        if (idx >= 0)
+            path = crumbFor(m_doc->tree, m_doc->tree.nodes[idx].id);
+    }
+
+    QString row = QStringLiteral(" * SRC: %1 : %2  %3")
+        .arg(elide(src, 40), elide(addr, 24), elide(path, 120));
+
+    for (auto* ed : m_editors)
+        ed->setCommandRowText(row);
 }
 
 void RcxController::handleMarginClick(RcxEditor* editor, int margin,

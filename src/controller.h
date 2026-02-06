@@ -23,6 +23,7 @@ public:
     std::unique_ptr<Provider>  provider;
     QUndoStack                 undoStack;
     QString                    filePath;
+    QString                    dataPath;
     bool                       modified = false;
 
     ComposeResult compose() const;
@@ -95,6 +96,7 @@ private:
 
     void connectEditor(RcxEditor* editor);
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
+    void updateCommandRow();
 };
 
 } // namespace rcx

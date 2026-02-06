@@ -37,6 +37,7 @@ public:
     void cancelInlineEdit();
 
     void applySelectionOverlay(const QSet<uint64_t>& selIds);
+    void setCommandRowText(const QString& line);
     void setEditorFont(const QString& fontName);
     static void setGlobalFontName(const QString& fontName);
 
@@ -98,6 +99,10 @@ private:
     };
     InlineEditState m_editState;
 
+    // ── Reentrancy guards ──
+    bool m_clampingSelection = false;
+    bool m_updatingComment = false;
+
     void setupScintilla();
     void setupLexer();
     void setupMargins();
@@ -116,6 +121,7 @@ private:
     bool handleNormalKey(QKeyEvent* ke);
     bool handleEditKey(QKeyEvent* ke);
     void showTypeAutocomplete();
+    void showSourcePicker();
     void showTypeListFiltered(const QString& filter);
     void updateTypeListFilter();
     void paintEditableSpans(int line);

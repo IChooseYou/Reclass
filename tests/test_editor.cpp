@@ -25,43 +25,89 @@ static FileProvider makeTestProvider() {
     return FileProvider(data);
 }
 
-// Build a tree covering 0x6000 bytes with Hex64 fields
+// Build a PE-like test tree with IMAGE_FILE_HEADER fields
 static NodeTree makeTestTree() {
     NodeTree tree;
-    tree.baseAddress = 0;
+    tree.baseAddress = 0x140000000;
 
+    // Root struct: IMAGE_FILE_HEADER
     Node root;
     root.kind = NodeKind::Struct;
-    root.name = "TestStruct";
+    root.structTypeName = "IMAGE_FILE_HEADER";
+    root.name = "FileHeader";
     root.parentId = 0;
     root.offset = 0;
     int ri = tree.addNode(root);
     uint64_t rootId = tree.nodes[ri].id;
 
-    // First two fields for existing tests
-    Node f1;
-    f1.kind = NodeKind::UInt16;
-    f1.name = "field_u16";
-    f1.parentId = rootId;
-    f1.offset = 0;
-    tree.addNode(f1);
+    int offset = 0;
 
-    Node f2;
-    f2.kind = NodeKind::Hex64;
-    f2.name = "field_hex";
-    f2.parentId = rootId;
-    f2.offset = 8;
-    tree.addNode(f2);
+    // IMAGE_FILE_HEADER fields (matches Windows PE format)
+    Node machine;
+    machine.kind = NodeKind::UInt16;
+    machine.name = "Machine";
+    machine.parentId = rootId;
+    machine.offset = offset;
+    tree.addNode(machine);
+    offset += 2;
 
-    // Fill remaining 0x6000 bytes with Hex64 fields (8 bytes each)
-    // Start at offset 16 (0x10), go to 0x6000
-    for (int off = 0x10; off < 0x6000; off += 8) {
-        Node f;
-        f.kind = NodeKind::Hex64;
-        f.name = QString("data_%1").arg(off, 4, 16, QChar('0'));
-        f.parentId = rootId;
-        f.offset = off;
-        tree.addNode(f);
+    Node numSections;
+    numSections.kind = NodeKind::UInt16;
+    numSections.name = "NumberOfSections";
+    numSections.parentId = rootId;
+    numSections.offset = offset;
+    tree.addNode(numSections);
+    offset += 2;
+
+    Node timestamp;
+    timestamp.kind = NodeKind::Hex32;
+    timestamp.name = "TimeDateStamp";
+    timestamp.parentId = rootId;
+    timestamp.offset = offset;
+    tree.addNode(timestamp);
+    offset += 4;
+
+    Node ptrSymbols;
+    ptrSymbols.kind = NodeKind::Hex32;
+    ptrSymbols.name = "PointerToSymbolTable";
+    ptrSymbols.parentId = rootId;
+    ptrSymbols.offset = offset;
+    tree.addNode(ptrSymbols);
+    offset += 4;
+
+    Node numSymbols;
+    numSymbols.kind = NodeKind::UInt32;
+    numSymbols.name = "NumberOfSymbols";
+    numSymbols.parentId = rootId;
+    numSymbols.offset = offset;
+    tree.addNode(numSymbols);
+    offset += 4;
+
+    Node optHeaderSize;
+    optHeaderSize.kind = NodeKind::UInt16;
+    optHeaderSize.name = "SizeOfOptionalHeader";
+    optHeaderSize.parentId = rootId;
+    optHeaderSize.offset = offset;
+    tree.addNode(optHeaderSize);
+    offset += 2;
+
+    Node characteristics;
+    characteristics.kind = NodeKind::Hex16;
+    characteristics.name = "Characteristics";
+    characteristics.parentId = rootId;
+    characteristics.offset = offset;
+    tree.addNode(characteristics);
+    offset += 2;
+
+    // 8 Hex64 fields for additional test coverage
+    for (int i = 0; i < 8; i++) {
+        Node hex;
+        hex.kind = NodeKind::Hex64;
+        hex.name = QString("Reserved%1").arg(i);
+        hex.parentId = rootId;
+        hex.offset = offset;
+        tree.addNode(hex);
+        offset += 8;
     }
 
     return tree;
@@ -90,16 +136,50 @@ private slots:
         delete m_editor;
     }
 
+    // ── Test: CommandRow at line 0 rejects non-ADDR edits ──
+    void testCommandRowLineRejectsEdits() {
+        m_editor->applyDocument(m_result);
+
+        // Line 0 should be the CommandRow
+        const LineMeta* lm = m_editor->metaForLine(0);
+        QVERIFY(lm);
+        QCOMPARE(lm->lineKind, LineKind::CommandRow);
+        QCOMPARE(lm->nodeId, kCommandRowId);
+        QCOMPARE(lm->nodeIdx, -1);
+
+        // Type/Name/Value should be rejected on CommandRow
+        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Type, 0));
+        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Name, 0));
+        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Value, 0));
+        QVERIFY(!m_editor->isEditing());
+
+        // Set CommandRow text with an ADDR value (simulates controller.updateCommandRow)
+        m_editor->setCommandRowText(
+            QStringLiteral(" * SRC: File : 0x140000000"));
+
+        // BaseAddress should be ALLOWED on CommandRow (ADDR field)
+        bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
+        QVERIFY2(ok, "BaseAddress edit should be allowed on CommandRow");
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
+
+        // Source should be ALLOWED on CommandRow (SRC field)
+        ok = m_editor->beginInlineEdit(EditTarget::Source, 0);
+        QVERIFY2(ok, "Source edit should be allowed on CommandRow");
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
+    }
+
     // ── Test: inline edit lifecycle (begin → commit → re-edit) ──
     void testInlineEditReEntry() {
-        // Move cursor to line 1 (first field inside struct)
-        m_editor->scintilla()->setCursorPosition(1, 0);
+        // Move cursor to line 2 (first field inside struct; line 0=CommandRow, 1=header)
+        m_editor->scintilla()->setCursorPosition(2, 0);
 
         // Should not be editing
         QVERIFY(!m_editor->isEditing());
 
         // Begin edit on Name column
-        bool ok = m_editor->beginInlineEdit(EditTarget::Name, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Name, 2);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
 
@@ -111,7 +191,7 @@ private slots:
         m_editor->applyDocument(m_result);
 
         // Should be able to edit again
-        ok = m_editor->beginInlineEdit(EditTarget::Name, 1);
+        ok = m_editor->beginInlineEdit(EditTarget::Name, 2);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
 
@@ -123,10 +203,10 @@ private slots:
     // ── Test: commit inline edit then re-edit same line ──
     void testCommitThenReEdit() {
         m_editor->applyDocument(m_result);
-        m_editor->scintilla()->setCursorPosition(1, 0);
+        m_editor->scintilla()->setCursorPosition(2, 0);
 
         // Begin value edit
-        bool ok = m_editor->beginInlineEdit(EditTarget::Value, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Value, 2);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
 
@@ -143,7 +223,7 @@ private slots:
         m_editor->applyDocument(m_result);
 
         // Must be able to edit the same line again
-        ok = m_editor->beginInlineEdit(EditTarget::Value, 1);
+        ok = m_editor->beginInlineEdit(EditTarget::Value, 2);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
 
@@ -154,7 +234,7 @@ private slots:
     void testMouseClickCommitsEdit() {
         m_editor->applyDocument(m_result);
 
-        bool ok = m_editor->beginInlineEdit(EditTarget::Name, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Name, 2);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
 
@@ -179,7 +259,7 @@ private slots:
         m_editor->scintilla()->setFocus();
         QApplication::processEvents();
 
-        bool ok = m_editor->beginInlineEdit(EditTarget::Name, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Name, 2);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
 
@@ -207,7 +287,7 @@ private slots:
         m_editor->applyDocument(m_result);
 
         // Begin type edit on a field line
-        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 2);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
 
@@ -226,22 +306,23 @@ private slots:
         QVERIFY(!m_editor->isEditing());
     }
 
-    // ── Test: edit on header line (Name is valid, Type/Value invalid) ──
+    // ── Test: edit on header line (Name and Type valid, Value invalid) ──
     void testHeaderLineEdit() {
         m_editor->applyDocument(m_result);
 
-        // Line 0 should be the struct header
-        const LineMeta* lm = m_editor->metaForLine(0);
+        // Line 1 should be the struct header (line 0 is CommandRow)
+        const LineMeta* lm = m_editor->metaForLine(1);
         QVERIFY(lm);
         QCOMPARE(lm->lineKind, LineKind::Header);
 
-        // Type edit on header should fail (no type span)
-        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 0);
-        QVERIFY(!ok);
-        QVERIFY(!m_editor->isEditing());
+        // Type edit on header should succeed (has typename IMAGE_FILE_HEADER)
+        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 1);
+        QVERIFY(ok);
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
 
-        // Name edit on header should succeed (dynamic span)
-        ok = m_editor->beginInlineEdit(EditTarget::Name, 0);
+        // Name edit on header should succeed
+        ok = m_editor->beginInlineEdit(EditTarget::Name, 1);
         QVERIFY(ok);
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();
@@ -271,7 +352,7 @@ private slots:
     void testTypeAutocompleteShows() {
         m_editor->applyDocument(m_result);
 
-        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 2);
         QVERIFY(ok);
 
         // Process deferred timer (autocomplete is deferred)
@@ -313,11 +394,12 @@ private slots:
         QCOMPARE((uint8_t)b[1], (uint8_t)0x5A);
         QCOMPARE((uint8_t)b[7], (uint8_t)0x00);
 
-        // Hex64 continuous (should still work)
+        // Hex64 continuous - stores as native-endian (numeric value preserved)
         b = fmt::parseValue(NodeKind::Hex64, "4D5A900000000000", &ok);
         QVERIFY(ok);
-        QCOMPARE((uint8_t)b[0], (uint8_t)0x4D);
-        QCOMPARE((uint8_t)b[1], (uint8_t)0x5A);
+        uint64_t v64;
+        memcpy(&v64, b.data(), 8);
+        QCOMPARE(v64, (uint64_t)0x4D5A900000000000);
 
         // Hex64 with 0x prefix and spaces
         b = fmt::parseValue(NodeKind::Hex64, "0x4D 5A 90 00 00 00 00 00", &ok);
@@ -328,7 +410,7 @@ private slots:
     void testTypeAutocompleteTypingAndCommit() {
         m_editor->applyDocument(m_result);
 
-        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 2);
         QVERIFY(ok);
 
         // Process deferred autocomplete
@@ -368,7 +450,7 @@ private slots:
     void testTypeEditClickAwayNoChange() {
         m_editor->applyDocument(m_result);
 
-        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 1);
+        bool ok = m_editor->beginInlineEdit(EditTarget::Type, 2);
         QVERIFY(ok);
 
         // Process deferred autocomplete
@@ -397,8 +479,8 @@ private slots:
     void testColumnSpanHitTest() {
         m_editor->applyDocument(m_result);
 
-        // Line 1 is a field line (UInt16), verify spans are valid
-        const LineMeta* lm = m_editor->metaForLine(1);
+        // Line 2 is a field line (UInt16), verify spans are valid (line 0=CommandRow, 1=header)
+        const LineMeta* lm = m_editor->metaForLine(2);
         QVERIFY(lm);
         QCOMPARE(lm->lineKind, LineKind::Field);
 
@@ -415,7 +497,7 @@ private slots:
         // Value span should be valid for field lines
         QString lineText;
         int len = (int)m_editor->scintilla()->SendScintilla(
-            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)1);
+            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)2);
         QVERIFY(len > 0);
         ColumnSpan vs = RcxEditor::valueSpan(*lm, len);
         QVERIFY(vs.valid);
@@ -444,20 +526,19 @@ private slots:
     void testSelectedNodeIndices() {
         m_editor->applyDocument(m_result);
 
-        // Put cursor on first field line
-        m_editor->scintilla()->setCursorPosition(1, 0);
+        // Put cursor on first field line (line 2; 0=CommandRow, 1=header)
+        m_editor->scintilla()->setCursorPosition(2, 0);
         QSet<int> sel = m_editor->selectedNodeIndices();
         QCOMPARE(sel.size(), 1);
 
         // The node index should match the first field
-        const LineMeta* lm = m_editor->metaForLine(1);
+        const LineMeta* lm = m_editor->metaForLine(2);
         QVERIFY(lm);
         QVERIFY(sel.contains(lm->nodeIdx));
     }
 
-    // ── Test: base address changes affect header display ──
+    // ── Test: header line no longer contains "// base:" ──
     void testBaseAddressDisplay() {
-        // Create tree with base address 0x10
         NodeTree tree = makeTestTree();
         tree.baseAddress = 0x10;
         FileProvider prov = makeTestProvider();
@@ -465,50 +546,45 @@ private slots:
 
         m_editor->applyDocument(result);
 
-        // Line 0 should be the struct header with isRootHeader=true
-        const LineMeta* lm = m_editor->metaForLine(0);
+        // Line 1 should be the struct header (line 0 is CommandRow)
+        const LineMeta* lm = m_editor->metaForLine(1);
         QVERIFY(lm);
         QCOMPARE(lm->lineKind, LineKind::Header);
         QVERIFY(lm->isRootHeader);
 
-        // Get header line text - should contain "0x10"
+        // Get header line text — should NOT contain "// base:" (consolidated into cmd bar)
         QString lineText;
         int len = (int)m_editor->scintilla()->SendScintilla(
-            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
+            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)1);
         if (len > 0) {
             QByteArray buf(len + 1, '\0');
             m_editor->scintilla()->SendScintilla(
-                QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
+                QsciScintillaBase::SCI_GETLINE, (unsigned long)1, (void*)buf.data());
             lineText = QString::fromUtf8(buf.constData(), len).trimmed();
         }
 
-        // Verify base address appears in header
-        QVERIFY2(lineText.contains("0x10") || lineText.contains("0X10"),
-                 qPrintable("Header should contain base address 0x10, got: " + lineText));
-
-        // Verify struct keyword is present
+        QVERIFY2(!lineText.contains("// base:"),
+                 qPrintable("Header should no longer contain '// base:', got: " + lineText));
         QVERIFY2(lineText.contains("struct"),
                  qPrintable("Header should contain 'struct', got: " + lineText));
 
-        // Reset to original result
         m_editor->applyDocument(m_result);
     }
 
-    // ── Test: base address span is valid for root headers ──
+    // ── Test: CommandRow ADDR span is valid ──
     void testBaseAddressSpan() {
-        NodeTree tree = makeTestTree();
-        tree.baseAddress = 0x140000000;  // Large address to test span width
-        FileProvider prov = makeTestProvider();
-        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(m_result);
 
-        m_editor->applyDocument(result);
+        // Set CommandRow text with ADDR value (simulates controller)
+        m_editor->setCommandRowText(
+            QStringLiteral(" * SRC: File : 0x140000000"));
 
-        // Line 0 should be root header
+        // Line 0 is CommandRow
         const LineMeta* lm = m_editor->metaForLine(0);
         QVERIFY(lm);
-        QVERIFY(lm->isRootHeader);
+        QCOMPARE(lm->lineKind, LineKind::CommandRow);
 
-        // Get line text for span calculation
+        // Get CommandRow line text
         QString lineText;
         int len = (int)m_editor->scintilla()->SendScintilla(
             QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
@@ -521,32 +597,30 @@ private slots:
                 lineText.chop(1);
         }
 
-        // Base address span should be valid
-        ColumnSpan bs = baseAddressSpanFor(*lm, lineText);
-        QVERIFY2(bs.valid, "Base address span should be valid for root header");
-        QVERIFY(bs.start < bs.end);
+        // ADDR span should be valid (uses commandRowAddrSpan)
+        ColumnSpan as = commandRowAddrSpan(lineText);
+        QVERIFY2(as.valid, "ADDR span should be valid on CommandRow");
+        QVERIFY(as.start < as.end);
 
         // The span should cover the hex address
-        QString spanText = lineText.mid(bs.start, bs.end - bs.start);
+        QString spanText = lineText.mid(as.start, as.end - as.start);
         QVERIFY2(spanText.contains("0x") || spanText.startsWith("0X"),
                  qPrintable("Span should contain hex address, got: " + spanText));
 
-        // Reset
         m_editor->applyDocument(m_result);
     }
 
-    // ── Test: base address edit begins on root header ──
+    // ── Test: base address edit begins on CommandRow (line 0) ──
     void testBaseAddressEditBegins() {
-        NodeTree tree = makeTestTree();
-        tree.baseAddress = 0x10;
-        FileProvider prov = makeTestProvider();
-        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(m_result);
 
-        m_editor->applyDocument(result);
+        // Set CommandRow text with ADDR value (simulates controller)
+        m_editor->setCommandRowText(
+            QStringLiteral(" * SRC: File : 0x140000000"));
 
-        // Begin base address edit on line 0 (root header)
+        // Begin base address edit on line 0 (CommandRow ADDR field)
         bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
-        QVERIFY2(ok, "Should be able to begin base address edit on root header");
+        QVERIFY2(ok, "Should be able to begin base address edit on CommandRow");
         QVERIFY(m_editor->isEditing());
 
         // Cancel and reset

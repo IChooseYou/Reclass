@@ -440,7 +440,7 @@ void MainWindow::newFile() {
     };
 
     // ── Root: IMAGE_DOS_HEADER ──
-    uint64_t dosId = addStruct(0, 0x00, "IMAGE_DOS_HEADER", "dosHeader");
+    uint64_t dosId = addStruct(0, 0x00, "IMAGE_DOS_HEADER", "DosHeader");
     addField(dosId, 0x00, NodeKind::UInt16, "e_magic");
     addField(dosId, 0x02, NodeKind::UInt16, "e_cblp");
     addField(dosId, 0x04, NodeKind::UInt16, "e_cp");
@@ -458,10 +458,10 @@ void MainWindow::newFile() {
     addField(dosId, 0x3C, NodeKind::UInt32, "e_lfanew");
 
     // ── PE Signature ──
-    addField(0, peOff, NodeKind::UInt32, "PE_Signature");
+    addField(0, peOff, NodeKind::UInt32, "Signature");
 
     // ── IMAGE_FILE_HEADER ──
-    uint64_t fhId = addStruct(0, fhOff, "IMAGE_FILE_HEADER", "fileHeader");
+    uint64_t fhId = addStruct(0, fhOff, "IMAGE_FILE_HEADER", "FileHeader");
     addField(fhId, 0, NodeKind::UInt16, "Machine");
     addField(fhId, 2, NodeKind::UInt16, "NumberOfSections");
     addField(fhId, 4, NodeKind::UInt32, "TimeDateStamp");
@@ -471,7 +471,7 @@ void MainWindow::newFile() {
     addField(fhId, 18, NodeKind::UInt16, "Characteristics");
 
     // ── IMAGE_OPTIONAL_HEADER64 ──
-    uint64_t ohId = addStruct(0, ohOff, "IMAGE_OPTIONAL_HEADER64", "optionalHeader");
+    uint64_t ohId = addStruct(0, ohOff, "IMAGE_OPTIONAL_HEADER64", "OptionalHeader");
     addField(ohId, 0, NodeKind::UInt16, "Magic");
     addField(ohId, 2, NodeKind::UInt8, "MajorLinkerVersion");
     addField(ohId, 3, NodeKind::UInt8, "MinorLinkerVersion");
@@ -483,8 +483,8 @@ void MainWindow::newFile() {
     addField(ohId, 24, NodeKind::UInt64, "ImageBase");
     addField(ohId, 32, NodeKind::UInt32, "SectionAlignment");
     addField(ohId, 36, NodeKind::UInt32, "FileAlignment");
-    addField(ohId, 40, NodeKind::UInt16, "MajorOSVersion");
-    addField(ohId, 42, NodeKind::UInt16, "MinorOSVersion");
+    addField(ohId, 40, NodeKind::UInt16, "MajorOperatingSystemVersion");
+    addField(ohId, 42, NodeKind::UInt16, "MinorOperatingSystemVersion");
     addField(ohId, 44, NodeKind::UInt16, "MajorImageVersion");
     addField(ohId, 46, NodeKind::UInt16, "MinorImageVersion");
     addField(ohId, 48, NodeKind::UInt16, "MajorSubsystemVersion");
@@ -539,6 +539,13 @@ void MainWindow::newFile() {
         addField(secId, 34, NodeKind::UInt16, "NumberOfLinenumbers");
         addField(secId, 36, NodeKind::UInt32, "Characteristics");
     }
+
+    // ── Hex64 fields after headers ──
+    const int tailOff = shOff + 4 * 40;  // 0x228
+    addField(0, tailOff + 0,  NodeKind::Hex64, "RawData0");
+    addField(0, tailOff + 8,  NodeKind::Hex64, "RawData1");
+    addField(0, tailOff + 16, NodeKind::Hex64, "RawData2");
+    addField(0, tailOff + 24, NodeKind::Hex64, "RawData3");
 
     createTab(doc);
 }
@@ -715,11 +722,10 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName("ReclassX");
     app.setStyle("Fusion"); // Fusion style respects dark palette well
 
-    // Load embedded Iosevka font
+    // Load embedded fonts
     int fontId = QFontDatabase::addApplicationFont(":/fonts/Iosevka-Regular.ttf");
     if (fontId == -1)
         qWarning("Failed to load embedded Iosevka font");
-
     // Apply saved font preference before creating any editors
     {
         QSettings settings("ReclassX", "ReclassX");
