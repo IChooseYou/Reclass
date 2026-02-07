@@ -934,6 +934,34 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         uint64_t nodeId = node.id;
         uint64_t parentId = node.parentId;
 
+        // Quick-convert suggestions for Hex nodes
+        bool addedQuickConvert = false;
+        if (node.kind == NodeKind::Hex64) {
+            menu.addAction(icon("symbol-numeric.svg"), "Change to uint64_t", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) changeNodeKind(ni, NodeKind::UInt64);
+            });
+            menu.addAction(icon("symbol-numeric.svg"), "Change to uint32_t", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) changeNodeKind(ni, NodeKind::UInt32);
+            });
+            addedQuickConvert = true;
+        } else if (node.kind == NodeKind::Hex32) {
+            menu.addAction(icon("symbol-numeric.svg"), "Change to uint32_t", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) changeNodeKind(ni, NodeKind::UInt32);
+            });
+            addedQuickConvert = true;
+        } else if (node.kind == NodeKind::Hex16) {
+            menu.addAction(icon("symbol-numeric.svg"), "Change to int16_t", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) changeNodeKind(ni, NodeKind::Int16);
+            });
+            addedQuickConvert = true;
+        }
+        if (addedQuickConvert)
+            menu.addSeparator();
+
         bool isEditable = node.kind != NodeKind::Struct && node.kind != NodeKind::Array
                           && node.kind != NodeKind::Padding && node.kind != NodeKind::Mat4x4
                           && m_doc->provider->isWritable();
