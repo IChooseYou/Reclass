@@ -172,8 +172,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
         case EditTarget::Name: {
             if (text.isEmpty()) break;
             const Node& node = m_doc->tree.nodes[nodeIdx];
-            // ASCII edit on Hex/Padding nodes
-            if (isHexPreview(node.kind)) {
+            // ASCII edit on Padding nodes
+            if (node.kind == NodeKind::Padding) {
                 setNodeValue(nodeIdx, subLine, text, /*isAscii=*/true);
             } else {
                 renameNode(nodeIdx, text);

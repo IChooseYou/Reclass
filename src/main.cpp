@@ -1,4 +1,5 @@
 #include "controller.h"
+#include "generator.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QMdiArea>
@@ -8,6 +9,8 @@
 #include <QStatusBar>
 #include <QLabel>
 #include <QSplitter>
+#include <QStackedWidget>
+#include <QPointer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
@@ -21,6 +24,8 @@
 #include <QPainter>
 #include <QSvgRenderer>
 #include <QSettings>
+#include <Qsci/qsciscintilla.h>
+#include <Qsci/qscilexercpp.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -122,17 +127,28 @@ private slots:
     void redo();
     void about();
     void setEditorFont(const QString& fontName);
+    void exportCpp();
 
 private:
+    enum ViewMode { VM_Reclass, VM_Rendered };
+
     QMdiArea* m_mdiArea;
     QLabel*   m_statusLabel;
 
     struct TabState {
-        RcxDocument*   doc;
-        RcxController* ctrl;
-        QSplitter*     splitter;
+        RcxDocument*              doc;
+        RcxController*            ctrl;
+        QSplitter*                splitter;
+        QStackedWidget*           stack       = nullptr;
+        QPointer<QsciScintilla>   rendered;
+        ViewMode                  viewMode    = VM_Reclass;
+        uint64_t                  lastRenderedRootId      = 0;
+        int                       lastRenderedFirstLine   = 0;
     };
     QMap<QMdiSubWindow*, TabState> m_tabs;
+
+    QAction* m_actViewReclass  = nullptr;
+    QAction* m_actViewRendered = nullptr;
 
     void createMenus();
     void createStatusBar();
@@ -142,6 +158,12 @@ private:
     TabState* activeTab();
     QMdiSubWindow* createTab(RcxDocument* doc);
     void updateWindowTitle();
+
+    void setViewMode(ViewMode mode);
+    void updateRenderedView(TabState& tab);
+    void syncRenderMenuState();
+    uint64_t findRootStructForNode(const NodeTree& tree, uint64_t nodeId) const;
+    void setupRenderedSci(QsciScintilla* sci);
 };
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -158,7 +180,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createStatusBar();
 
     connect(m_mdiArea, &QMdiArea::subWindowActivated,
-            this, [this](QMdiSubWindow*) { updateWindowTitle(); });
+            this, [this](QMdiSubWindow*) {
+        updateWindowTitle();
+        syncRenderMenuState();
+    });
 }
 
 QIcon MainWindow::makeIcon(const QString& svgPath) {
@@ -191,6 +216,8 @@ void MainWindow::createMenus() {
     file->addSeparator();
     file->addAction(makeIcon(":/vsicons/file-binary.svg"), "Load &Binary...", this, &MainWindow::loadBinary);
     file->addSeparator();
+    file->addAction(makeIcon(":/vsicons/export.svg"), "Export &C++ Header...", this, &MainWindow::exportCpp);
+    file->addSeparator();
     file->addAction(makeIcon(":/vsicons/close.svg"), "E&xit", QKeySequence(Qt::Key_Close), this, &QMainWindow::close);
 
     // Edit
@@ -220,6 +247,10 @@ void MainWindow::createMenus() {
     connect(actConsolas, &QAction::triggered, this, [this]() { setEditorFont("Consolas"); });
     connect(actIosevka, &QAction::triggered, this, [this]() { setEditorFont("Iosevka"); });
 
+    view->addSeparator();
+    m_actViewRendered = view->addAction(makeIcon(":/vsicons/code.svg"), "&C/C++", this, [this]() { setViewMode(VM_Rendered); });
+    m_actViewReclass  = view->addAction(makeIcon(":/vsicons/eye.svg"), "&Reclass View", this, [this]() { setViewMode(VM_Reclass); });
+
     // Node
     auto* node = menuBar()->addMenu("&Node");
     node->addAction(makeIcon(":/vsicons/add.svg"), "&Add Field", QKeySequence(Qt::Key_Insert), this, &MainWindow::addNode);
@@ -240,17 +271,27 @@ void MainWindow::createStatusBar() {
 }
 
 QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
+    // QStackedWidget wraps [0] splitter (Reclass view) and [1] rendered QsciScintilla
+    auto* stack = new QStackedWidget;
     auto* splitter = new QSplitter(Qt::Horizontal);
     auto* ctrl = new RcxController(doc, splitter);
     ctrl->addSplitEditor(splitter);
 
-    auto* sub = m_mdiArea->addSubWindow(splitter);
+    stack->addWidget(splitter);   // index 0 = Reclass view
+
+    auto* renderedSci = new QsciScintilla;
+    setupRenderedSci(renderedSci);
+    stack->addWidget(renderedSci); // index 1 = Rendered view
+    stack->setCurrentIndex(0);
+
+    auto* sub = m_mdiArea->addSubWindow(stack);
     sub->setWindowTitle(doc->filePath.isEmpty()
                         ? "Untitled" : QFileInfo(doc->filePath).fileName());
     sub->setAttribute(Qt::WA_DeleteOnClose);
     sub->showMaximized();
 
-    m_tabs[sub] = { doc, ctrl, splitter };
+    m_tabs[sub] = { doc, ctrl, splitter, stack, renderedSci,
+                    VM_Reclass, 0, 0 };
 
     connect(sub, &QObject::destroyed, this, [this, sub]() {
         auto it = m_tabs.find(sub);
@@ -261,18 +302,29 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
     });
 
     connect(ctrl, &RcxController::nodeSelected,
-            this, [this, ctrl](int nodeIdx) {
+            this, [this, ctrl, sub](int nodeIdx) {
         if (nodeIdx >= 0 && nodeIdx < ctrl->document()->tree.nodes.size()) {
             auto& node = ctrl->document()->tree.nodes[nodeIdx];
-            m_statusLabel->setText(
-                QString("%1 %2  offset: 0x%3  size: %4 bytes")
-                    .arg(kindToString(node.kind))
-                    .arg(node.name)
-                    .arg(node.offset, 4, 16, QChar('0'))
-                    .arg(node.byteSize()));
+            auto it = m_tabs.find(sub);
+            if (it != m_tabs.end() && it->viewMode == VM_Rendered)
+                m_statusLabel->setText(
+                    QString("Rendered: %1 %2")
+                        .arg(kindToString(node.kind))
+                        .arg(node.name));
+            else
+                m_statusLabel->setText(
+                    QString("%1 %2  offset: 0x%3  size: %4 bytes")
+                        .arg(kindToString(node.kind))
+                        .arg(node.name)
+                        .arg(node.offset, 4, 16, QChar('0'))
+                        .arg(node.byteSize()));
         } else {
             m_statusLabel->setText("Ready");
         }
+        // Update rendered view on selection change
+        auto it = m_tabs.find(sub);
+        if (it != m_tabs.end())
+            updateRenderedView(*it);
     });
     connect(ctrl, &RcxController::selectionChanged,
             this, [this](int count) {
@@ -282,6 +334,26 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
             m_statusLabel->setText(QString("%1 nodes selected").arg(count));
     });
 
+    // Update rendered view on document changes and undo/redo
+    connect(doc, &RcxDocument::documentChanged,
+            this, [this, sub]() {
+        auto it = m_tabs.find(sub);
+        if (it != m_tabs.end())
+            QTimer::singleShot(0, this, [this, sub]() {
+                auto it2 = m_tabs.find(sub);
+                if (it2 != m_tabs.end()) updateRenderedView(*it2);
+            });
+    });
+    connect(&doc->undoStack, &QUndoStack::indexChanged,
+            this, [this, sub](int) {
+        auto it = m_tabs.find(sub);
+        if (it != m_tabs.end())
+            QTimer::singleShot(0, this, [this, sub]() {
+                auto it2 = m_tabs.find(sub);
+                if (it2 != m_tabs.end()) updateRenderedView(*it2);
+            });
+    });
+
     ctrl->refresh();
     return sub;
 }
@@ -289,314 +361,23 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
 void MainWindow::newFile() {
     auto* doc = new RcxDocument(this);
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // _PEB64 Demo — Process Environment Block + stub structs
-    // Buffer covers PEB (0x7D0) + _PEB_LDR_DATA (0x800) + _RTL_USER_PROCESS_PARAMETERS (0x900)
-    // ══════════════════════════════════════════════════════════════════════════
+    QByteArray data(16, '\0');
+    doc->loadData(data);
+    doc->tree.baseAddress = 0x00400000;
 
-    QByteArray pebData(0x940, '\0');
-    char* d = pebData.data();
+    Node root;
+    root.kind = NodeKind::Struct;
+    root.name = "Entity";
+    root.structTypeName = "Entity";
+    root.parentId = 0;
+    root.offset = 0;
+    int ri = doc->tree.addNode(root);
+    uint64_t rootId = doc->tree.nodes[ri].id;
 
-    auto w8  = [&](int off, uint8_t  v) { d[off] = (char)v; };
-    auto w16 = [&](int off, uint16_t v) { memcpy(d+off, &v, 2); };
-    auto w32 = [&](int off, uint32_t v) { memcpy(d+off, &v, 4); };
-    auto w64 = [&](int off, uint64_t v) { memcpy(d+off, &v, 8); };
-
-    w8 (0x002, 1);                              // BeingDebugged
-    w8 (0x003, 0x04);                           // BitField
-    w64(0x008, 0xFFFFFFFFFFFFFFFFULL);          // Mutant (-1)
-    w64(0x010, 0x00007FF6DE120000ULL);          // ImageBaseAddress
-    w64(0x018, 0x000000D87B5E5800ULL);          // Ldr (baseAddress + 0x800)
-    w64(0x020, 0x000000D87B5E5900ULL);          // ProcessParameters (baseAddress + 0x900)
-    w64(0x030, 0x000001A4C3D40000ULL);          // ProcessHeap
-    w64(0x038, 0x00007FFE3B8D4260ULL);          // FastPebLock
-    w32(0x050, 0x01);                           // CrossProcessFlags
-    w64(0x058, 0x00007FFE3B720000ULL);          // KernelCallbackTable
-    w64(0x068, 0x00007FFE3E570000ULL);          // ApiSetMap
-    w64(0x078, 0x00007FFE3B8D3F50ULL);          // TlsBitmap
-    w32(0x080, 0x00000003);                     // TlsBitmapBits[0]
-    w64(0x088, 0x00007FFE38800000ULL);          // ReadOnlySharedMemoryBase
-    w64(0x090, 0x00007FFE38820000ULL);          // SharedData
-    w64(0x0A0, 0x00007FFE3B8D1000ULL);          // AnsiCodePageData
-    w64(0x0A8, 0x00007FFE3B8D2040ULL);          // OemCodePageData
-    w64(0x0B0, 0x00007FFE3B8CE020ULL);          // UnicodeCaseTableData
-    w32(0x0B8, 8);                              // NumberOfProcessors
-    w32(0x0BC, 0x70);                           // NtGlobalFlag
-    w64(0x0C0, 0xFFFFFFFF7C91E000ULL);          // CriticalSectionTimeout
-    w64(0x0C8, 0x0000000000100000ULL);          // HeapSegmentReserve
-    w64(0x0D0, 0x0000000000002000ULL);          // HeapSegmentCommit
-    w32(0x0E8, 4);                              // NumberOfHeaps
-    w32(0x0EC, 16);                             // MaximumNumberOfHeaps
-    w64(0x0F0, 0x000001A4C3D40688ULL);          // ProcessHeaps
-    w64(0x0F8, 0x00007FFE388B0000ULL);          // GdiSharedHandleTable
-    w64(0x110, 0x00007FFE3B8D42E8ULL);          // LoaderLock
-    w32(0x118, 10);                             // OSMajorVersion
-    w16(0x120, 19045);                          // OSBuildNumber
-    w32(0x124, 2);                              // OSPlatformId
-    w32(0x128, 3);                              // ImageSubsystem (CUI)
-    w32(0x12C, 10);                             // ImageSubsystemMajorVersion
-    w64(0x138, 0x00000000000000FFULL);          // ActiveProcessAffinityMask
-    w64(0x238, 0x00007FFE3B8D3F70ULL);          // TlsExpansionBitmap
-    w32(0x2C0, 1);                              // SessionId
-    w64(0x2F8, 0x000001A4C3E21000ULL);          // ActivationContextData
-    w64(0x308, 0x00007FFE38840000ULL);          // SystemDefaultActivationContextData
-    w64(0x318, 0x0000000000002000ULL);          // MinimumStackCommit
-    w16(0x34C, 1252);                           // ActiveCodePage
-    w16(0x34E, 437);                            // OemCodePage
-    w64(0x358, 0x000001A4C3E30000ULL);          // WerRegistrationData
-    w64(0x380, 0x00007FFE38890000ULL);          // CsrServerReadOnlySharedMemoryBase
-    w64(0x390, 0x000000D87B5E5390ULL);          // TppWorkerpList.Flink (self)
-    w64(0x398, 0x000000D87B5E5390ULL);          // TppWorkerpList.Blink (self)
-    w64(0x7B8, 0x00007FFE38860000ULL);          // LeapSecondData
-
-    // ── _PEB_LDR_DATA at offset 0x800 ──
-    w32(0x800, 0x48);                             // Length
-    w8 (0x804, 0x01);                             // Initialized
-    w64(0x808, 0x0000000000000000ULL);            // SsHandle
-    w64(0x810, 0x000001A4C3D40100ULL);            // InLoadOrderModuleList.Flink
-    w64(0x818, 0x000001A4C3D40200ULL);            // InLoadOrderModuleList.Blink
-    w64(0x820, 0x000001A4C3D40110ULL);            // InMemoryOrderModuleList.Flink
-    w64(0x828, 0x000001A4C3D40210ULL);            // InMemoryOrderModuleList.Blink
-
-    // ── _RTL_USER_PROCESS_PARAMETERS at offset 0x900 ──
-    w32(0x900, 0x07B0);                           // MaximumLength
-    w32(0x904, 0x07B0);                           // Length
-    w32(0x908, 0x0001);                           // Flags (NORMALIZED)
-    w32(0x90C, 0x0000);                           // DebugFlags
-    w64(0x910, 0x0000000000000044ULL);            // ConsoleHandle
-    w32(0x918, 0x0000);                           // ConsoleFlags
-    w64(0x920, 0x0000000000000008ULL);            // StandardInput
-    w64(0x928, 0x000000000000000CULL);            // StandardOutput
-    w64(0x930, 0x0000000000000010ULL);            // StandardError
-
-    doc->loadData(pebData);
-    doc->tree.baseAddress = 0x000000D87B5E5000ULL;
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // Build _PEB64 Node Tree (0x7D0 bytes, unions mapped to first member)
-    // ══════════════════════════════════════════════════════════════════════════
-
-    auto addField = [&](uint64_t parent, int offset, NodeKind kind, const QString& name) -> uint64_t {
-        Node n; n.kind = kind; n.name = name;
-        n.parentId = parent; n.offset = offset;
-        int idx = doc->tree.addNode(n);
-        return doc->tree.nodes[idx].id;
-    };
-    auto addPad = [&](uint64_t parent, int offset, int len, const QString& name) {
-        Node n; n.kind = NodeKind::Padding; n.name = name;
-        n.parentId = parent; n.offset = offset; n.arrayLen = len;
-        doc->tree.addNode(n);
-    };
-    auto addStruct = [&](uint64_t parent, int offset, const QString& typeName, const QString& name, bool collapse = true) -> uint64_t {
-        Node n; n.kind = NodeKind::Struct;
-        n.structTypeName = typeName; n.name = name;
-        n.parentId = parent; n.offset = offset; n.collapsed = collapse;
-        int idx = doc->tree.addNode(n);
-        return doc->tree.nodes[idx].id;
-    };
-    auto addArray = [&](uint64_t parent, int offset, const QString& name, int count, NodeKind elemKind) {
-        Node n; n.kind = NodeKind::Array; n.name = name;
-        n.parentId = parent; n.offset = offset;
-        n.arrayLen = count; n.elementKind = elemKind;
-        n.collapsed = true;
-        int idx = doc->tree.addNode(n);
-        uint64_t arrId = doc->tree.nodes[idx].id;
-        int elemSz = sizeForKind(elemKind);
-        if (elemSz > 0) {
-            for (int i = 0; i < count; i++) {
-                Node e; e.kind = elemKind;
-                e.name = QStringLiteral("[%1]").arg(i);
-                e.parentId = arrId; e.offset = i * elemSz;
-                doc->tree.addNode(e);
-            }
-        }
-    };
-
-    // Root struct (not collapsed so fields are visible on open)
-    uint64_t peb = addStruct(0, 0, "_PEB64", "Peb", false);
-
-    // 0x000 – 0x007
-    addField(peb, 0x000, NodeKind::UInt8,     "InheritedAddressSpace");
-    addField(peb, 0x001, NodeKind::UInt8,     "ReadImageFileExecOptions");
-    addField(peb, 0x002, NodeKind::UInt8,     "BeingDebugged");
-    addField(peb, 0x003, NodeKind::UInt8,     "BitField");
-    addPad  (peb, 0x004, 4,                   "Padding0");
-
-    // 0x008 – 0x04F
-    addField(peb, 0x008, NodeKind::Pointer64, "Mutant");
-    addField(peb, 0x010, NodeKind::Pointer64, "ImageBaseAddress");
-    uint64_t ldrPtrId = addField(peb, 0x018, NodeKind::Pointer64, "Ldr");
-    uint64_t ppPtrId  = addField(peb, 0x020, NodeKind::Pointer64, "ProcessParameters");
-    addField(peb, 0x028, NodeKind::Pointer64, "SubSystemData");
-    addField(peb, 0x030, NodeKind::Pointer64, "ProcessHeap");
-    addField(peb, 0x038, NodeKind::Pointer64, "FastPebLock");
-    addField(peb, 0x040, NodeKind::Pointer64, "AtlThunkSListPtr");
-    addField(peb, 0x048, NodeKind::Pointer64, "IFEOKey");
-
-    // 0x050 – 0x07F
-    addField(peb, 0x050, NodeKind::UInt32,    "CrossProcessFlags");
-    addPad  (peb, 0x054, 4,                   "Padding1");
-    addField(peb, 0x058, NodeKind::Pointer64, "KernelCallbackTable");
-    addField(peb, 0x060, NodeKind::UInt32,    "SystemReserved");
-    addField(peb, 0x064, NodeKind::UInt32,    "AtlThunkSListPtr32");
-    addField(peb, 0x068, NodeKind::Pointer64, "ApiSetMap");
-    addField(peb, 0x070, NodeKind::UInt32,    "TlsExpansionCounter");
-    addPad  (peb, 0x074, 4,                   "Padding2");
-    addField(peb, 0x078, NodeKind::Pointer64, "TlsBitmap");
-    addArray(peb, 0x080, "TlsBitmapBits", 2, NodeKind::UInt32);
-
-    // 0x088 – 0x0BF
-    addField(peb, 0x088, NodeKind::Pointer64, "ReadOnlySharedMemoryBase");
-    addField(peb, 0x090, NodeKind::Pointer64, "SharedData");
-    addField(peb, 0x098, NodeKind::Pointer64, "ReadOnlyStaticServerData");
-    addField(peb, 0x0A0, NodeKind::Pointer64, "AnsiCodePageData");
-    addField(peb, 0x0A8, NodeKind::Pointer64, "OemCodePageData");
-    addField(peb, 0x0B0, NodeKind::Pointer64, "UnicodeCaseTableData");
-    addField(peb, 0x0B8, NodeKind::UInt32,    "NumberOfProcessors");
-    addField(peb, 0x0BC, NodeKind::Hex32,     "NtGlobalFlag");
-
-    // 0x0C0 – 0x0EF
-    addField(peb, 0x0C0, NodeKind::UInt64,    "CriticalSectionTimeout");
-    addField(peb, 0x0C8, NodeKind::UInt64,    "HeapSegmentReserve");
-    addField(peb, 0x0D0, NodeKind::UInt64,    "HeapSegmentCommit");
-    addField(peb, 0x0D8, NodeKind::UInt64,    "HeapDeCommitTotalFreeThreshold");
-    addField(peb, 0x0E0, NodeKind::UInt64,    "HeapDeCommitFreeBlockThreshold");
-    addField(peb, 0x0E8, NodeKind::UInt32,    "NumberOfHeaps");
-    addField(peb, 0x0EC, NodeKind::UInt32,    "MaximumNumberOfHeaps");
-
-    // 0x0F0 – 0x13F
-    addField(peb, 0x0F0, NodeKind::Pointer64, "ProcessHeaps");
-    addField(peb, 0x0F8, NodeKind::Pointer64, "GdiSharedHandleTable");
-    addField(peb, 0x100, NodeKind::Pointer64, "ProcessStarterHelper");
-    addField(peb, 0x108, NodeKind::UInt32,    "GdiDCAttributeList");
-    addPad  (peb, 0x10C, 4,                   "Padding3");
-    addField(peb, 0x110, NodeKind::Pointer64, "LoaderLock");
-    addField(peb, 0x118, NodeKind::UInt32,    "OSMajorVersion");
-    addField(peb, 0x11C, NodeKind::UInt32,    "OSMinorVersion");
-    addField(peb, 0x120, NodeKind::UInt16,    "OSBuildNumber");
-    addField(peb, 0x122, NodeKind::UInt16,    "OSCSDVersion");
-    addField(peb, 0x124, NodeKind::UInt32,    "OSPlatformId");
-    addField(peb, 0x128, NodeKind::UInt32,    "ImageSubsystem");
-    addField(peb, 0x12C, NodeKind::UInt32,    "ImageSubsystemMajorVersion");
-    addField(peb, 0x130, NodeKind::UInt32,    "ImageSubsystemMinorVersion");
-    addPad  (peb, 0x134, 4,                   "Padding4");
-    addField(peb, 0x138, NodeKind::UInt64,    "ActiveProcessAffinityMask");
-
-    // 0x140 – 0x22F
-    addArray(peb, 0x140, "GdiHandleBuffer", 60, NodeKind::UInt32);
-
-    // 0x230 – 0x2BF
-    addField(peb, 0x230, NodeKind::Pointer64, "PostProcessInitRoutine");
-    addField(peb, 0x238, NodeKind::Pointer64, "TlsExpansionBitmap");
-    addArray(peb, 0x240, "TlsExpansionBitmapBits", 32, NodeKind::UInt32);
-
-    // 0x2C0 – 0x2E7
-    addField(peb, 0x2C0, NodeKind::UInt32,    "SessionId");
-    addPad  (peb, 0x2C4, 4,                   "Padding5");
-    addField(peb, 0x2C8, NodeKind::UInt64,    "AppCompatFlags");
-    addField(peb, 0x2D0, NodeKind::UInt64,    "AppCompatFlagsUser");
-    addField(peb, 0x2D8, NodeKind::Pointer64, "pShimData");
-    addField(peb, 0x2E0, NodeKind::Pointer64, "AppCompatInfo");
-
-    // 0x2E8 – 0x2F7: _STRING64 CSDVersion
-    {
-        uint64_t sid = addStruct(peb, 0x2E8, "_STRING64", "CSDVersion");
-        addField(sid, 0, NodeKind::UInt16,    "Length");
-        addField(sid, 2, NodeKind::UInt16,    "MaximumLength");
-        addPad  (sid, 4, 4,                   "Pad");
-        addField(sid, 8, NodeKind::Pointer64, "Buffer");
-    }
-
-    // 0x2F8 – 0x31F
-    addField(peb, 0x2F8, NodeKind::Pointer64, "ActivationContextData");
-    addField(peb, 0x300, NodeKind::Pointer64, "ProcessAssemblyStorageMap");
-    addField(peb, 0x308, NodeKind::Pointer64, "SystemDefaultActivationContextData");
-    addField(peb, 0x310, NodeKind::Pointer64, "SystemAssemblyStorageMap");
-    addField(peb, 0x318, NodeKind::UInt64,    "MinimumStackCommit");
-
-    // 0x320 – 0x34B
-    addArray(peb, 0x320, "SparePointers", 2, NodeKind::UInt64);
-    addField(peb, 0x330, NodeKind::Pointer64, "PatchLoaderData");
-    addField(peb, 0x338, NodeKind::Pointer64, "ChpeV2ProcessInfo");
-    addField(peb, 0x340, NodeKind::UInt32,    "AppModelFeatureState");
-    addArray(peb, 0x344, "SpareUlongs", 2, NodeKind::UInt32);
-    addField(peb, 0x34C, NodeKind::UInt16,    "ActiveCodePage");
-    addField(peb, 0x34E, NodeKind::UInt16,    "OemCodePage");
-    addField(peb, 0x350, NodeKind::UInt16,    "UseCaseMapping");
-    addField(peb, 0x352, NodeKind::UInt16,    "UnusedNlsField");
-
-    // 0x354 – 0x37F
-    addPad  (peb, 0x354, 4,                   "Pad354");
-    addField(peb, 0x358, NodeKind::Pointer64, "WerRegistrationData");
-    addField(peb, 0x360, NodeKind::Pointer64, "WerShipAssertPtr");
-    addField(peb, 0x368, NodeKind::Pointer64, "EcCodeBitMap");
-    addField(peb, 0x370, NodeKind::Pointer64, "pImageHeaderHash");
-    addField(peb, 0x378, NodeKind::UInt32,    "TracingFlags");
-    addPad  (peb, 0x37C, 4,                   "Padding6");
-
-    // 0x380 – 0x39F
-    addField(peb, 0x380, NodeKind::Pointer64, "CsrServerReadOnlySharedMemoryBase");
-    addField(peb, 0x388, NodeKind::UInt64,    "TppWorkerpListLock");
-
-    // LIST_ENTRY64 TppWorkerpList
-    {
-        uint64_t sid = addStruct(peb, 0x390, "LIST_ENTRY64", "TppWorkerpList");
-        addField(sid, 0, NodeKind::Pointer64, "Flink");
-        addField(sid, 8, NodeKind::Pointer64, "Blink");
-    }
-
-    // 0x3A0 – 0x79F
-    addArray(peb, 0x3A0, "WaitOnAddressHashTable", 128, NodeKind::UInt64);
-
-    // 0x7A0 – 0x7CF
-    addField(peb, 0x7A0, NodeKind::Pointer64, "TelemetryCoverageHeader");
-    addField(peb, 0x7A8, NodeKind::UInt32,    "CloudFileFlags");
-    addField(peb, 0x7AC, NodeKind::UInt32,    "CloudFileDiagFlags");
-    addField(peb, 0x7B0, NodeKind::Int8,      "PlaceholderCompatibilityMode");
-    addArray(peb, 0x7B1, "PlaceholderCompatibilityModeReserved", 7, NodeKind::Int8);
-    addField(peb, 0x7B8, NodeKind::Pointer64, "LeapSecondData");
-    addField(peb, 0x7C0, NodeKind::UInt32,    "LeapSecondFlags");
-    addField(peb, 0x7C4, NodeKind::UInt32,    "NtGlobalFlag2");
-    addField(peb, 0x7C8, NodeKind::UInt64,    "ExtendedFeatureDisableMask");
-
-    // ── Stub structs for pointer deref demo ──
-    // _PEB_LDR_DATA (Ldr target)
-    uint64_t ldrData = addStruct(0, 0x800, "_PEB_LDR_DATA", "LdrData");
-    addField(ldrData, 0x00, NodeKind::UInt32,    "Length");
-    addField(ldrData, 0x04, NodeKind::UInt8,     "Initialized");
-    addPad  (ldrData, 0x05, 3,                   "Pad");
-    addField(ldrData, 0x08, NodeKind::Pointer64, "SsHandle");
-    {
-        uint64_t le = addStruct(ldrData, 0x10, "LIST_ENTRY64", "InLoadOrderModuleList");
-        addField(le, 0, NodeKind::Pointer64, "Flink");
-        addField(le, 8, NodeKind::Pointer64, "Blink");
-    }
-    {
-        uint64_t le = addStruct(ldrData, 0x20, "LIST_ENTRY64", "InMemoryOrderModuleList");
-        addField(le, 0, NodeKind::Pointer64, "Flink");
-        addField(le, 8, NodeKind::Pointer64, "Blink");
-    }
-
-    // _RTL_USER_PROCESS_PARAMETERS (ProcessParameters target)
-    uint64_t procParams = addStruct(0, 0x900, "_RTL_USER_PROCESS_PARAMETERS", "ProcessParams");
-    addField(procParams, 0x00, NodeKind::UInt32,    "MaximumLength");
-    addField(procParams, 0x04, NodeKind::UInt32,    "Length");
-    addField(procParams, 0x08, NodeKind::UInt32,    "Flags");
-    addField(procParams, 0x0C, NodeKind::UInt32,    "DebugFlags");
-    addField(procParams, 0x10, NodeKind::Pointer64, "ConsoleHandle");
-    addField(procParams, 0x18, NodeKind::UInt32,    "ConsoleFlags");
-    addPad  (procParams, 0x1C, 4,                   "Pad");
-    addField(procParams, 0x20, NodeKind::Pointer64, "StandardInput");
-    addField(procParams, 0x28, NodeKind::Pointer64, "StandardOutput");
-    addField(procParams, 0x30, NodeKind::Pointer64, "StandardError");
-
-    // Wire up pointer refIds
-    {
-        int li = doc->tree.indexOfId(ldrPtrId);
-        if (li >= 0) doc->tree.nodes[li].refId = ldrData;
-        int pi = doc->tree.indexOfId(ppPtrId);
-        if (pi >= 0) doc->tree.nodes[pi].refId = procParams;
-    }
+    { Node n; n.kind = NodeKind::Int32; n.name = "health"; n.parentId = rootId; n.offset = 0;  doc->tree.addNode(n); }
+    { Node n; n.kind = NodeKind::Int32; n.name = "armor";  n.parentId = rootId; n.offset = 4;  doc->tree.addNode(n); }
+    { Node n; n.kind = NodeKind::Float; n.name = "speed";  n.parentId = rootId; n.offset = 8;  doc->tree.addNode(n); }
+    { Node n; n.kind = NodeKind::Hex32; n.name = "flags";  n.parentId = rootId; n.offset = 12; doc->tree.addNode(n); }
 
     createTab(doc);
 }
@@ -735,9 +516,20 @@ void MainWindow::about() {
 void MainWindow::setEditorFont(const QString& fontName) {
     QSettings settings("ReclassX", "ReclassX");
     settings.setValue("font", fontName);
-    // Notify all controllers to refresh fonts
     for (auto& state : m_tabs) {
         state.ctrl->setEditorFont(fontName);
+        // Also update the rendered view font
+        if (state.rendered) {
+            QFont f(fontName, 12);
+            f.setFixedPitch(true);
+            state.rendered->setFont(f);
+            if (auto* lex = state.rendered->lexer()) {
+                lex->setFont(f);
+                for (int i = 0; i <= 127; i++)
+                    lex->setFont(f, i);
+            }
+            state.rendered->setMarginsFont(f);
+        }
     }
 }
 
@@ -766,6 +558,170 @@ void MainWindow::updateWindowTitle() {
     } else {
         setWindowTitle("ReclassX");
     }
+}
+
+// ── Rendered view setup ──
+
+void MainWindow::setupRenderedSci(QsciScintilla* sci) {
+    QSettings settings("ReclassX", "ReclassX");
+    QString fontName = settings.value("font", "Consolas").toString();
+    QFont f(fontName, 12);
+    f.setFixedPitch(true);
+
+    sci->setFont(f);
+    sci->setReadOnly(true);
+    sci->setWrapMode(QsciScintilla::WrapNone);
+    sci->setCaretLineVisible(false);
+    sci->setPaper(QColor("#1e1e1e"));
+    sci->setColor(QColor("#d4d4d4"));
+    sci->setTabWidth(4);
+    sci->setIndentationsUseTabs(false);
+    sci->setCaretForegroundColor(QColor("#d4d4d4"));
+    sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT, (long)2);
+    sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRADESCENT, (long)2);
+
+    // Line number margin
+    sci->setMarginType(0, QsciScintilla::NumberMargin);
+    sci->setMarginWidth(0, "00000");
+    sci->setMarginsBackgroundColor(QColor("#252526"));
+    sci->setMarginsForegroundColor(QColor("#858585"));
+    sci->setMarginsFont(f);
+
+    // Hide other margins
+    sci->setMarginWidth(1, 0);
+    sci->setMarginWidth(2, 0);
+
+    // C++ lexer for syntax highlighting
+    auto* lexer = new QsciLexerCPP(sci);
+    lexer->setFont(f);
+    lexer->setColor(QColor("#569cd6"), QsciLexerCPP::Keyword);
+    lexer->setColor(QColor("#569cd6"), QsciLexerCPP::KeywordSet2);
+    lexer->setColor(QColor("#b5cea8"), QsciLexerCPP::Number);
+    lexer->setColor(QColor("#ce9178"), QsciLexerCPP::DoubleQuotedString);
+    lexer->setColor(QColor("#ce9178"), QsciLexerCPP::SingleQuotedString);
+    lexer->setColor(QColor("#6a9955"), QsciLexerCPP::Comment);
+    lexer->setColor(QColor("#6a9955"), QsciLexerCPP::CommentLine);
+    lexer->setColor(QColor("#6a9955"), QsciLexerCPP::CommentDoc);
+    lexer->setColor(QColor("#d4d4d4"), QsciLexerCPP::Default);
+    lexer->setColor(QColor("#d4d4d4"), QsciLexerCPP::Identifier);
+    lexer->setColor(QColor("#c586c0"), QsciLexerCPP::PreProcessor);
+    lexer->setColor(QColor("#d4d4d4"), QsciLexerCPP::Operator);
+    for (int i = 0; i <= 127; i++) {
+        lexer->setPaper(QColor("#1e1e1e"), i);
+        lexer->setFont(f, i);
+    }
+    sci->setLexer(lexer);
+    sci->setBraceMatching(QsciScintilla::NoBraceMatch);
+}
+
+// ── View mode / generator switching ──
+
+void MainWindow::setViewMode(ViewMode mode) {
+    auto* tab = activeTab();
+    if (!tab) return;
+    tab->viewMode = mode;
+    if (tab->stack) {
+        tab->stack->setCurrentIndex(mode == VM_Rendered ? 1 : 0);
+    }
+    if (mode == VM_Rendered) {
+        updateRenderedView(*tab);
+    }
+    syncRenderMenuState();
+}
+
+void MainWindow::syncRenderMenuState() {
+    auto* tab = activeTab();
+    bool rendered = tab && tab->viewMode == VM_Rendered;
+    if (m_actViewRendered) m_actViewRendered->setEnabled(!rendered);
+    if (m_actViewReclass)  m_actViewReclass->setEnabled(rendered);
+}
+
+// ── Find the root-level struct ancestor for a node ──
+
+uint64_t MainWindow::findRootStructForNode(const NodeTree& tree, uint64_t nodeId) const {
+    QSet<uint64_t> visited;
+    uint64_t cur = nodeId;
+    uint64_t lastStruct = 0;
+    while (cur != 0 && !visited.contains(cur)) {
+        visited.insert(cur);
+        int idx = tree.indexOfId(cur);
+        if (idx < 0) break;
+        const Node& n = tree.nodes[idx];
+        if (n.kind == NodeKind::Struct)
+            lastStruct = n.id;
+        if (n.parentId == 0)
+            return (n.kind == NodeKind::Struct) ? n.id : lastStruct;
+        cur = n.parentId;
+    }
+    return lastStruct;
+}
+
+// ── Update the rendered view for a tab ──
+
+void MainWindow::updateRenderedView(TabState& tab) {
+    if (tab.viewMode != VM_Rendered) return;
+    if (!tab.rendered) return;
+
+    // Determine which struct to render based on selection
+    uint64_t rootId = 0;
+    QSet<uint64_t> selIds = tab.ctrl->selectedIds();
+    if (selIds.size() >= 1) {
+        uint64_t selId = *selIds.begin();
+        selId &= ~kFooterIdBit;
+        rootId = findRootStructForNode(tab.doc->tree, selId);
+    }
+
+    // Generate text
+    QString text;
+    if (rootId != 0)
+        text = renderCpp(tab.doc->tree, rootId);
+    else
+        text = renderCppAll(tab.doc->tree);
+
+    // Scroll restoration: save if same root, reset if different
+    int restoreLine = 0;
+    if (rootId != 0 && rootId == tab.lastRenderedRootId) {
+        restoreLine = (int)tab.rendered->SendScintilla(
+            QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+    }
+    tab.lastRenderedRootId = rootId;
+
+    // Set text
+    tab.rendered->setReadOnly(false);
+    tab.rendered->setText(text);
+    tab.rendered->setReadOnly(true);
+
+    // Update margin width for line count
+    int lineCount = tab.rendered->lines();
+    QString marginStr = QString(QString::number(lineCount).size() + 2, '0');
+    tab.rendered->setMarginWidth(0, marginStr);
+
+    // Restore scroll
+    if (restoreLine > 0) {
+        tab.rendered->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                                    (unsigned long)restoreLine);
+    }
+}
+
+// ── Export C++ header to file ──
+
+void MainWindow::exportCpp() {
+    auto* tab = activeTab();
+    if (!tab) return;
+
+    QString path = QFileDialog::getSaveFileName(this,
+        "Export C++ Header", {}, "C++ Header (*.h);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    QString text = renderCppAll(tab->doc->tree);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Export Failed",
+            "Could not write to: " + path);
+        return;
+    }
+    file.write(text.toUtf8());
+    m_statusLabel->setText("Exported to " + QFileInfo(path).fileName());
 }
 
 } // namespace rcx

@@ -401,8 +401,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
     // Include struct/array names - they now use columnar layout too
     int maxNameLen = kMinNameW;
     for (const Node& node : tree.nodes) {
-        // Skip hex/padding (they show ASCII preview, not name column)
-        if (isHexPreview(node.kind)) continue;
+        // Skip padding (it shows ASCII preview, not name column)
+        if (node.kind == NodeKind::Padding) continue;
         maxNameLen = qMax(maxNameLen, (int)node.name.size());
     }
     state.nameW = qBound(kMinNameW, maxNameLen, kMaxNameW);
@@ -420,8 +420,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
             const Node& child = tree.nodes[childIdx];
             scopeMaxType = qMax(scopeMaxType, (int)nodeTypeName(child).size());
 
-            // Name width (skip hex/padding, but include containers)
-            if (!isHexPreview(child.kind)) {
+            // Name width (skip padding, but include hex and containers)
+            if (child.kind != NodeKind::Padding) {
                 scopeMaxName = qMax(scopeMaxName, (int)child.name.size());
             }
         }
@@ -439,8 +439,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov) {
             const Node& child = tree.nodes[childIdx];
             rootMaxType = qMax(rootMaxType, (int)nodeTypeName(child).size());
 
-            // Name width (skip hex/padding, include containers)
-            if (!isHexPreview(child.kind)) {
+            // Name width (skip padding, include hex and containers)
+            if (child.kind != NodeKind::Padding) {
                 rootMaxName = qMax(rootMaxName, (int)child.name.size());
             }
         }

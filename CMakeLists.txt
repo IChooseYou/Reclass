@@ -20,6 +20,8 @@ add_executable(ReclassX
     src/controller.cpp
     src/compose.cpp
     src/format.cpp
+    src/generator.h
+    src/generator.cpp
     src/processpicker.h
     src/processpicker.cpp
     src/processpicker.ui
@@ -58,6 +60,7 @@ foreach(_f
     \"${CMAKE_SOURCE_DIR}/src/controller.cpp\"
     \"${CMAKE_SOURCE_DIR}/src/compose.cpp\"
     \"${CMAKE_SOURCE_DIR}/src/format.cpp\"
+    \"${CMAKE_SOURCE_DIR}/src/generator.cpp\"
     \"${CMAKE_SOURCE_DIR}/src/main.cpp\")
     file(READ \${_f} _content)
     file(APPEND \${_out} \${_content})
@@ -125,4 +128,19 @@ if(BUILD_TESTING)
         Qt6::Widgets Qt6::PrintSupport Qt6::Test
         QScintilla::QScintilla dbghelp psapi)
     add_test(NAME test_controller COMMAND test_controller)
+
+    add_executable(test_validation tests/test_validation.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/controller.cpp
+        src/processpicker.cpp src/processpicker.ui)
+    target_include_directories(test_validation PRIVATE src)
+    target_link_libraries(test_validation PRIVATE
+        Qt6::Widgets Qt6::PrintSupport Qt6::Test
+        QScintilla::QScintilla dbghelp psapi)
+    add_test(NAME test_validation COMMAND test_validation)
+
+    add_executable(test_generator tests/test_generator.cpp
+        src/generator.cpp src/compose.cpp src/format.cpp)
+    target_include_directories(test_generator PRIVATE src)
+    target_link_libraries(test_generator PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME test_generator COMMAND test_generator)
 endif()

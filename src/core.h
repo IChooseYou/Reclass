@@ -486,8 +486,8 @@ inline ColumnSpan nameSpanFor(const LineMeta& lm, int typeW = kColType, int name
     int ind = kFoldCol + lm.depth * 3;
     int start = ind + typeW + kSepWidth;
 
-    // Hex/Padding: ASCII preview takes the name column position (8 chars)
-    if (isHexPreview(lm.nodeKind))
+    // Padding: ASCII preview takes the name column position (8 chars)
+    if (lm.nodeKind == NodeKind::Padding)
         return {start, start + 8, true};
 
     return {start, start + nameW, true};
@@ -498,12 +498,12 @@ inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/, int typeW
         lm.lineKind == LineKind::ArrayElementSeparator) return {};
     int ind = kFoldCol + lm.depth * 3;
 
-    // Hex/Padding layout: [Type][sep][ASCII(8)][sep][hex bytes(23)]
-    bool isHexPad = isHexPreview(lm.nodeKind);
-    int valWidth = isHexPad ? 23 : kColValue;  // hex bytes or value column
+    // Padding layout: [Type][sep][ASCII(8)][sep][hex bytes(23)]
+    bool isPad = (lm.nodeKind == NodeKind::Padding);
+    int valWidth = isPad ? 23 : kColValue;
 
     if (lm.isContinuation) {
-        int prefixW = isHexPad
+        int prefixW = isPad
             ? (typeW + kSepWidth + 8 + kSepWidth)
             : (typeW + nameW + 2 * kSepWidth);
         int start = ind + prefixW;
@@ -511,7 +511,7 @@ inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/, int typeW
     }
     if (lm.lineKind != LineKind::Field) return {};
 
-    int start = isHexPad
+    int start = isPad
         ? (ind + typeW + kSepWidth + 8 + kSepWidth)
         : (ind + typeW + kSepWidth + nameW + kSepWidth);
     return {start, start + valWidth, true};
@@ -521,17 +521,17 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW =
     if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer) return {};
     int ind = kFoldCol + lm.depth * 3;
 
-    bool isHexPad = isHexPreview(lm.nodeKind);
-    int valWidth = isHexPad ? 23 : kColValue;
+    bool isPad = (lm.nodeKind == NodeKind::Padding);
+    int valWidth = isPad ? 23 : kColValue;
 
     int start;
     if (lm.isContinuation) {
-        int prefixW = isHexPad
+        int prefixW = isPad
             ? (typeW + kSepWidth + 8 + kSepWidth)
             : (typeW + nameW + 2 * kSepWidth);
         start = ind + prefixW + valWidth;
     } else {
-        start = isHexPad
+        start = isPad
             ? (ind + typeW + kSepWidth + 8 + kSepWidth + valWidth)
             : (ind + typeW + kSepWidth + nameW + kSepWidth + valWidth);
     }

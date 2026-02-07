@@ -404,7 +404,7 @@ void RcxEditor::fillIndicatorCols(int indic, int line, int colA, int colB) {
 void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HEX_DIM);
     for (int i = 0; i < meta.size(); i++) {
-        if (isHexPreview(meta[i].nodeKind)) {
+        if (meta[i].nodeKind == NodeKind::Padding) {
             long pos, len; lineRangeNoEol(m_sci, i, pos, len);
             if (len > 0)
                 m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, len);
@@ -1678,7 +1678,7 @@ void RcxEditor::applyHoverCursor() {
     bool inHexDataArea = false;
     uint64_t hoverNodeId = 0;
     if (hoverLine >= 0 && hoverLine < m_meta.size()
-        && isHexPreview(m_meta[hoverLine].nodeKind)) {
+        && m_meta[hoverLine].nodeKind == NodeKind::Padding) {
         hoverNodeId = m_meta[hoverLine].nodeId;
         if (hoverNodeId != 0 && h.col >= 0) {
             int ind = kFoldCol + m_meta[hoverLine].depth * 3;

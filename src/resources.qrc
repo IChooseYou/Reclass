@@ -27,5 +27,9 @@
         <file alias="files.svg">vsicons/files.svg</file>
         <file alias="extensions.svg">vsicons/extensions.svg</file>
         <file alias="question.svg">vsicons/question.svg</file>
+        <file alias="eye.svg">vsicons/eye.svg</file>
+        <file alias="code.svg">vsicons/code.svg</file>
+        <file alias="export.svg">vsicons/export.svg</file>
+        <file alias="preview.svg">vsicons/preview.svg</file>
     </qresource>
 </RCC>
