@@ -143,4 +143,13 @@ if(BUILD_TESTING)
     target_include_directories(test_generator PRIVATE src)
     target_link_libraries(test_generator PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME test_generator COMMAND test_generator)
+
+    add_executable(test_context_menu tests/test_context_menu.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/controller.cpp
+        src/processpicker.cpp src/processpicker.ui)
+    target_include_directories(test_context_menu PRIVATE src)
+    target_link_libraries(test_context_menu PRIVATE
+        Qt6::Widgets Qt6::PrintSupport Qt6::Test
+        QScintilla::QScintilla dbghelp psapi)
+    add_test(NAME test_context_menu COMMAND test_context_menu)
 endif()

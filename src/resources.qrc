@@ -31,5 +31,14 @@
         <file alias="code.svg">vsicons/code.svg</file>
         <file alias="export.svg">vsicons/export.svg</file>
         <file alias="preview.svg">vsicons/preview.svg</file>
+        <file alias="trash.svg">vsicons/trash.svg</file>
+        <file alias="clippy.svg">vsicons/clippy.svg</file>
+        <file alias="link.svg">vsicons/link.svg</file>
+        <file alias="diff-added.svg">vsicons/diff-added.svg</file>
+        <file alias="expand-all.svg">vsicons/expand-all.svg</file>
+        <file alias="collapse-all.svg">vsicons/collapse-all.svg</file>
+        <file alias="rename.svg">vsicons/rename.svg</file>
+        <file alias="whole-word.svg">vsicons/whole-word.svg</file>
+        <file alias="selection.svg">vsicons/list-selection.svg</file>
     </qresource>
 </RCC>
