@@ -2,7 +2,7 @@
 
 An improvement over other reclass like editors.
 
-<video src="video.mp4" controls width="100%"></video>
+https://github.com/IChooseYou/ReclassX/raw/main/video.mp4
 
 ![screenshot](screenshot.png)
 
