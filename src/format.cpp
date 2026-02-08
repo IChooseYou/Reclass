@@ -112,8 +112,8 @@ QString indent(int depth) {
 // ── Offset margin ──
 
 QString fmtOffsetMargin(uint64_t absoluteOffset, bool isContinuation) {
-    if (isContinuation) return QStringLiteral("  \u00B7");
-    return QString::number(absoluteOffset, 16).toUpper();
+    if (isContinuation) return QStringLiteral("  \u00B7 ");
+    return QString::number(absoluteOffset, 16).toUpper() + QChar(' ');
 }
 
 // ── Struct type name (for width calculation) ──

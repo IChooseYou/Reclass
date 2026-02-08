@@ -45,7 +45,6 @@ public:
 
     void applySelectionOverlay(const QSet<uint64_t>& selIds);
     void setCommandRowText(const QString& line);
-    void setCommandRow2Text(const QString& line);
     void setEditorFont(const QString& fontName);
     static void setGlobalFontName(const QString& fontName);
 

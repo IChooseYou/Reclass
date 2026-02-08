@@ -39,10 +39,9 @@ struct ComposeState {
         if (currentLine > 0) text += '\n';
         // 3-char fold indicator column: " - " expanded, " + " collapsed, "   " other
         // CommandRow has no fold prefix (flush left)
-        if (lm.lineKind == LineKind::CommandRow || lm.lineKind == LineKind::Blank
-            || lm.lineKind == LineKind::CommandRow2
+        if (lm.lineKind == LineKind::CommandRow
             || (lm.lineKind == LineKind::Footer && lm.isRootHeader)) {
-            // no prefix — flush left like CommandRow2
+            // no prefix — flush left
         } else if (lm.foldHead)
             text += lm.foldCollapsed ? QStringLiteral(" \u25B8 ") : QStringLiteral(" \u25BE ");
         else
@@ -218,13 +217,13 @@ void composeParent(ComposeState& state, const NodeTree& tree,
     }
 
     // Detect root header: first root-level struct — suppressed from display
-    // (CommandRow2 already shows the root class type + name)
+    // (CommandRow already shows the root class type + name)
     bool isRootHeader = (node.parentId == 0 && node.kind == NodeKind::Struct && !state.baseEmitted);
     if (isRootHeader)
         state.baseEmitted = true;
 
     // Header line (skip for array element structs and root struct)
-    // Root struct header is on CommandRow2 (type + name + {)
+    // Root struct header is on CommandRow (type + name + {)
     if (!isArrayChild && !isRootHeader) {
         // Get per-scope widths for this header's parent scope
         int typeW = state.effectiveTypeW(scopeId);
@@ -474,8 +473,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         state.scopeNameW[0] = qBound(kMinNameW, rootMaxName, kMaxNameW);
     }
 
-    // Emit CommandRow as line 0 (synthetic UI line)
-    const QString cmdRowText = QStringLiteral("source\u25BE \u203A 0x0");
+    // Emit CommandRow as line 0 (combined: source + address + root class type + name)
+    const QString cmdRowText = QStringLiteral("source\u25BE \u00B7 0x0 \u00B7 struct\u25BE <no class> {");
     {
         LineMeta lm;
         lm.nodeIdx   = -1;
@@ -484,46 +483,11 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         lm.lineKind  = LineKind::CommandRow;
         lm.foldLevel = SC_FOLDLEVELBASE;
         lm.foldHead  = false;
-        lm.offsetText.clear();
+        lm.offsetText = fmt::fmtOffsetMargin(tree.baseAddress, false);
         lm.markerMask = 0;
         lm.effectiveTypeW = state.typeW;
         lm.effectiveNameW = state.nameW;
         state.emitLine(cmdRowText, lm);
-    }
-
-    // Emit dotted separator (line 1) — fixed-width spaced dots in text + margin
-    {
-        // ~20 dots in text area, ~10 dots in margin, using middle dot · (U+00B7)
-        QString dots(20, QChar(0x00B7));
-        QString marginDots(10, QChar(0x00B7));
-        LineMeta lm;
-        lm.nodeIdx   = -1;
-        lm.nodeId    = kCommandRowId;
-        lm.depth     = 0;
-        lm.lineKind  = LineKind::Blank;
-        lm.foldLevel = SC_FOLDLEVELBASE;
-        lm.foldHead  = false;
-        lm.offsetText = marginDots;
-        lm.markerMask = 0;
-        lm.effectiveTypeW = state.typeW;
-        lm.effectiveNameW = state.nameW;
-        state.emitLine(dots, lm);
-    }
-
-    // Emit CommandRow2 as line 2 (root class type + name)
-    {
-        LineMeta lm;
-        lm.nodeIdx   = -1;
-        lm.nodeId    = kCommandRow2Id;
-        lm.depth     = 0;
-        lm.lineKind  = LineKind::CommandRow2;
-        lm.foldLevel = SC_FOLDLEVELBASE;
-        lm.foldHead  = false;
-        lm.offsetText.clear();
-        lm.markerMask = 0;
-        lm.effectiveTypeW = state.typeW;
-        lm.effectiveNameW = state.nameW;
-        state.emitLine(QStringLiteral("struct\u25BE <no class> {"), lm);
     }
 
     QVector<int> roots = state.childMap.value(0);

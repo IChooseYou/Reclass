@@ -57,7 +57,7 @@ static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
     std::reverse(parts.begin(), parts.end());
     if (parts.size() > 4)
         parts = {parts.front(), QStringLiteral("\u2026"), parts[parts.size() - 2], parts.back()};
-    return parts.join(QStringLiteral(" \u203A "));
+    return parts.join(QStringLiteral(" \u00B7 "));
 }
 
 // ── RcxDocument ──
@@ -205,7 +205,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // Inline editing signals
     connect(editor, &RcxEditor::inlineEditCommitted,
             this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text) {
-        // CommandRow BaseAddress/Source edit has nodeIdx=-1; CommandRow2 edits too
+        // CommandRow BaseAddress/Source/RootClass edit has nodeIdx=-1
         if (nodeIdx < 0 && target != EditTarget::BaseAddress && target != EditTarget::Source
             && target != EditTarget::RootClassType && target != EditTarget::RootClassName) { refresh(); return; }
         switch (target) {
@@ -332,7 +332,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             if (text.startsWith(QStringLiteral("#saved:"))) {
                 int idx = text.mid(7).toInt();
                 switchToSavedSource(idx);
-            } else if (text == QStringLiteral("File")) {
+            } else if (text == QStringLiteral("file")) {
                 auto* w = qobject_cast<QWidget*>(parent());
                 QString path = QFileDialog::getOpenFileName(w, "Load Binary Data", {}, "All Files (*)");
                 if (!path.isEmpty()) {
@@ -366,7 +366,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     refresh();
                 }
             }
-            else if (text == QStringLiteral("Process")) {
+            else if (text == QStringLiteral("process")) {
 #ifdef _WIN32
                 auto* w = qobject_cast<QWidget*>(parent());
                 ProcessPicker picker(w);
@@ -1234,7 +1234,7 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
             int to   = qMax(m_anchorLine, line);
             for (int i = from; i <= to && i < m_lastResult.meta.size(); i++) {
                 uint64_t nid = m_lastResult.meta[i].nodeId;
-                if (nid != 0 && nid != kCommandRowId && nid != kCommandRow2Id) m_selIds.insert(effectiveId(i, nid));
+                if (nid != 0 && nid != kCommandRowId) m_selIds.insert(effectiveId(i, nid));
             }
         }
     } else { // Ctrl+Shift
@@ -1246,7 +1246,7 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
             int to   = qMax(m_anchorLine, line);
             for (int i = from; i <= to && i < m_lastResult.meta.size(); i++) {
                 uint64_t nid = m_lastResult.meta[i].nodeId;
-                if (nid != 0 && nid != kCommandRowId && nid != kCommandRow2Id) m_selIds.insert(effectiveId(i, nid));
+                if (nid != 0 && nid != kCommandRowId) m_selIds.insert(effectiveId(i, nid));
             }
         }
     }
@@ -1397,10 +1397,10 @@ void RcxController::updateCommandRow() {
     // Build the row. If we have a symbol, append it after the address.
     QString row;
     if (sym.isEmpty()) {
-        row = QStringLiteral("%1 \u203A %2")
+        row = QStringLiteral("%1 \u00B7 %2")
             .arg(elide(src, 40), elide(addr, 24));
     } else {
-        row = QStringLiteral("%1 \u203A %2  %3")
+        row = QStringLiteral("%1 \u00B7 %2  %3")
             .arg(elide(src, 40), elide(addr, 24), elide(sym, 40));
     }
 
@@ -1419,9 +1419,10 @@ void RcxController::updateCommandRow() {
     if (row2.isEmpty())
         row2 = QStringLiteral("struct\u25BE <no class> {");
 
+    QString combined = row + QStringLiteral(" \u00B7 ") + row2;
+
     for (auto* ed : m_editors) {
-        ed->setCommandRowText(row);
-        ed->setCommandRow2Text(row2);
+        ed->setCommandRowText(combined);
     }
     emit selectionChanged(m_selIds.size());
 }

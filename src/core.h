@@ -393,18 +393,14 @@ struct NodeTree {
 // ── LineMeta ──
 
 enum class LineKind : uint8_t {
-    CommandRow,   // line 0: source + address
-    Blank,        // line 1: dotted separator
-    CommandRow2,  // line 2: root class type + name
+    CommandRow,   // line 0: source + address + root class type + name
+    Blank,        // (unused — kept for enum stability)
     Header, Field, Continuation, Footer, ArrayElementSeparator
 };
 
 static constexpr uint64_t kCommandRowId   = UINT64_MAX;
-static constexpr uint64_t kCommandRow2Id  = UINT64_MAX - 1;
 static constexpr int      kCommandRowLine = 0;
-static constexpr int      kBlankLine       = 1;
-static constexpr int      kCommandRow2Line = 2;
-static constexpr int      kFirstDataLine  = 3;
+static constexpr int      kFirstDataLine  = 1;
 static constexpr uint64_t kFooterIdBit    = 0x8000000000000000ULL;
 
 struct LineMeta {
@@ -435,7 +431,7 @@ struct LineMeta {
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {
-    return lm.lineKind == LineKind::CommandRow || lm.lineKind == LineKind::Blank || lm.lineKind == LineKind::CommandRow2;
+    return lm.lineKind == LineKind::CommandRow;
 }
 
 // ── Layout Info ──
@@ -573,10 +569,10 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW =
 }
 
 // ── CommandRow spans ──
-// Line format: "source▾ › 0x140000000"
+// Line format: "source▾ · 0x140000000"
 
 inline ColumnSpan commandRowSrcSpan(const QString& lineText) {
-    int idx = lineText.indexOf(QStringLiteral(" \u203A"));
+    int idx = lineText.indexOf(QStringLiteral(" \u00B7"));
     if (idx < 0) return {};
     int start = 0;
     while (start < idx && !lineText[start].isLetterOrNumber()
@@ -590,38 +586,48 @@ inline ColumnSpan commandRowSrcSpan(const QString& lineText) {
 }
 
 inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
-    int tag = lineText.indexOf(QStringLiteral(" \u203A"));
+    int tag = lineText.indexOf(QStringLiteral(" \u00B7"));
     if (tag < 0) return {};
-    int start = tag + 3;  // after " › "
+    int start = tag + 3;  // after " · "
     int end = start;
     while (end < lineText.size() && !lineText[end].isSpace()) end++;
     if (end <= start) return {};
     return {start, end, true};
 }
 
-// ── CommandRow2 spans ──
-// Line format: "struct▾ ClassName {"
+// ── CommandRow root-class spans ──
+// Combined CommandRow format ends with: "  struct▾ ClassName {"
 
-inline ColumnSpan commandRow2TypeSpan(const QString& lineText) {
-    int start = 0;
-    while (start < lineText.size() && lineText[start].isSpace()) start++;
-    if (start >= lineText.size()) return {};
+inline int commandRowRootStart(const QString& lineText) {
+    int best = -1;
+    int i;
+    i = lineText.lastIndexOf(QStringLiteral("struct\u25BE"));
+    if (i > best) best = i;
+    i = lineText.lastIndexOf(QStringLiteral("class\u25BE"));
+    if (i > best) best = i;
+    i = lineText.lastIndexOf(QStringLiteral("enum\u25BE"));
+    if (i > best) best = i;
+    return best;
+}
+
+inline ColumnSpan commandRowRootTypeSpan(const QString& lineText) {
+    int start = commandRowRootStart(lineText);
+    if (start < 0) return {};
     int end = start;
-    while (end < lineText.size() && lineText[end] != QChar(' ') && lineText[end] != QChar(0x25BE)) end++;
-    if (end <= start) return {start, (int)lineText.size(), true};
+    while (end < lineText.size() && lineText[end] != QChar(' ')
+           && lineText[end] != QChar(0x25BE)) end++;
+    if (end <= start) return {};
     return {start, end, true};
 }
 
-inline ColumnSpan commandRow2NameSpan(const QString& lineText) {
-    // Format: "keyword name {" — extract just the name part (before " {")
-    int start = 0;
-    while (start < lineText.size() && lineText[start].isSpace()) start++;
-    int space = lineText.indexOf(' ', start);
+inline ColumnSpan commandRowRootNameSpan(const QString& lineText) {
+    int base = commandRowRootStart(lineText);
+    if (base < 0) return {};
+    int space = lineText.indexOf(' ', base);
     if (space < 0) return {};
     int nameStart = space + 1;
     while (nameStart < lineText.size() && lineText[nameStart].isSpace()) nameStart++;
     if (nameStart >= lineText.size()) return {};
-    // Stop before trailing " {"
     int nameEnd = lineText.indexOf(QStringLiteral(" {"), nameStart);
     if (nameEnd < 0) nameEnd = lineText.size();
     while (nameEnd > nameStart && lineText[nameEnd - 1].isSpace()) nameEnd--;

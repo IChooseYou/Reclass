@@ -441,11 +441,9 @@ private slots:
         NullProvider prov;
         ComposeResult result = compose(tree, prov, 99999);
 
-        // Only command rows + blank
-        QCOMPARE(result.meta.size(), 3);
+        // Only command row
+        QCOMPARE(result.meta.size(), 1);
         QCOMPARE(result.meta[0].lineKind, LineKind::CommandRow);
-        QCOMPARE(result.meta[1].lineKind, LineKind::Blank);
-        QCOMPARE(result.meta[2].lineKind, LineKind::CommandRow2);
     }
 
     void testCompose_viewRootId_singleRoot() {
@@ -882,13 +880,13 @@ private slots:
         NullProvider prov;
         ComposeResult result = compose(tree, prov);
 
-        // CommandRow + Blank + CommandRow2 + 1 Vec4 line + footer = 5
-        QCOMPARE(result.meta.size(), 5);
+        // CommandRow + 1 Vec4 line + footer = 3
+        QCOMPARE(result.meta.size(), 3);
 
-        // The Vec4 line (index 3) is a single field line, not continuation
-        QCOMPARE(result.meta[3].lineKind, LineKind::Field);
-        QCOMPARE(result.meta[3].nodeKind, NodeKind::Vec4);
-        QVERIFY(!result.meta[3].isContinuation);
+        // The Vec4 line (index 1) is a single field line, not continuation
+        QCOMPARE(result.meta[1].lineKind, LineKind::Field);
+        QCOMPARE(result.meta[1].nodeKind, NodeKind::Vec4);
+        QVERIFY(!result.meta[1].isContinuation);
 
         // Copy text (equivalent to editor's "Copy All as Text")
         QString text = result.text;
@@ -896,9 +894,9 @@ private slots:
         QVERIFY(text.contains("0.f, 0.f, 0.f, 0.f"));
         // Confirm type, name, and values all on the same line
         QStringList lines = text.split('\n');
-        QVERIFY(lines[3].contains("vec4"));
-        QVERIFY(lines[3].contains("position"));
-        QVERIFY(lines[3].contains("0.f, 0.f, 0.f, 0.f"));
+        QVERIFY(lines[1].contains("vec4"));
+        QVERIFY(lines[1].contains("position"));
+        QVERIFY(lines[1].contains("0.f, 0.f, 0.f, 0.f"));
     }
 };
 

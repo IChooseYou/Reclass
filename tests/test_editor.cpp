@@ -376,7 +376,7 @@ private slots:
 
         // Set CommandRow text with an ADDR value (simulates controller.updateCommandRow)
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u203A 0xD87B5E5000"));
+            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000"));
 
         // BaseAddress should be ALLOWED on CommandRow (ADDR field)
         bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
@@ -394,7 +394,7 @@ private slots:
 
     // ── Test: inline edit lifecycle (begin → commit → re-edit) ──
     void testInlineEditReEntry() {
-        // Move cursor to line 3 (first field; 0=CommandRow, 1=Blank, 2=CommandRow2, root header suppressed)
+        // Move cursor to first data line (0=CommandRow, root header suppressed)
         m_editor->scintilla()->setCursorPosition(kFirstDataLine, 0);
 
         // Should not be editing
@@ -712,7 +712,7 @@ private slots:
     void testSelectedNodeIndices() {
         m_editor->applyDocument(m_result);
 
-        // Put cursor on first field line (kFirstDataLine; 0=CommandRow, 1=Blank, 2=CommandRow2)
+        // Put cursor on first field line (kFirstDataLine; 0=CommandRow)
         m_editor->scintilla()->setCursorPosition(kFirstDataLine, 0);
         QSet<int> sel = m_editor->selectedNodeIndices();
         QCOMPARE(sel.size(), 1);
@@ -750,7 +750,7 @@ private slots:
 
         // Set CommandRow text with ADDR value (simulates controller)
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u203A 0xD87B5E5000"));
+            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000"));
 
         // Line 0 is CommandRow
         const LineMeta* lm = m_editor->metaForLine(0);
@@ -902,7 +902,7 @@ private slots:
 
         // Set CommandRow text with ADDR value (simulates controller)
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u203A 0xD87B5E5000"));
+            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000"));
 
         // Begin base address edit on line 0 (CommandRow ADDR field)
         bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
@@ -978,7 +978,7 @@ private slots:
         m_editor->applyDocument(m_result);
         QApplication::processEvents();
 
-        // Root header (line 2) has fold suppressed; find a nested struct with foldHead
+        // Root header is suppressed; find a nested struct with foldHead
         int foldLine = -1;
         for (int i = 0; i < m_result.meta.size(); i++) {
             if (m_result.meta[i].foldHead && m_result.meta[i].lineKind == LineKind::Header) {
@@ -1033,57 +1033,54 @@ private slots:
         QVERIFY(!m_editor->isEditing());
     }
 
-    // ── Test: CommandRow2 exists at kCommandRow2Line ──
-    void testCommandRow2Exists() {
+    // ── Test: CommandRow root class edits on line 0 ──
+    void testCommandRowRootClassEdits() {
         m_editor->applyDocument(m_result);
 
-        // kCommandRow2Line should be CommandRow2
-        const LineMeta* lm = m_editor->metaForLine(kCommandRow2Line);
-        QVERIFY(lm);
-        QCOMPARE(lm->lineKind, LineKind::CommandRow2);
-        QCOMPARE(lm->nodeId, kCommandRow2Id);
-        QCOMPARE(lm->nodeIdx, -1);
+        // Set CommandRow text with root class (simulates controller.updateCommandRow)
+        m_editor->setCommandRowText(
+            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000 \u00B7 struct\u25BE _PEB64 {"));
 
-        // Type/Name/Value should be rejected on CommandRow2
-        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Type, kCommandRow2Line));
-        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Name, kCommandRow2Line));
-        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Value, kCommandRow2Line));
-        QVERIFY(!m_editor->isEditing());
+        // RootClassName should be allowed on CommandRow (line 0)
+        bool ok = m_editor->beginInlineEdit(EditTarget::RootClassName, 0);
+        QVERIFY2(ok, "RootClassName edit should be allowed on CommandRow");
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
 
-        // RootClassName should be allowed on CommandRow2
-        m_editor->setCommandRow2Text(QStringLiteral("struct\u25BE _PEB64"));
-        bool ok = m_editor->beginInlineEdit(EditTarget::RootClassName, kCommandRow2Line);
-        QVERIFY2(ok, "RootClassName edit should be allowed on CommandRow2");
+        // RootClassType should be allowed on CommandRow (line 0)
+        ok = m_editor->beginInlineEdit(EditTarget::RootClassType, 0);
+        QVERIFY2(ok, "RootClassType edit should be allowed on CommandRow");
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();
     }
 
-    // ── Test: CommandRow2 has class type and name but no alignas ──
-    void testCommandRow2NoAlignas() {
+    // ── Test: CommandRow root class name editable ──
+    void testCommandRowRootClassName() {
         m_editor->applyDocument(m_result);
 
-        // Set CommandRow2 without alignas
-        m_editor->setCommandRow2Text(QStringLiteral("struct\u25BE _PEB64"));
+        // Set CommandRow with root class
+        m_editor->setCommandRowText(
+            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000 \u00B7 struct\u25BE _PEB64 {"));
 
-        // kCommandRow2Line is CommandRow2
-        const LineMeta* lm = m_editor->metaForLine(kCommandRow2Line);
+        // Line 0 is CommandRow
+        const LineMeta* lm = m_editor->metaForLine(0);
         QVERIFY(lm);
-        QCOMPARE(lm->lineKind, LineKind::CommandRow2);
+        QCOMPARE(lm->lineKind, LineKind::CommandRow);
 
         // RootClassName should work
-        QVERIFY(m_editor->beginInlineEdit(EditTarget::RootClassName, kCommandRow2Line));
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::RootClassName, 0));
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();
 
         m_editor->applyDocument(m_result);
     }
 
-    // ── Test: root header/footer are suppressed (CommandRow2 replaces them) ──
+    // ── Test: root header/footer are suppressed (CommandRow replaces them) ──
     void testRootFoldSuppressed() {
         m_editor->applyDocument(m_result);
 
         // Root struct header is completely suppressed from output.
-        // Line 0 = CommandRow, Line 1 = Blank, Line 2 = CommandRow2, Line 3 = first field.
+        // Line 0 = CommandRow, Line 1 = first field.
         const LineMeta* lm2 = m_editor->metaForLine(kFirstDataLine);
         QVERIFY(lm2);
         QCOMPARE(lm2->lineKind, LineKind::Field);

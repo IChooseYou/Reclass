@@ -24,12 +24,12 @@ static const QColor kFgMarginDim("#505050");
 
 static constexpr int IND_EDITABLE   = 8;
 static constexpr int IND_HEX_DIM    = 9;
-static constexpr int IND_BASE_ADDR  = 10;  // Green color for base address
+static constexpr int IND_BASE_ADDR  = 10;  // Default text color override for command row address
 static constexpr int IND_HOVER_SPAN = 11;  // Blue text on hover (link-like)
 static constexpr int IND_CMD_PILL   = 12;  // Rounded chip behind command row spans
 static constexpr int IND_DATA_CHANGED = 13; // Amber text for changed data values
 static constexpr int IND_CLASS_NAME   = 14; // Teal text for root class name
-static constexpr int IND_CLASS_ULINE  = 15; // Underline for root class name
+static constexpr int IND_HINT_GREEN   = 15; // Green text for hint/comment text
 
 static QString g_fontName = "Consolas";
 
@@ -148,11 +148,11 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HEX_DIM, QColor("#505050"));
 
-    // Base address indicator — green like comments
+    // Base address indicator — default text color to override lexer green on command row
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_BASE_ADDR, 17 /*INDIC_TEXTFORE*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_BASE_ADDR, QColor("#5a8248"));
+                         IND_BASE_ADDR, QColor("#d4d4d4"));
 
     // Hover span indicator — muted teal text (distinct from blue keywords)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
@@ -182,11 +182,11 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_CLASS_NAME, QColor("#4EC9B0"));
 
-    // Root class name underline
+    // Green text for hint/comment annotations
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
-                         IND_CLASS_ULINE, (long)0 /*INDIC_PLAIN*/);
+                         IND_HINT_GREEN, 17 /*INDIC_TEXTFORE*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_CLASS_ULINE, QColor(124, 180, 226));
+                         IND_HINT_GREEN, QColor("#5a8248"));
 
 }
 
@@ -394,9 +394,6 @@ void RcxEditor::applyMarkers(const QVector<LineMeta>& meta) {
         if (meta[i].lineKind == LineKind::CommandRow) {
             m_sci->markerAdd(i, M_CMD_ROW);
             continue;
-        }
-        if (meta[i].lineKind == LineKind::CommandRow2) {
-            continue;  // regular background (no special marker)
         }
         uint32_t mask = meta[i].markerMask;
         for (int m = M_CONT; m <= M_STRUCT_BG; m++) {
@@ -636,7 +633,11 @@ void RcxEditor::applyBaseAddressColoring(const QVector<LineMeta>& meta) {
     if (meta.isEmpty() || meta[0].lineKind != LineKind::CommandRow) return;
 
     clearIndicatorLine(IND_BASE_ADDR, 0);
-    // Address in command bar is not colored green (only field values get green)
+    // Override lexer's green number coloring on the address with default text color
+    QString t = getLineText(m_sci, 0);
+    ColumnSpan addr = commandRowAddrSpan(t);
+    if (addr.valid)
+        fillIndicatorCols(IND_BASE_ADDR, 0, addr.start, addr.end);
 }
 
 void RcxEditor::applyCommandRowPills() {
@@ -645,20 +646,10 @@ void RcxEditor::applyCommandRowPills() {
     constexpr int line = 0;
     QString t = getLineText(m_sci, line);
 
-    clearIndicatorLine(IND_CMD_PILL, line);
     clearIndicatorLine(IND_HEX_DIM, line);
+    clearIndicatorLine(IND_CLASS_NAME, line);
 
-    auto fillPadded = [&](ColumnSpan s) {
-        if (!s.valid) return;
-        int a = qMax(0, s.start - 1);
-        int b = qMin(t.size(), s.end + 1);
-        fillIndicatorCols(IND_CMD_PILL, line, a, b);
-    };
-
-    fillPadded(commandRowSrcSpan(t));
-    fillPadded(commandRowAddrSpan(t));
-
-    // Dim label text: source arrow/placeholder and ", address="
+    // Dim label text: source arrow/placeholder + its ▾ dropdown arrow
     ColumnSpan srcSpan = commandRowSrcSpan(t);
     if (srcSpan.valid) {
         int quotePos = t.indexOf('\'', srcSpan.start);
@@ -666,35 +657,37 @@ void RcxEditor::applyCommandRowPills() {
         while (kindEnd > srcSpan.start && t[kindEnd - 1].isSpace()) kindEnd--;
         if (kindEnd > srcSpan.start)
             fillIndicatorCols(IND_HEX_DIM, line, srcSpan.start, kindEnd);
+        // Dim the source ▾ dropdown arrow to match (like struct▾)
+        int srcDrop = t.indexOf(QChar(0x25BE));
+        int rootStart = commandRowRootStart(t);
+        if (srcDrop >= 0 && (rootStart < 0 || srcDrop < rootStart))
+            fillIndicatorCols(IND_HEX_DIM, line, srcDrop, srcDrop + 1);
     }
-    int addrTag = t.indexOf(QStringLiteral(" \u203A"));
-    if (addrTag >= 0)
-        fillIndicatorCols(IND_HEX_DIM, line, addrTag, addrTag + 3);
-
-    // Style CommandRow2 (line kCommandRow2Line) if present
-    if (m_meta.size() > kCommandRow2Line && m_meta[kCommandRow2Line].lineKind == LineKind::CommandRow2) {
-        int line2 = kCommandRow2Line;
-        QString t2 = getLineText(m_sci, line2);
-
-        clearIndicatorLine(IND_HEX_DIM, line2);
-        clearIndicatorLine(IND_CLASS_NAME, line2);
-        clearIndicatorLine(IND_CLASS_ULINE, line2);
-
-        ColumnSpan typeSpan = commandRow2TypeSpan(t2);
-        if (typeSpan.valid)
-            fillIndicatorCols(IND_HEX_DIM, line2, typeSpan.start, typeSpan.end);
-
-        ColumnSpan nameSpan = commandRow2NameSpan(t2);
-        if (nameSpan.valid) {
-            fillIndicatorCols(IND_CLASS_NAME, line2, nameSpan.start, nameSpan.end);
-        }
+    // Dim all " · " separators
+    int searchFrom = 0;
+    while (true) {
+        int tag = t.indexOf(QStringLiteral(" \u00B7"), searchFrom);
+        if (tag < 0) break;
+        fillIndicatorCols(IND_HEX_DIM, line, tag, tag + 3);
+        searchFrom = tag + 3;
     }
 
-    // Dim the dotted separator line
-    if (m_meta.size() > kBlankLine && m_meta[kBlankLine].lineKind == LineKind::Blank) {
-        QString sep = getLineText(m_sci, kBlankLine);
-        if (!sep.isEmpty())
-            fillIndicatorCols(IND_HEX_DIM, kBlankLine, 0, sep.size());
+    // Dim base address to match source/struct grey
+    ColumnSpan addrSpan = commandRowAddrSpan(t);
+    if (addrSpan.valid)
+        fillIndicatorCols(IND_HEX_DIM, line, addrSpan.start, addrSpan.end);
+
+    // Root class styling (type dim + class-name teal, no underline)
+    ColumnSpan rt = commandRowRootTypeSpan(t);
+    if (rt.valid) {
+        fillIndicatorCols(IND_HEX_DIM, line, rt.start, rt.end);
+        int drop = t.indexOf(QChar(0x25BE), rt.start);
+        if (drop >= 0)
+            fillIndicatorCols(IND_HEX_DIM, line, drop, qMin(drop + 2, t.size()));
+    }
+    ColumnSpan rn = commandRowRootNameSpan(t);
+    if (rn.valid) {
+        fillIndicatorCols(IND_CLASS_NAME, line, rn.start, rn.end);
     }
 }
 
@@ -841,26 +834,17 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     const LineMeta* lm = metaForLine(line);
     if (!lm) return false;
 
-    // CommandRow: BaseAddress (ADDR) and Source (SRC) editing
+    // CommandRow: Source / BaseAddress / Root class (type+name) editing
     if (lm->lineKind == LineKind::CommandRow) {
-        if (t != EditTarget::BaseAddress && t != EditTarget::Source) return false;
-        QString lineText = getLineText(m_sci, line);
-        ColumnSpan s = (t == EditTarget::Source)
-            ? commandRowSrcSpan(lineText)
-            : commandRowAddrSpan(lineText);
-        out = normalizeSpan(s, lineText, t, /*skipPrefixes=*/(t == EditTarget::BaseAddress));
-        if (lineTextOut) *lineTextOut = lineText;
-        return out.valid;
-    }
-
-    // CommandRow2: root class type and name
-    if (lm->lineKind == LineKind::CommandRow2) {
-        if (t != EditTarget::RootClassType && t != EditTarget::RootClassName) return false;
+        if (t != EditTarget::BaseAddress && t != EditTarget::Source
+            && t != EditTarget::RootClassType && t != EditTarget::RootClassName) return false;
         QString lineText = getLineText(m_sci, line);
         ColumnSpan s;
-        if (t == EditTarget::RootClassType)       s = commandRow2TypeSpan(lineText);
-        else                                       s = commandRow2NameSpan(lineText);
-        out = normalizeSpan(s, lineText, t, false);
+        if (t == EditTarget::Source)             s = commandRowSrcSpan(lineText);
+        else if (t == EditTarget::BaseAddress)   s = commandRowAddrSpan(lineText);
+        else if (t == EditTarget::RootClassType) s = commandRowRootTypeSpan(lineText);
+        else                                     s = commandRowRootNameSpan(lineText);
+        out = normalizeSpan(s, lineText, t, /*skipPrefixes=*/(t == EditTarget::BaseAddress));
         if (lineTextOut) *lineTextOut = lineText;
         return out.valid;
     }
@@ -974,21 +958,17 @@ static bool hitTestTarget(QsciScintilla* sci,
         return s.valid && col >= s.start && col < s.end;
     };
 
-    // CommandRow: SRC and ADDR fields are interactive
+    // CommandRow: interactive SRC/ADDR + root class (type+name)
     if (lm.lineKind == LineKind::CommandRow) {
         ColumnSpan ss = commandRowSrcSpan(lineText);
         if (inSpan(ss)) { outTarget = EditTarget::Source; outLine = line; return true; }
         ColumnSpan as = commandRowAddrSpan(lineText);
         if (inSpan(as)) { outTarget = EditTarget::BaseAddress; outLine = line; return true; }
-        return false;
-    }
 
-    // CommandRow2: root class type and name
-    if (lm.lineKind == LineKind::CommandRow2) {
-        ColumnSpan ts = commandRow2TypeSpan(lineText);
-        if (inSpan(ts)) { outTarget = EditTarget::RootClassType; outLine = line; return true; }
-        ColumnSpan ns = commandRow2NameSpan(lineText);
-        if (inSpan(ns)) { outTarget = EditTarget::RootClassName; outLine = line; return true; }
+        ColumnSpan rts = commandRowRootTypeSpan(lineText);
+        if (inSpan(rts)) { outTarget = EditTarget::RootClassType; outLine = line; return true; }
+        ColumnSpan rns = commandRowRootNameSpan(lineText);
+        if (inSpan(rns)) { outTarget = EditTarget::RootClassName; outLine = line; return true; }
         return false;
     }
 
@@ -1122,7 +1102,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 return true;
             }
             // CommandRow: try ADDR edit or consume
-            if (h.nodeId == kCommandRowId || h.nodeId == kCommandRow2Id) {
+            if (h.nodeId == kCommandRowId) {
                 int tLine; EditTarget t;
                 if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t))
                     beginInlineEdit(t, tLine);
@@ -1217,7 +1197,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_pendingClickNodeId = 0;   // cancel deferred selection change
             // Narrow selection to this node before editing
             auto h = hitTest(me->pos());
-            if (h.nodeId != 0 && h.nodeId != kCommandRowId && h.nodeId != kCommandRow2Id)
+            if (h.nodeId != 0 && h.nodeId != kCommandRowId)
                 emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
             return beginInlineEdit(t, line);
         }
@@ -1403,11 +1383,10 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
     m_sci->getCursorPosition(&line, &col);
     auto* lm = metaForLine(line);
     if (!lm) return false;
-    // Allow nodeIdx=-1 only for CommandRow/CommandRow2 editing
+    // Allow nodeIdx=-1 only for CommandRow editing (command bar)
     if (lm->nodeIdx < 0 && !(lm->lineKind == LineKind::CommandRow &&
-        (target == EditTarget::BaseAddress || target == EditTarget::Source))
-        && !(lm->lineKind == LineKind::CommandRow2 &&
-        (target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
+        (target == EditTarget::BaseAddress || target == EditTarget::Source
+         || target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
         return false;
     // Padding: reject value editing (display-only hex bytes)
     if (target == EditTarget::Value && lm->nodeKind == NodeKind::Padding)
@@ -1493,10 +1472,15 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
         m_sci->viewport()->setCursor(Qt::IBeamCursor);
     }
 
-    // Re-enable selection rendering for inline edit
+    // Re-enable selection rendering for inline edit (skip for picker-based targets)
+    bool isPicker = (target == EditTarget::Type || target == EditTarget::Source
+                     || target == EditTarget::ArrayElementType
+                     || target == EditTarget::PointerTarget
+                     || target == EditTarget::RootClassType);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELFORE, (long)0, (long)0);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELBACK, (long)1,
-                         QColor("#264f78"));
+    if (!isPicker)
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELBACK, (long)1,
+                             QColor("#264f78"));
 
     // Use correct UTF-8 position conversion (not lineStart + col!)
     m_editState.posStart = posFromCol(m_sci, line, norm.start);
@@ -1671,8 +1655,15 @@ void RcxEditor::showSourcePicker() {
     if (!m_editState.active || m_editState.target != EditTarget::Source)
         return;
     QMenu menu;
-    menu.addAction("File");
-    menu.addAction("Process");
+    QFont menuFont = editorFont();
+    int zoom = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
+    menuFont.setPointSize(menuFont.pointSize() + zoom);
+    menu.setFont(menuFont);
+    menu.setStyleSheet(QStringLiteral(
+        "QMenu { background: #252526; color: #d4d4d4; }"
+        "QMenu::item:selected { background: #232323; }"));
+    menu.addAction("file");
+    menu.addAction("process");
 
     // Saved sources below separator (with checkmarks)
     if (!m_savedSourceDisplay.isEmpty()) {
@@ -1795,18 +1786,13 @@ void RcxEditor::updatePointerTargetFilter() {
 void RcxEditor::paintEditableSpans(int line) {
     const LineMeta* lm = metaForLine(line);
     if (!lm) return;
-    // CommandRow: paint Source and BaseAddress spans
+    // CommandRow: paint Source/BaseAddress + root class (type+name) spans
     if (lm->lineKind == LineKind::CommandRow) {
         NormalizedSpan norm;
         if (resolvedSpanFor(line, EditTarget::Source, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
         if (resolvedSpanFor(line, EditTarget::BaseAddress, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
-        return;
-    }
-    // CommandRow2: paint RootClassType and RootClassName spans
-    if (lm->lineKind == LineKind::CommandRow2) {
-        NormalizedSpan norm;
         if (resolvedSpanFor(line, EditTarget::RootClassType, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
         if (resolvedSpanFor(line, EditTarget::RootClassName, norm))
@@ -1991,8 +1977,8 @@ void RcxEditor::setEditComment(const QString& comment) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
                          (uintptr_t)utf8.size(), utf8.constData());
 
-    // Apply green color to hint text (reuse IND_BASE_ADDR which is green)
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_BASE_ADDR);
+    // Apply green color to hint text
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HINT_GREEN);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, posA, posB - posA);
 
     m_updatingComment = false;
@@ -2052,42 +2038,6 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET, (uintptr_t)utf8.size(), utf8.constData());
 
     // Adjust saved cursor/anchor for length change in line 0
-    long delta = (long)utf8.size() - oldLen;
-    if (savedPos > end)    savedPos    += delta;
-    if (savedAnchor > end) savedAnchor += delta;
-
-    if (wasReadOnly) m_sci->setReadOnly(true);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, 1);
-    if (!wasModified) m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETCURRENTPOS, savedPos);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETANCHOR, savedAnchor);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, start, start + utf8.size());
-    applyCommandRowPills();
-}
-
-void RcxEditor::setCommandRow2Text(const QString& line) {
-    if (m_sci->lines() <= kCommandRow2Line) return;
-    QString s = line;
-    s.replace('\n', ' ');
-    s.replace('\r', ' ');
-
-    bool wasReadOnly = m_sci->isReadOnly();
-    bool wasModified = m_sci->SendScintilla(QsciScintillaBase::SCI_GETMODIFY);
-    long savedPos    = m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS);
-    long savedAnchor = m_sci->SendScintilla(QsciScintillaBase::SCI_GETANCHOR);
-
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, 0);
-    m_sci->setReadOnly(false);
-
-    long start = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, kCommandRow2Line);
-    long end   = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION, kCommandRow2Line);
-    long oldLen = end - start;
-    QByteArray utf8 = s.toUtf8();
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, start);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, end);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET, (uintptr_t)utf8.size(), utf8.constData());
-
-    // Adjust saved cursor/anchor for length change in CommandRow2 line
     long delta = (long)utf8.size() - oldLen;
     if (savedPos > end)    savedPos    += delta;
     if (savedAnchor > end) savedAnchor += delta;
