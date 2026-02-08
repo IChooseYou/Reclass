@@ -22,6 +22,7 @@ class ProcessPicker : public QDialog
 
 public:
     explicit ProcessPicker(QWidget *parent = nullptr);
+    explicit ProcessPicker(const QList<ProcessInfo>& customProcesses, QWidget *parent = nullptr);
     ~ProcessPicker();
 
     uint32_t selectedProcessId() const;
@@ -41,6 +42,7 @@ private:
     uint32_t m_selectedPid = 0;
     QString m_selectedName;
     QList<ProcessInfo> m_allProcesses;
+    bool m_useCustomList = false;
 };
 
 #endif // PROCESSPICKER_H

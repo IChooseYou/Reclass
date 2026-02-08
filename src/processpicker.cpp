@@ -16,6 +16,7 @@
 ProcessPicker::ProcessPicker(QWidget *parent)
     : QDialog(parent)
     , ui(new Ui::ProcessPicker)
+    , m_useCustomList(false)
 {
     ui->setupUi(this);
     
@@ -34,6 +35,31 @@ ProcessPicker::ProcessPicker(QWidget *parent)
     
     // Initial process enumeration
     refreshProcessList();
+}
+
+ProcessPicker::ProcessPicker(const QList<ProcessInfo>& customProcesses, QWidget *parent)
+    : QDialog(parent)
+    , ui(new Ui::ProcessPicker)
+    , m_useCustomList(true)
+{
+    ui->setupUi(this);
+    
+    // Configure table
+    ui->processTable->setColumnWidth(0, 80);
+    ui->processTable->setColumnWidth(1, 200);
+    ui->processTable->horizontalHeader()->setStretchLastSection(true);
+    ui->processTable->setWordWrap(false);
+    ui->processTable->setTextElideMode(Qt::ElideLeft);
+    
+    // Connect signals (no refresh button for custom lists)
+    ui->refreshButton->setVisible(false);
+    connect(ui->processTable, &QTableWidget::itemDoubleClicked, this, &ProcessPicker::onProcessSelected);
+    connect(ui->filterEdit, &QLineEdit::textChanged, this, &ProcessPicker::filterProcesses);
+    connect(ui->attachButton, &QPushButton::clicked, this, &ProcessPicker::onProcessSelected);
+    
+    // Use custom process list
+    m_allProcesses = customProcesses;
+    applyFilter();
 }
 
 ProcessPicker::~ProcessPicker()

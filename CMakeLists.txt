@@ -29,6 +29,10 @@ add_executable(ReclassX
     src/core.h
     src/workspace_model.h
     src/providers/buffer_provider.h src/providers/null_provider.h src/providers/process_provider.h src/providers/provider.h src/providers/snapshot_provider.h
+    src/providerregistry.cpp
+    src/providerregistry.h
+    src/pluginmanager.cpp
+    src/pluginmanager.h
 )
 
 target_include_directories(ReclassX PRIVATE src)
@@ -105,7 +109,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_compose PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME test_compose COMMAND test_compose)
 
-    add_executable(test_editor tests/test_editor.cpp src/editor.cpp src/compose.cpp src/format.cpp)
+    add_executable(test_editor tests/test_editor.cpp src/editor.cpp src/compose.cpp src/format.cpp src/providerregistry.cpp)
     target_include_directories(test_editor PRIVATE src)
     target_link_libraries(test_editor PRIVATE
         Qt6::Widgets Qt6::PrintSupport Qt6::Test
@@ -132,7 +136,7 @@ if(BUILD_TESTING)
 
     add_executable(test_controller tests/test_controller.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/controller.cpp
-        src/processpicker.cpp src/processpicker.ui)
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp)
     target_include_directories(test_controller PRIVATE src)
     target_link_libraries(test_controller PRIVATE
         Qt6::Widgets Qt6::PrintSupport Qt6::Concurrent Qt6::Test
@@ -141,7 +145,7 @@ if(BUILD_TESTING)
 
     add_executable(test_validation tests/test_validation.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/controller.cpp
-        src/processpicker.cpp src/processpicker.ui)
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp)
     target_include_directories(test_validation PRIVATE src)
     target_link_libraries(test_validation PRIVATE
         Qt6::Widgets Qt6::PrintSupport Qt6::Concurrent Qt6::Test
@@ -156,7 +160,7 @@ if(BUILD_TESTING)
 
     add_executable(test_context_menu tests/test_context_menu.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/controller.cpp
-        src/processpicker.cpp src/processpicker.ui)
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp)
     target_include_directories(test_context_menu PRIVATE src)
     target_link_libraries(test_context_menu PRIVATE
         Qt6::Widgets Qt6::PrintSupport Qt6::Concurrent Qt6::Test
@@ -165,10 +169,11 @@ if(BUILD_TESTING)
 
     add_executable(test_new_features tests/test_new_features.cpp
         src/generator.cpp src/compose.cpp src/format.cpp src/controller.cpp
-        src/editor.cpp src/processpicker.cpp src/processpicker.ui)
+        src/editor.cpp src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp)
     target_include_directories(test_new_features PRIVATE src)
     target_link_libraries(test_new_features PRIVATE
         Qt6::Widgets Qt6::PrintSupport Qt6::Concurrent Qt6::Test
         QScintilla::QScintilla dbghelp psapi)
     add_test(NAME test_new_features COMMAND test_new_features)
 endif()
+add_subdirectory(plugins/ProcessMemory)

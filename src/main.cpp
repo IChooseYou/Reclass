@@ -1,5 +1,6 @@
 #include "controller.h"
 #include "generator.h"
+#include "pluginmanager.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QMdiArea>
@@ -27,6 +28,8 @@
 #include <QDockWidget>
 #include <QTreeView>
 #include <QStandardItemModel>
+#include <QListWidget>
+#include <QPushButton>
 #include "workspace_model.h"
 #include <QTableWidget>
 #include <QHeaderView>
@@ -152,6 +155,7 @@ private:
 
     QMdiArea* m_mdiArea;
     QLabel*   m_statusLabel;
+    PluginManager m_pluginManager;
 
     struct TabState {
         RcxDocument*              doc;
@@ -170,6 +174,7 @@ private:
 
     void createMenus();
     void createStatusBar();
+    void showPluginsDialog();
     QIcon makeIcon(const QString& svgPath);
 
     RcxController* activeController() const;
@@ -204,6 +209,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createWorkspaceDock();
     createMenus();
     createStatusBar();
+
+    // Load plugins
+    m_pluginManager.LoadPlugins();
 
     connect(m_mdiArea, &QMdiArea::subWindowActivated,
             this, [this](QMdiSubWindow*) {
@@ -289,6 +297,10 @@ void MainWindow::createMenus() {
     node->addAction(makeIcon(":/vsicons/symbol-structure.svg"), "Change &Type", QKeySequence(Qt::Key_T), this, &MainWindow::changeNodeType);
     node->addAction(makeIcon(":/vsicons/edit.svg"), "Re&name", QKeySequence(Qt::Key_F2), this, &MainWindow::renameNodeAction);
     node->addAction(makeIcon(":/vsicons/files.svg"), "D&uplicate", this, &MainWindow::duplicateNodeAction)->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
+
+    // Plugins
+    auto* plugins = menuBar()->addMenu("&Plugins");
+    plugins->addAction("&Manage Plugins...", this, &MainWindow::showPluginsDialog);
 
     // Help
     auto* help = menuBar()->addMenu("&Help");
@@ -1012,6 +1024,106 @@ void MainWindow::rebuildWorkspaceModel() {
     buildWorkspaceModel(m_workspaceModel, tab.doc->tree, tabName,
                         static_cast<void*>(sub));
     m_workspaceTree->expandAll();
+}
+
+void MainWindow::showPluginsDialog() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Plugins");
+    dialog.resize(600, 400);
+
+    auto* layout = new QVBoxLayout(&dialog);
+
+    auto* list = new QListWidget();
+    layout->addWidget(list);
+
+    auto refreshList = [&]() {
+        list->clear();
+
+        // Populate plugin list
+        for (IPlugin* plugin : m_pluginManager.plugins()) {
+            QString typeStr;
+            switch (plugin->Type())
+            {
+            case IPlugin::ProviderPlugin: typeStr = "Provider"; break;
+            default: typeStr = "Unknown"; break;
+            }
+
+            QString text = QString("%1 v%2\n  %3\n  Type: %4\n  Author: %5")
+                               .arg(QString::fromStdString(plugin->Name()))
+                               .arg(QString::fromStdString(plugin->Version()))
+                               .arg(QString::fromStdString(plugin->Description()))
+                               .arg(typeStr)
+                               .arg(QString::fromStdString(plugin->Author()));
+
+            auto* item = new QListWidgetItem(plugin->Icon(), text);
+            item->setData(Qt::UserRole, QString::fromStdString(plugin->Name()));
+            list->addItem(item);
+        }
+
+        if (m_pluginManager.plugins().isEmpty()) {
+            list->addItem("No plugins loaded");
+        }
+    };
+
+    refreshList();
+
+    // Button row
+    auto* btnLayout = new QHBoxLayout();
+
+    auto* btnLoad = new QPushButton("Load Plugin...");
+    connect(btnLoad, &QPushButton::clicked, [&, refreshList]() {
+        QString path = QFileDialog::getOpenFileName(&dialog, "Load Plugin",
+                                                    QCoreApplication::applicationDirPath() + "/Plugins",
+                                                    "Plugins (*.dll *.so *.dylib);;All Files (*)");
+
+        if (!path.isEmpty()) {
+            if (m_pluginManager.LoadPluginFromPath(path)) {
+                refreshList();
+                m_statusLabel->setText("Plugin loaded successfully");
+            } else {
+                QMessageBox::warning(&dialog, "Failed to Load Plugin",
+                                     "Could not load the selected plugin.\nCheck the console for details.");
+            }
+        }
+    });
+
+    auto* btnUnload = new QPushButton("Unload Selected");
+    connect(btnUnload, &QPushButton::clicked, [&, list, refreshList]() {
+        auto* item = list->currentItem();
+        if (!item) {
+            QMessageBox::information(&dialog, "No Selection", "Please select a plugin to unload.");
+            return;
+        }
+
+        QString pluginName = item->data(Qt::UserRole).toString();
+        if (pluginName.isEmpty()) return;
+
+        auto reply = QMessageBox::question(&dialog, "Unload Plugin",
+                                           QString("Are you sure you want to unload '%1'?").arg(pluginName),
+                                           QMessageBox::Yes | QMessageBox::No);
+
+        if (reply == QMessageBox::Yes) {
+            if (m_pluginManager.UnloadPlugin(pluginName)) {
+                refreshList();
+                m_statusLabel->setText("Plugin unloaded");
+            } else {
+                QMessageBox::warning(&dialog, "Failed to Unload",
+                                     "Could not unload the selected plugin.");
+            }
+        }
+    });
+
+    auto* btnClose = new QPushButton("Close");
+    connect(btnClose, &QPushButton::clicked, &dialog, &QDialog::accept);
+
+    btnLayout->addWidget(btnLoad);
+    btnLayout->addWidget(btnUnload);
+    btnLayout->addStretch();
+    btnLayout->addWidget(btnClose);
+
+    layout->addLayout(btnLayout);
+
+    dialog.exec();
 }
 
 } // namespace rcx

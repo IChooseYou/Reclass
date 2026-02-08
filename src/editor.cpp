@@ -1,4 +1,5 @@
 #include "editor.h"
+#include "providerregistry.h"
 #include <QDebug>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
@@ -1664,6 +1665,11 @@ void RcxEditor::showSourcePicker() {
         "QMenu::item:selected { background: #232323; }"));
     menu.addAction("file");
     menu.addAction("process");
+
+    // Add all registered providers from global registry
+    const auto& providers = ProviderRegistry::instance().providers();
+    for (const auto& provider : providers)
+        menu.addAction(provider.name);
 
     // Saved sources below separator (with checkmarks)
     if (!m_savedSourceDisplay.isEmpty()) {

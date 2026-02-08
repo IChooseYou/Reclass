@@ -1,5 +1,6 @@
 #include "controller.h"
 #include "providers/process_provider.h"
+#include "providerregistry.h"
 #include "processpicker.h"
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
@@ -404,6 +405,51 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     refresh();
                 }
 #endif
+            }
+            else
+            {
+                // Look up provider in registry
+                const auto* providerInfo = ProviderRegistry::instance().findProvider(text.toLower().replace(" ", ""));
+
+                if (providerInfo) {
+                    QString target;
+                    bool selected = false;
+
+                    // Execute provider's target selection
+                    if (providerInfo->isBuiltin) {
+                        // Built-in provider with factory function
+                        if (providerInfo->factory) {
+                            selected = providerInfo->factory(qobject_cast<QWidget*>(parent()), &target);
+                        }
+                    } else {
+                        // Plugin-based provider
+                        if (providerInfo->plugin) {
+                            selected = providerInfo->plugin->selectTarget(qobject_cast<QWidget*>(parent()), &target);
+                        }
+                    }
+
+                    if (selected && !target.isEmpty()) {
+                        // Create provider from target
+                        std::unique_ptr<Provider> provider;
+                        QString errorMsg;
+
+                        if (providerInfo->plugin)
+                        {
+                            provider = providerInfo->plugin->createProvider(target, &errorMsg);
+                        }
+
+                        // Apply provider or show error
+                        if (provider) {
+                            m_doc->undoStack.clear();
+                            m_doc->provider = std::move(provider);
+                            m_doc->dataPath.clear();
+                            emit m_doc->documentChanged();
+                            refresh();
+                        } else if (!errorMsg.isEmpty()) {
+                            QMessageBox::warning(qobject_cast<QWidget*>(parent()), "Provider Error", errorMsg);
+                        }
+                    }
+                }
             }
             break;
         }
