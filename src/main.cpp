@@ -348,6 +348,7 @@ void MainWindow::createMenus() {
 
 void MainWindow::createStatusBar() {
     m_statusLabel = new QLabel("Ready");
+    m_statusLabel->setContentsMargins(10, 0, 0, 0);
     statusBar()->addWidget(m_statusLabel, 1);
     statusBar()->setStyleSheet("QStatusBar { background: #252526; color: #858585; }");
 
