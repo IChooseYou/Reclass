@@ -131,10 +131,17 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
 
         row->addStretch();
 
-        m_escLabel = new QLabel(QStringLiteral("Esc"));
-        QPalette dimPal = pal;
-        dimPal.setColor(QPalette::WindowText, theme.textDim);
-        m_escLabel->setPalette(dimPal);
+        m_escLabel = new QToolButton;
+        m_escLabel->setText(QStringLiteral("\u2715 Esc"));
+        m_escLabel->setAutoRaise(true);
+        m_escLabel->setCursor(Qt::PointingHandCursor);
+        m_escLabel->setStyleSheet(QStringLiteral(
+            "QToolButton { color: %1; border: none; padding: 2px 6px; }"
+            "QToolButton:hover { color: %2; }")
+            .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+        connect(m_escLabel, &QToolButton::clicked, this, [this]() {
+            hide();
+        });
         row->addWidget(m_escLabel);
 
         layout->addLayout(row);
@@ -144,8 +151,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     {
         m_createBtn = new QToolButton;
         m_createBtn->setText(QStringLiteral("+ Create new type\u2026"));
-        m_createBtn->setIcon(QIcon(QStringLiteral(":/vsicons/add.svg")));
-        m_createBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        m_createBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
         m_createBtn->setAutoRaise(true);
         m_createBtn->setCursor(Qt::PointingHandCursor);
         m_createBtn->setPalette(pal);

@@ -7,7 +7,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport Svg Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport Svg Concurrent Network)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 find_package(QScintilla REQUIRED)
@@ -41,6 +41,9 @@ add_executable(ReclassX
     src/themes/thememanager.cpp
     src/themes/themeeditor.h
     src/themes/themeeditor.cpp
+    src/mainwindow.h
+    src/mcp/mcp_bridge.h
+    src/mcp/mcp_bridge.cpp
 )
 
 target_include_directories(ReclassX PRIVATE src)
@@ -50,11 +53,15 @@ target_link_libraries(ReclassX PRIVATE
     Qt6::PrintSupport
     Qt6::Svg
     Qt6::Concurrent
+    Qt6::Network
     QScintilla::QScintilla
 )
 if(WIN32)
     target_link_libraries(ReclassX PRIVATE dbghelp psapi)
 endif()
+
+add_executable(rcx-mcp-stdio tools/rcx-mcp-stdio.cpp)
+target_link_libraries(rcx-mcp-stdio PRIVATE Qt6::Core Qt6::Network)
 
 add_custom_target(screenshot ALL
     COMMAND ReclassX --screenshot ${CMAKE_BINARY_DIR}/screenshot.png

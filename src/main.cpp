@@ -1,6 +1,6 @@
-#include "controller.h"
+#include "mainwindow.h"
 #include "generator.h"
-#include "pluginmanager.h"
+#include "mcp/mcp_bridge.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QMdiArea>
@@ -170,98 +170,7 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
 
 namespace rcx {
 
-class MainWindow : public QMainWindow {
-    Q_OBJECT
-public:
-    explicit MainWindow(QWidget* parent = nullptr);
-
-private slots:
-    void newFile();
-    void newDocument();
-    void selfTest();
-    void openFile();
-    void saveFile();
-    void saveFileAs();
-
-
-    void addNode();
-    void removeNode();
-    void changeNodeType();
-    void renameNodeAction();
-    void duplicateNodeAction();
-    void splitView();
-    void unsplitView();
-
-    void undo();
-    void redo();
-    void about();
-    void setEditorFont(const QString& fontName);
-    void exportCpp();
-    void showTypeAliasesDialog();
-    void editTheme();
-
-public:
-    // Project Lifecycle API
-    QMdiSubWindow* project_new();
-    QMdiSubWindow* project_open(const QString& path = {});
-    bool project_save(QMdiSubWindow* sub = nullptr, bool saveAs = false);
-    void project_close(QMdiSubWindow* sub = nullptr);
-
-private:
-    enum ViewMode { VM_Reclass, VM_Rendered };
-
-    QMdiArea* m_mdiArea;
-    QLabel*   m_statusLabel;
-    PluginManager m_pluginManager;
-
-    struct SplitPane {
-        QTabWidget*    tabWidget = nullptr;
-        RcxEditor*     editor    = nullptr;
-        QsciScintilla* rendered  = nullptr;
-        ViewMode       viewMode  = VM_Reclass;
-        uint64_t       lastRenderedRootId = 0;
-    };
-
-    struct TabState {
-        RcxDocument*       doc;
-        RcxController*     ctrl;
-        QSplitter*         splitter;
-        QVector<SplitPane> panes;
-        int                activePaneIdx = 0;
-    };
-    QMap<QMdiSubWindow*, TabState> m_tabs;
-
-
-    void createMenus();
-    void createStatusBar();
-    void showPluginsDialog();
-    QIcon makeIcon(const QString& svgPath);
-
-    RcxController* activeController() const;
-    TabState* activeTab();
-    QMdiSubWindow* createTab(RcxDocument* doc);
-    void updateWindowTitle();
-
-    void setViewMode(ViewMode mode);
-    void updateRenderedView(TabState& tab, SplitPane& pane);
-    void updateAllRenderedPanes(TabState& tab);
-    uint64_t findRootStructForNode(const NodeTree& tree, uint64_t nodeId) const;
-    void setupRenderedSci(QsciScintilla* sci);
-
-    SplitPane createSplitPane(TabState& tab);
-    void applyTheme(const Theme& theme);
-    void applyTabWidgetStyle(QTabWidget* tw);
-    SplitPane* findPaneByTabWidget(QTabWidget* tw);
-    SplitPane* findActiveSplitPane();
-    RcxEditor* activePaneEditor();
-
-    // Workspace dock
-    QDockWidget*        m_workspaceDock  = nullptr;
-    QTreeView*          m_workspaceTree  = nullptr;
-    QStandardItemModel* m_workspaceModel = nullptr;
-    void createWorkspaceDock();
-    void rebuildWorkspaceModel();
-};
+// MainWindow class declaration is in mainwindow.h
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Reclass");
@@ -300,6 +209,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Load plugins
     m_pluginManager.LoadPlugins();
 
+    // MCP bridge (stopped by default — user starts via File → Start MCP)
+    m_mcp = new McpBridge(this, this);
+
     connect(m_mdiArea, &QMdiArea::subWindowActivated,
             this, [this](QMdiSubWindow*) {
         updateWindowTitle();
@@ -335,6 +247,8 @@ void MainWindow::createMenus() {
     file->addAction(makeIcon(":/vsicons/save-as.svg"), "Save &As...", QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
     file->addSeparator();
     file->addAction(makeIcon(":/vsicons/export.svg"), "Export &C++ Header...", this, &MainWindow::exportCpp);
+    file->addSeparator();
+    m_mcpAction = file->addAction("Start &MCP Server", this, &MainWindow::toggleMcp);
     file->addSeparator();
     file->addAction(makeIcon(":/vsicons/close.svg"), "E&xit", QKeySequence(Qt::Key_Close), this, &QMainWindow::close);
 
@@ -839,6 +753,18 @@ void MainWindow::about() {
     dlg.exec();
 }
 
+void MainWindow::toggleMcp() {
+    if (m_mcp->isRunning()) {
+        m_mcp->stop();
+        m_mcpAction->setText("Start &MCP Server");
+        m_statusLabel->setText("MCP server stopped");
+    } else {
+        m_mcp->start();
+        m_mcpAction->setText("Stop &MCP Server");
+        m_statusLabel->setText("MCP server listening on pipe: rcx-mcp");
+    }
+}
+
 void MainWindow::applyTheme(const Theme& theme) {
     applyGlobalTheme(theme);
 
@@ -918,6 +844,15 @@ RcxController* MainWindow::activeController() const {
 MainWindow::TabState* MainWindow::activeTab() {
     auto* sub = m_mdiArea->activeSubWindow();
     if (sub && m_tabs.contains(sub))
+        return &m_tabs[sub];
+    return nullptr;
+}
+
+MainWindow::TabState* MainWindow::tabByIndex(int index) {
+    auto subs = m_mdiArea->subWindowList();
+    if (index < 0 || index >= subs.size()) return nullptr;
+    auto* sub = subs[index];
+    if (m_tabs.contains(sub))
         return &m_tabs[sub];
     return nullptr;
 }
@@ -1465,4 +1400,4 @@ int main(int argc, char* argv[]) {
     return app.exec();
 }
 
-#include "main.moc"
+// MainWindow Q_OBJECT is now in mainwindow.h; AUTOMOC handles moc generation.

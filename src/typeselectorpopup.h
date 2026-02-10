@@ -39,7 +39,7 @@ protected:
 
 private:
     QLabel*           m_titleLabel   = nullptr;
-    QLabel*           m_escLabel     = nullptr;
+    QToolButton*      m_escLabel     = nullptr;
     QToolButton*      m_createBtn    = nullptr;
     QLineEdit*        m_filterEdit   = nullptr;
     QListView*        m_listView     = nullptr;

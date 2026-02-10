@@ -110,6 +110,12 @@ public:
     RcxDocument* document() const { return m_doc; }
     void setEditorFont(const QString& fontName);
 
+    // MCP bridge accessors
+    void setSuppressRefresh(bool v) { m_suppressRefresh = v; }
+    const QVector<SavedSourceEntry>& savedSources() const { return m_savedSources; }
+    int activeSourceIndex() const { return m_activeSourceIdx; }
+    void switchSource(int idx) { switchToSavedSource(idx); }
+
 signals:
     void nodeSelected(int nodeIdx);
     void selectionChanged(int count);
