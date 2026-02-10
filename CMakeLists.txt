@@ -74,7 +74,7 @@ target_link_libraries(ReclassX PRIVATE
     ${_QT_WINEXTRAS}
 )
 if(WIN32)
-    target_link_libraries(ReclassX PRIVATE dbghelp psapi)
+    target_link_libraries(ReclassX PRIVATE dbghelp dwmapi psapi)
 endif()
 
 add_executable(rcx-mcp-stdio tools/rcx-mcp-stdio.cpp)

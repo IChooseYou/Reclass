@@ -46,8 +46,21 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <dwmapi.h>
 #include <dbghelp.h>
 #include <cstdio>
+
+static void setDarkTitleBar(QWidget* widget) {
+    // Requires Windows 10 1809+ (build 17763)
+    auto hwnd = reinterpret_cast<HWND>(widget->winId());
+    BOOL dark = TRUE;
+    // Attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (build 18985+), 19 for older
+    DWORD attr = 20;
+    if (FAILED(DwmSetWindowAttribute(hwnd, attr, &dark, sizeof(dark)))) {
+        attr = 19;
+        DwmSetWindowAttribute(hwnd, attr, &dark, sizeof(dark));
+    }
+}
 
 static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
     fprintf(stderr, "\n=== UNHANDLED EXCEPTION ===\n");
@@ -117,6 +130,22 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif
+
+class DarkApp : public QApplication {
+public:
+    using QApplication::QApplication;
+    bool notify(QObject* receiver, QEvent* event) override {
+        if (event->type() == QEvent::WindowActivate && receiver->isWidgetType()) {
+            auto* w = static_cast<QWidget*>(receiver);
+            if ((w->windowFlags() & Qt::Window) == Qt::Window
+                && !w->property("DarkTitleBar").toBool()) {
+                w->setProperty("DarkTitleBar", true);
+                setDarkTitleBar(w);
+            }
+        }
+        return QApplication::notify(receiver, event);
+    }
+};
 
 class MenuBarStyle : public QProxyStyle {
 public:
@@ -1359,7 +1388,7 @@ int main(int argc, char* argv[]) {
     SetUnhandledExceptionFilter(crashHandler);
 #endif
 
-    QApplication app(argc, argv);
+    DarkApp app(argc, argv);
     app.setApplicationName("ReclassX");
     app.setOrganizationName("ReclassX");
     app.setStyle("Fusion"); // Fusion style respects dark palette well
