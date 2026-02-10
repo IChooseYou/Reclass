@@ -7,6 +7,10 @@
 #include "typeselectorpopup.h"
 #include "core.h"
 
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+Q_DECLARE_METATYPE(uint64_t)
+#endif
+
 using namespace rcx;
 
 static void buildTwoRootTree(NodeTree& tree) {
@@ -44,6 +48,11 @@ class TestTypeSelector : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase() {
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+        qRegisterMetaType<uint64_t>("uint64_t");
+#endif
+    }
 
     // ── Chevron span detection ──
 
@@ -203,9 +212,9 @@ private slots:
         QCOMPARE(doc->tree.nodes[idx].parentId, (uint64_t)0);
         QCOMPARE(ctrl->viewRootId(), newId);
 
-        // Command row shows "<no name>"
-        QVERIFY2(sci->text(0).contains("<no name>"),
-                 qPrintable("Expected '<no name>' in command row, got: " + sci->text(0)));
+        // Command row shows "NoName" for empty-named struct
+        QVERIFY2(sci->text(0).contains("NoName"),
+                 qPrintable("Expected 'NoName' in command row, got: " + sci->text(0)));
 
         // -- Undo removes the new struct --
         doc->undoStack.undo();
