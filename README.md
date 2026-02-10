@@ -1,6 +1,5 @@
 This tool helps you inspect raw bytes and interpret those as (int, float, struct, array, etc.) instead of just hex. It supports ptrs/arrays so you can see the relationship between data. And help deduce paths to these classes from long pointer chains. Either modify the values inside the editor or export as .h to reuse these structures in your code.
 
-Video: https://github.com/IChooseYou/ReclassX/raw/main/video.mp4
 ![screenshot](screenshot.png)
 
 QScintilla (github: https://github.com/brCreate/QScintilla) happens to be a really nice fit for our project.
