@@ -507,7 +507,7 @@ enum class EditTarget { Name, Type, Value, BaseAddress, Source, ArrayIndex, Arra
 inline constexpr int kFoldCol     = 3;   // 3-char fold indicator prefix per line
 inline constexpr int kColType     = 14;  // Max type column width (fits "uint64_t[999]")
 inline constexpr int kColName     = 22;
-inline constexpr int kColValue    = 32;
+inline constexpr int kColValue    = 96;
 inline constexpr int kColComment  = 28;  // "// Enter=Save Esc=Cancel" fits
 inline constexpr int kColBaseAddr = 12;  // "0x" + up to 10 hex digits (40-bit address)
 inline constexpr int kSepWidth    = 1;

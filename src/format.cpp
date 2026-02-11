@@ -337,9 +337,9 @@ QString fmtNodeLine(const Node& node, const Provider& prov,
     QString cmtSuffix = comment.isEmpty() ? QString()
                                           : fit(comment, COL_COMMENT);
 
-    // Mat4x4: subLine 0..3 = rows
+    // Mat4x4: subLine 0..3 = rows — no truncation so large floats always display fully
     if (node.kind == NodeKind::Mat4x4) {
-        QString val = fit(readValue(node, prov, addr, subLine), COL_VALUE);
+        QString val = readValue(node, prov, addr, subLine);
         if (subLine == 0) return ind + type + SEP + name + SEP + val + cmtSuffix;
         return ind + QString(prefixW, ' ') + val + cmtSuffix;
     }

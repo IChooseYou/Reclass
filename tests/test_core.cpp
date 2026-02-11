@@ -336,7 +336,7 @@ private slots:
         auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
         QCOMPARE(vs.start, 44); // 21 + 22 + 1 (kSepWidth)
-        QCOMPARE(vs.end, 76);   // 44 + 32 (kColValue)
+        QCOMPARE(vs.end, 44 + rcx::kColValue);
     }
 
     void testColumnSpan_continuation() {
@@ -352,7 +352,7 @@ private slots:
         auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
         QCOMPARE(vs.start, 6 + 14 + 22 + 2);  // kFoldCol+indent + kColType(14) + kColName(22) + 2*kSepWidth
-        QCOMPARE(vs.end, 44 + 32);   // start + kColValue
+        QCOMPARE(vs.end, 44 + rcx::kColValue);
     }
 
     void testColumnSpan_headerFooter() {
@@ -392,7 +392,7 @@ private slots:
         auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
         QCOMPARE(vs.start, 41); // 18 + 22 + 1 (kSepWidth)
-        QCOMPARE(vs.end, 73);   // 41 + 32 (kColValue)
+        QCOMPARE(vs.end, 41 + rcx::kColValue);   // start + kColValue
     }
 
     void testNodeIdJsonRoundTrip() {
