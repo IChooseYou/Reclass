@@ -993,7 +993,7 @@ RcxEditor::HitInfo RcxEditor::hitTest(const QPoint& vp) const {
 static bool hitTestTarget(QsciScintilla* sci,
                           const QVector<LineMeta>& meta,
                           const QPoint& viewportPos,
-                          int& outLine, EditTarget& outTarget)
+                          int& outLine, int& outCol, EditTarget& outTarget)
 {
     long pos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMPOINTCLOSE,
                                   (unsigned long)viewportPos.x(), (long)viewportPos.y());
@@ -1002,6 +1002,7 @@ static bool hitTestTarget(QsciScintilla* sci,
                                        (unsigned long)pos);
     int col  = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETCOLUMN,
                                        (unsigned long)pos);
+    outCol = col;
     if (line < 0 || line >= meta.size()) return false;
 
     QString lineText = getLineText(sci, line);
@@ -1183,12 +1184,12 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             }
             // CommandRow: try chevron/ADDR edit or consume
             if (h.nodeId == kCommandRowId) {
-                int tLine; EditTarget t;
-                if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t)) {
+                int tLine, tCol; EditTarget t;
+                if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                     if (t == EditTarget::TypeSelector)
                         emit typeSelectorRequested();
                     else
-                        beginInlineEdit(t, tLine);
+                        beginInlineEdit(t, tLine, tCol);
                 }
                 return true;  // consume all CommandRow clicks
             }
@@ -1197,11 +1198,11 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
                 // Single-click on editable token of already-selected node → edit
-                int tLine; EditTarget t;
-                if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, t)) {
+                int tLine, tCol; EditTarget t;
+                if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                     if (alreadySelected && plain) {
                         m_pendingClickNodeId = 0;
-                        return beginInlineEdit(t, tLine);
+                        return beginInlineEdit(t, tLine, tCol);
                     }
                 }
 
@@ -1276,14 +1277,14 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
     if (obj == m_sci->viewport() && !m_editState.active
         && event->type() == QEvent::MouseButtonDblClick) {
         auto* me = static_cast<QMouseEvent*>(event);
-        int line; EditTarget t;
-        if (hitTestTarget(m_sci, m_meta, me->pos(), line, t)) {
+        int line, tCol; EditTarget t;
+        if (hitTestTarget(m_sci, m_meta, me->pos(), line, tCol, t)) {
             m_pendingClickNodeId = 0;   // cancel deferred selection change
             // Narrow selection to this node before editing
             auto h = hitTest(me->pos());
             if (h.nodeId != 0 && h.nodeId != kCommandRowId)
                 emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
-            return beginInlineEdit(t, line);
+            return beginInlineEdit(t, line, tCol);
         }
         return true;  // consume even on miss (prevent QScintilla word-select)
     }
@@ -1469,14 +1470,14 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
 
 // ── Begin inline edit ──
 
-bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
+bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     if (target == EditTarget::TypeSelector) return false;  // handled by popup, not inline edit
 
     // Array element type and pointer target: handled by TypeSelectorPopup, not inline edit
     if (target == EditTarget::ArrayElementType || target == EditTarget::PointerTarget) {
         if (line < 0) {
-            int col;
-            m_sci->getCursorPosition(&line, &col);
+            int c;
+            m_sci->getCursorPosition(&line, &c);
         }
         auto* lm = metaForLine(line);
         if (!lm) return false;
@@ -1498,10 +1499,11 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
     m_hintLine = -1;
 
     if (line >= 0) {
-        m_sci->setCursorPosition(line, 0);
+        m_sci->setCursorPosition(line, col >= 0 ? col : 0);
     }
-    int col;
-    m_sci->getCursorPosition(&line, &col);
+    if (col < 0) {
+        m_sci->getCursorPosition(&line, &col);
+    }
     auto* lm = metaForLine(line);
     if (!lm) return false;
     // Allow nodeIdx=-1 only for CommandRow editing (command bar)
@@ -1522,28 +1524,23 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
 
     QString trimmed = lineText.mid(norm.start, norm.end - norm.start);
 
-    int vecComponent = 0;  // which vector component (0-3)
+    int vecComponent = 0;  // which vector/matrix component
 
-    // For vector value editing: narrow span to the clicked component
-    if (target == EditTarget::Value && isVectorKind(lm->nodeKind)) {
-        int cursorCol = col;  // col from getCursorPosition above
-        // Find comma positions within the value span to identify components
+    // Helper: parse comma-separated components, narrow span to clicked one
+    auto narrowToComponent = [&](const QString& inner, int innerAbsStart) {
         QVector<int> compStarts, compEnds;
-        int pos = 0;
-        for (int i = 0; i < trimmed.size(); i++) {
-            if (trimmed[i] == ',') {
+        for (int i = 0; i < inner.size(); i++) {
+            if (inner[i] == ',') {
                 compEnds.append(i);
-                // skip ", " separator
                 int next = i + 1;
-                while (next < trimmed.size() && trimmed[next] == ' ') next++;
+                while (next < inner.size() && inner[next] == ' ') next++;
                 compStarts.append(next);
             }
         }
         compStarts.prepend(0);
-        compEnds.append(trimmed.size());
+        compEnds.append(inner.size());
 
-        // Find which component the cursor is in
-        int relCol = cursorCol - norm.start;
+        int relCol = col - innerAbsStart;
         vecComponent = 0;
         for (int i = 0; i < compStarts.size(); i++) {
             if (relCol >= compStarts[i] && (i == compStarts.size() - 1 || relCol < compStarts[i + 1]))
@@ -1551,27 +1548,47 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line) {
         }
         if (vecComponent >= compStarts.size()) vecComponent = compStarts.size() - 1;
 
-        // Narrow span to just this component
-        int cStart = norm.start + compStarts[vecComponent];
-        int cEnd = norm.start + compEnds[vecComponent];
-        // Trim trailing spaces from component
+        int cStart = innerAbsStart + compStarts[vecComponent];
+        int cEnd = innerAbsStart + compEnds[vecComponent];
         while (cEnd > cStart && lineText[cEnd - 1] == ' ') cEnd--;
         norm.start = cStart;
         norm.end = cEnd;
         trimmed = lineText.mid(norm.start, norm.end - norm.start);
+    };
+
+    // For vector value editing: narrow span to the clicked component
+    if (target == EditTarget::Value && isVectorKind(lm->nodeKind)) {
+        narrowToComponent(trimmed, norm.start);
+    }
+
+    // For Mat4x4 value editing: skip "rowN [...]" and narrow to clicked component
+    if (target == EditTarget::Value && isMatrixKind(lm->nodeKind)) {
+        int bracketOpen = trimmed.indexOf('[');
+        int bracketClose = trimmed.lastIndexOf(']');
+        if (bracketOpen < 0 || bracketClose <= bracketOpen)
+            return false;
+        QString inner = trimmed.mid(bracketOpen + 1, bracketClose - bracketOpen - 1);
+        int innerAbsStart = norm.start + bracketOpen + 1;
+        narrowToComponent(inner, innerAbsStart);
     }
 
     m_editState.active = true;
     m_editState.line = line;
     m_editState.nodeIdx = lm->nodeIdx;
-    m_editState.subLine = isVectorKind(lm->nodeKind) ? vecComponent : lm->subLine;
+    m_editState.subLine = lm->subLine;
     m_editState.target = target;
     m_editState.spanStart = norm.start;
     m_editState.original = trimmed;
     m_editState.linelenAfterReplace = lineText.size();
     m_editState.editKind = lm->nodeKind;
-    if (isVectorKind(lm->nodeKind))
+    if (isVectorKind(lm->nodeKind)) {
+        m_editState.subLine = vecComponent;
         m_editState.editKind = NodeKind::Float;
+    }
+    if (isMatrixKind(lm->nodeKind)) {
+        m_editState.subLine = lm->subLine * 4 + vecComponent;  // flat index 0-15
+        m_editState.editKind = NodeKind::Float;
+    }
 
     // Store fixed comment column position for value editing
     // Use large lineLength so commentCol is always computed (padding added dynamically)
@@ -2040,8 +2057,8 @@ void RcxEditor::applyHoverCursor() {
     }
 
     auto h = hitTest(m_lastHoverPos);
-    int line; EditTarget t;
-    bool tokenHit = hitTestTarget(m_sci, m_meta, m_lastHoverPos, line, t);
+    int line, hCol; EditTarget t;
+    bool tokenHit = hitTestTarget(m_sci, m_meta, m_lastHoverPos, line, hCol, t);
 
     // Skip hover span on footer lines (nothing editable)
     int hoverLine = h.line;

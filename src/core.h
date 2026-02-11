@@ -134,6 +134,9 @@ inline constexpr bool isHexNode(NodeKind k) {
 inline constexpr bool isVectorKind(NodeKind k) {
     return k == NodeKind::Vec2 || k == NodeKind::Vec3 || k == NodeKind::Vec4;
 }
+inline constexpr bool isMatrixKind(NodeKind k) {
+    return k == NodeKind::Mat4x4;
+}
 
 inline QStringList allTypeNamesForUI(bool stripBrackets = false) {
     QStringList out;

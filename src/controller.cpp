@@ -919,6 +919,11 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
         addr += subLine * 4;
         editKind = NodeKind::Float;
     }
+    // For Mat4x4 components: subLine encodes flat index (row*4 + col), 0-15
+    if (node.kind == NodeKind::Mat4x4 && subLine >= 0 && subLine < 16) {
+        addr += subLine * 4;
+        editKind = NodeKind::Float;
+    }
 
     bool ok;
     QByteArray newBytes;
@@ -1068,7 +1073,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             menu.addSeparator();
 
         bool isEditable = node.kind != NodeKind::Struct && node.kind != NodeKind::Array
-                          && node.kind != NodeKind::Padding && node.kind != NodeKind::Mat4x4
+                          && node.kind != NodeKind::Padding
                           && m_doc->provider->isWritable();
         if (isEditable) {
             menu.addAction(icon("edit.svg"), "Edit &Value\tEnter", [editor, line]() {

@@ -41,7 +41,7 @@ public:
 
     // ── Inline editing ──
     bool isEditing() const { return m_editState.active; }
-    bool beginInlineEdit(EditTarget target, int line = -1);
+    bool beginInlineEdit(EditTarget target, int line = -1, int col = -1);
     void cancelInlineEdit();
 
     void applySelectionOverlay(const QSet<uint64_t>& selIds);

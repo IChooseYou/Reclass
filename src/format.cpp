@@ -1,4 +1,5 @@
 #include "core.h"
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -80,8 +81,24 @@ QString fmtUInt32(uint32_t v) { return hexVal(v); }
 QString fmtUInt64(uint64_t v) { return hexVal(v); }
 
 QString fmtFloat(float v) {
-    QString s = QString::number(v, 'g', 4);
-    if (!s.contains('.') && !s.contains('e') && !s.contains('E'))
+    if (std::isnan(v)) return QStringLiteral("NaN");
+    if (std::isinf(v)) return v > 0 ? QStringLiteral("inff") : QStringLiteral("-inff");
+
+    // 6 significant digits — covers full single-precision range
+    QString s = QString::number(v, 'g', 6);
+
+    // If 'g' chose scientific notation, reformat as plain decimal
+    if (s.contains('e') || s.contains('E')) {
+        s = QString::number(v, 'f', 8);
+        if (s.contains('.')) {
+            int i = s.size() - 1;
+            while (i > 0 && s[i] == '0') i--;
+            if (s[i] == '.') i++;  // keep at least one decimal digit
+            s.truncate(i + 1);
+        }
+    }
+
+    if (!s.contains('.'))
         s += QStringLiteral(".f");
     else
         s += QLatin1Char('f');
@@ -268,7 +285,7 @@ static QString readValueImpl(const Node& node, const Provider& prov,
     case NodeKind::Mat4x4: {
         if (!display) return {};  // not editable as single value
         if (subLine < 0 || subLine >= 4) return QStringLiteral("?");
-        QString line = QStringLiteral("[");
+        QString line = QStringLiteral("row%1 [").arg(subLine);
         for (int c = 0; c < 4; c++) {
             if (c > 0) line += QStringLiteral(", ");
             line += fmtFloat(prov.readF32(addr + (subLine * 4 + c) * 4)).trimmed();
