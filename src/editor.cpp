@@ -655,9 +655,8 @@ void RcxEditor::applyDataChangedHighlight(const QVector<LineMeta>& meta) {
             // Per-byte highlighting in ASCII + hex areas
             int ind = kFoldCol + lm.depth * 3;
             int asciiStart = ind + typeW + kSepWidth;
-            // Hex8-64: ASCII always padded to 8; Padding: ASCII = lineByteCount chars
-            int asciiWidth = (lm.nodeKind == NodeKind::Padding) ? lm.lineByteCount : 8;
-            int hexStart = asciiStart + asciiWidth + kSepWidth;
+            // ASCII column is padded to nameW (aligned with value column)
+            int hexStart = asciiStart + nameW + kSepWidth;
 
             for (int byteIdx : lm.changedByteIndices) {
                 // Highlight in ASCII area (1 char per byte)
