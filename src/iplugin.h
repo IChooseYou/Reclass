@@ -14,7 +14,7 @@
 namespace rcx { class Provider; }
 
 /**
- * Plugin interface for ReclassX
+ * Plugin interface for Reclass
  *
  * Plugins are loaded from the "Plugins" folder as shared libraries.
  * Each plugin must export a C function: extern "C" RCX_PLUGIN_EXPORT IPlugin* CreatePlugin();
@@ -133,4 +133,4 @@ public:
 // Plugin factory function signature
 typedef IPlugin* (*CreatePluginFunc)();
 
-#define IPLUGIN_IID "com.reclassx.IPlugin/1.0"
+#define IPLUGIN_IID "com.reclass.IPlugin/1.0"

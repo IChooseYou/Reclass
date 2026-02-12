@@ -1622,7 +1622,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
     }
 
     // ── Font with zoom ──
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ReclassX VERSION 0.1 LANGUAGES CXX)
+project(Reclass VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,7 +30,7 @@ endif()
 
 find_package(QScintilla REQUIRED)
 
-add_executable(ReclassX
+add_executable(Reclass
     src/main.cpp
     src/editor.h
     src/editor.cpp
@@ -64,9 +64,9 @@ add_executable(ReclassX
     src/mcp/mcp_bridge.cpp
 )
 
-target_include_directories(ReclassX PRIVATE src)
+target_include_directories(Reclass PRIVATE src)
 
-target_link_libraries(ReclassX PRIVATE
+target_link_libraries(Reclass PRIVATE
     ${QT}::Widgets
     ${QT}::PrintSupport
     ${QT}::Svg
@@ -76,7 +76,7 @@ target_link_libraries(ReclassX PRIVATE
     ${_QT_WINEXTRAS}
 )
 if(WIN32)
-    target_link_libraries(ReclassX PRIVATE dbghelp dwmapi psapi)
+    target_link_libraries(Reclass PRIVATE dbghelp dwmapi psapi)
 endif()
 
 add_executable(rcx-mcp-stdio tools/rcx-mcp-stdio.cpp)
@@ -85,8 +85,8 @@ target_link_libraries(rcx-mcp-stdio PRIVATE ${QT}::Core ${QT}::Network)
 include(deploy)
 
 add_custom_target(screenshot ALL
-    COMMAND ReclassX --screenshot ${CMAKE_BINARY_DIR}/screenshot.png
-    DEPENDS ReclassX deploy
+    COMMAND Reclass --screenshot ${CMAKE_BINARY_DIR}/screenshot.png
+    DEPENDS Reclass deploy
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Capturing UI screenshot with class open..."
 )
@@ -114,7 +114,7 @@ message(STATUS \"Combined sources -> \${_out}\")
 
 add_custom_target(combined ALL
     COMMAND ${CMAKE_COMMAND} -P ${_combine_script}
-    DEPENDS ReclassX
+    DEPENDS Reclass
     COMMENT "Combining all source files into h_cpp_combined.txt"
 )
 

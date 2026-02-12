@@ -69,14 +69,14 @@ endif()
 if(TARGET ${QT}::windeployqt)
     add_custom_target(deploy
         COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/deploy.cmake
-            $<TARGET_FILE:ReclassX>
+            $<TARGET_FILE:Reclass>
             $<TARGET_FILE:${QT}::windeployqt>
-        DEPENDS ReclassX
+        DEPENDS Reclass
         COMMENT "Deploying Qt runtime DLLs..."
     )
 
     # Force re-deploy on rebuild
     set_target_properties(deploy PROPERTIES
-        ADDITIONAL_CLEAN_FILES $<TARGET_FILE_DIR:ReclassX>/.qt_deployed
+        ADDITIONAL_CLEAN_FILES $<TARGET_FILE_DIR:Reclass>/.qt_deployed
     )
 endif()

@@ -64,7 +64,7 @@ class ProcessMemoryPlugin : public IProviderPlugin
 public:
     std::string Name() const override { return "Process Memory"; }
     std::string Version() const override { return "1.0.0"; }
-    std::string Author() const override { return "ReclassX"; }
+    std::string Author() const override { return "Reclass"; }
     std::string Description() const override { return "Read and write memory from local running processes"; }
     k_ELoadType LoadType() const override { return k_ELoadTypeAuto; }
     QIcon Icon() const override;

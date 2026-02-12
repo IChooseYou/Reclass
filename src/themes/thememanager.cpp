@@ -17,7 +17,7 @@ ThemeManager::ThemeManager() {
     m_builtIn.append(Theme::warm());
     loadUserThemes();
 
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     QString saved = settings.value("theme", m_builtIn[0].name).toString();
     auto all = themes();
     for (int i = 0; i < all.size(); i++) {
@@ -44,7 +44,7 @@ void ThemeManager::setCurrent(int index) {
     auto all = themes();
     if (index < 0 || index >= all.size()) return;
     m_currentIdx = index;
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     settings.setValue("theme", all[index].name);
     emit themeChanged(current());
 }
@@ -113,6 +113,29 @@ void ThemeManager::saveUserThemes() const {
         QFile f(dir + "/" + filename);
         if (!f.open(QIODevice::WriteOnly)) continue;
         f.write(QJsonDocument(m_user[i].toJson()).toJson(QJsonDocument::Indented));
+    }
+}
+
+QString ThemeManager::themeFilePath(int index) const {
+    if (index < builtInCount()) return {};
+    int ui = index - builtInCount();
+    if (ui < 0 || ui >= m_user.size()) return {};
+    QString filename = m_user[ui].name.toLower().replace(' ', '_') + ".json";
+    return themesDir() + "/" + filename;
+}
+
+void ThemeManager::previewTheme(const Theme& theme) {
+    if (!m_previewing) {
+        m_savedTheme = current();
+        m_previewing = true;
+    }
+    emit themeChanged(theme);
+}
+
+void ThemeManager::revertPreview() {
+    if (m_previewing) {
+        m_previewing = false;
+        emit themeChanged(m_savedTheme);
     }
 }
 

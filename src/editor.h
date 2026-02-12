@@ -48,6 +48,7 @@ public:
     void setCommandRowText(const QString& line);
     void setEditorFont(const QString& fontName);
     static void setGlobalFontName(const QString& fontName);
+    static QString globalFontName();
     void applyTheme(const Theme& theme);
 
     // Custom type names (struct types from the tree) shown in type picker + lexer GlobalClass coloring

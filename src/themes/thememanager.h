@@ -22,6 +22,10 @@ public:
     void loadUserThemes();
     void saveUserThemes() const;
 
+    QString themeFilePath(int index) const;
+    void previewTheme(const Theme& theme);
+    void revertPreview();
+
 signals:
     void themeChanged(const rcx::Theme& theme);
 
@@ -33,6 +37,8 @@ private:
 
     int builtInCount() const { return m_builtIn.size(); }
     QString themesDir() const;
+    bool m_previewing = false;
+    Theme m_savedTheme;   // stashed current theme during preview
 };
 
 } // namespace rcx

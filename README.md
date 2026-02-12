@@ -20,8 +20,8 @@ This tool helps you inspect raw bytes and interpret them as types (structs, arra
 
  2. Quick Build (relies on powershell| for manual build skip to step 3)
 
-    git clone --recurse-submodules https://github.com/IChooseYou/ReclassX.git
-    cd ReclassX
+    git clone --recurse-submodules https://github.com/IChooseYou/Reclass.git
+    cd Reclass
     .\scripts\build_qscintilla.ps1
     .\scripts\build.ps1
     ^ script above tries to autodetect Qt install (as we learned not everyone installs to C:/Qt/)

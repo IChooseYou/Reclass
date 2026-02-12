@@ -194,7 +194,7 @@ QJsonObject McpBridge::handleInitialize(const QJsonValue& id, const QJsonObject&
         {"protocolVersion", "2024-11-05"},
         {"capabilities", caps},
         {"serverInfo", QJsonObject{
-            {"name", "reclassx-mcp"},
+            {"name", "reclass-mcp"},
             {"version", "1.0.0"}
         }}
     };

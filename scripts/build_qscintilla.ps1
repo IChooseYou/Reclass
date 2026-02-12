@@ -1,4 +1,4 @@
-# PowerShell script to build QScintilla static library for ReclassX
+# PowerShell script to build QScintilla static library for Reclass
 # This script checks for Qt installation, prompts if missing, and builds QScintilla
 
 #Requires -Version 5.1
@@ -272,7 +272,7 @@ function Find-MakeCommand {
 # ──────────────────────────────────────────────────────────────────────────────
 
 Write-ColorOutput "`n========================================" Cyan
-Write-ColorOutput "QScintilla Build Script for ReclassX" Cyan
+Write-ColorOutput "QScintilla Build Script for Reclass" Cyan
 Write-ColorOutput "========================================`n" Cyan
 
 # Get script directory and project root
@@ -423,7 +423,7 @@ try {
             Write-Host "  - $($lib.Name) ($sizeMB MB)" -ForegroundColor Green
             Write-Host "    Path: $($lib.Path)" -ForegroundColor Gray
         }
-        Write-ColorOutput "`nYou can now build ReclassX with CMake." Green
+        Write-ColorOutput "`nYou can now build Reclass with CMake." Green
     } else {
         Write-ColorOutput "`nWARNING: Build completed but no library files found." Yellow
         Write-ColorOutput "Expected files: qscintilla2_qt6.a or qscintilla2_qt6.lib" Yellow

@@ -334,7 +334,7 @@ void MainWindow::createMenus() {
     actJetBrains->setCheckable(true);
     actJetBrains->setActionGroup(fontGroup);
     // Load saved preference
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     QString savedFont = settings.value("font", "JetBrains Mono").toString();
     if (savedFont == "JetBrains Mono") actJetBrains->setChecked(true);
     else actConsolas->setChecked(true);
@@ -392,7 +392,7 @@ void MainWindow::createStatusBar() {
         statusBar()->setAutoFillBackground(true);
     }
 
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -400,7 +400,7 @@ void MainWindow::createStatusBar() {
 }
 
 void MainWindow::applyTabWidgetStyle(QTabWidget* tw) {
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont tabFont(fontName, 12);
     tabFont.setFixedPitch(true);
@@ -889,7 +889,7 @@ void MainWindow::editTheme() {
 }
 
 void MainWindow::setEditorFont(const QString& fontName) {
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     settings.setValue("font", fontName);
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -959,7 +959,7 @@ void MainWindow::updateWindowTitle() {
 // ── Rendered view setup ──
 
 void MainWindow::setupRenderedSci(QsciScintilla* sci) {
-    QSettings settings("ReclassX", "ReclassX");
+    QSettings settings("Reclass", "Reclass");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -1204,7 +1204,7 @@ QMdiSubWindow* MainWindow::project_open(const QString& path) {
     QString filePath = path;
     if (filePath.isEmpty()) {
         filePath = QFileDialog::getOpenFileName(this,
-            "Open Definition", {}, "ReclassX (*.rcx);;JSON (*.json);;All (*)");
+            "Open Definition", {}, "Reclass (*.rcx);;JSON (*.json);;All (*)");
         if (filePath.isEmpty()) return nullptr;
     }
 
@@ -1226,7 +1226,7 @@ bool MainWindow::project_save(QMdiSubWindow* sub, bool saveAs) {
 
     if (saveAs || tab.doc->filePath.isEmpty()) {
         QString path = QFileDialog::getSaveFileName(this,
-            "Save Definition", {}, "ReclassX (*.rcx);;JSON (*.json)");
+            "Save Definition", {}, "Reclass (*.rcx);;JSON (*.json)");
         if (path.isEmpty()) return false;
         tab.doc->save(path);
     } else {
@@ -1259,7 +1259,7 @@ void MainWindow::createWorkspaceDock() {
 
     // Match editor font
     {
-        QSettings settings("ReclassX", "ReclassX");
+        QSettings settings("Reclass", "Reclass");
         QString fontName = settings.value("font", "JetBrains Mono").toString();
         QFont f(fontName, 12);
         f.setFixedPitch(true);
@@ -1442,8 +1442,8 @@ int main(int argc, char* argv[]) {
 #endif
 
     DarkApp app(argc, argv);
-    app.setApplicationName("ReclassX");
-    app.setOrganizationName("ReclassX");
+    app.setApplicationName("Reclass");
+    app.setOrganizationName("Reclass");
     app.setStyle(new MenuBarStyle("Fusion")); // Fusion + generous menu sizing
 
     // Load embedded fonts
@@ -1452,7 +1452,7 @@ int main(int argc, char* argv[]) {
         qWarning("Failed to load embedded JetBrains Mono font");
     // Apply saved font preference before creating any editors
     {
-        QSettings settings("ReclassX", "ReclassX");
+        QSettings settings("Reclass", "Reclass");
         QString savedFont = settings.value("font", "JetBrains Mono").toString();
         rcx::RcxEditor::setGlobalFontName(savedFont);
     }

@@ -1,9 +1,9 @@
 // rcx-mcp-stdio: Bridges stdin/stdout to QLocalSocket for MCP transport.
 // Claude Desktop spawns this process; it connects to the rcx-mcp named pipe
-// inside the running ReclassX application.
+// inside the running Reclass application.
 //
-// stdin  (from Claude) → QLocalSocket → McpBridge (in ReclassX)
-// stdout (to Claude)   ← QLocalSocket ← McpBridge (in ReclassX)
+// stdin  (from Claude) → QLocalSocket → McpBridge (in Reclass)
+// stdout (to Claude)   ← QLocalSocket ← McpBridge (in Reclass)
 
 #include <QCoreApplication>
 #include <QLocalSocket>
@@ -29,7 +29,7 @@ int main(int argc, char* argv[]) {
     auto* socket = new QLocalSocket(&app);
     QByteArray readBuf;
 
-    // Socket → stdout: forward lines from ReclassX to Claude Desktop
+    // Socket → stdout: forward lines from Reclass to Claude Desktop
     QObject::connect(socket, &QLocalSocket::readyRead, [&]() {
         readBuf.append(socket->readAll());
         while (true) {

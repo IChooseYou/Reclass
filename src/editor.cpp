@@ -201,8 +201,11 @@ void RcxEditor::setupMargins() {
     m_sci->setMarginWidth(0, "  00000000  ");  // default 8-digit; resized dynamically in applyDocument()
     m_sci->setMarginSensitivity(0, true);
 
-    // Margin 1: hidden (fold chevrons moved to text column)
-    m_sci->setMarginWidth(1, 0);
+    // Margin 1: 2px accent bar (selection indicator)
+    m_sci->setMarginType(1, QsciScintilla::SymbolMargin);
+    m_sci->setMarginWidth(1, 2);
+    m_sci->setMarginSensitivity(1, false);
+    m_sci->setMarginMarkerMask(1, 1 << M_ACCENT);
 }
 
 void RcxEditor::setupFolding() {
@@ -252,6 +255,9 @@ void RcxEditor::setupMarkers() {
 
     // M_CMD_ROW (8): distinct background for CommandRow bar
     m_sci->markerDefine(QsciScintilla::Background, M_CMD_ROW);
+
+    // M_ACCENT (9): 2px accent bar in margin 1 (selection indicator)
+    m_sci->markerDefine(QsciScintilla::FullRectangle, M_ACCENT);
 }
 
 void RcxEditor::allocateMarginStyles() {
@@ -329,6 +335,7 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->setMarkerBackgroundColor(theme.hover, M_HOVER);
     m_sci->setMarkerBackgroundColor(theme.selected, M_SELECTED);
     m_sci->setMarkerBackgroundColor(theme.background, M_CMD_ROW);
+    m_sci->setMarkerBackgroundColor(theme.indHoverSpan, M_ACCENT);
 
     // Margin extended styles
     if (m_marginStyleBase >= 0) {
@@ -493,6 +500,7 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta) {
 void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     m_currentSelIds = selIds;
     m_sci->markerDeleteAll(M_SELECTED);
+    m_sci->markerDeleteAll(M_ACCENT);
 
     // Clear all editable indicators, then repaint for selected lines only
     long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
@@ -508,6 +516,7 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
         uint64_t checkId = isFooter ? (nodeId | kFooterIdBit) : nodeId;
         if (selIds.contains(checkId)) {
             m_sci->markerAdd(i, M_SELECTED);
+            m_sci->markerAdd(i, M_ACCENT);
             if (!isFooter)
                 paintEditableSpans(i);
         }
@@ -1477,6 +1486,9 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         }
         auto* lm = metaForLine(line);
         if (!lm) return false;
+        // Reject lines that don't support type editing
+        if (lm->nodeIdx < 0) return false;              // CommandRow etc.
+        if (lm->lineKind == LineKind::Footer) return false;
         // Position popup at the type column start
         ColumnSpan ts = typeSpan(*lm);
         long typePos = posFromCol(m_sci, line, ts.valid ? ts.start : 0);
@@ -2232,6 +2244,10 @@ void RcxEditor::setEditorFont(const QString& fontName) {
 
 void RcxEditor::setGlobalFontName(const QString& fontName) {
     g_fontName = fontName;
+}
+
+QString RcxEditor::globalFontName() {
+    return g_fontName;
 }
 
 QString RcxEditor::textWithMargins() const {

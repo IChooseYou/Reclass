@@ -163,6 +163,7 @@ enum Marker : int {
     M_HOVER     = 6,
     M_SELECTED  = 7,
     M_CMD_ROW   = 8,
+    M_ACCENT    = 9,
 };
 
 // ── Node ──

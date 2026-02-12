@@ -1,4 +1,4 @@
-# PowerShell script to build ReclassX
+# PowerShell script to build Reclass
 # Automatically detects Qt installation and configures build environment
 
 #Requires -Version 5.1
@@ -303,7 +303,7 @@ function Find-MinGWDirectory {
 # ──────────────────────────────────────────────────────────────────────────────
 
 Write-ColorOutput "`n========================================" Cyan
-Write-ColorOutput "ReclassX Build Script" Cyan
+Write-ColorOutput "Reclass Build Script" Cyan
 Write-ColorOutput "========================================`n" Cyan
 
 # Get script directory and project root
@@ -426,7 +426,7 @@ try {
     Write-ColorOutput "`nCMake configuration completed successfully.`n" Green
     
     # Build
-    Write-ColorOutput "Building ReclassX..." Cyan
+    Write-ColorOutput "Building Reclass..." Cyan
     
     $cores = (Get-CimInstance -ClassName Win32_Processor).NumberOfLogicalProcessors
     if (-not $cores -or $cores -lt 1) {
@@ -445,8 +445,8 @@ try {
     # Find executable
     Write-ColorOutput "Locating executable..." Cyan
     $exePaths = @(
-        (Join-Path $buildDir "ReclassX.exe"),
-        (Join-Path $buildDir "$BuildType\ReclassX.exe")
+        (Join-Path $buildDir "Reclass.exe"),
+        (Join-Path $buildDir "$BuildType\Reclass.exe")
     )
     
     $exePath = $null
@@ -477,7 +477,7 @@ try {
                 
                 # Count deployed files
                 $deployedFiles = Get-ChildItem -Path $exeDir -Recurse -File | Where-Object {
-                    $_.Name -ne "ReclassX.exe" -and $_.Extension -match '\.(dll|qm)$'
+                    $_.Name -ne "Reclass.exe" -and $_.Extension -match '\.(dll|qm)$'
                 }
                 if ($deployedFiles) {
                     Write-ColorOutput "Deployed $($deployedFiles.Count) Qt dependency files." Gray
@@ -491,7 +491,7 @@ try {
             Write-ColorOutput "Application may not run without Qt DLLs in PATH" Yellow
         }
     } else {
-        Write-ColorOutput "WARNING: Could not locate ReclassX.exe" Yellow
+        Write-ColorOutput "WARNING: Could not locate Reclass.exe" Yellow
     }
     
 } catch {
@@ -507,5 +507,5 @@ Write-ColorOutput "========================================`n" Cyan
 
 if ($exePath) {
     Write-ColorOutput "Run the application with:" White
-    Write-ColorOutput "  .\build\ReclassX.exe`n" Cyan
+    Write-ColorOutput "  .\build\Reclass.exe`n" Cyan
 }
