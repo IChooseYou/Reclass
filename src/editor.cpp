@@ -128,9 +128,12 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELFORE, (long)0, (long)0);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELBACK, (long)0, (long)0);
 
-    // Auto-size horizontal scrollbar to actual content width (default is fixed 2000px)
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTHTRACKING, 1);
+    // Horizontal scrollbar: sized explicitly in applyDocument() to match content
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTHTRACKING, 0);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH, 1);
+
+    // Vertical scrollbar: don't allow scrolling past the last line
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETENDATLASTLINE, 1);
 
     // Editable-field indicator - HIDDEN (no visual)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
@@ -371,9 +374,20 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     m_sci->setText(result.text);
     m_sci->setReadOnly(true);
 
-    // Reset scroll width so tracking re-measures from current content
-    // (tracking never shrinks automatically — only grows)
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH, 1);
+    // Set horizontal scroll width to match the longest line (ignoring trailing spaces)
+    {
+        int maxLen = 0;
+        const QStringList lines = result.text.split(QChar('\n'));
+        for (const auto& line : lines) {
+            int len = line.size();
+            while (len > 0 && line[len - 1] == QChar(' ')) --len;
+            if (len > maxLen) maxLen = len;
+        }
+        QFontMetrics fm(editorFont());
+        int pixelWidth = fm.horizontalAdvance(QString(maxLen, QChar('0')));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
+                             (unsigned long)qMax(1, pixelWidth));
+    }
 
     // Force full re-lex to fix stale syntax coloring after edits
     m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, (uintptr_t)0, (long)-1);
