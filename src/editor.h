@@ -77,6 +77,9 @@ private:
     QVector<LineMeta> m_meta;
     LayoutInfo        m_layout;  // cached from ComposeResult
 
+    // ── Toggle: absolute vs relative offset margin
+    bool m_relativeOffsets = false;
+
     int m_marginStyleBase = -1;
     int m_hintLine = -1;
 
@@ -138,6 +141,7 @@ private:
     void allocateMarginStyles();
 
     void applyMarginText(const QVector<LineMeta>& meta);
+    void reformatMargins();
     void applyMarkers(const QVector<LineMeta>& meta);
     void applyFoldLevels(const QVector<LineMeta>& meta);
     void applyHexDimming(const QVector<LineMeta>& meta);

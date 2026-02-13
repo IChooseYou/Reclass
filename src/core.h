@@ -432,6 +432,7 @@ struct LineMeta {
     int      arrayCount     = 0;   // Array: total element count
     int      arrayElementIdx = -1; // Index of this element within parent array (-1 if not array element)
     QString  offsetText;
+    uint64_t offsetAddr     = 0;     // Raw absolute address (for margin toggle)
     uint32_t markerMask     = 0;
     bool     dataChanged    = false;  // true if any byte in this node changed since last refresh
     QVector<int> changedByteIndices;  // Hex preview: which byte indices (0-based) changed on this line
@@ -452,6 +453,7 @@ struct LayoutInfo {
     int typeW = 14;  // Effective type column width (default = kColType)
     int nameW = 22;  // Effective name column width (default = kColName)
     int offsetHexDigits = 8;  // Hex digits for offset margin (4/8/12/16)
+    uint64_t baseAddress = 0; // Base address for relative offset computation
 };
 
 // ── ComposeResult ──

@@ -26,6 +26,7 @@ static constexpr int IND_CMD_PILL   = 12;  // Rounded chip behind command row sp
 static constexpr int IND_DATA_CHANGED = 13; // Amber text for changed data values
 static constexpr int IND_CLASS_NAME   = 14; // Teal text for root class name
 static constexpr int IND_HINT_GREEN   = 15; // Green text for hint/comment text
+static constexpr int IND_LOCAL_OFF    = 16; // Dim text for inline local offset in relative mode
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -171,6 +172,10 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HINT_GREEN, 17 /*INDIC_TEXTFORE*/);
 
+    // Local offset text color (dim, like margin text)
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_LOCAL_OFF, 17 /*INDIC_TEXTFORE*/);
+
 }
 
 void RcxEditor::setupLexer() {
@@ -303,6 +308,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_CLASS_NAME, theme.syntaxType);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HINT_GREEN, theme.indHintGreen);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_LOCAL_OFF, theme.textFaint);
 
     // Lexer colors
     m_lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::Keyword);
@@ -409,6 +416,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
 }
 
 void RcxEditor::applyMarginText(const QVector<LineMeta>& meta) {
+    if (m_relativeOffsets)
+        return reformatMargins();
+
     m_sci->clearMarginText(-1);
 
     for (int i = 0; i < meta.size(); i++) {
@@ -422,6 +432,107 @@ void RcxEditor::applyMarginText(const QVector<LineMeta>& meta) {
         m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLES,
                              (uintptr_t)i, styles.constData());
     }
+}
+
+void RcxEditor::reformatMargins() {
+    uint64_t base = m_layout.baseAddress;
+    int hexDigits = m_layout.offsetHexDigits;
+
+    // ── Pass 1: margin text (global offset only) ──
+    m_sci->clearMarginText(-1);
+    for (int i = 0; i < m_meta.size(); i++) {
+        auto& lm = m_meta[i];
+
+        if (lm.isContinuation) {
+            lm.offsetText = QStringLiteral("  \u00B7 ");
+        } else if (lm.offsetText.isEmpty()) {
+            continue;
+        } else if (m_relativeOffsets) {
+            if (lm.lineKind == LineKind::Footer ||
+                lm.lineKind == LineKind::ArrayElementSeparator ||
+                lm.lineKind == LineKind::CommandRow) {
+                lm.offsetText = QString(hexDigits + 1, ' ');
+            } else {
+                uint64_t rel = lm.offsetAddr >= base ? lm.offsetAddr - base : 0;
+                lm.offsetText = (QStringLiteral("+") +
+                    QString::number(rel, 16).toUpper())
+                    .rightJustified(hexDigits, ' ') + QChar(' ');
+            }
+        } else {
+            lm.offsetText = QString::number(lm.offsetAddr, 16).toUpper()
+                .rightJustified(hexDigits, '0') + QChar(' ');
+        }
+
+        QByteArray text = lm.offsetText.toUtf8();
+        m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETTEXT,
+                             (uintptr_t)i, text.constData());
+        QByteArray styles(text.size(), '\0');
+        m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLES,
+                             (uintptr_t)i, styles.constData());
+    }
+
+    // ── Pass 2: inline local offsets in the text indent area ──
+    m_sci->setReadOnly(false);
+    for (int i = 0; i < m_meta.size(); i++) {
+        const auto& lm = m_meta[i];
+        if (lm.depth <= 1 || lm.isContinuation) continue;
+        if (lm.lineKind != LineKind::Field && lm.lineKind != LineKind::Header)
+            continue;
+
+        // Place offset in the parent's indent slot (one level above the field's own indent)
+        // so the field's own 3-char indent acts as visual separator from the type column
+        int col = kFoldCol + (lm.depth - 2) * 3;
+        int slotWidth = 3;
+
+        auto pos = [&](int c) -> long {
+            return m_sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                        (unsigned long)i, (long)c);
+        };
+
+        if (m_relativeOffsets) {
+            // Derive local offset: find enclosing header or array element separator
+            uint64_t parentAddr = base;
+            for (int j = i - 1; j >= 0; j--) {
+                const auto& pLm = m_meta[j];
+                if (pLm.lineKind == LineKind::Header && pLm.depth < lm.depth) {
+                    parentAddr = pLm.offsetAddr;
+                    break;
+                }
+                if (pLm.lineKind == LineKind::ArrayElementSeparator && pLm.depth <= lm.depth) {
+                    parentAddr = pLm.offsetAddr;
+                    break;
+                }
+            }
+            uint64_t localOff = lm.offsetAddr >= parentAddr ? lm.offsetAddr - parentAddr : 0;
+
+            QString off = QStringLiteral("+") +
+                QString::number(localOff, 16).toUpper();
+            QString padded = off.size() <= slotWidth
+                ? off.rightJustified(slotWidth, ' ')
+                : off;
+            long posA = pos(col);
+            long posB = pos(col + slotWidth);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, posA);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, posB);
+            QByteArray utf8 = padded.left(slotWidth).toUtf8();
+            m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
+                                 (uintptr_t)utf8.size(), utf8.constData());
+            // Color the local offset dim
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_LOCAL_OFF);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE,
+                                 posA, posB - posA);
+        } else {
+            // Restore spaces when toggling off
+            long posA = pos(col);
+            long posB = pos(col + slotWidth);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, posA);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, posB);
+            QByteArray spaces(slotWidth, ' ');
+            m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
+                                 (uintptr_t)spaces.size(), spaces.constData());
+        }
+    }
+    m_sci->setReadOnly(true);
 }
 
 void RcxEditor::applyMarkers(const QVector<LineMeta>& meta) {
@@ -1284,6 +1395,17 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_pendingClickNodeId = 0;
         }
         return true;  // consume release (prevent QScintilla from acting on it)
+    }
+    // Double-click on offset margin → toggle absolute/relative
+    if (obj == m_sci->viewport() && event->type() == QEvent::MouseButtonDblClick) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        int margin0Width = (int)m_sci->SendScintilla(
+            QsciScintillaBase::SCI_GETMARGINWIDTHN, 0UL, 0L);
+        if ((int)me->position().x() < margin0Width) {
+            m_relativeOffsets = !m_relativeOffsets;
+            reformatMargins();
+            return true;
+        }
     }
     // Double-click during edit mode: select entire editable text
     if (obj == m_sci->viewport() && m_editState.active
