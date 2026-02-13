@@ -722,17 +722,17 @@ void MainWindow::removeNode() {
     auto* ctrl = activeController();
     if (!ctrl) return;
     auto* primary = activePaneEditor();
-    if (!primary || primary->isEditing()) return;
-    QSet<int> indices = primary->selectedNodeIndices();
-    if (indices.size() > 1) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        ctrl->batchRemoveNodes(indices.values());
-#else
-        ctrl->batchRemoveNodes(indices.values().toVector());
-#endif
-    } else if (indices.size() == 1) {
-        ctrl->removeNode(*indices.begin());
+    if (primary && primary->isEditing()) return;
+    QSet<uint64_t> ids = ctrl->selectedIds();
+    QVector<int> indices;
+    for (uint64_t id : ids) {
+        int idx = ctrl->document()->tree.indexOfId(id & ~kFooterIdBit);
+        if (idx >= 0) indices.append(idx);
     }
+    if (indices.size() > 1)
+        ctrl->batchRemoveNodes(indices);
+    else if (indices.size() == 1)
+        ctrl->removeNode(indices.first());
 }
 
 void MainWindow::changeNodeType() {
