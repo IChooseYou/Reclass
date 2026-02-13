@@ -4,7 +4,17 @@ This tool helps you inspect raw bytes and interpret them as types (structs, arra
 
 ## State
 
-- MCP (Model Context Protocol) bridge (McpBridge) added. Server starts by default but can be stopped in File menu. Exposes the tools functionality and also has UI fallback if something new has been introduced.
+- MCP (Model Context Protocol) bridge via `ReclassMcpBridge.exe`. The server starts by default and can be stopped from the File menu. It exposes all tool functionality to any MCP-compatible client (e.g. Claude Code) and falls back to UI prompts when the client requests something not yet covered by tools. To connect, add this to your MCP client config (e.g. `.mcp.json`):
+  ```json
+  {
+    "mcpServers": {
+      "ReclassMcpBridge": {
+        "command": "path/to/build/ReclassMcpBridge.exe",
+        "args": []
+      }
+    }
+  }
+  ```
 - Plugin system is partially implemented. Some UI bugs exist.
 - Vector/Matrix improvements have been made but are not entirely complete.
 - When attached to a live process memory is read on a background thread and changed bytes get highlighted in real time.
