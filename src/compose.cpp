@@ -336,6 +336,25 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             }
         }
 
+        // Embedded struct with refId but no child nodes: expand referenced struct's
+        // children at this node's offset (single instance, like array with count=1)
+        if (node.kind == NodeKind::Struct && children.isEmpty() && node.refId != 0) {
+            int refIdx = tree.indexOfId(node.refId);
+            if (refIdx >= 0) {
+                QVector<int> refChildren = state.childMap.value(node.refId);
+                std::sort(refChildren.begin(), refChildren.end(), [&](int a, int b) {
+                    return tree.nodes[a].offset < tree.nodes[b].offset;
+                });
+                for (int childIdx : refChildren) {
+                    // Skip self-referential children (e.g. struct Ball has a field of type Ball)
+                    if (state.visiting.contains(tree.nodes[childIdx].id))
+                        continue;
+                    composeNode(state, tree, prov, childIdx, childDepth,
+                                absAddr, node.refId, false, node.id);
+                }
+            }
+        }
+
         // For arrays, render children as condensed (no header/footer for struct elements)
         bool childrenAreArrayElements = (node.kind == NodeKind::Array);
         int elementIdx = 0;

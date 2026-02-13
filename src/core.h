@@ -366,6 +366,10 @@ struct NodeTree {
             if (end > maxEnd) maxEnd = end;
         }
 
+        // Embedded struct reference: no own children but refId points to a struct definition
+        if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0)
+            maxEnd = qMax(maxEnd, structSpan(node.refId, childMap, visited));
+
         return qMax(declaredSize, maxEnd);
     }
 

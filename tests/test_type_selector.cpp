@@ -405,6 +405,186 @@ private slots:
         QCOMPARE(spec.arrayCount, 0);
     }
 
+    // ── FieldType popup: selecting a composite (struct) type changes node kind + structTypeName + collapsed ──
+
+    void testFieldTypeCompositeChangesNodeToStruct() {
+        auto* doc = new RcxDocument();
+        buildTwoRootTree(doc->tree);
+        doc->provider = std::make_unique<BufferProvider>(makeBuffer());
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        // Find the "x" field (Int32) inside Alpha struct, and Bravo struct id
+        int xIdx = -1;
+        uint64_t bravoId = 0;
+        for (int i = 0; i < doc->tree.nodes.size(); i++) {
+            const auto& n = doc->tree.nodes[i];
+            if (n.name == "x" && n.kind == NodeKind::Int32) xIdx = i;
+            if (n.name == "Bravo" && n.kind == NodeKind::Struct) bravoId = n.id;
+        }
+        QVERIFY(xIdx >= 0);
+        QVERIFY(bravoId != 0);
+
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Int32);
+        QVERIFY(!doc->tree.nodes[xIdx].collapsed);
+        uint64_t xNodeId = doc->tree.nodes[xIdx].id;
+
+        // Simulate the plain-struct path of applyTypePopupResult:
+        // beginMacro → changeNodeKind(Struct) → ChangeStructTypeName → ChangePointerRef → endMacro
+        doc->undoStack.beginMacro(QStringLiteral("Change to composite type"));
+        ctrl->changeNodeKind(xIdx, NodeKind::Struct);
+
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+
+        int bravoIdx = doc->tree.indexOfId(bravoId);
+        QVERIFY(bravoIdx >= 0);
+        QString targetName = doc->tree.nodes[bravoIdx].structTypeName;
+
+        doc->undoStack.push(new RcxCommand(ctrl,
+            cmd::ChangeStructTypeName{xNodeId, doc->tree.nodes[xIdx].structTypeName, targetName}));
+
+        // Set refId so compose can expand referenced struct children (auto-collapses)
+        doc->undoStack.push(new RcxCommand(ctrl,
+            cmd::ChangePointerRef{xNodeId, 0, bravoId}));
+
+        doc->undoStack.endMacro();
+        QApplication::processEvents();
+
+        // Verify: Struct with correct name, refId, AND collapsed
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Struct);
+        QCOMPARE(doc->tree.nodes[xIdx].structTypeName, QString("Bravo"));
+        QCOMPARE(doc->tree.nodes[xIdx].refId, bravoId);
+        QVERIFY(doc->tree.nodes[xIdx].collapsed);
+
+        // Single undo reverses the entire macro
+        doc->undoStack.undo();
+        QApplication::processEvents();
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Int32);
+        QCOMPARE(doc->tree.nodes[xIdx].refId, uint64_t(0));
+        QVERIFY(doc->tree.nodes[xIdx].structTypeName.isEmpty());
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    // ── FieldType popup: selecting a composite with * modifier creates Pointer64 + refId ──
+
+    void testFieldTypeCompositeWithPointerModifier() {
+        auto* doc = new RcxDocument();
+        buildTwoRootTree(doc->tree);
+        doc->provider = std::make_unique<BufferProvider>(makeBuffer());
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        // Find the "x" field (Int32) and Bravo struct
+        int xIdx = -1;
+        uint64_t bravoId = 0;
+        for (int i = 0; i < doc->tree.nodes.size(); i++) {
+            const auto& n = doc->tree.nodes[i];
+            if (n.name == "x" && n.kind == NodeKind::Int32) xIdx = i;
+            if (n.name == "Bravo" && n.kind == NodeKind::Struct) bravoId = n.id;
+        }
+        QVERIFY(xIdx >= 0);
+        QVERIFY(bravoId != 0);
+
+        uint64_t xNodeId = doc->tree.nodes[xIdx].id;
+
+        // Simulate the pointer path of applyTypePopupResult:
+        // beginMacro → changeNodeKind(Pointer64) → ChangePointerRef → endMacro
+        doc->undoStack.beginMacro(QStringLiteral("Change to composite type"));
+        ctrl->changeNodeKind(xIdx, NodeKind::Pointer64);
+
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Pointer64);
+
+        doc->undoStack.push(new RcxCommand(ctrl,
+            cmd::ChangePointerRef{xNodeId, 0, bravoId}));
+        doc->undoStack.endMacro();
+        QApplication::processEvents();
+
+        // Verify: Pointer64 with refId pointing to Bravo, auto-collapsed
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Pointer64);
+        QCOMPARE(doc->tree.nodes[xIdx].refId, bravoId);
+        QVERIFY(doc->tree.nodes[xIdx].collapsed);
+
+        // Single undo reverses the entire macro
+        doc->undoStack.undo();
+        QApplication::processEvents();
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Int32);
+        QCOMPARE(doc->tree.nodes[xIdx].refId, uint64_t(0));
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    // ── FieldType popup: selecting a primitive type still works ──
+
+    void testFieldTypePrimitiveStillWorks() {
+        auto* doc = new RcxDocument();
+        buildTwoRootTree(doc->tree);
+        doc->provider = std::make_unique<BufferProvider>(makeBuffer());
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        // Find the "x" field (Int32)
+        int xIdx = -1;
+        for (int i = 0; i < doc->tree.nodes.size(); i++) {
+            if (doc->tree.nodes[i].name == "x") { xIdx = i; break; }
+        }
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Int32);
+
+        // Change to Float via changeNodeKind (same path as primitive TypeEntry)
+        ctrl->changeNodeKind(xIdx, NodeKind::Float);
+        QApplication::processEvents();
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Float);
+
+        // Undo
+        doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Int32);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
     // ── Section headers in filtered list ──
 
     void testSectionHeadersPresent() {

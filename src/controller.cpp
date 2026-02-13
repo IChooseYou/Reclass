@@ -1703,6 +1703,63 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
         if (entry.entryKind == TypeEntry::Primitive) {
             if (entry.primitiveKind != node.kind)
                 changeNodeKind(nodeIdx, entry.primitiveKind);
+        } else if (entry.entryKind == TypeEntry::Composite) {
+            bool wasSuppressed = m_suppressRefresh;
+            m_suppressRefresh = true;
+            m_doc->undoStack.beginMacro(QStringLiteral("Change to composite type"));
+
+            if (spec.isPointer) {
+                // Pointer modifier: e.g. "Material*" → Pointer64 + refId
+                if (node.kind != NodeKind::Pointer64)
+                    changeNodeKind(nodeIdx, NodeKind::Pointer64);
+                int idx = m_doc->tree.indexOfId(node.id);
+                if (idx >= 0 && m_doc->tree.nodes[idx].refId != entry.structId)
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangePointerRef{node.id, m_doc->tree.nodes[idx].refId, entry.structId}));
+
+            } else if (spec.arrayCount > 0) {
+                // Array modifier: e.g. "Material[10]" → Array + Struct element
+                if (node.kind != NodeKind::Array)
+                    changeNodeKind(nodeIdx, NodeKind::Array);
+                int idx = m_doc->tree.indexOfId(node.id);
+                if (idx >= 0) {
+                    auto& n = m_doc->tree.nodes[idx];
+                    if (n.elementKind != NodeKind::Struct || n.arrayLen != spec.arrayCount)
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangeArrayMeta{node.id, n.elementKind, NodeKind::Struct,
+                                                 n.arrayLen, spec.arrayCount}));
+                    if (n.refId != entry.structId)
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangePointerRef{node.id, n.refId, entry.structId}));
+                }
+
+            } else {
+                // Plain struct: e.g. "Material" → Struct + structTypeName + refId + collapsed
+                if (node.kind != NodeKind::Struct)
+                    changeNodeKind(nodeIdx, NodeKind::Struct);
+                int idx = m_doc->tree.indexOfId(node.id);
+                if (idx >= 0) {
+                    int refIdx = m_doc->tree.indexOfId(entry.structId);
+                    QString targetName;
+                    if (refIdx >= 0) {
+                        const Node& ref = m_doc->tree.nodes[refIdx];
+                        targetName = ref.structTypeName.isEmpty() ? ref.name : ref.structTypeName;
+                    }
+                    QString oldTypeName = m_doc->tree.nodes[idx].structTypeName;
+                    if (oldTypeName != targetName)
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangeStructTypeName{node.id, oldTypeName, targetName}));
+                    // Set refId so compose can expand the referenced struct's children
+                    if (m_doc->tree.nodes[idx].refId != entry.structId)
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangePointerRef{node.id, m_doc->tree.nodes[idx].refId, entry.structId}));
+                    // ChangePointerRef auto-sets collapsed=true when refId != 0
+                }
+            }
+
+            m_doc->undoStack.endMacro();
+            m_suppressRefresh = wasSuppressed;
+            if (!m_suppressRefresh) refresh();
         }
     } else if (mode == TypePopupMode::ArrayElement) {
         if (entry.entryKind == TypeEntry::Primitive) {
