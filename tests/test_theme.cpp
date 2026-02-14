@@ -92,9 +92,16 @@ private slots:
     void themeManagerHasBuiltIns() {
         auto& tm = ThemeManager::instance();
         auto all = tm.themes();
-        QVERIFY(all.size() >= 2);
+        QVERIFY(all.size() >= 3);
         QCOMPARE(all[0].name, QString("Reclass Dark"));
-        QCOMPARE(all[1].name, QString("Warm"));
+        // VS2022 Dark and Warm are also loaded (order depends on filename sort)
+        bool hasVs = false, hasWarm = false;
+        for (const auto& t : all) {
+            if (t.name == "VS2022 Dark") hasVs = true;
+            if (t.name == "Warm") hasWarm = true;
+        }
+        QVERIFY(hasVs);
+        QVERIFY(hasWarm);
     }
 
     void themeManagerSwitch() {

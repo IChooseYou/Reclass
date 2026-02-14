@@ -459,8 +459,13 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 ptrVal = (node.kind == NodeKind::Pointer32)
                     ? (uint64_t)prov.readU32(absAddr) : prov.readU64(absAddr);
                 if (ptrVal != 0) {
-                    uint64_t pBase = ptrToProviderAddr(tree, ptrVal);
-                    if (pBase == UINT64_MAX) ptrVal = 0;  // ptr below base: invalid
+                    // Treat sentinel values as invalid pointers
+                    if (ptrVal == UINT64_MAX || (node.kind == NodeKind::Pointer32 && ptrVal == 0xFFFFFFFF))
+                        ptrVal = 0;
+                    else {
+                        uint64_t pBase = ptrToProviderAddr(tree, ptrVal);
+                        if (pBase == UINT64_MAX) ptrVal = 0;  // ptr below base: invalid
+                    }
                 }
             }
 

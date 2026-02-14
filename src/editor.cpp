@@ -14,6 +14,7 @@
 #include <QCursor>
 #include <QMenu>
 #include <QApplication>
+#include <QClipboard>
 #include "themes/thememanager.h"
 
 namespace rcx {
@@ -1603,6 +1604,22 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
     case Qt::Key_End:
         m_sci->setCursorPosition(m_editState.line, editEndCol());
         return true;
+    case Qt::Key_V:
+        if (ke->modifiers() & Qt::ControlModifier) {
+            // Sanitized paste: strip newlines (and backticks for base addresses)
+            QString clip = QApplication::clipboard()->text();
+            clip.remove('\n');
+            clip.remove('\r');
+            if (m_editState.target == EditTarget::BaseAddress)
+                clip.remove('`');
+            if (!clip.isEmpty()) {
+                QByteArray utf8 = clip.toUtf8();
+                m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
+                                     (uintptr_t)0, utf8.constData());
+            }
+            return true;
+        }
+        return false;
     default:
         return false;
     }
@@ -1961,7 +1978,7 @@ void RcxEditor::showSourcePicker() {
     int zoom = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
     menuFont.setPointSize(menuFont.pointSize() + zoom);
     menu.setFont(menuFont);
-    menu.addAction("file");
+    menu.addAction("File");
 
     // Add all registered providers from global registry
     const auto& providers = ProviderRegistry::instance().providers();

@@ -465,7 +465,7 @@ void MainWindow::styleTabCloseButtons() {
 
     const auto& t = ThemeManager::instance().current();
     QString style = QStringLiteral(
-        "QToolButton { color: %1; border: none; padding: 0px 4px; font-size: 12px; }"
+        "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
         "QToolButton:hover { color: %2; }")
         .arg(t.textDim.name(), t.indHoverSpan.name());
 

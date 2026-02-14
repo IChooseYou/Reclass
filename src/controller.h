@@ -141,10 +141,11 @@ private:
     TypeSelectorPopup* m_cachedPopup = nullptr;
 
     // ── Auto-refresh state ──
+    using PageMap = QHash<uint64_t, QByteArray>;
     QTimer*         m_refreshTimer = nullptr;
-    QFutureWatcher<QByteArray>* m_refreshWatcher = nullptr;
+    QFutureWatcher<PageMap>* m_refreshWatcher = nullptr;
     std::unique_ptr<SnapshotProvider> m_snapshotProv;
-    QByteArray      m_prevSnapshot;
+    PageMap         m_prevPages;
     QSet<int64_t>   m_changedOffsets;
     uint64_t        m_refreshGen = 0;
     uint64_t        m_readGen = 0;
@@ -166,6 +167,10 @@ private:
     void onReadComplete();
     int  computeDataExtent() const;
     void resetSnapshot();
+    void collectPointerRanges(uint64_t structId, uint64_t memBase,
+                              int depth, int maxDepth,
+                              QSet<uint64_t>& visited,
+                              QVector<QPair<uint64_t,int>>& ranges) const;
 };
 
 } // namespace rcx

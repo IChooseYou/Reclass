@@ -293,6 +293,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
             break;
         case EditTarget::BaseAddress: {
             QString s = text.trimmed();
+            s.remove('`');          // WinDbg backtick separators (e.g. 7ff6`6cce0000)
+            s.remove('\n');
+            s.remove('\r');
             // Support simple equations: 0x10+0x4, 0x100-0x10, etc.
             uint64_t newBase = 0;
             bool ok = true;
@@ -347,7 +350,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             if (text.startsWith(QStringLiteral("#saved:"))) {
                 int idx = text.mid(7).toInt();
                 switchToSavedSource(idx);
-            } else if (text == QStringLiteral("file")) {
+            } else if (text == QStringLiteral("File")) {
                 auto* w = qobject_cast<QWidget*>(parent());
                 QString path = QFileDialog::getOpenFileName(w, "Load Binary Data", {}, "All Files (*)");
                 if (!path.isEmpty()) {
@@ -910,7 +913,7 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
                 qWarning() << "WriteBytes failed at address" << QString::number(c.addr, 16);
             // Patch snapshot so compose sees the new value immediately
             if (m_snapshotProv)
-                m_snapshotProv->patchSnapshot(c.addr, bytes.constData(), bytes.size());
+                m_snapshotProv->patchPages(c.addr, bytes.constData(), bytes.size());
         } else if constexpr (std::is_same_v<T, cmd::ChangeArrayMeta>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0) {
@@ -1896,13 +1899,64 @@ void RcxController::pushSavedSourcesToEditors() {
 
 void RcxController::setupAutoRefresh() {
     m_refreshTimer = new QTimer(this);
-    m_refreshTimer->setInterval(2000);
+    m_refreshTimer->setInterval(660);
     connect(m_refreshTimer, &QTimer::timeout, this, &RcxController::onRefreshTick);
     m_refreshTimer->start();
 
-    m_refreshWatcher = new QFutureWatcher<QByteArray>(this);
-    connect(m_refreshWatcher, &QFutureWatcher<QByteArray>::finished,
+    m_refreshWatcher = new QFutureWatcher<PageMap>(this);
+    connect(m_refreshWatcher, &QFutureWatcher<PageMap>::finished,
             this, &RcxController::onReadComplete);
+}
+
+// Recursively collect memory ranges for a struct and its pointer targets.
+// memBase is the provider-relative address where this struct's data lives.
+void RcxController::collectPointerRanges(
+        uint64_t structId, uint64_t memBase,
+        int depth, int maxDepth,
+        QSet<uint64_t>& visited,
+        QVector<QPair<uint64_t,int>>& ranges) const
+{
+    if (depth >= maxDepth) return;
+    uint64_t key = memBase ^ (structId * 0x9E3779B97F4A7C15ULL);
+    if (visited.contains(key)) return;
+    visited.insert(key);
+
+    int span = m_doc->tree.structSpan(structId);
+    if (span <= 0) return;
+    ranges.append({memBase, span});
+
+    if (!m_snapshotProv) return;
+
+    // Walk children looking for non-collapsed pointers
+    QVector<int> children = m_doc->tree.childrenOf(structId);
+    for (int ci : children) {
+        const Node& child = m_doc->tree.nodes[ci];
+        if (child.kind != NodeKind::Pointer32 && child.kind != NodeKind::Pointer64)
+            continue;
+        if (child.collapsed || child.refId == 0) continue;
+
+        uint64_t ptrAddr = memBase + child.offset;
+        int ptrSize = child.byteSize();
+        if (!m_snapshotProv->isReadable(ptrAddr, ptrSize)) continue;
+
+        uint64_t ptrVal = (child.kind == NodeKind::Pointer32)
+            ? (uint64_t)m_snapshotProv->readU32(ptrAddr)
+            : m_snapshotProv->readU64(ptrAddr);
+        if (ptrVal == 0 || ptrVal == UINT64_MAX || ptrVal < m_doc->tree.baseAddress) continue;
+
+        uint64_t pBase = ptrVal - m_doc->tree.baseAddress;
+        collectPointerRanges(child.refId, pBase, depth + 1, maxDepth,
+                             visited, ranges);
+    }
+
+    // Embedded struct references (struct node with refId but no own children)
+    int idx = m_doc->tree.indexOfId(structId);
+    if (idx >= 0) {
+        const Node& sn = m_doc->tree.nodes[idx];
+        if (sn.kind == NodeKind::Struct && sn.refId != 0 && children.isEmpty())
+            collectPointerRanges(sn.refId, memBase, depth, maxDepth,
+                                 visited, ranges);
+    }
 }
 
 void RcxController::onRefreshTick() {
@@ -1915,75 +1969,120 @@ void RcxController::onRefreshTick() {
     int extent = computeDataExtent();
     if (extent <= 0) return;
 
+    // Collect all needed ranges: main struct + pointer targets
+    QVector<QPair<uint64_t,int>> ranges;
+    ranges.append({0, extent});
+
+    if (m_snapshotProv) {
+        QSet<uint64_t> visited;
+        uint64_t rootId = m_viewRootId;
+        if (rootId == 0 && !m_doc->tree.nodes.isEmpty())
+            rootId = m_doc->tree.nodes[0].id;
+        collectPointerRanges(rootId, 0, 0, 4, visited, ranges);
+    }
+
     m_readInFlight = true;
     m_readGen = m_refreshGen;
 
-    // Capture shared_ptr copy — keeps provider alive during async read
     auto prov = m_doc->provider;
-    uint64_t base = prov->base();
-    qDebug() << "[Refresh] reading" << extent << "bytes from base" << Qt::hex << base;
-    m_refreshWatcher->setFuture(QtConcurrent::run([prov, extent]() -> QByteArray {
-        return prov->readBytes(0, extent);
+    qDebug() << "[Refresh] reading" << ranges.size() << "ranges from base"
+             << Qt::hex << prov->base();
+    m_refreshWatcher->setFuture(QtConcurrent::run([prov, ranges]() -> PageMap {
+        constexpr uint64_t kPageSize = 4096;
+        constexpr uint64_t kPageMask = ~(kPageSize - 1);
+        PageMap pages;
+        for (const auto& r : ranges) {
+            uint64_t pageStart = r.first & kPageMask;
+            uint64_t end = r.first + r.second;
+            uint64_t pageEnd = (end + kPageSize - 1) & kPageMask;
+            for (uint64_t p = pageStart; p < pageEnd; p += kPageSize) {
+                if (!pages.contains(p))
+                    pages[p] = prov->readBytes(p, static_cast<int>(kPageSize));
+            }
+        }
+        return pages;
     }));
 }
 
 void RcxController::onReadComplete() {
     m_readInFlight = false;
 
-    // Stale read (provider changed while we were reading) — discard
     if (m_readGen != m_refreshGen) return;
 
-    QByteArray newData = m_refreshWatcher->result();
+    PageMap newPages;
+    try {
+        newPages = m_refreshWatcher->result();
+    } catch (const std::exception& e) {
+        qWarning() << "[Refresh] async read threw:" << e.what();
+        return;
+    } catch (...) {
+        qWarning() << "[Refresh] async read threw unknown exception";
+        return;
+    }
 
-    // Fast path: no changes at all — skip full recompose
-    if (!m_prevSnapshot.isEmpty() && m_prevSnapshot.size() == newData.size()
-        && memcmp(m_prevSnapshot.constData(), newData.constData(), newData.size()) == 0)
+    // All-zero guard: if page 0 is all zeros and we already have data, discard
+    if (!m_prevPages.isEmpty() && newPages.contains(0)) {
+        const QByteArray& p0 = newPages.value(0);
+        bool allZero = true;
+        for (int i = 0; i < p0.size(); ++i) {
+            if (p0[i] != 0) { allZero = false; break; }
+        }
+        if (allZero) {
+            qDebug() << "[Refresh] discarding all-zero page-0, keeping stale snapshot";
+            return;
+        }
+    }
+
+    // Fast path: no changes at all
+    if (newPages == m_prevPages)
         return;
 
-    // Compute which byte offsets changed
+    // Compute which byte offsets changed (for change highlighting).
+    // Skip on first snapshot — nothing to compare against.
     m_changedOffsets.clear();
-    if (!m_prevSnapshot.isEmpty()) {
-        int compareLen = qMin(m_prevSnapshot.size(), newData.size());
-        const char* oldP = m_prevSnapshot.constData();
-        const char* newP = newData.constData();
-        for (int i = 0; i < compareLen; i++) {
-            if (oldP[i] != newP[i])
-                m_changedOffsets.insert(i);
+    if (!m_prevPages.isEmpty()) {
+        for (auto it = newPages.constBegin(); it != newPages.constEnd(); ++it) {
+            uint64_t pageAddr = it.key();
+            const QByteArray& newPage = it.value();
+            auto oldIt = m_prevPages.constFind(pageAddr);
+            if (oldIt == m_prevPages.constEnd())
+                continue;   // new page, no previous data to diff against
+            const QByteArray& oldPage = oldIt.value();
+            int cmpLen = qMin(oldPage.size(), newPage.size());
+            for (int i = 0; i < cmpLen; ++i) {
+                if (oldPage[i] != newPage[i])
+                    m_changedOffsets.insert(static_cast<int64_t>(pageAddr) + i);
+            }
         }
-        // Bytes beyond old snapshot are all "new"
-        for (int i = compareLen; i < newData.size(); i++)
-            m_changedOffsets.insert(i);
     }
-    m_prevSnapshot = newData;
 
-    // Update or create snapshot provider
+    int mainExtent = computeDataExtent();
+    m_prevPages = newPages;
+
     if (m_snapshotProv)
-        m_snapshotProv->updateSnapshot(std::move(newData));
+        m_snapshotProv->updatePages(std::move(newPages), mainExtent);
     else
-        m_snapshotProv = std::make_unique<SnapshotProvider>(m_doc->provider, std::move(newData));
+        m_snapshotProv = std::make_unique<SnapshotProvider>(
+            m_doc->provider, std::move(newPages), mainExtent);
 
     refresh();
-
-    // Clear changed offsets after refresh consumed them
     m_changedOffsets.clear();
 }
 
 int RcxController::computeDataExtent() const {
-    // Prefer tree-based extent: exact bytes needed for rendering
+    static constexpr int64_t kMaxMainExtent = 16 * 1024 * 1024; // 16 MB cap
+
     int64_t treeExtent = 0;
     for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
         const Node& node = m_doc->tree.nodes[i];
         int64_t off = m_doc->tree.computeOffset(i);
-        // byteSize() returns 0 for Array-of-Struct/Array; use structSpan() for containers
         int sz = (node.kind == NodeKind::Struct || node.kind == NodeKind::Array)
             ? m_doc->tree.structSpan(node.id) : node.byteSize();
         int64_t end = off + sz;
         if (end > treeExtent) treeExtent = end;
     }
-    // Clamp to max int (readBytes takes int length)
-    if (treeExtent > 0) return (int)qMin(treeExtent, (int64_t)std::numeric_limits<int>::max());
+    if (treeExtent > 0) return static_cast<int>(qMin(treeExtent, kMaxMainExtent));
 
-    // Fallback: provider size (empty tree)
     int provSize = m_doc->provider->size();
     if (provSize > 0) return provSize;
     return 0;
@@ -1993,7 +2092,7 @@ void RcxController::resetSnapshot() {
     m_refreshGen++;
     m_readInFlight = false;
     m_snapshotProv.reset();
-    m_prevSnapshot.clear();
+    m_prevPages.clear();
     m_changedOffsets.clear();
 }
 

@@ -20,6 +20,7 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
     // App name
     m_appLabel = new QLabel(QStringLiteral("Reclass"), this);
     m_appLabel->setContentsMargins(10, 0, 4, 0);
+    m_appLabel->setAlignment(Qt::AlignVCenter);
     m_appLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(m_appLabel);
 
