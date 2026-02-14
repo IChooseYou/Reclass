@@ -16,6 +16,7 @@
 #include <QApplication>
 #include <QScreen>
 #include <QIntValidator>
+#include <QElapsedTimer>
 #include "themes/thememanager.h"
 
 namespace rcx {
@@ -384,10 +385,33 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
 }
 
 void TypeSelectorPopup::warmUp() {
+    // One-time per-process cost (~170ms): Qt lazily initializes the style/font/DLL
+    // subsystem the first time a popup with complex children is shown. Pre-pay it
+    // by briefly showing a throwaway dummy popup with a QListView, then show+hide
+    // ourselves.
+    {
+        auto* primer = new QFrame(nullptr, Qt::Popup | Qt::FramelessWindowHint);
+        primer->resize(300, 400);
+        auto* lay = new QVBoxLayout(primer);
+        lay->addWidget(new QLabel(QStringLiteral("x")));
+        lay->addWidget(new QLineEdit);
+        auto* model = new QStringListModel(primer);
+        QStringList items; for (int i = 0; i < 10; i++) items << QStringLiteral("x");
+        model->setStringList(items);
+        auto* lv = new QListView;
+        lv->setModel(model);
+        lay->addWidget(lv);
+        primer->show();
+        QApplication::processEvents();
+        primer->hide();
+        QApplication::processEvents();
+        delete primer;
+    }
+
     TypeEntry dummy;
     dummy.entryKind = TypeEntry::Primitive;
     dummy.primitiveKind = NodeKind::Hex8;
-    dummy.displayName = "warmup";
+    dummy.displayName = QStringLiteral("warmup");
     setTypes({dummy});
     popup(QPoint(-9999, -9999));
     hide();

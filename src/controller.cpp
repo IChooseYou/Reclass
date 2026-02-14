@@ -178,6 +178,14 @@ RcxEditor* RcxController::addSplitEditor(QWidget* parent) {
         editor->applyDocument(m_lastResult);
     }
     updateCommandRow();
+
+    // Eagerly pre-warm the type popup so first click isn't slow (~350ms cold start).
+    if (!m_cachedPopup) {
+        QTimer::singleShot(0, this, [this, editor]() {
+            if (!m_cachedPopup && !m_editors.isEmpty())
+                ensurePopup(editor);
+        });
+    }
     return editor;
 }
 

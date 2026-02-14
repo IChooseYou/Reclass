@@ -1,4 +1,4 @@
-#include "ProcessMemoryWindowsPlugin.h"
+#include "ProcessMemoryPlugin.h"
 
 #include "../../src/processpicker.h"
 
@@ -32,12 +32,12 @@
 #endif
 
 // ──────────────────────────────────────────────────────────────────────────
-// ProcessMemoryWindowsProvider implementation
+// ProcessMemoryProvider implementation
 // ──────────────────────────────────────────────────────────────────────────
 
 #ifdef _WIN32
 
-ProcessMemoryWindowsProvider::ProcessMemoryWindowsProvider(uint32_t pid, const QString& processName)
+ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& processName)
     : m_handle(nullptr)
     , m_pid(pid)
     , m_processName(processName)
@@ -60,7 +60,7 @@ ProcessMemoryWindowsProvider::ProcessMemoryWindowsProvider(uint32_t pid, const Q
         cacheModules();
 }
 
-bool ProcessMemoryWindowsProvider::read(uint64_t addr, void* buf, int len) const
+bool ProcessMemoryProvider::read(uint64_t addr, void* buf, int len) const
 {
     if (!m_handle || len <= 0) return false;
 
@@ -71,7 +71,7 @@ bool ProcessMemoryWindowsProvider::read(uint64_t addr, void* buf, int len) const
     return bytesRead > 0;
 }
 
-bool ProcessMemoryWindowsProvider::write(uint64_t addr, const void* buf, int len)
+bool ProcessMemoryProvider::write(uint64_t addr, const void* buf, int len)
 {
     if (!m_handle || !m_writable || len <= 0) return false;
 
@@ -81,7 +81,7 @@ bool ProcessMemoryWindowsProvider::write(uint64_t addr, const void* buf, int len
     return false;
 }
 
-QString ProcessMemoryWindowsProvider::getSymbol(uint64_t addr) const
+QString ProcessMemoryProvider::getSymbol(uint64_t addr) const
 {
     for (const auto& mod : m_modules)
     {
@@ -96,7 +96,7 @@ QString ProcessMemoryWindowsProvider::getSymbol(uint64_t addr) const
     return {};
 }
 
-void ProcessMemoryWindowsProvider::cacheModules()
+void ProcessMemoryProvider::cacheModules()
 {
     HMODULE mods[1024];
     DWORD needed = 0;
@@ -126,7 +126,7 @@ void ProcessMemoryWindowsProvider::cacheModules()
 
 #elif defined(__linux__)
 
-ProcessMemoryWindowsProvider::ProcessMemoryWindowsProvider(uint32_t pid, const QString& processName)
+ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& processName)
     : m_fd(-1)
     , m_pid(pid)
     , m_processName(processName)
@@ -152,7 +152,7 @@ ProcessMemoryWindowsProvider::ProcessMemoryWindowsProvider(uint32_t pid, const Q
 
 }
 
-bool ProcessMemoryWindowsProvider::read(uint64_t addr, void* buf, int len) const
+bool ProcessMemoryProvider::read(uint64_t addr, void* buf, int len) const
 {
     if (m_fd < 0 || len <= 0) return false;
 
@@ -176,7 +176,7 @@ bool ProcessMemoryWindowsProvider::read(uint64_t addr, void* buf, int len) const
     return nread == static_cast<ssize_t>(len);
 }
 
-bool ProcessMemoryWindowsProvider::write(uint64_t addr, const void* buf, int len)
+bool ProcessMemoryProvider::write(uint64_t addr, const void* buf, int len)
 {
     if (m_fd < 0 || !m_writable || len <= 0) return false;
 
@@ -200,7 +200,7 @@ bool ProcessMemoryWindowsProvider::write(uint64_t addr, const void* buf, int len
     return nwritten == static_cast<ssize_t>(len);
 }
 
-QString ProcessMemoryWindowsProvider::getSymbol(uint64_t addr) const
+QString ProcessMemoryProvider::getSymbol(uint64_t addr) const
 {
     for (const auto& mod : m_modules)
     {
@@ -215,7 +215,7 @@ QString ProcessMemoryWindowsProvider::getSymbol(uint64_t addr) const
     return {};
 }
 
-void ProcessMemoryWindowsProvider::cacheModules()
+void ProcessMemoryProvider::cacheModules()
 {
     // Parse /proc/<pid>/maps to discover loaded modules
     QString mapsPath = QStringLiteral("/proc/%1/maps").arg(m_pid);
@@ -288,7 +288,7 @@ void ProcessMemoryWindowsProvider::cacheModules()
 
 #endif // platform
 
-ProcessMemoryWindowsProvider::~ProcessMemoryWindowsProvider()
+ProcessMemoryProvider::~ProcessMemoryProvider()
 {
 #ifdef _WIN32
     if (m_handle)
@@ -299,7 +299,7 @@ ProcessMemoryWindowsProvider::~ProcessMemoryWindowsProvider()
 #endif
 }
 
-int ProcessMemoryWindowsProvider::size() const
+int ProcessMemoryProvider::size() const
 {
 #ifdef _WIN32
     return m_handle ? 0x10000 : 0;
@@ -309,22 +309,22 @@ int ProcessMemoryWindowsProvider::size() const
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// ProcessMemoryWindowsPlugin implementation
+// ProcessMemoryPlugin implementation
 // ──────────────────────────────────────────────────────────────────────────
 
-QIcon ProcessMemoryWindowsPlugin::Icon() const
+QIcon ProcessMemoryPlugin::Icon() const
 {
     return qApp->style()->standardIcon(QStyle::SP_ComputerIcon);
 }
 
-bool ProcessMemoryWindowsPlugin::canHandle(const QString& target) const
+bool ProcessMemoryPlugin::canHandle(const QString& target) const
 {
     // Target format: "pid:name" or just "pid"
     QRegularExpression re("^\\d+");
     return re.match(target).hasMatch();
 }
 
-std::unique_ptr<rcx::Provider> ProcessMemoryWindowsPlugin::createProvider(const QString& target, QString* errorMsg)
+std::unique_ptr<rcx::Provider> ProcessMemoryPlugin::createProvider(const QString& target, QString* errorMsg)
 {
     // Parse target: "pid:name" or just "pid"
     QStringList parts = target.split(':');
@@ -339,7 +339,7 @@ std::unique_ptr<rcx::Provider> ProcessMemoryWindowsPlugin::createProvider(const 
 
     QString name = parts.size() > 1 ? parts[1] : QString("PID %1").arg(pid);
 
-    auto provider = std::make_unique<ProcessMemoryWindowsProvider>(pid, name);
+    auto provider = std::make_unique<ProcessMemoryProvider>(pid, name);
     if (!provider->isValid())
     {
         if (errorMsg)
@@ -352,7 +352,7 @@ std::unique_ptr<rcx::Provider> ProcessMemoryWindowsPlugin::createProvider(const 
     return provider;
 }
 
-uint64_t ProcessMemoryWindowsPlugin::getInitialBaseAddress(const QString& target) const
+uint64_t ProcessMemoryPlugin::getInitialBaseAddress(const QString& target) const
 {
 #ifdef _WIN32
     // Parse PID from target
@@ -409,7 +409,7 @@ uint64_t ProcessMemoryWindowsPlugin::getInitialBaseAddress(const QString& target
 #endif
 }
 
-bool ProcessMemoryWindowsPlugin::selectTarget(QWidget* parent, QString* target)
+bool ProcessMemoryPlugin::selectTarget(QWidget* parent, QString* target)
 {
     // Use custom process enumeration from plugin
     QVector<PluginProcessInfo> pluginProcesses = enumerateProcesses();
@@ -440,7 +440,7 @@ bool ProcessMemoryWindowsPlugin::selectTarget(QWidget* parent, QString* target)
     return false;
 }
 
-QVector<PluginProcessInfo> ProcessMemoryWindowsPlugin::enumerateProcesses()
+QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
 {
     QVector<PluginProcessInfo> processes;
 
@@ -543,5 +543,5 @@ QVector<PluginProcessInfo> ProcessMemoryWindowsPlugin::enumerateProcesses()
 
 extern "C" RCX_PLUGIN_EXPORT IPlugin* CreatePlugin()
 {
-    return new ProcessMemoryWindowsPlugin();
+    return new ProcessMemoryPlugin();
 }

@@ -1330,7 +1330,15 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 // Single-click on editable token of already-selected node → edit
                 int tLine, tCol; EditTarget t;
                 if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
-                    if (alreadySelected && plain) {
+                    // Type/ArrayElementType/PointerTarget open a dismissible popup
+                    // (not inline text edit), so allow on first click without
+                    // requiring the node to be pre-selected.
+                    bool isPopupTarget = (t == EditTarget::Type
+                                       || t == EditTarget::ArrayElementType
+                                       || t == EditTarget::PointerTarget);
+                    if ((alreadySelected || isPopupTarget) && plain) {
+                        if (!alreadySelected)
+                            emit nodeClicked(h.line, h.nodeId, me->modifiers());
                         m_pendingClickNodeId = 0;
                         return beginInlineEdit(t, tLine, tCol);
                     }

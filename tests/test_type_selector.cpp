@@ -8,6 +8,8 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QStringListModel>
+#include <QLabel>
+#include <QFrame>
 #include <Qsci/qsciscintilla.h>
 #include "controller.h"
 #include "typeselectorpopup.h"
@@ -195,6 +197,127 @@ private slots:
             qDebug().noquote() << QString("  Total: %1 ms").arg(ms(tSecond));
 
             delete popup2;
+        }
+    }
+
+    // ── Isolate first-show cost with different window flags ──
+
+    void benchmarkFirstShow() {
+        auto ms = [](qint64 ns) { return QString::number(ns / 1000000.0, 'f', 2); };
+
+        struct FlagTest {
+            const char* name;
+            Qt::WindowFlags flags;
+        };
+        FlagTest tests[] = {
+            {"Qt::Popup|Frameless",         Qt::Popup | Qt::FramelessWindowHint},
+            {"Qt::Tool|Frameless",          Qt::Tool | Qt::FramelessWindowHint},
+            {"Qt::ToolTip",                 Qt::ToolTip},
+            {"Qt::Window|Frameless",        Qt::Window | Qt::FramelessWindowHint},
+            {"Qt::Popup|Frameless (2nd)",   Qt::Popup | Qt::FramelessWindowHint},
+        };
+
+        for (const auto& test : tests) {
+            auto* f = new QFrame(nullptr, test.flags);
+            f->resize(300, 400);
+
+            QElapsedTimer t; t.start();
+            f->show();
+            qint64 t1 = t.nsecsElapsed(); t.restart();
+            QApplication::processEvents();
+            qint64 t2 = t.nsecsElapsed();
+            f->hide();
+            QApplication::processEvents();
+
+            t.restart();
+            f->show();
+            qint64 t3 = t.nsecsElapsed(); t.restart();
+            QApplication::processEvents();
+            qint64 t4 = t.nsecsElapsed();
+            f->hide();
+            QApplication::processEvents();
+
+            qDebug() << "";
+            qDebug().noquote() << QString("=== %1 ===").arg(test.name);
+            qDebug().noquote() << QString("  1st: show=%1ms events=%2ms | 2nd: show=%3ms events=%4ms")
+                .arg(ms(t1)).arg(ms(t2)).arg(ms(t3)).arg(ms(t4));
+            delete f;
+        }
+
+        // TypeSelectorPopup: cold vs after warmUp
+        {
+            auto* popup = new TypeSelectorPopup();
+            TypeEntry dummy;
+            dummy.entryKind = TypeEntry::Primitive;
+            dummy.primitiveKind = NodeKind::Hex8;
+            dummy.displayName = "test";
+            popup->setTypes({dummy});
+
+            QElapsedTimer t; t.start();
+            popup->show();
+            qint64 t1 = t.nsecsElapsed(); t.restart();
+            QApplication::processEvents();
+            qint64 t2 = t.nsecsElapsed();
+            popup->hide();
+            QApplication::processEvents();
+
+            t.restart();
+            popup->show();
+            qint64 t3 = t.nsecsElapsed(); t.restart();
+            QApplication::processEvents();
+            qint64 t4 = t.nsecsElapsed();
+            popup->hide();
+            QApplication::processEvents();
+
+            qDebug() << "";
+            qDebug().noquote() << QString("=== TypeSelectorPopup (cold, Qt::Popup) ===");
+            qDebug().noquote() << QString("  1st: show=%1ms events=%2ms | 2nd: show=%3ms events=%4ms")
+                .arg(ms(t1)).arg(ms(t2)).arg(ms(t3)).arg(ms(t4));
+            delete popup;
+        }
+
+        // Clean order test: dummy popup with children FIRST, then TypeSelectorPopup
+        qDebug() << "";
+        qDebug() << "=== CLEAN: dummy popup first, then TypeSelectorPopup ===";
+        {
+            auto* dummy = new QFrame(nullptr, Qt::Popup | Qt::FramelessWindowHint);
+            dummy->resize(300, 400);
+            auto* dLay = new QVBoxLayout(dummy);
+            dLay->addWidget(new QLabel("dummy"));
+            dLay->addWidget(new QLineEdit);
+            auto* dModel = new QStringListModel(dummy);
+            QStringList dItems; for (int i = 0; i < 10; i++) dItems << "x";
+            dModel->setStringList(dItems);
+            auto* dLv = new QListView; dLv->setModel(dModel);
+            dLay->addWidget(dLv);
+
+            QElapsedTimer t; t.start();
+            dummy->show();
+            qint64 t1 = t.nsecsElapsed(); t.restart();
+            QApplication::processEvents();
+            qint64 t2 = t.nsecsElapsed();
+            dummy->hide();
+            QApplication::processEvents();
+            qDebug().noquote() << QString("  Dummy popup: show=%1ms events=%2ms").arg(ms(t1)).arg(ms(t2));
+            delete dummy;
+        }
+        {
+            auto* popup = new TypeSelectorPopup();
+            TypeEntry e;
+            e.entryKind = TypeEntry::Primitive;
+            e.primitiveKind = NodeKind::Hex8;
+            e.displayName = "test";
+            popup->setTypes({e});
+            popup->resize(300, 400);
+            QElapsedTimer t; t.start();
+            popup->show();
+            qint64 t1 = t.nsecsElapsed(); t.restart();
+            QApplication::processEvents();
+            qint64 t2 = t.nsecsElapsed();
+            popup->hide();
+            QApplication::processEvents();
+            qDebug().noquote() << QString("  TypeSelectorPopup (after dummy): show=%1ms events=%2ms").arg(ms(t1)).arg(ms(t2));
+            delete popup;
         }
     }
 

@@ -5,14 +5,14 @@
 #include <cstdint>
 
 /**
- * Process memory provider (Windows)
- * Reads/writes memory from a live process using Windows platform APIs
+ * Process memory provider
+ * Reads/writes memory from a live process using platform APIs
  */
-class ProcessMemoryWindowsProvider : public rcx::Provider
+class ProcessMemoryProvider : public rcx::Provider
 {
 public:
-    ProcessMemoryWindowsProvider(uint32_t pid, const QString& processName);
-    ~ProcessMemoryWindowsProvider() override;
+    ProcessMemoryProvider(uint32_t pid, const QString& processName);
+    ~ProcessMemoryProvider() override;
 
     // Required overrides
     bool read(uint64_t addr, void* buf, int len) const override;
@@ -57,15 +57,15 @@ private:
 };
 
 /**
- * Plugin that provides ProcessMemoryWindowsProvider
+ * Plugin that provides ProcessMemoryProvider
  */
-class ProcessMemoryWindowsPlugin : public IProviderPlugin
+class ProcessMemoryPlugin : public IProviderPlugin
 {
 public:
-    std::string Name() const override { return "Process Memory Windows"; }
+    std::string Name() const override { return "Process Memory"; }
     std::string Version() const override { return "1.0.0"; }
     std::string Author() const override { return "Reclass"; }
-    std::string Description() const override { return "Read and write memory from local running processes (Windows)"; }
+    std::string Description() const override { return "Read and write memory from local running processes"; }
     k_ELoadType LoadType() const override { return k_ELoadTypeAuto; }
     QIcon Icon() const override;
 
