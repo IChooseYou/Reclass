@@ -130,6 +130,7 @@ jobs:
           cp build/Reclass AppDir/usr/bin/
           cp build/ReclassMcpBridge AppDir/usr/bin/
           cp -r build/themes AppDir/usr/bin/ 2>/dev/null || true
+          cp -r build/Plugins AppDir/usr/bin/ 2>/dev/null || true
           cp src/icons/class.png AppDir/usr/share/icons/hicolor/256x256/apps/reclass.png
 
           # Create AppImage with Qt libs bundled
