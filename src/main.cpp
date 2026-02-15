@@ -366,7 +366,7 @@ void MainWindow::createMenus() {
     file->addAction(makeIcon(":/vsicons/save.svg"), "&Save", QKeySequence::Save, this, &MainWindow::saveFile);
     file->addAction(makeIcon(":/vsicons/save-as.svg"), "Save &As...", QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
     file->addSeparator();
-    file->addAction(makeIcon(":/vsicons/close.svg"), "&Close", QKeySequence(Qt::CTRL | Qt::Key_W), this, &MainWindow::closeFile);
+    file->addAction("&Unload Project", QKeySequence(Qt::CTRL | Qt::Key_W), this, &MainWindow::closeFile);
     file->addSeparator();
     file->addAction(makeIcon(":/vsicons/export.svg"), "Export &C++ Header...", this, &MainWindow::exportCpp);
     file->addSeparator();
