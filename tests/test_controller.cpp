@@ -34,9 +34,8 @@ static void buildSmallTree(NodeTree& tree) {
     field(0,  NodeKind::UInt32,  "field_u32");    // 4 bytes
     field(4,  NodeKind::Float,   "field_float");   // 4 bytes
     field(8,  NodeKind::UInt8,   "field_u8");      // 1 byte
-    field(9,  NodeKind::Padding, "pad0");          // 3 bytes padding
-    // Set padding arrayLen = 3 for 3-byte padding
-    tree.nodes.last().arrayLen = 3;
+    field(9,  NodeKind::Hex16,   "pad0");           // 2 bytes
+    field(11, NodeKind::Hex8,    "pad1");           // 1 byte
     field(12, NodeKind::Hex32,   "field_hex");     // 4 bytes
 }
 
@@ -280,47 +279,6 @@ private slots:
             if (m_doc->tree.nodes[i].name == "newHex") { newIdx = i; break; }
         }
         QVERIFY(newIdx >= 0);
-    }
-
-    // ── Test: Padding value edit is effectively blocked at controller level ──
-    void testPaddingValueEditIsBlocked() {
-        // Find the padding node
-        int padIdx = -1;
-        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
-            if (m_doc->tree.nodes[i].kind == NodeKind::Padding) { padIdx = i; break; }
-        }
-        QVERIFY(padIdx >= 0);
-        uint64_t addr = m_doc->tree.computeOffset(padIdx);
-
-        // Read original data at padding offset
-        int padSize = m_doc->tree.nodes[padIdx].byteSize();
-        QByteArray origData = m_doc->provider->readBytes(addr, padSize);
-
-        // The context menu blocks Padding editing, so the controller's setNodeValue
-        // would only be called if the editing UI somehow allows it. But let's verify
-        // the editor correctly blocks it.
-        // Find padding line in composed output
-        ComposeResult result = m_doc->compose();
-        int paddingLine = -1;
-        for (int i = 0; i < result.meta.size(); i++) {
-            if (result.meta[i].nodeKind == NodeKind::Padding &&
-                result.meta[i].lineKind == LineKind::Field) {
-                paddingLine = i;
-                break;
-            }
-        }
-        QVERIFY(paddingLine >= 0);
-
-        m_editor->applyDocument(result);
-        QApplication::processEvents();
-
-        // beginInlineEdit(Value) on Padding line must be rejected
-        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Value, paddingLine));
-        QVERIFY(!m_editor->isEditing());
-
-        // Data must be unchanged
-        QByteArray afterData = m_doc->provider->readBytes(addr, padSize);
-        QCOMPARE(afterData, origData);
     }
 
     // ── Test: setNodeValue with Hex32 (space-separated hex bytes) ──

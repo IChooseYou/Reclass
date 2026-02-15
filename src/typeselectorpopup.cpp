@@ -122,7 +122,7 @@ public:
             return;
         }
 
-        // 18px gutter: side triangle if current
+        // Gutter: side triangle if current
         if (m_hasCurrent && m_filtered && row >= 0 && row < m_filtered->size()) {
             const TypeEntry& entry = (*m_filtered)[row];
             bool isCurrent = false;
@@ -131,13 +131,13 @@ public:
             else if (m_current->entryKind == TypeEntry::Composite && entry.entryKind == TypeEntry::Composite)
                 isCurrent = (entry.structId == m_current->structId);
             if (isCurrent) {
-                painter->setPen(t.syntaxType);
+                painter->setPen(t.text);
                 painter->setFont(m_font);
-                painter->drawText(QRect(x, y, 18, h), Qt::AlignCenter,
+                painter->drawText(QRect(x, y, 10, h), Qt::AlignCenter,
                                   QString(QChar(0x25B8)));
             }
         }
-        x += 18;
+        x += 10;
 
         // Icon 16x16 — only for composite entries
         bool hasIcon = (m_filtered && row >= 0 && row < m_filtered->size()
@@ -369,6 +369,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_listView->setFrameShape(QFrame::NoFrame);
         m_listView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_listView->setMouseTracking(true);
+        m_listView->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_listView->viewport()->setAttribute(Qt::WA_Hover, true);
         m_listView->installEventFilter(this);
 
@@ -491,7 +492,7 @@ void TypeSelectorPopup::popup(const QPoint& globalPos) {
         QString text = t.classKeyword.isEmpty()
             ? t.displayName
             : (t.classKeyword + QStringLiteral(" ") + t.displayName);
-        int w = 18 + 20 + fm.horizontalAdvance(text) + 16;
+        int w = 10 + 20 + fm.horizontalAdvance(text) + 16;
         if (w > maxTextW) maxTextW = w;
     }
     int popupW = qBound(280, maxTextW + 24, 500);

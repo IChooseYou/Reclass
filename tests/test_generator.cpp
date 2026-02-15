@@ -418,30 +418,6 @@ private slots:
         QVERIFY(result.contains("wchar_t wname[32];"));
     }
 
-    // ── Padding node ──
-
-    void testPaddingNode() {
-        rcx::NodeTree tree;
-        rcx::Node root;
-        root.kind = rcx::NodeKind::Struct;
-        root.name = "PadTest";
-        root.structTypeName = "PadTest";
-        root.parentId = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        rcx::Node pad;
-        pad.kind = rcx::NodeKind::Padding;
-        pad.name = "reserved";
-        pad.parentId = rootId;
-        pad.offset = 0;
-        pad.arrayLen = 16;
-        tree.addNode(pad);
-
-        QString result = rcx::renderCpp(tree, rootId);
-        QVERIFY(result.contains("uint8_t reserved[16];"));
-    }
-
     // ── Full SDK export (multiple root structs) ──
 
     void testFullSdkExport() {

@@ -89,7 +89,7 @@ private slots:
         QCOMPARE(result.meta[2].lineKind, LineKind::Footer);
     }
 
-    void testPaddingMarker() {
+    void testHexNodeCompose() {
         NodeTree tree;
         tree.baseAddress = 0;
 
@@ -100,19 +100,18 @@ private slots:
         int ri = tree.addNode(root);
         uint64_t rootId = tree.nodes[ri].id;
 
-        Node pad;
-        pad.kind = NodeKind::Padding;
-        pad.name = "pad";
-        pad.parentId = rootId;
-        pad.offset = 0;
-        tree.addNode(pad);
+        Node hex;
+        hex.kind = NodeKind::Hex8;
+        hex.name = "pad";
+        hex.parentId = rootId;
+        hex.offset = 0;
+        tree.addNode(hex);
 
         NullProvider prov;
         ComposeResult result = compose(tree, prov);
 
-        // CommandRow + padding + root footer = 3
+        // CommandRow + hex node + root footer = 3
         QCOMPARE(result.meta.size(), 3);
-        QVERIFY(result.meta[1].markerMask & (1u << M_PAD));
         QCOMPARE(result.meta[1].depth, 1);
 
         // Line 2 is root footer

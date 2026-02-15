@@ -293,7 +293,6 @@ static QString readValueImpl(const Node& node, const Provider& prov,
         line += QStringLiteral("]");
         return line;
     }
-    case NodeKind::Padding:   return display ? hexVal(prov.readU8(addr)) : rawHex(prov.readU8(addr), 2);
     case NodeKind::UTF8: {
         QByteArray bytes = prov.readBytes(addr, node.strLen);
         int end = bytes.indexOf('\0');
@@ -344,21 +343,8 @@ QString fmtNodeLine(const Node& node, const Provider& prov,
         return ind + QString(prefixW, ' ') + val + cmtSuffix;
     }
 
-    // Hex nodes and Padding: hex byte preview (ASCII padded to colName to align with value column)
+    // Hex nodes: hex byte preview (ASCII padded to colName to align with value column)
     if (isHexPreview(node.kind)) {
-        if (node.kind == NodeKind::Padding) {
-            const int totalSz = qMax(1, node.arrayLen);
-            const int lineOff = subLine * 8;
-            const int lineBytes = qMin(8, totalSz - lineOff);
-            QByteArray b = prov.isReadable(addr + lineOff, lineBytes)
-                ? prov.readBytes(addr + lineOff, lineBytes) : QByteArray(lineBytes, '\0');
-            QString ascii = bytesToAscii(b, lineBytes).leftJustified(colName, ' ');
-            QString hex = bytesToHex(b, lineBytes).leftJustified(23, ' '); // 8*3-1
-            if (subLine == 0)
-                return ind + type + SEP + ascii + SEP + hex + cmtSuffix;
-            return ind + QString(colType + (int)SEP.size(), ' ') + ascii + SEP + hex + cmtSuffix;
-        }
-        // Hex8..Hex64: single line, ASCII padded to colName so hex column aligns with value column
         const int sz = sizeForKind(node.kind);
         QByteArray b = prov.isReadable(addr, sz)
             ? prov.readBytes(addr, sz) : QByteArray(sz, '\0');

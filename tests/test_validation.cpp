@@ -57,8 +57,8 @@ static void buildValidationTree(NodeTree& tree) {
     field(46, NodeKind::Hex32,      "field_h32");
     field(50, NodeKind::Hex64,      "field_h64");
     field(58, NodeKind::Pointer64,  "field_ptr");
-    field(66, NodeKind::Padding,    "pad0");
-    tree.nodes.last().arrayLen = 6;
+    field(66, NodeKind::Hex32,      "pad0");
+    field(70, NodeKind::Hex16,      "pad1");
     fieldArr(72, NodeKind::UInt32, 4, "field_arr");
 }
 
@@ -725,9 +725,9 @@ private slots:
         QCOMPARE(m_doc->undoStack.count(), 0);
     }
 
-    // ── changeNodeKind size transitions: shrink inserts padding ──
+    // ── changeNodeKind size transitions: shrink inserts hex nodes ──
 
-    void testChangeKindShrinkInsertsPadding() {
+    void testChangeKindShrinkInsertsHexNodes() {
         int idx = findNode(m_doc->tree, "field_u32");
         QVERIFY(idx >= 0);
         QCOMPARE(m_doc->tree.nodes[idx].kind, NodeKind::UInt32);  // 4 bytes
@@ -737,7 +737,7 @@ private slots:
         QApplication::processEvents();
 
         QCOMPARE(m_doc->tree.nodes[idx].kind, NodeKind::UInt8);
-        // Should have inserted padding nodes (Hex16 + Hex8 = 3 bytes, or similar)
+        // Should have inserted hex nodes (Hex16 + Hex8 = 3 bytes, or similar)
         QVERIFY(m_doc->tree.nodes.size() > origCount);
 
         // Undo restores everything
@@ -983,37 +983,6 @@ private slots:
 
         QVERIFY(!m_editor->beginInlineEdit(EditTarget::Value, -1));
         QVERIFY(!m_editor->isEditing());
-    }
-
-    // ── Editor: padding value edit blocked, name/type still work ──
-
-    void testPaddingEditRestrictions() {
-        m_ctrl->refresh();
-        QApplication::processEvents();
-
-        ComposeResult result = m_doc->compose();
-        m_editor->applyDocument(result);
-        QApplication::processEvents();
-
-        // Find padding line
-        int padLine = -1;
-        for (int i = 0; i < result.meta.size(); i++) {
-            if (result.meta[i].nodeKind == NodeKind::Padding &&
-                result.meta[i].lineKind == LineKind::Field) {
-                padLine = i;
-                break;
-            }
-        }
-        QVERIFY(padLine >= 0);
-
-        // Value edit rejected
-        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Value, padLine));
-
-        // Type edit accepted
-        bool ok = m_editor->beginInlineEdit(EditTarget::Type, padLine);
-        QVERIFY(ok);
-        m_editor->cancelInlineEdit();
-        QApplication::processEvents();
     }
 
     // ── Editor: struct header rejects value edit ──

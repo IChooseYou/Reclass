@@ -141,7 +141,7 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_EDITABLE, 5 /*INDIC_HIDDEN*/);
 
-    // Hex/Padding node dim indicator — overrides text color
+    // Hex node dim indicator — overrides text color
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HEX_DIM, 17 /*INDIC_TEXTFORE*/);
 
@@ -240,9 +240,6 @@ void RcxEditor::setupFolding() {
 void RcxEditor::setupMarkers() {
     // M_CONT (0): continuation line (metadata only, no visual)
     m_sci->markerDefine(QsciScintilla::Invisible, M_CONT);
-
-    // M_PAD (1): padding line (metadata only, no visual)
-    m_sci->markerDefine(QsciScintilla::Invisible, M_PAD);
 
     // M_PTR0 (2): right triangle
     m_sci->markerDefine(QsciScintilla::RightTriangle, M_PTR0);
@@ -1038,9 +1035,6 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
 
     if (lm->nodeIdx < 0) return false;
 
-    // Padding: reject value editing (hex bytes are display-only)
-    if (t == EditTarget::Value && lm->nodeKind == NodeKind::Padding)
-        return false;
     // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
     if ((t == EditTarget::Name || t == EditTarget::Value) && isHexNode(lm->nodeKind))
         return false;
@@ -1221,9 +1215,6 @@ static bool hitTestTarget(QsciScintilla* sci,
         }
         return false;
     }
-    // Padding nodes: hex bytes are display-only, not editable
-    if (outTarget == EditTarget::Value && lm.nodeKind == NodeKind::Padding)
-        return false;
     // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
     if ((outTarget == EditTarget::Name || outTarget == EditTarget::Value) && isHexNode(lm.nodeKind))
         return false;
@@ -1680,9 +1671,6 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     if (lm->nodeIdx < 0 && !(lm->lineKind == LineKind::CommandRow &&
         (target == EditTarget::BaseAddress || target == EditTarget::Source
          || target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
-        return false;
-    // Padding: reject value editing (display-only hex bytes)
-    if (target == EditTarget::Value && lm->nodeKind == NodeKind::Padding)
         return false;
     // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
     if ((target == EditTarget::Name || target == EditTarget::Value) && isHexNode(lm->nodeKind))

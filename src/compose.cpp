@@ -14,8 +14,9 @@ constexpr uint64_t kGoldenRatio      = 0x9E3779B97F4A7C15ULL;
 struct ComposeState {
     QString            text;
     QVector<LineMeta>  meta;
-    QSet<uint64_t>     visiting;   // cycle detection for struct recursion
-    QSet<qulonglong>   ptrVisiting; // cycle guard for pointer expansions
+    QSet<uint64_t>     visiting;      // cycle detection for struct recursion
+    QSet<qulonglong>   ptrVisiting;   // cycle guard for pointer expansions
+    QSet<uint64_t>     virtualPtrRefs; // refIds currently being virtually expanded via pointer deref
     int                currentLine = 0;
     int                typeW       = kColType;  // global type column width (fallback)
     int                nameW       = kColName;  // global name column width (fallback)
@@ -64,7 +65,6 @@ uint32_t computeMarkers(const Node& node, const Provider& /*prov*/,
                         uint64_t /*addr*/, bool isCont, int /*depth*/) {
     uint32_t mask = 0;
     if (isCont)                          mask |= (1u << M_CONT);
-    if (node.kind == NodeKind::Padding)  mask |= (1u << M_PAD);
     // No ambient validation markers — errors only shown during inline editing.
     return mask;
 }
@@ -118,14 +118,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
     int typeW = state.effectiveTypeW(scopeId);
     int nameW = state.effectiveNameW(scopeId);
 
-    // Line count: padding wraps at 8 bytes per line
-    int numLines;
-    if (node.kind == NodeKind::Padding) {
-        int totalBytes = qMax(1, node.arrayLen);
-        numLines = (totalBytes + 7) / 8;
-    } else {
-        numLines = linesForKind(node.kind);
-    }
+    int numLines = linesForKind(node.kind);
 
     // Resolve pointer target name for display
     QString ptrTypeOverride;
@@ -156,12 +149,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
 
         // Set byte count for hex preview lines (used for per-byte change highlighting)
         if (isHexPreview(node.kind)) {
-            if (node.kind == NodeKind::Padding) {
-                int totalSz = qMax(1, node.arrayLen);
-                lm.lineByteCount = qMin(8, totalSz - sub * 8);
-            } else {
-                lm.lineByteCount = sizeForKind(node.kind);
-            }
+            lm.lineByteCount = sizeForKind(node.kind);
         }
 
         QString lineText = fmt::fmtNodeLine(node, prov, absAddr, depth, sub,
@@ -430,29 +418,42 @@ void composeNode(ComposeState& state, const NodeTree& tree,
         QString ptrTargetName = resolvePointerTarget(tree, node.refId);
         QString ptrTypeOverride = fmt::pointerTypeName(node.kind, ptrTargetName);
 
+        // Check if this pointer has materialized children (from materializeRefChildren)
+        QVector<int> ptrChildren = state.childMap.value(node.id);
+        bool hasMaterialized = !ptrChildren.isEmpty();
+
+        // Force collapsed if this refId is already being virtually expanded
+        // (prevents infinite recursion in virtual expansion mode).
+        // Materialized children bypass this — they are real tree nodes with
+        // independent collapsed state, so recursion is bounded by the tree.
+        bool forceCollapsed = !hasMaterialized
+                              && state.virtualPtrRefs.contains(node.refId);
+        bool effectiveCollapsed = node.collapsed || forceCollapsed;
+
         // Emit merged fold header: "Type* Name {" (expanded) or "Type* Name -> val" (collapsed)
         {
             LineMeta lm;
             lm.nodeIdx    = nodeIdx;
             lm.nodeId     = node.id;
             lm.depth      = depth;
-            lm.lineKind   = node.collapsed ? LineKind::Field : LineKind::Header;
+            lm.lineKind   = effectiveCollapsed ? LineKind::Field : LineKind::Header;
             lm.offsetText = fmt::fmtOffsetMargin(tree.baseAddress + absAddr, false, state.offsetHexDigits);
             lm.offsetAddr = tree.baseAddress + absAddr;
             lm.nodeKind   = node.kind;
             lm.foldHead      = true;
-            lm.foldCollapsed = node.collapsed;
+            lm.foldCollapsed = effectiveCollapsed;
             lm.foldLevel  = computeFoldLevel(depth, true);
             lm.markerMask = computeMarkers(node, prov, absAddr, false, depth);
+            if (forceCollapsed) lm.markerMask |= (1u << M_CYCLE);
             lm.effectiveTypeW = typeW;
             lm.effectiveNameW = nameW;
             lm.pointerTargetName = ptrTargetName;
-            state.emitLine(fmt::fmtPointerHeader(node, depth, node.collapsed,
+            state.emitLine(fmt::fmtPointerHeader(node, depth, effectiveCollapsed,
                                                   prov, absAddr, ptrTypeOverride,
                                                   typeW, nameW), lm);
         }
 
-        if (!node.collapsed) {
+        if (!effectiveCollapsed) {
             int sz = node.byteSize();
             uint64_t ptrVal = 0;
             if (prov.isValid() && sz > 0 && prov.isReadable(absAddr, sz)) {
@@ -480,18 +481,42 @@ void composeNode(ComposeState& state, const NodeTree& tree,
             if (!ptrReadable)
                 pBase = (uint64_t)0 - tree.baseAddress;
 
-            qulonglong key = pBase ^ (node.refId * kGoldenRatio);
-            if (!state.ptrVisiting.contains(key)) {
-                state.ptrVisiting.insert(key);
-                int refIdx = tree.indexOfId(node.refId);
-                if (refIdx >= 0) {
-                    const Node& ref = tree.nodes[refIdx];
-                    if (ref.kind == NodeKind::Struct || ref.kind == NodeKind::Array)
-                        composeParent(state, tree, childProv, refIdx,
-                                      depth, pBase, ref.id,
-                                      /*isArrayChild=*/true);
+            if (hasMaterialized) {
+                // Render materialized children at the pointer target address.
+                // These are real tree nodes with independent state — use rootId
+                // so resolveAddr computes offsets relative to the pointer target.
+                std::sort(ptrChildren.begin(), ptrChildren.end(), [&](int a, int b) {
+                    return tree.nodes[a].offset < tree.nodes[b].offset;
+                });
+                for (int childIdx : ptrChildren) {
+                    composeNode(state, tree, childProv, childIdx, depth + 1,
+                                pBase, node.id, false, node.id);
                 }
-                state.ptrVisiting.remove(key);
+            } else {
+                // Virtual expansion via ref struct definition.
+                // Temporarily remove the ref struct from visiting so composeParent
+                // doesn't hit the struct-level cycle guard. The ptrVisiting mechanism
+                // handles actual address-level pointer cycles, and virtualPtrRefs
+                // prevents infinite virtual recursion (inner self-referential pointers
+                // are force-collapsed with M_CYCLE for the user to materialize).
+                qulonglong key = pBase ^ (node.refId * kGoldenRatio);
+                if (!state.ptrVisiting.contains(key)) {
+                    state.ptrVisiting.insert(key);
+                    int refIdx = tree.indexOfId(node.refId);
+                    if (refIdx >= 0) {
+                        const Node& ref = tree.nodes[refIdx];
+                        if (ref.kind == NodeKind::Struct || ref.kind == NodeKind::Array) {
+                            bool wasVisiting = state.visiting.remove(node.refId);
+                            state.virtualPtrRefs.insert(node.refId);
+                            composeParent(state, tree, childProv, refIdx,
+                                          depth, pBase, ref.id,
+                                          /*isArrayChild=*/true);
+                            state.virtualPtrRefs.remove(node.refId);
+                            if (wasVisiting) state.visiting.insert(node.refId);
+                        }
+                    }
+                    state.ptrVisiting.remove(key);
+                }
             }
 
             // Footer for pointer fold
@@ -571,7 +596,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     // Include struct/array names - they now use columnar layout too
     int maxNameLen = kMinNameW;
     for (const Node& node : tree.nodes) {
-        // Skip hex/padding (they show ASCII preview, not name column)
+        // Skip hex (they show ASCII preview, not name column)
         if (isHexPreview(node.kind)) continue;
         maxNameLen = qMax(maxNameLen, (int)node.name.size());
     }
@@ -590,7 +615,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
             const Node& child = tree.nodes[childIdx];
             scopeMaxType = qMax(scopeMaxType, (int)nodeTypeName(child).size());
 
-            // Name width (skip hex/padding, but include containers)
+            // Name width (skip hex, but include containers)
             if (!isHexPreview(child.kind)) {
                 scopeMaxName = qMax(scopeMaxName, (int)child.name.size());
             }
@@ -622,7 +647,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
             const Node& child = tree.nodes[childIdx];
             rootMaxType = qMax(rootMaxType, (int)nodeTypeName(child).size());
 
-            // Name width (skip hex/padding, include containers)
+            // Name width (skip hex, include containers)
             if (!isHexPreview(child.kind)) {
                 rootMaxName = qMax(rootMaxName, (int)child.name.size());
             }

@@ -50,7 +50,6 @@ static QString cTypeName(NodeKind kind) {
     case NodeKind::Mat4x4:    return QStringLiteral("float");
     case NodeKind::UTF8:      return QStringLiteral("char");
     case NodeKind::UTF16:     return QStringLiteral("wchar_t");
-    case NodeKind::Padding:   return QStringLiteral("uint8_t");
     default:                  return QStringLiteral("uint8_t");
     }
 }
@@ -123,8 +122,6 @@ static QString emitField(GenContext& ctx, const Node& node) {
         return QStringLiteral("    %1 %2[%3];").arg(ctx.cType(NodeKind::UTF8), name).arg(node.strLen) + oc;
     case NodeKind::UTF16:
         return QStringLiteral("    %1 %2[%3];").arg(ctx.cType(NodeKind::UTF16), name).arg(node.strLen) + oc;
-    case NodeKind::Padding:
-        return QStringLiteral("    %1 %2[%3];").arg(ctx.cType(NodeKind::Padding), name).arg(qMax(1, node.arrayLen)) + oc;
     case NodeKind::Pointer32: {
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
@@ -169,7 +166,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
     auto emitPadRun = [&](int offset, int size) {
         if (size <= 0) return;
         ctx.output += QStringLiteral("    %1 %2[0x%3];%4\n")
-            .arg(ctx.cType(NodeKind::Padding))
+            .arg(QStringLiteral("uint8_t"))
             .arg(ctx.uniquePadName())
             .arg(QString::number(size, 16).toUpper())
             .arg(offsetComment(offset));

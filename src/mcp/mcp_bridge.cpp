@@ -248,7 +248,7 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                         "collapse: {op:'collapse', nodeId:'ID', collapsed:true}. "
                         "Insert ops get auto-assigned IDs; use $0, $1 etc. to reference them in later ops. "
                         "Kinds: Hex8 Hex16 Hex32 Hex64 Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64 "
-                        "Float Double Bool Pointer32 Pointer64 Vec2 Vec3 Vec4 Mat4x4 UTF8 UTF16 Padding Struct Array"},
+                        "Float Double Bool Pointer32 Pointer64 Vec2 Vec3 Vec4 Mat4x4 UTF8 UTF16 Struct Array"},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{

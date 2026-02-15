@@ -1,62 +1,76 @@
 #pragma once
 #include "core.h"
+#include <QIcon>
 #include <QStandardItemModel>
 #include <QStandardItem>
 #include <algorithm>
 
 namespace rcx {
 
-// Recursively add children of parentId as tree items under parentItem.
-inline void addWorkspaceChildren(QStandardItem* parentItem,
-                                 const NodeTree& tree,
-                                 uint64_t parentId,
-                                 void* subPtr) {
-    QVector<int> children = tree.childrenOf(parentId);
-    std::sort(children.begin(), children.end(), [&](int a, int b) {
-        return tree.nodes[a].offset < tree.nodes[b].offset;
-    });
+struct TabInfo {
+    const NodeTree* tree;
+    QString         name;
+    void*           subPtr;   // QMdiSubWindow* as void*
+};
 
-    for (int idx : children) {
-        const Node& node = tree.nodes[idx];
+// Sentinel value stored in UserRole+1 to mark the Project group node.
+static constexpr uint64_t kGroupSentinel = ~uint64_t(0);
 
-        // Skip hex preview nodes — they are padding/filler, not meaningful fields
-        if (isHexNode(node.kind)) continue;
-
-        QString display;
-        if (node.kind == NodeKind::Struct) {
-            QString typeName = node.structTypeName.isEmpty()
-                ? node.name : node.structTypeName;
-            display = QStringLiteral("%1 (%2)")
-                .arg(typeName, node.resolvedClassKeyword());
-        } else {
-            display = QStringLiteral("%1 (%2)")
-                .arg(node.name, QString::fromLatin1(kindToString(node.kind)));
-        }
-
-        auto* item = new QStandardItem(display);
-        item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
-        if (node.kind == NodeKind::Struct)
-            item->setData(QVariant::fromValue(node.id), Qt::UserRole + 1);
-        item->setData(QVariant::fromValue(node.id), Qt::UserRole + 2);  // nodeId for scroll
-
-        if (node.kind == NodeKind::Struct)
-            addWorkspaceChildren(item, tree, node.id, subPtr);
-
-        parentItem->appendRow(item);
-    }
-}
-
-inline void buildWorkspaceModel(QStandardItemModel* model,
-                                const NodeTree& tree,
-                                const QString& projectName,
-                                void* subPtr = nullptr) {
+inline void buildProjectExplorer(QStandardItemModel* model,
+                                 const QVector<TabInfo>& tabs) {
     model->clear();
     model->setHorizontalHeaderLabels({QStringLiteral("Name")});
 
-    auto* projectItem = new QStandardItem(projectName);
-    projectItem->setData(QVariant::fromValue(subPtr), Qt::UserRole);
+    // Single "Project" root with folder icon
+    void* firstSub = tabs.isEmpty() ? nullptr : tabs[0].subPtr;
+    auto* projectItem = new QStandardItem(QIcon(":/vsicons/folder.svg"),
+                                          QStringLiteral("Project"));
+    projectItem->setData(QVariant::fromValue(firstSub), Qt::UserRole);
+    projectItem->setData(QVariant::fromValue(kGroupSentinel), Qt::UserRole + 1);
 
-    addWorkspaceChildren(projectItem, tree, 0, subPtr);
+    // Collect all top-level structs/enums across all tabs
+    QVector<std::pair<const Node*, void*>> types, enums;
+    for (const auto& tab : tabs) {
+        QVector<int> topLevel = tab.tree->childrenOf(0);
+        for (int idx : topLevel) {
+            const Node& n = tab.tree->nodes[idx];
+            if (n.kind != NodeKind::Struct) continue;
+            if (n.resolvedClassKeyword() == QStringLiteral("enum"))
+                enums.append({&n, tab.subPtr});
+            else
+                types.append({&n, tab.subPtr});
+        }
+    }
+
+    auto nameOf = [](const Node* n) {
+        return n->structTypeName.isEmpty() ? n->name : n->structTypeName;
+    };
+    auto cmpName = [&](const std::pair<const Node*, void*>& a,
+                       const std::pair<const Node*, void*>& b) {
+        return nameOf(a.first).compare(nameOf(b.first), Qt::CaseInsensitive) < 0;
+    };
+    std::sort(types.begin(), types.end(), cmpName);
+    std::sort(enums.begin(), enums.end(), cmpName);
+
+    for (const auto& [n, subPtr] : types) {
+        QString display = QStringLiteral("%1 (%2)")
+            .arg(nameOf(n), n->resolvedClassKeyword());
+        auto* item = new QStandardItem(
+            QIcon(":/vsicons/symbol-structure.svg"), display);
+        item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
+        item->setData(QVariant::fromValue(n->id), Qt::UserRole + 1);
+        projectItem->appendRow(item);
+    }
+
+    for (const auto& [n, subPtr] : enums) {
+        QString display = QStringLiteral("%1 (%2)")
+            .arg(nameOf(n), n->resolvedClassKeyword());
+        auto* item = new QStandardItem(
+            QIcon(":/vsicons/symbol-enum.svg"), display);
+        item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
+        item->setData(QVariant::fromValue(n->id), Qt::UserRole + 1);
+        projectItem->appendRow(item);
+    }
 
     model->appendRow(projectItem);
 }

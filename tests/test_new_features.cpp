@@ -304,39 +304,6 @@ private slots:
         QVERIFY(result.contains("float speed;"));
     }
 
-    void testGenerator_typeAliases_padding() {
-        // Padding gap and tail padding should use aliased uint8_t
-        NodeTree tree;
-        Node root;
-        root.kind = NodeKind::Struct;
-        root.name = "PadTest";
-        root.structTypeName = "PadTest";
-        root.parentId = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        Node f1;
-        f1.kind = NodeKind::UInt32;
-        f1.name = "a";
-        f1.parentId = rootId;
-        f1.offset = 0;
-        tree.addNode(f1);
-
-        Node f2;
-        f2.kind = NodeKind::UInt32;
-        f2.name = "b";
-        f2.parentId = rootId;
-        f2.offset = 8;  // gap of 4 bytes at offset 4
-        tree.addNode(f2);
-
-        QHash<NodeKind, QString> aliases;
-        aliases[NodeKind::Padding] = "BYTE";
-
-        QString result = renderCpp(tree, rootId, &aliases);
-        // Padding gap should use the alias
-        QVERIFY(result.contains("BYTE _pad"));
-    }
-
     void testGenerator_typeAliases_array() {
         // Array element type should use alias
         NodeTree tree;
@@ -547,134 +514,92 @@ private slots:
     void testWorkspace_simpleTree() {
         auto tree = makeSimpleTree();
         QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "TestProject.rcx");
+        QVector<TabInfo> tabs = {{ &tree, "TestProject.rcx", nullptr }};
+        buildProjectExplorer(&model, tabs);
 
-        // 1 top-level item (the project)
+        // Single "Project" root
         QCOMPARE(model.rowCount(), 1);
         QStandardItem* project = model.item(0);
-        QCOMPARE(project->text(), QString("TestProject.rcx"));
+        QCOMPARE(project->text(), QString("Project"));
 
-        // Project has 1 child: the Player struct
+        // 1 type directly under Project: Player (no member fields)
         QCOMPARE(project->rowCount(), 1);
-        QStandardItem* player = project->child(0);
-        QVERIFY(player->text().contains("Player"));
-        QVERIFY(player->text().contains("struct"));
-
-        // Player struct has 2 children: health, speed
-        QCOMPARE(player->rowCount(), 2);
-        QVERIFY(player->child(0)->text().contains("health"));
-        QVERIFY(player->child(1)->text().contains("speed"));
+        QVERIFY(project->child(0)->text().contains("Player"));
+        QVERIFY(project->child(0)->text().contains("struct"));
+        QCOMPARE(project->child(0)->rowCount(), 0);
     }
 
     void testWorkspace_twoRootTree() {
         auto tree = makeTwoRootTree();
         QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "TwoRoot.rcx");
+        QVector<TabInfo> tabs = {{ &tree, "TwoRoot.rcx", nullptr }};
+        buildProjectExplorer(&model, tabs);
 
         QCOMPARE(model.rowCount(), 1);
         QStandardItem* project = model.item(0);
 
-        // 2 root struct children: Alpha and Bravo
+        // 2 types sorted alphabetically: Alpha, Bravo (no field children)
         QCOMPARE(project->rowCount(), 2);
         QVERIFY(project->child(0)->text().contains("Alpha"));
         QVERIFY(project->child(1)->text().contains("Bravo"));
-
-        // Each has 1 field child
-        QCOMPARE(project->child(0)->rowCount(), 1);
-        QVERIFY(project->child(0)->child(0)->text().contains("flagsA"));
-        QCOMPARE(project->child(1)->rowCount(), 1);
-        QVERIFY(project->child(1)->child(0)->text().contains("flagsB"));
+        QCOMPARE(project->child(0)->rowCount(), 0);
+        QCOMPARE(project->child(1)->rowCount(), 0);
     }
 
     void testWorkspace_richTree_rootCount() {
         auto tree = makeRichTree();
         QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "Rich.rcx");
+        QVector<TabInfo> tabs = {{ &tree, "Rich.rcx", nullptr }};
+        buildProjectExplorer(&model, tabs);
 
         QStandardItem* project = model.item(0);
-        QCOMPARE(project->rowCount(), 3);  // Pet, Cat, Ball
+        QCOMPARE(project->rowCount(), 3);  // Ball, Cat, Pet (sorted)
     }
 
-    void testWorkspace_richTree_petChildren() {
+    void testWorkspace_richTree_sorted() {
         auto tree = makeRichTree();
         QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "Rich.rcx");
+        QVector<TabInfo> tabs = {{ &tree, "Rich.rcx", nullptr }};
+        buildProjectExplorer(&model, tabs);
 
-        QStandardItem* pet = model.item(0)->child(0);
-        QVERIFY(pet->text().contains("Pet"));
-        // Pet has 2 non-hex children: name (UTF8), owner (Pointer64)
-        QCOMPARE(pet->rowCount(), 2);
-        QVERIFY(pet->child(0)->text().contains("name"));
-        QVERIFY(pet->child(1)->text().contains("owner"));
-    }
-
-    void testWorkspace_richTree_catNesting() {
-        auto tree = makeRichTree();
-        QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "Rich.rcx");
-
-        QStandardItem* cat = model.item(0)->child(1);
-        QVERIFY(cat->text().contains("Cat"));
-
-        // Find the nested "Pet" struct child (base)
-        QStandardItem* base = nullptr;
-        for (int i = 0; i < cat->rowCount(); i++) {
-            if (cat->child(i)->text().contains("Pet") &&
-                cat->child(i)->text().contains("struct")) {
-                base = cat->child(i);
-                break;
-            }
-        }
-        QVERIFY2(base != nullptr, "Cat should have a nested Pet struct child");
-
-        // base has structId set
-        QVERIFY(base->data(Qt::UserRole + 1).isValid());
-
-        // base should have its own children (name + owner)
-        QCOMPARE(base->rowCount(), 2);
-    }
-
-    void testWorkspace_richTree_ballChildren() {
-        auto tree = makeRichTree();
-        QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "Rich.rcx");
-
-        QStandardItem* ball = model.item(0)->child(2);
-        QVERIFY(ball->text().contains("Ball"));
-
-        // Ball has 3 non-hex children: speed, position, color
-        QCOMPARE(ball->rowCount(), 3);
-        QVERIFY(ball->child(0)->text().contains("speed"));
-        QVERIFY(ball->child(1)->text().contains("position"));
-        QVERIFY(ball->child(2)->text().contains("color"));
+        QStandardItem* project = model.item(0);
+        // Sorted alphabetically: Ball, Cat, Pet
+        QVERIFY(project->child(0)->text().contains("Ball"));
+        QVERIFY(project->child(1)->text().contains("Cat"));
+        QVERIFY(project->child(2)->text().contains("Pet"));
+        // No member fields under type nodes
+        QCOMPARE(project->child(0)->rowCount(), 0);
+        QCOMPARE(project->child(1)->rowCount(), 0);
+        QCOMPARE(project->child(2)->rowCount(), 0);
     }
 
     void testWorkspace_emptyTree() {
         NodeTree tree;
         QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "Empty.rcx");
+        QVector<TabInfo> tabs = {{ &tree, "Empty.rcx", nullptr }};
+        buildProjectExplorer(&model, tabs);
 
+        // Still has the "Project" root, just no children
         QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.item(0)->text(), QString("Project"));
         QCOMPARE(model.item(0)->rowCount(), 0);
     }
 
     void testWorkspace_structIdRole() {
         auto tree = makeSimpleTree();
         QStandardItemModel model;
-        buildWorkspaceModel(&model, tree, "Test.rcx");
+        QVector<TabInfo> tabs = {{ &tree, "Test.rcx", nullptr }};
+        buildProjectExplorer(&model, tabs);
 
         QStandardItem* project = model.item(0);
-        // Project item should NOT have structId
-        QVERIFY(!project->data(Qt::UserRole + 1).isValid());
+        // Project root has kGroupSentinel
+        QCOMPARE(project->data(Qt::UserRole + 1).toULongLong(), kGroupSentinel);
 
-        // Player struct should have structId
+        // Player type item should have structId
         QStandardItem* player = project->child(0);
         QVERIFY(player->data(Qt::UserRole + 1).isValid());
         QVERIFY(player->data(Qt::UserRole + 1).toULongLong() > 0);
-
-        // health field should NOT have structId
-        QStandardItem* health = player->child(0);
-        QVERIFY(!health->data(Qt::UserRole + 1).isValid());
+        QVERIFY(player->data(Qt::UserRole + 1).toULongLong() != kGroupSentinel);
     }
 
     // ═══════════════════════════════════════════════════

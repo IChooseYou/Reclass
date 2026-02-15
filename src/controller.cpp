@@ -2078,7 +2078,7 @@ void RcxController::onRefreshTick() {
         uint64_t rootId = m_viewRootId;
         if (rootId == 0 && !m_doc->tree.nodes.isEmpty())
             rootId = m_doc->tree.nodes[0].id;
-        collectPointerRanges(rootId, 0, 0, 4, visited, ranges);
+        collectPointerRanges(rootId, 0, 0, 99, visited, ranges);
     }
 
     m_readInFlight = true;

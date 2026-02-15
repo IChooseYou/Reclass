@@ -49,5 +49,7 @@
         <file alias="symbol-ruler.svg">vsicons/symbol-ruler.svg</file>
         <file alias="settings-gear.svg">vsicons/settings-gear.svg</file>
         <file alias="chevron-down.svg">vsicons/chevron-down.svg</file>
+        <file alias="folder.svg">vsicons/folder.svg</file>
+        <file alias="symbol-enum.svg">vsicons/symbol-enum.svg</file>
     </qresource>
 </RCC>
