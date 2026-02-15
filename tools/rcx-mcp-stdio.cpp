@@ -15,6 +15,9 @@
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
+#else
+#include <unistd.h>
+#include <sys/select.h>
 #endif
 
 int main(int argc, char* argv[]) {
