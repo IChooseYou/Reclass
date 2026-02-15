@@ -15,10 +15,6 @@ This tool helps you inspect raw bytes and interpret them as types (structs, arra
     }
   }
   ```
-- Plugin system is partially implemented. Some UI bugs exist.
-- Vector/Matrix improvements have been made but are not entirely complete.
-- Every edit goes through a full undo/redo system.
-
 ## Build
 
  1. Prerequisites
