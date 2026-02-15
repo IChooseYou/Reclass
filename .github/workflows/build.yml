@@ -15,11 +15,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Cache Qt5
-        uses: actions/cache@v4
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
         with:
-          path: build/_deps
-          key: qt5-msvc2017-x64-${{ hashFiles('cmake/FindQt5.cmake') }}
+          version: '6.7.2'
+          modules: 'qtsvg'
+          cache: true
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
