@@ -71,20 +71,19 @@ jobs:
           cp -r build/Plugins release/ 2>/dev/null || true
           cp -r build/themes release/ 2>/dev/null || true
           cp build/screenshot.png release/ 2>/dev/null || true
-          cd release && 7z a ../win64-reclass-latest.zip *
+          cd release && 7z a ../Reclass-win64.zip *
 
-      - name: Update win64 release
+      - name: Upload release asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-win64
-          name: win64
+          tag_name: latest
+          name: Latest Build
           body: |
-            Windows x64 build from main branch.
+            Automated build from main branch.
             Commit: ${{ github.sha }}
-          prerelease: true
-          files: win64-reclass-latest.zip
-          make_latest: false
+          prerelease: false
+          files: Reclass-win64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -157,18 +156,16 @@ jobs:
           name: Reclass-Linux-x64
           path: Reclass-x86_64.AppImage
 
-      - name: Update linux64 release
+      - name: Upload release asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-linux64
-          name: linux64
+          tag_name: latest
+          name: Latest Build
           body: |
-            Linux x64 AppImage build from main branch.
+            Automated build from main branch.
             Commit: ${{ github.sha }}
-            Run `chmod +x Reclass-x86_64.AppImage && ./Reclass-x86_64.AppImage`
-          prerelease: true
+          prerelease: false
           files: Reclass-x86_64.AppImage
-          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
