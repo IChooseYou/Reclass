@@ -47,6 +47,7 @@ private slots:
     void toggleMcp();
     void setEditorFont(const QString& fontName);
     void exportCpp();
+    void exportReclassXmlAction();
     void importFromSource();
     void importReclassXml();
     void showTypeAliasesDialog();

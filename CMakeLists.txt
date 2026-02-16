@@ -63,6 +63,8 @@ add_executable(Reclass
     src/import_reclass_xml.cpp
     src/import_source.h
     src/import_source.cpp
+    src/export_reclass_xml.h
+    src/export_reclass_xml.cpp
     src/mainwindow.h
     src/optionsdialog.h
     src/optionsdialog.cpp
@@ -275,6 +277,12 @@ if(BUILD_TESTING)
     target_include_directories(test_import_source PRIVATE src)
     target_link_libraries(test_import_source PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_import_source COMMAND test_import_source)
+
+    add_executable(test_export_xml tests/test_export_xml.cpp
+        src/export_reclass_xml.cpp src/import_reclass_xml.cpp src/format.cpp src/compose.cpp)
+    target_include_directories(test_export_xml PRIVATE src)
+    target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test)
+    add_test(NAME test_export_xml COMMAND test_export_xml)
 
     if(WIN32)
         add_executable(test_windbg_provider tests/test_windbg_provider.cpp

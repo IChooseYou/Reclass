@@ -2,6 +2,7 @@
 #include "generator.h"
 #include "import_reclass_xml.h"
 #include "import_source.h"
+#include "export_reclass_xml.h"
 #include "mcp/mcp_bridge.h"
 #include <QApplication>
 #include <QMainWindow>
@@ -381,6 +382,7 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(file, "&Unload Project", QKeySequence(Qt::CTRL | Qt::Key_W), QIcon(), this, &MainWindow::closeFile);
     file->addSeparator();
     Qt5Qt6AddAction(file, "Export &C++ Header...", QKeySequence::UnknownKey, makeIcon(":/vsicons/export.svg"), this, &MainWindow::exportCpp);
+    Qt5Qt6AddAction(file, "Export ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportReclassXmlAction);
     Qt5Qt6AddAction(file, "Import from &Source...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importFromSource);
     Qt5Qt6AddAction(file, "&Import ReClass XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importReclassXml);
     file->addSeparator();
@@ -1313,6 +1315,31 @@ void MainWindow::exportCpp() {
     }
     file.write(text.toUtf8());
     m_statusLabel->setText("Exported to " + QFileInfo(path).fileName());
+}
+
+// ── Export ReClass XML ──
+
+void MainWindow::exportReclassXmlAction() {
+    auto* tab = activeTab();
+    if (!tab) return;
+
+    QString path = QFileDialog::getSaveFileName(this,
+        "Export ReClass XML", {}, "ReClass XML (*.reclass);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    QString error;
+    if (!rcx::exportReclassXml(tab->doc->tree, path, &error)) {
+        QMessageBox::warning(this, "Export Failed",
+            error.isEmpty() ? QStringLiteral("Could not export") : error);
+        return;
+    }
+
+    int classCount = 0;
+    for (const auto& n : tab->doc->tree.nodes)
+        if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
+
+    m_statusLabel->setText(QStringLiteral("Exported %1 classes to %2")
+        .arg(classCount).arg(QFileInfo(path).fileName()));
 }
 
 // ── Import ReClass XML ──

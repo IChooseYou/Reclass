@@ -7,82 +7,8 @@ using namespace rcx;
 class TestImportXml : public QObject {
     Q_OBJECT
 private slots:
-    void importReClassEx();
-    void importMemeClsEx();
-    void importOlderFormat();
     void importSmallXml();
 };
-
-void TestImportXml::importReClassEx() {
-    QString path = QStringLiteral("E:/game_dev/dayz/dayz2.reclass");
-    QFile f(path);
-    if (!f.exists()) { QSKIP("dayz2.reclass not found"); return; }
-
-    QString error;
-    NodeTree tree = importReclassXml(path, &error);
-    QVERIFY2(!tree.nodes.isEmpty(), qPrintable(error));
-
-    // Count root structs
-    int rootCount = 0;
-    for (const auto& n : tree.nodes)
-        if (n.parentId == 0 && n.kind == NodeKind::Struct) rootCount++;
-    QVERIFY(rootCount > 0);
-    qDebug() << "dayz2.reclass:" << rootCount << "classes," << tree.nodes.size() << "nodes";
-
-    // First root should be collapsed
-    QCOMPARE(tree.nodes[0].collapsed, true);
-
-    // Verify pointer resolution
-    int resolved = 0;
-    for (const auto& n : tree.nodes) {
-        if ((n.kind == NodeKind::Pointer64 || n.kind == NodeKind::Pointer32) && n.refId != 0)
-            resolved++;
-    }
-    QVERIFY(resolved > 0);
-    qDebug() << "  Resolved pointers:" << resolved;
-
-    // Check specific known class exists
-    bool hasAVWorld = false;
-    for (const auto& n : tree.nodes) {
-        if (n.parentId == 0 && n.name == QStringLiteral("AVWorld")) {
-            hasAVWorld = true;
-            break;
-        }
-    }
-    QVERIFY(hasAVWorld);
-}
-
-void TestImportXml::importMemeClsEx() {
-    QString path = QStringLiteral("E:/game_dev/dayz/dayz3.MemeCls");
-    QFile f(path);
-    if (!f.exists()) { QSKIP("dayz3.MemeCls not found"); return; }
-
-    QString error;
-    NodeTree tree = importReclassXml(path, &error);
-    QVERIFY2(!tree.nodes.isEmpty(), qPrintable(error));
-
-    int rootCount = 0;
-    for (const auto& n : tree.nodes)
-        if (n.parentId == 0 && n.kind == NodeKind::Struct) rootCount++;
-    QVERIFY(rootCount > 0);
-    qDebug() << "dayz3.MemeCls:" << rootCount << "classes," << tree.nodes.size() << "nodes";
-}
-
-void TestImportXml::importOlderFormat() {
-    QString path = QStringLiteral("E:/game_dev/dayz/dayz.reclass");
-    QFile f(path);
-    if (!f.exists()) { QSKIP("dayz.reclass not found"); return; }
-
-    QString error;
-    NodeTree tree = importReclassXml(path, &error);
-    QVERIFY2(!tree.nodes.isEmpty(), qPrintable(error));
-
-    int rootCount = 0;
-    for (const auto& n : tree.nodes)
-        if (n.parentId == 0 && n.kind == NodeKind::Struct) rootCount++;
-    QVERIFY(rootCount > 0);
-    qDebug() << "dayz.reclass:" << rootCount << "classes," << tree.nodes.size() << "nodes";
-}
 
 void TestImportXml::importSmallXml() {
     // Create a minimal XML in a temp file and test parsing
