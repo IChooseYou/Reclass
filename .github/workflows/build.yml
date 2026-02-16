@@ -43,7 +43,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Reclass-Windows-x64
+          name: Reclass-win64-qt6
           path: |
             build/Reclass.exe
             build/ReclassMcpBridge.exe
@@ -55,6 +55,12 @@ jobs:
             build/iconengines/
             build/themes/
             build/screenshot.png
+
+      - name: Get date tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: date
+        shell: bash
+        run: echo "tag=$(date +'%d-%m-%Y')" >> "$GITHUB_OUTPUT"
 
       - name: Package release zip
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -72,19 +78,19 @@ jobs:
           cp build/Plugins/*.dll release/Plugins/ 2>/dev/null || true
           cp -r build/themes release/ 2>/dev/null || true
           cp build/screenshot.png release/ 2>/dev/null || true
-          cd release && 7z a ../Reclass-win64.zip *
+          cd release && 7z a ../Reclass-win64-qt6.zip *
 
       - name: Upload release asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest Build
+          tag_name: snapshot-${{ steps.date.outputs.tag }}
+          name: Snapshot ${{ steps.date.outputs.tag }}
           body: |
-            Automated build from main branch.
+            Automated snapshot from main branch.
             Commit: ${{ github.sha }}
           prerelease: false
-          files: Reclass-win64.zip
+          files: Reclass-win64-qt6.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -149,32 +155,39 @@ jobs:
             --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/reclass.png \
             --plugin qt \
             --output appimage
-          # Rename only if needed (appimagetool may already use the right name)
+          # Rename to final name
           ls Reclass-*.AppImage
-          if [ ! -f Reclass-x86_64.AppImage ]; then mv Reclass-*.AppImage Reclass-x86_64.AppImage; fi
+          mv Reclass-*.AppImage Reclass-linux64-qt6.AppImage
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Reclass-Linux-x64
-          path: Reclass-x86_64.AppImage
+          name: Reclass-linux64-qt6
+          path: Reclass-linux64-qt6.AppImage
+
+      - name: Get date tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: date
+        shell: bash
+        run: echo "tag=$(date +'%d-%m-%Y')" >> "$GITHUB_OUTPUT"
 
       - name: Upload release asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest Build
+          tag_name: snapshot-${{ steps.date.outputs.tag }}
+          name: Snapshot ${{ steps.date.outputs.tag }}
           body: |
-            Automated build from main branch.
+            Automated snapshot from main branch.
             Commit: ${{ github.sha }}
           prerelease: false
-          files: Reclass-x86_64.AppImage
+          files: Reclass-linux64-qt6.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   windows-qt5:
+    needs: linux
     runs-on: windows-latest
 
     steps:
@@ -201,3 +214,58 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --exclude-regex "test_editor|test_windbg_provider|test_com_security|test_format|test_command_row|test_type_selector"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Reclass-win64-qt5
+          path: |
+            build/Reclass.exe
+            build/ReclassMcpBridge.exe
+            build/Plugins/*.dll
+            build/*.dll
+            build/platforms/
+            build/styles/
+            build/imageformats/
+            build/iconengines/
+            build/themes/
+            build/screenshot.png
+
+      - name: Get date tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: date
+        shell: bash
+        run: echo "tag=$(date +'%d-%m-%Y')" >> "$GITHUB_OUTPUT"
+
+      - name: Package release zip
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          mkdir -p release
+          cp build/Reclass.exe release/
+          cp build/ReclassMcpBridge.exe release/
+          cp build/*.dll release/ 2>/dev/null || true
+          cp -r build/platforms release/ 2>/dev/null || true
+          cp -r build/styles release/ 2>/dev/null || true
+          cp -r build/imageformats release/ 2>/dev/null || true
+          cp -r build/iconengines release/ 2>/dev/null || true
+          mkdir -p release/Plugins
+          cp build/Plugins/*.dll release/Plugins/ 2>/dev/null || true
+          cp -r build/themes release/ 2>/dev/null || true
+          cp build/screenshot.png release/ 2>/dev/null || true
+          cd release && 7z a ../Reclass-win64-qt5.zip *
+
+      - name: Upload release asset
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: snapshot-${{ steps.date.outputs.tag }}
+          name: Snapshot ${{ steps.date.outputs.tag }}
+          body: |
+            Automated snapshot from main branch.
+            Commit: ${{ github.sha }}
+          prerelease: false
+          files: Reclass-win64-qt5.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
