@@ -54,6 +54,7 @@ public:
     // Custom type names (struct types from the tree) shown in type picker + lexer GlobalClass coloring
     QString textWithMargins() const;
     void setCustomTypeNames(const QStringList& names);
+    void setValueHistoryRef(const QHash<uint64_t, ValueHistory>* ref) { m_valueHistory = ref; }
 
     // Saved sources for quick-switch in source picker
     void setSavedSources(const QVector<SavedSourceDisplay>& sources) { m_savedSourceDisplay = sources; }
@@ -129,6 +130,11 @@ private:
     // ── Saved sources for quick-switch ──
     QVector<SavedSourceDisplay> m_savedSourceDisplay;
 
+    // ── Value history ref (owned by controller) ──
+    const QHash<uint64_t, ValueHistory>* m_valueHistory = nullptr;
+    bool m_calltipVisible = false;
+    int  m_calltipLine = -1;
+
     // ── Reentrancy guards ──
     bool m_clampingSelection = false;
     bool m_updatingComment = false;
@@ -145,7 +151,7 @@ private:
     void applyMarkers(const QVector<LineMeta>& meta);
     void applyFoldLevels(const QVector<LineMeta>& meta);
     void applyHexDimming(const QVector<LineMeta>& meta);
-    void applyDataChangedHighlight(const QVector<LineMeta>& meta);
+    void applyHeatmapHighlight(const QVector<LineMeta>& meta);
     void applyBaseAddressColoring(const QVector<LineMeta>& meta);
     void applyCommandRowPills();
 

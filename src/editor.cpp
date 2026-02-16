@@ -24,10 +24,12 @@ static constexpr int IND_HEX_DIM    = 9;
 static constexpr int IND_BASE_ADDR  = 10;  // Default text color override for command row address
 static constexpr int IND_HOVER_SPAN = 11;  // Blue text on hover (link-like)
 static constexpr int IND_CMD_PILL   = 12;  // Rounded chip behind command row spans
-static constexpr int IND_DATA_CHANGED = 13; // Amber text for changed data values
+static constexpr int IND_HEAT_COLD    = 13; // Heatmap level 1 (changed once)
 static constexpr int IND_CLASS_NAME   = 14; // Teal text for root class name
 static constexpr int IND_HINT_GREEN   = 15; // Green text for hint/comment text
 static constexpr int IND_LOCAL_OFF    = 16; // Dim text for inline local offset in relative mode
+static constexpr int IND_HEAT_WARM    = 17; // Heatmap level 2 (moderate changes)
+static constexpr int IND_HEAT_HOT     = 18; // Heatmap level 3 (frequent changes)
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -161,9 +163,13 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
                          IND_CMD_PILL, (long)1);
 
-    // Data-changed indicator
+    // Heatmap indicators (cold / warm / hot)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
-                         IND_DATA_CHANGED, 17 /*INDIC_TEXTFORE*/);
+                         IND_HEAT_COLD, 17 /*INDIC_TEXTFORE*/);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_HEAT_WARM, 17 /*INDIC_TEXTFORE*/);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_HEAT_HOT, 17 /*INDIC_TEXTFORE*/);
 
     // Root class name — type color
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
@@ -300,8 +306,13 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_HOVER_SPAN, theme.indHoverSpan);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_CMD_PILL, theme.indCmdPill);
+    // Heatmap colors
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_DATA_CHANGED, theme.indDataChanged);
+                         IND_HEAT_COLD, theme.indHeatCold);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_HEAT_WARM, theme.indHeatWarm);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_HEAT_HOT, theme.indHeatHot);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_CLASS_NAME, theme.syntaxType);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
@@ -401,7 +412,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     applyMarkers(result.meta);
     applyFoldLevels(result.meta);
     applyHexDimming(result.meta);
-    applyDataChangedHighlight(result.meta);
+    applyHeatmapHighlight(result.meta);
     applyCommandRowPills();
 
     // Reset hint line - applySelectionOverlay will repaint indicators
@@ -765,35 +776,48 @@ static QString getLineText(QsciScintilla* sci, int line) {
     return text;
 }
 
-void RcxEditor::applyDataChangedHighlight(const QVector<LineMeta>& meta) {
-    for (int i = 0; i < meta.size(); i++) {
-        if (!meta[i].dataChanged) continue;
-        if (isSyntheticLine(meta[i])) continue;
+void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta) {
+    static constexpr int heatIndicators[] = { IND_HEAT_COLD, IND_HEAT_WARM, IND_HEAT_HOT };
 
+    for (int i = 0; i < meta.size(); i++) {
         const LineMeta& lm = meta[i];
+        if (isSyntheticLine(lm)) continue;
+
+        int heat = lm.heatLevel;
         int typeW = lm.effectiveTypeW;
         int nameW = lm.effectiveNameW;
 
-        if (isHexPreview(lm.nodeKind) && !lm.changedByteIndices.isEmpty()) {
-            // Per-byte highlighting in ASCII + hex areas
+        // For hex preview nodes: use dataChanged + changedByteIndices (per-byte heat)
+        if (isHexPreview(lm.nodeKind) && lm.dataChanged && !lm.changedByteIndices.isEmpty()) {
+            // Hex nodes don't track heatLevel (they're skipped in controller).
+            // Use IND_HEAT_COLD for any changed byte (simple visual feedback).
             int ind = kFoldCol + lm.depth * 3;
             int asciiStart = ind + typeW + kSepWidth;
-            // ASCII column is padded to nameW (aligned with value column)
             int hexStart = asciiStart + nameW + kSepWidth;
 
             for (int byteIdx : lm.changedByteIndices) {
-                // Highlight in ASCII area (1 char per byte)
-                fillIndicatorCols(IND_DATA_CHANGED, i, asciiStart + byteIdx, asciiStart + byteIdx + 1);
-                // Highlight in hex area (2 hex chars per byte at position byteIdx*3)
+                fillIndicatorCols(IND_HEAT_COLD, i, asciiStart + byteIdx, asciiStart + byteIdx + 1);
                 int hexCol = hexStart + byteIdx * 3;
-                fillIndicatorCols(IND_DATA_CHANGED, i, hexCol, hexCol + 2);
+                fillIndicatorCols(IND_HEAT_COLD, i, hexCol, hexCol + 2);
             }
-        } else {
-            // Non-hex nodes: highlight entire value span
-            QString lineText = getLineText(m_sci, i);
-            ColumnSpan vs = valueSpan(lm, lineText.size(), typeW, nameW);
-            if (vs.valid)
-                fillIndicatorCols(IND_DATA_CHANGED, i, vs.start, vs.end);
+            continue;
+        }
+
+        // Non-hex nodes: apply heat-level indicator to value span
+        if (heat <= 0) continue;
+
+        QString lineText = getLineText(m_sci, i);
+        ColumnSpan vs = valueSpan(lm, lineText.size(), typeW, nameW);
+        if (!vs.valid) continue;
+
+        // Pick the right indicator for this heat level (1→cold, 2→warm, 3→hot)
+        int activeInd = heatIndicators[qBound(0, heat - 1, 2)];
+        fillIndicatorCols(activeInd, i, vs.start, vs.end);
+
+        // Clear the other two heat indicators on this span to avoid overlap
+        for (int hi : heatIndicators) {
+            if (hi != activeInd)
+                clearIndicatorLine(hi, i);
         }
     }
 }
@@ -2204,8 +2228,13 @@ void RcxEditor::applyHoverCursor() {
         return;
     }
 
-    // Mouse left viewport - set Arrow
+    // Mouse left viewport - set Arrow, cancel calltip
     if (!m_hoverInside) {
+        if (m_calltipVisible) {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_CALLTIPCANCEL);
+            m_calltipVisible = false;
+            m_calltipLine = -1;
+        }
         m_sci->viewport()->setCursor(Qt::ArrowCursor);
         return;
     }
@@ -2292,6 +2321,43 @@ void RcxEditor::applyHoverCursor() {
     if (h.inFoldCol && h.line >= 0 && h.line < m_meta.size()) {
         fillIndicatorCols(IND_HOVER_SPAN, h.line, 0, kFoldCol);
         m_hoverSpanLines.append(h.line);
+    }
+
+    // Value history calltip on hover
+    {
+        bool showCalltip = false;
+        if (m_valueHistory && h.line >= 0 && h.line < m_meta.size() && !m_editState.active) {
+            const LineMeta& lm = m_meta[h.line];
+            if (lm.heatLevel > 0 && lm.nodeId != 0) {
+                auto it = m_valueHistory->find(lm.nodeId);
+                if (it != m_valueHistory->end() && it->uniqueCount() > 1) {
+                    // Check cursor is over the value span
+                    QString lineText = getLineText(m_sci, h.line);
+                    ColumnSpan vs = valueSpan(lm, lineText.size(), lm.effectiveTypeW, lm.effectiveNameW);
+                    if (vs.valid && h.col >= vs.start && h.col < vs.end) {
+                        QString tip = QStringLiteral("Previous Values:");
+                        it->forEach([&](const QString& v) {
+                            tip += QStringLiteral("\n  ") + v;
+                        });
+                        if (m_calltipLine != h.line) {
+                            long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
+                                                            (unsigned long)h.line);
+                            QByteArray tipUtf8 = tip.toUtf8();
+                            m_sci->SendScintilla(QsciScintillaBase::SCI_CALLTIPSHOW,
+                                                 pos, tipUtf8.constData());
+                            m_calltipLine = h.line;
+                            m_calltipVisible = true;
+                        }
+                        showCalltip = true;
+                    }
+                }
+            }
+        }
+        if (!showCalltip && m_calltipVisible) {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_CALLTIPCANCEL);
+            m_calltipVisible = false;
+            m_calltipLine = -1;
+        }
     }
 
     // Determine cursor shape based on interaction type

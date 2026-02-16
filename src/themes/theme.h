@@ -38,7 +38,10 @@ struct Theme {
     // ── Indicators ──
     QColor indHoverSpan;    // hover link text
     QColor indCmdPill;      // command row pill bg
-    QColor indDataChanged;  // changed data values
+    QColor indDataChanged;  // changed data values (legacy, fallback for old themes)
+    QColor indHeatCold;     // heatmap level 1 (changed once)
+    QColor indHeatWarm;     // heatmap level 2 (moderate changes)
+    QColor indHeatHot;      // heatmap level 3 (frequent changes)
     QColor indHintGreen;    // comment/hint text
 
     // ── Markers ──

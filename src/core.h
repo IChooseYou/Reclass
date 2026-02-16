@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QSet>
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <variant>
 
@@ -405,6 +406,49 @@ struct NodeTree {
 
 };
 
+// ── Value History (ring buffer for heatmap) ──
+
+struct ValueHistory {
+    static constexpr int kCapacity = 10;
+    std::array<QString, kCapacity> values;
+    int count = 0;   // total unique values recorded
+    int head  = 0;   // next write position in ring
+
+    void record(const QString& v) {
+        if (count > 0) {
+            int last = (head + kCapacity - 1) % kCapacity;
+            if (values[last] == v) return;  // no change
+        }
+        values[head] = v;
+        head = (head + 1) % kCapacity;
+        if (count < INT_MAX) count++;
+    }
+
+    int uniqueCount() const { return qMin(count, kCapacity); }
+
+    // 0=static, 1=cold(2 unique), 2=warm(3-4), 3=hot(5+)
+    int heatLevel() const {
+        if (count <= 1) return 0;
+        if (count == 2) return 1;
+        if (count <= 4) return 2;
+        return 3;
+    }
+
+    QString last() const {
+        if (count == 0) return {};
+        return values[(head + kCapacity - 1) % kCapacity];
+    }
+
+    // Iterate from oldest to newest (up to uniqueCount entries)
+    template<typename Fn>
+    void forEach(Fn&& fn) const {
+        int n = uniqueCount();
+        int start = (head + kCapacity - n) % kCapacity;
+        for (int i = 0; i < n; i++)
+            fn(values[(start + i) % kCapacity]);
+    }
+};
+
 // ── LineMeta ──
 
 enum class LineKind : uint8_t {
@@ -439,6 +483,7 @@ struct LineMeta {
     uint64_t offsetAddr     = 0;     // Raw absolute address (for margin toggle)
     uint32_t markerMask     = 0;
     bool     dataChanged    = false;  // true if any byte in this node changed since last refresh
+    int      heatLevel      = 0;     // 0=static, 1=cold, 2=warm, 3=hot (from ValueHistory)
     QVector<int> changedByteIndices;  // Hex preview: which byte indices (0-based) changed on this line
     int      lineByteCount  = 0;     // Hex preview: actual data byte count on this line
     int      effectiveTypeW = 14;  // Per-line type column width used for rendering

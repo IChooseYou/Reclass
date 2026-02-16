@@ -583,6 +583,94 @@ private slots:
         QCOMPARE(norm.size(), 1);
         QVERIFY(norm.contains(rootId));
     }
+
+    // ── ValueHistory tests ──
+
+    void testValueHistory_empty() {
+        rcx::ValueHistory h;
+        QCOMPARE(h.heatLevel(), 0);
+        QCOMPARE(h.uniqueCount(), 0);
+        QCOMPARE(h.last(), QString());
+    }
+
+    void testValueHistory_singleValue() {
+        rcx::ValueHistory h;
+        h.record("42");
+        QCOMPARE(h.heatLevel(), 0);  // only 1 unique → static
+        QCOMPARE(h.uniqueCount(), 1);
+        QCOMPARE(h.last(), QString("42"));
+    }
+
+    void testValueHistory_duplicateIgnored() {
+        rcx::ValueHistory h;
+        h.record("42");
+        h.record("42");
+        h.record("42");
+        QCOMPARE(h.count, 1);
+        QCOMPARE(h.heatLevel(), 0);
+    }
+
+    void testValueHistory_heatLevels() {
+        rcx::ValueHistory h;
+        h.record("a");
+        QCOMPARE(h.heatLevel(), 0);  // 1 unique
+
+        h.record("b");
+        QCOMPARE(h.heatLevel(), 1);  // 2 unique → cold
+
+        h.record("c");
+        QCOMPARE(h.heatLevel(), 2);  // 3 unique → warm
+
+        h.record("d");
+        QCOMPARE(h.heatLevel(), 2);  // 4 unique → warm
+
+        h.record("e");
+        QCOMPARE(h.heatLevel(), 3);  // 5 unique → hot
+    }
+
+    void testValueHistory_ringWrap() {
+        rcx::ValueHistory h;
+        // Fill beyond capacity
+        for (int i = 0; i < 15; i++)
+            h.record(QString::number(i));
+
+        QCOMPARE(h.count, 15);
+        QCOMPARE(h.uniqueCount(), 10);  // capped at kCapacity
+        QCOMPARE(h.heatLevel(), 3);     // hot
+        QCOMPARE(h.last(), QString("14"));
+
+        // Verify oldest values were pushed out, newest 10 remain
+        QStringList collected;
+        h.forEach([&](const QString& v) { collected.append(v); });
+        QCOMPARE(collected.size(), 10);
+        QCOMPARE(collected.first(), QString("5"));   // oldest surviving
+        QCOMPARE(collected.last(), QString("14"));    // newest
+    }
+
+    void testValueHistory_forEach() {
+        rcx::ValueHistory h;
+        h.record("x");
+        h.record("y");
+        h.record("z");
+
+        QStringList items;
+        h.forEach([&](const QString& v) { items.append(v); });
+        QCOMPARE(items.size(), 3);
+        QCOMPARE(items[0], QString("x"));
+        QCOMPARE(items[1], QString("y"));
+        QCOMPARE(items[2], QString("z"));
+    }
+
+    void testValueHistory_oscillation() {
+        // Values that oscillate (A → B → A → B) should still count each unique transition
+        rcx::ValueHistory h;
+        h.record("A");
+        h.record("B");
+        h.record("A");
+        h.record("B");
+        QCOMPARE(h.count, 4);       // 4 transitions
+        QCOMPARE(h.heatLevel(), 2); // warm (count=4 → 3-4 range)
+    }
 };
 
 QTEST_MAIN(TestCore)

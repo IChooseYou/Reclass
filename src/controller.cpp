@@ -633,6 +633,52 @@ void RcxController::refresh() {
         }
     }
 
+    // Update value history and compute heat levels
+    // Use the snapshot provider if active; skip entirely if no valid provider
+    {
+        const Provider* prov = nullptr;
+        if (m_snapshotProv)
+            prov = m_snapshotProv.get();
+        else if (m_doc->provider && m_doc->provider->isValid())
+            prov = m_doc->provider.get();
+
+        if (prov) {
+            for (auto& lm : m_lastResult.meta) {
+                if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
+                if (isSyntheticLine(lm) || lm.isContinuation) continue;
+                if (lm.lineKind != LineKind::Field) continue;
+
+                const Node& node = m_doc->tree.nodes[lm.nodeIdx];
+                // Skip containers — they don't have scalar values
+                if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) continue;
+                // Skip hex preview nodes — they show raw bytes, not a single value
+                if (isHexPreview(node.kind)) continue;
+
+                int64_t nodeOff = m_doc->tree.computeOffset(lm.nodeIdx);
+                uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(nodeOff);
+                int sz = node.byteSize();
+                if (sz <= 0 || !prov->isReadable(addr, sz)) continue;
+
+                QString val = fmt::readValue(node, *prov, addr, lm.subLine);
+                if (!val.isEmpty()) {
+                    m_valueHistory[lm.nodeId].record(val);
+                    lm.heatLevel = m_valueHistory[lm.nodeId].heatLevel();
+                }
+            }
+        }
+
+        // Apply persisted heat levels even when provider is unavailable
+        if (!prov) {
+            for (auto& lm : m_lastResult.meta) {
+                if (lm.nodeId != 0) {
+                    auto it = m_valueHistory.find(lm.nodeId);
+                    if (it != m_valueHistory.end())
+                        lm.heatLevel = it->heatLevel();
+                }
+            }
+        }
+    }
+
     // Prune stale selections (nodes removed by undo/redo/delete)
     QSet<uint64_t> valid;
     for (uint64_t id : m_selIds) {
@@ -656,6 +702,7 @@ void RcxController::refresh() {
 
     for (auto* editor : m_editors) {
         editor->setCustomTypeNames(customTypes);
+        editor->setValueHistoryRef(&m_valueHistory);
         ViewState vs = editor->saveViewState();
         editor->applyDocument(m_lastResult);
         editor->restoreViewState(vs);
@@ -914,11 +961,13 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
                     int ai = tree.indexOfId(adj.nodeId);
                     if (ai >= 0) tree.nodes[ai].offset = adj.newOffset;
                 }
-                // Remove nodes
+                // Remove nodes and their value history
                 QVector<int> indices = tree.subtreeIndices(c.nodeId);
                 std::sort(indices.begin(), indices.end(), std::greater<int>());
-                for (int idx : indices)
+                for (int idx : indices) {
+                    m_valueHistory.remove(tree.nodes[idx].id);
                     tree.nodes.remove(idx);
+                }
                 tree.invalidateIdCache();
             }
         } else if constexpr (std::is_same_v<T, cmd::ChangeBase>) {
@@ -932,11 +981,14 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             resetSnapshot();
         } else if constexpr (std::is_same_v<T, cmd::WriteBytes>) {
             const QByteArray& bytes = isUndo ? c.oldBytes : c.newBytes;
-            if (!m_doc->provider->writeBytes(c.addr, bytes))
+            // Write through snapshot (patches pages only on success) or provider directly.
+            // If write fails, the snapshot is NOT patched, so the next compose shows the
+            // real unchanged value — no optimistic visual leak.
+            bool ok = m_snapshotProv
+                ? m_snapshotProv->write(c.addr, bytes.constData(), bytes.size())
+                : m_doc->provider->writeBytes(c.addr, bytes);
+            if (!ok)
                 qWarning() << "WriteBytes failed at address" << QString::number(c.addr, 16);
-            // Patch snapshot so compose sees the new value immediately
-            if (m_snapshotProv)
-                m_snapshotProv->patchPages(c.addr, bytes.constData(), bytes.size());
         } else if constexpr (std::is_same_v<T, cmd::ChangeArrayMeta>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0) {
@@ -1019,8 +1071,21 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
     // Validate write range before pushing command
     if (!m_doc->provider->isReadable(addr, writeSize)) return;
 
+    // Read old bytes before writing (for undo)
     QByteArray oldBytes = m_doc->provider->readBytes(addr, writeSize);
 
+    // Test the write first — don't push a command that will silently fail.
+    // This prevents optimistic visual updates for read-only providers.
+    bool writeOk = m_snapshotProv
+        ? m_snapshotProv->write(addr, newBytes.constData(), newBytes.size())
+        : m_doc->provider->writeBytes(addr, newBytes);
+    if (!writeOk) {
+        qWarning() << "Write failed at address" << QString::number(addr, 16);
+        refresh();  // refresh to show the real unchanged value
+        return;
+    }
+
+    // Write succeeded — push undo command (redo will write again, which is harmless)
     m_doc->undoStack.push(new RcxCommand(this,
         cmd::WriteBytes{addr, oldBytes, newBytes}));
 }
@@ -2194,6 +2259,7 @@ void RcxController::resetSnapshot() {
     m_snapshotProv.reset();
     m_prevPages.clear();
     m_changedOffsets.clear();
+    m_valueHistory.clear();
 }
 
 void RcxController::handleMarginClick(RcxEditor* editor, int margin,

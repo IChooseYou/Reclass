@@ -67,29 +67,56 @@ static void setDarkTitleBar(QWidget* widget) {
     }
 }
 
+// Guard flag to prevent re-entrant crash inside the handler
+static volatile LONG s_inCrashHandler = 0;
+
 static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
+    // Prevent re-entrant crash: if we fault inside the handler, skip the
+    // risky dbghelp work and just terminate with what we already printed.
+    if (InterlockedCompareExchange(&s_inCrashHandler, 1, 0) != 0) {
+        fprintf(stderr, "\n(re-entrant fault inside crash handler — aborting)\n");
+        fflush(stderr);
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
+    // Phase 1: always-safe output (no allocations, no complex APIs)
     fprintf(stderr, "\n=== UNHANDLED EXCEPTION ===\n");
     fprintf(stderr, "Code : 0x%08lX\n", ep->ExceptionRecord->ExceptionCode);
     fprintf(stderr, "Addr : %p\n", ep->ExceptionRecord->ExceptionAddress);
+#ifdef _M_X64
+    fprintf(stderr, "RIP  : 0x%016llx\n", (unsigned long long)ep->ContextRecord->Rip);
+    fprintf(stderr, "RSP  : 0x%016llx\n", (unsigned long long)ep->ContextRecord->Rsp);
+#else
+    fprintf(stderr, "EIP  : 0x%08lx\n", (unsigned long)ep->ContextRecord->Eip);
+#endif
+    fflush(stderr);
+
+    // Phase 2: attempt symbol resolution + stack walk
+    // Copy context so StackWalk64 can mutate it safely
+    CONTEXT ctxCopy = *ep->ContextRecord;
 
     HANDLE process = GetCurrentProcess();
     HANDLE thread  = GetCurrentThread();
-    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
-    SymInitialize(process, NULL, TRUE);
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_FAIL_CRITICAL_ERRORS);
+    if (!SymInitialize(process, NULL, TRUE)) {
+        fprintf(stderr, "\n(SymInitialize failed — no stack trace available)\n");
+        fprintf(stderr, "=== END CRASH ===\n");
+        fflush(stderr);
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
 
-    CONTEXT* ctx = ep->ContextRecord;
     STACKFRAME64 frame = {};
     DWORD machineType;
 #ifdef _M_X64
     machineType = IMAGE_FILE_MACHINE_AMD64;
-    frame.AddrPC.Offset    = ctx->Rip;
-    frame.AddrFrame.Offset = ctx->Rbp;
-    frame.AddrStack.Offset = ctx->Rsp;
+    frame.AddrPC.Offset    = ctxCopy.Rip;
+    frame.AddrFrame.Offset = ctxCopy.Rbp;
+    frame.AddrStack.Offset = ctxCopy.Rsp;
 #else
     machineType = IMAGE_FILE_MACHINE_I386;
-    frame.AddrPC.Offset    = ctx->Eip;
-    frame.AddrFrame.Offset = ctx->Ebp;
-    frame.AddrStack.Offset = ctx->Esp;
+    frame.AddrPC.Offset    = ctxCopy.Eip;
+    frame.AddrFrame.Offset = ctxCopy.Ebp;
+    frame.AddrStack.Offset = ctxCopy.Esp;
 #endif
     frame.AddrPC.Mode    = AddrModeFlat;
     frame.AddrFrame.Mode = AddrModeFlat;
@@ -97,7 +124,7 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
 
     fprintf(stderr, "\nStack trace:\n");
     for (int i = 0; i < 64; i++) {
-        if (!StackWalk64(machineType, process, thread, &frame, ctx,
+        if (!StackWalk64(machineType, process, thread, &frame, &ctxCopy,
                          NULL, SymFunctionTableAccess64,
                          SymGetModuleBase64, NULL))
             break;

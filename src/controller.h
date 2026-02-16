@@ -148,6 +148,7 @@ private:
     std::unique_ptr<SnapshotProvider> m_snapshotProv;
     PageMap         m_prevPages;
     QSet<int64_t>   m_changedOffsets;
+    QHash<uint64_t, ValueHistory> m_valueHistory;
     uint64_t        m_refreshGen = 0;
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;
