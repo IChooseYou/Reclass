@@ -357,10 +357,12 @@ QIcon MainWindow::makeIcon(const QString& svgPath) {
 }
 
 template < typename...Args >
-inline QAction* Qt5Qt6AddAction(QWidget* parent, const QString &text, const QKeySequence &shortcut, const QIcon &icon, Args&&...args)
+inline QAction* Qt5Qt6AddAction(QMenu* menu, const QString &text, const QKeySequence &shortcut, const QIcon &icon, Args&&...args)
 {
-    QAction *result = parent->addAction(icon, text, shortcut);
-    parent->connect(result, &QAction::triggered, std::forward<Args>(args)...);
+    QAction *result = menu->addAction(icon, text);
+    if (!shortcut.isEmpty())
+        result->setShortcut(shortcut);
+    QObject::connect(result, &QAction::triggered, std::forward<Args>(args)...);
     return result;
 }
 
