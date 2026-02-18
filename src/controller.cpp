@@ -203,6 +203,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
             this, [this, editor](int line, int nodeIdx, int subLine, QPoint globalPos) {
         showContextMenu(editor, line, nodeIdx, subLine, globalPos);
     });
+    connect(editor, &RcxEditor::keywordConvertRequested,
+            this, &RcxController::convertRootKeyword);
     connect(editor, &RcxEditor::nodeClicked,
             this, [this, editor](int line, uint64_t nodeId, Qt::KeyboardModifiers mods) {
         handleNodeClick(editor, line, nodeId, mods);
@@ -727,6 +729,27 @@ void RcxController::refresh() {
     pushSavedSourcesToEditors();
     updateCommandRow();
     applySelectionOverlays();
+}
+
+void RcxController::convertRootKeyword(const QString& newKeyword) {
+    uint64_t targetId = m_viewRootId;
+    if (targetId == 0) {
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.parentId == 0 && n.kind == NodeKind::Struct) {
+                targetId = n.id;
+                break;
+            }
+        }
+    }
+    if (targetId == 0) return;
+    int idx = m_doc->tree.indexOfId(targetId);
+    if (idx < 0) return;
+    QString oldKw = m_doc->tree.nodes[idx].resolvedClassKeyword();
+    if (oldKw == newKeyword) return;
+    // Only allow class↔struct conversion
+    if (oldKw == QStringLiteral("enum") || newKeyword == QStringLiteral("enum")) return;
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::ChangeClassKeyword{targetId, oldKw, newKeyword}));
 }
 
 void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
@@ -1438,22 +1461,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 });
             }
 
-            // Align Members submenu
-            if (node.kind == NodeKind::Struct) {
-                int curAlign = m_doc->tree.computeStructAlignment(nodeId);
-                auto* alignMenu = menu.addMenu(icon("symbol-ruler.svg"), "Align &Members");
-                static const int alignValues[] = {1, 2, 4, 8, 16, 32, 64, 128};
-                for (int av : alignValues) {
-                    QString label = (av == 1)
-                        ? QStringLiteral("1 (packed)")
-                        : QString::number(av);
-                    auto* act = alignMenu->addAction(label, [this, nodeId, av]() {
-                        performRealignment(nodeId, av);
-                    });
-                    act->setCheckable(true);
-                    act->setChecked(av == curAlign);
-                }
-            }
         }
 
         menu.addAction(icon("files.svg"), "D&uplicate\tCtrl+D", [this, nodeId]() {
@@ -1487,33 +1494,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     }
 
     // ── Always-available actions ──
-
-    // Root struct alignment (always available if a root struct exists)
-    {
-        uint64_t rootStructId = 0;
-        for (const auto& n : m_doc->tree.nodes) {
-            if (n.parentId == 0 && n.kind == NodeKind::Struct) {
-                rootStructId = n.id;
-                break;
-            }
-        }
-        if (rootStructId != 0) {
-            int curAlign = m_doc->tree.computeStructAlignment(rootStructId);
-            auto* alignMenu = menu.addMenu(icon("symbol-ruler.svg"), "Align &Members");
-            static const int alignValues[] = {1, 2, 4, 8, 16, 32, 64, 128};
-            for (int av : alignValues) {
-                QString label = (av == 1)
-                    ? QStringLiteral("1 (packed)")
-                    : QString::number(av);
-                auto* act = alignMenu->addAction(label, [this, rootStructId, av]() {
-                    performRealignment(rootStructId, av);
-                });
-                act->setCheckable(true);
-                act->setChecked(av == curAlign);
-            }
-            menu.addSeparator();
-        }
-    }
 
     menu.addAction(icon("diff-added.svg"), "Append 128 bytes", [this]() {
         uint64_t target = m_viewRootId ? m_viewRootId : 0;
@@ -1670,112 +1650,6 @@ void RcxController::applySelectionOverlays() {
         editor->applySelectionOverlay(m_selIds);
 }
 
-void RcxController::performRealignment(uint64_t structId, int targetAlign) {
-    auto& tree = m_doc->tree;
-    int rootIdx = tree.indexOfId(structId);
-    if (rootIdx < 0) return;
-
-    // Gather direct children sorted by offset
-    QVector<int> kids = tree.childrenOf(structId);
-    std::sort(kids.begin(), kids.end(), [&](int a, int b) {
-        return tree.nodes[a].offset < tree.nodes[b].offset;
-    });
-
-    // Separate into real nodes (non-hex) and hex filler nodes
-    struct NodeInfo { uint64_t id; int offset; int size; };
-    QVector<NodeInfo> realNodes;
-    QVector<uint64_t> hexIds;
-
-    for (int ci : kids) {
-        const Node& child = tree.nodes[ci];
-        int sz = (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
-            ? tree.structSpan(child.id) : child.byteSize();
-        if (isHexNode(child.kind))
-            hexIds.append(child.id);
-        else
-            realNodes.append({child.id, child.offset, sz});
-    }
-
-    auto roundUp = [](int x, int align) -> int {
-        return align <= 1 ? x : ((x + align - 1) / align) * align;
-    };
-
-    // Compute new offsets for real nodes
-    struct OffChange { uint64_t id; int oldOff; int newOff; };
-    QVector<OffChange> offChanges;
-    int cursor = 0;
-    for (auto& rn : realNodes) {
-        int newOff = roundUp(cursor, targetAlign);
-        if (newOff != rn.offset)
-            offChanges.append({rn.id, rn.offset, newOff});
-        rn.offset = newOff;  // update local copy for gap computation
-        cursor = newOff + rn.size;
-    }
-
-    // Compute where padding is needed (gaps between consecutive nodes)
-    struct PadInsert { int offset; int size; };
-    QVector<PadInsert> padsNeeded;
-
-    for (int i = 0; i < realNodes.size(); i++) {
-        int gapStart = (i == 0) ? 0 : realNodes[i - 1].offset + realNodes[i - 1].size;
-        int gapEnd = realNodes[i].offset;
-        if (gapEnd > gapStart)
-            padsNeeded.append({gapStart, gapEnd - gapStart});
-    }
-
-    // Check if anything actually changes
-    if (offChanges.isEmpty() && hexIds.isEmpty() && padsNeeded.isEmpty())
-        return;
-
-    // Apply as undoable macro
-    bool wasSuppressed = m_suppressRefresh;
-    m_suppressRefresh = true;
-    m_doc->undoStack.beginMacro(QStringLiteral("Realign to %1").arg(targetAlign));
-
-    // 1. Remove all existing hex filler nodes (no offset adjustments — we recompute)
-    for (uint64_t hid : hexIds) {
-        int idx = tree.indexOfId(hid);
-        if (idx < 0) continue;
-        QVector<Node> subtree;
-        subtree.append(tree.nodes[idx]);
-        m_doc->undoStack.push(new RcxCommand(this,
-            cmd::Remove{hid, subtree, {}}));
-    }
-
-    // 2. Reposition real nodes
-    for (const auto& oc : offChanges) {
-        m_doc->undoStack.push(new RcxCommand(this,
-            cmd::ChangeOffset{oc.id, oc.oldOff, oc.newOff}));
-    }
-
-    // 3. Insert hex nodes to fill gaps (largest first for alignment)
-    for (const auto& pi : padsNeeded) {
-        int padOffset = pi.offset;
-        int gap = pi.size;
-        while (gap > 0) {
-            NodeKind padKind;
-            int padSize;
-            if (gap >= 8)      { padKind = NodeKind::Hex64; padSize = 8; }
-            else if (gap >= 4) { padKind = NodeKind::Hex32; padSize = 4; }
-            else if (gap >= 2) { padKind = NodeKind::Hex16; padSize = 2; }
-            else               { padKind = NodeKind::Hex8;  padSize = 1; }
-
-            Node pad;
-            pad.kind = padKind;
-            pad.parentId = structId;
-            pad.offset = padOffset;
-            pad.name = QString("pad_%1").arg(padOffset, 2, 16, QChar('0'));
-            pad.id = tree.reserveId();
-            m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{pad}));
-            padOffset += padSize;
-            gap -= padSize;
-        }
-    }
-
-    m_doc->undoStack.endMacro();
-    m_suppressRefresh = wasSuppressed;
-    if (!m_suppressRefresh) refresh();
-}
 
 void RcxController::updateCommandRow() {
     // -- Source label: driven by provider metadata --
@@ -1821,7 +1695,7 @@ void RcxController::updateCommandRow() {
             const auto& n = m_doc->tree.nodes[vi];
             QString keyword = n.resolvedClassKeyword();
             QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-            row2 = QStringLiteral("%1\u25BE %2 {")
+            row2 = QStringLiteral("%1 %2 {")
                 .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className);
         }
     }
@@ -1832,14 +1706,14 @@ void RcxController::updateCommandRow() {
             if (n.parentId == 0 && n.kind == NodeKind::Struct) {
                 QString keyword = n.resolvedClassKeyword();
                 QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-                row2 = QStringLiteral("%1\u25BE %2 {")
+                row2 = QStringLiteral("%1 %2 {")
                     .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className);
                 break;
             }
         }
     }
     if (row2.isEmpty())
-        row2 = QStringLiteral("struct\u25BE NoName {");
+        row2 = QStringLiteral("struct NoName {");
 
     QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral(" \u00B7 ") + row2;
 

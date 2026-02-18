@@ -25,6 +25,9 @@
 
 namespace rcx {
 
+// Forward declaration (defined below, after RcxEditor constructor)
+static QString getLineText(QsciScintilla* sci, int line);
+
 // ── Value history popup (styled like TypeSelectorPopup) ──
 
 class ValueHistoryPopup : public QFrame {
@@ -327,6 +330,33 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         }
         HitInfo hi = hitTest(pos);
         int line = hi.line;
+
+        // Right-click on command row keyword → show conversion menu
+        if (line == 0 && hi.col >= 0 && !m_meta.isEmpty()
+            && m_meta[0].lineKind == LineKind::CommandRow) {
+            QString lineText = getLineText(m_sci, 0);
+            ColumnSpan rts = commandRowRootTypeSpan(lineText);
+            if (rts.valid && hi.col >= rts.start && hi.col < rts.end) {
+                // Extract current keyword from span text
+                QString kw = lineText.mid(rts.start, rts.end - rts.start).trimmed();
+                QMenu menu;
+                if (kw == QStringLiteral("class"))
+                    menu.addAction("Convert to Struct");
+                else if (kw == QStringLiteral("struct"))
+                    menu.addAction("Convert to Class");
+                // enum: no conversion options
+                if (!menu.isEmpty()) {
+                    QAction* chosen = menu.exec(m_sci->mapToGlobal(pos));
+                    if (chosen) {
+                        QString newKw = chosen->text().contains("Class")
+                            ? QStringLiteral("class") : QStringLiteral("struct");
+                        emit keywordConvertRequested(newKw);
+                    }
+                }
+                return;
+            }
+        }
+
         int nodeIdx = -1;
         int subLine = 0;
         if (line >= 0 && line < m_meta.size()) {
@@ -341,8 +371,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (!m_editState.active) return;
         if (id == 1 && (m_editState.target == EditTarget::Type
                      || m_editState.target == EditTarget::ArrayElementType
-                     || m_editState.target == EditTarget::PointerTarget
-                     || m_editState.target == EditTarget::RootClassType)) {
+                     || m_editState.target == EditTarget::PointerTarget)) {
             auto info = endInlineEdit();
             emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text);
         }
@@ -1469,8 +1498,7 @@ static bool hitTestTarget(QsciScintilla* sci,
         ColumnSpan as = commandRowAddrSpan(lineText);
         if (inSpan(as)) { outTarget = EditTarget::BaseAddress; outLine = line; return true; }
 
-        ColumnSpan rts = commandRowRootTypeSpan(lineText);
-        if (inSpan(rts)) { outTarget = EditTarget::RootClassType; outLine = line; return true; }
+        // RootClassType is no longer clickable — use right-click to convert
         ColumnSpan rns = commandRowRootNameSpan(lineText);
         if (inSpan(rns)) { outTarget = EditTarget::RootClassName; outLine = line; return true; }
         return false;
@@ -2151,23 +2179,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     // and exit early above (never reach here).
     if (target == EditTarget::Source)
         QTimer::singleShot(0, this, &RcxEditor::showSourcePicker);
-    if (target == EditTarget::RootClassType) {
-        QTimer::singleShot(0, this, [this]() {
-            if (!m_editState.active || m_editState.target != EditTarget::RootClassType) return;
-            // Replace text with spaces and show picker
-            int len = m_editState.original.size();
-            QString spaces(len, ' ');
-            m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL,
-                                 m_editState.posStart, m_editState.posEnd);
-            m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
-                                 (uintptr_t)0, spaces.toUtf8().constData());
-            m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, m_editState.posStart);
-            m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSETSEPARATOR, (long)'\n');
-            m_sci->SendScintilla(QsciScintillaBase::SCI_USERLISTSHOW,
-                                 (uintptr_t)1, "struct\nclass\nenum");
-            m_sci->viewport()->setCursor(Qt::ArrowCursor);
-        });
-    }
+    // RootClassType is no longer editable via click — use right-click conversion instead
     // Refresh hover cursor so value history popup appears with Set buttons immediately
     if (target == EditTarget::Value)
         QTimer::singleShot(0, this, &RcxEditor::applyHoverCursor);
@@ -2444,8 +2456,7 @@ void RcxEditor::paintEditableSpans(int line) {
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
         if (resolvedSpanFor(line, EditTarget::BaseAddress, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
-        if (resolvedSpanFor(line, EditTarget::RootClassType, norm))
-            fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
+        // RootClassType no longer shown as editable — right-click conversion instead
         if (resolvedSpanFor(line, EditTarget::RootClassName, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
         return;

@@ -671,7 +671,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     }
 
     // Emit CommandRow as line 0 (combined: source + address + root class type + name)
-    const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE \u00B7 0x0 \u00B7 struct\u25BE NoName {");
+    const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE \u00B7 0x0 \u00B7 struct NoName {");
     {
         LineMeta lm;
         lm.nodeIdx   = -1;
@@ -743,20 +743,5 @@ QSet<uint64_t> NodeTree::normalizePreferDescendants(const QSet<uint64_t>& ids) c
     return result;
 }
 
-int NodeTree::computeStructAlignment(uint64_t structId) const {
-    int idx = indexOfId(structId);
-    if (idx < 0) return 1;
-    int maxAlign = 1;
-    QVector<int> kids = childrenOf(structId);
-    for (int ci : kids) {
-        const Node& c = nodes[ci];
-        if (c.kind == NodeKind::Struct || c.kind == NodeKind::Array) {
-            maxAlign = qMax(maxAlign, computeStructAlignment(c.id));
-        } else {
-            maxAlign = qMax(maxAlign, alignmentFor(c.kind));
-        }
-    }
-    return maxAlign;
-}
 
 } // namespace rcx

@@ -25,8 +25,9 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
 
 private slots:
-    void newFile();
-    void newDocument();
+    void newClass();
+    void newStruct();
+    void newEnum();
     void selfTest();
     void openFile();
     void saveFile();
@@ -56,7 +57,7 @@ private slots:
 
 public:
     // Project Lifecycle API
-    QMdiSubWindow* project_new();
+    QMdiSubWindow* project_new(const QString& classKeyword = QString());
     QMdiSubWindow* project_open(const QString& path = {});
     bool project_save(QMdiSubWindow* sub = nullptr, bool saveAs = false);
     void project_close(QMdiSubWindow* sub = nullptr);

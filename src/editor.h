@@ -65,6 +65,7 @@ public:
 signals:
     void marginClicked(int margin, int line, Qt::KeyboardModifiers mods);
     void contextMenuRequested(int line, int nodeIdx, int subLine, QPoint globalPos);
+    void keywordConvertRequested(const QString& newKeyword);
     void nodeClicked(int line, uint64_t nodeId, Qt::KeyboardModifiers mods);
     void inlineEditCommitted(int nodeIdx, int subLine,
                              EditTarget target, const QString& text);

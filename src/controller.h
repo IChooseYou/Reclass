@@ -85,6 +85,7 @@ public:
     void removeSplitEditor(RcxEditor* editor);
     QList<RcxEditor*> editors() const { return m_editors; }
 
+    void convertRootKeyword(const QString& newKeyword);
     void changeNodeKind(int nodeIdx, NodeKind newKind);
     void renameNode(int nodeIdx, const QString& newName);
     void insertNode(uint64_t parentId, int offset, NodeKind kind, const QString& name);
@@ -160,7 +161,6 @@ private:
     void connectEditor(RcxEditor* editor);
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
     void updateCommandRow();
-    void performRealignment(uint64_t structId, int targetAlign);
     void switchToSavedSource(int idx);
     void pushSavedSourcesToEditors();
     void showTypePopup(RcxEditor* editor, TypePopupMode mode, int nodeIdx, QPoint globalPos);

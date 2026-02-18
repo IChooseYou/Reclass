@@ -399,8 +399,9 @@ inline QAction* Qt5Qt6AddAction(QMenu* menu, const QString &text, const QKeySequ
 void MainWindow::createMenus() {
     // File
     auto* file = m_titleBar->menuBar()->addMenu("&File");
-    Qt5Qt6AddAction(file, "&New",  QKeySequence::New, QIcon(), this, &MainWindow::newDocument);
-    Qt5Qt6AddAction(file, "New &Tab", QKeySequence(Qt::CTRL | Qt::Key_T), QIcon(), this, &MainWindow::newFile);
+    Qt5Qt6AddAction(file, "New &Class",  QKeySequence::New, QIcon(), this, &MainWindow::newClass);
+    Qt5Qt6AddAction(file, "New &Struct", QKeySequence(Qt::CTRL | Qt::Key_T), QIcon(), this, &MainWindow::newStruct);
+    Qt5Qt6AddAction(file, "New &Enum",   QKeySequence(Qt::CTRL | Qt::Key_E), QIcon(), this, &MainWindow::newEnum);
     Qt5Qt6AddAction(file, "&Open...", QKeySequence::Open, makeIcon(":/vsicons/folder-opened.svg"), this, &MainWindow::openFile);
     file->addSeparator();
     Qt5Qt6AddAction(file, "&Save", QKeySequence::Save, makeIcon(":/vsicons/save.svg"), this, &MainWindow::saveFile);
@@ -745,11 +746,12 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
 }
 
 // Build a minimal empty struct for new documents
-static void buildEmptyStruct(NodeTree& tree) {
+static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QString()) {
     Node root;
     root.kind = NodeKind::Struct;
     root.name = "instance";
     root.structTypeName = "Unnamed";
+    root.classKeyword = classKeyword;
     root.parentId = 0;
     root.offset = 0;
     int ri = tree.addNode(root);
@@ -765,47 +767,16 @@ static void buildEmptyStruct(NodeTree& tree) {
     }
 }
 
-void MainWindow::newFile() {
+void MainWindow::newClass() {
+    project_new(QStringLiteral("class"));
+}
+
+void MainWindow::newStruct() {
     project_new();
 }
 
-void MainWindow::newDocument() {
-    auto* tab = activeTab();
-    if (!tab) {
-        project_new();
-        return;
-    }
-    auto* doc = tab->doc;
-    auto* ctrl = tab->ctrl;
-
-    // Clear everything
-    doc->undoStack.clear();
-    doc->tree = NodeTree();
-    doc->tree.baseAddress = 0x00400000;
-    doc->filePath.clear();
-    doc->typeAliases.clear();
-    doc->modified = false;
-
-    buildEmptyStruct(doc->tree);
-
-    QByteArray data(256, '\0');
-    doc->provider = std::make_shared<BufferProvider>(data);
-
-    // Focus on first struct
-    ctrl->setViewRootId(0);
-    for (const auto& n : doc->tree.nodes) {
-        if (n.parentId == 0 && n.kind == NodeKind::Struct) {
-            ctrl->setViewRootId(n.id);
-            break;
-        }
-    }
-    ctrl->clearSelection();
-    emit doc->documentChanged();
-
-    auto* sub = m_mdiArea->activeSubWindow();
-    if (sub) sub->setWindowTitle(rootName(doc->tree, ctrl->viewRootId()));
-    updateWindowTitle();
-    rebuildWorkspaceModel();
+void MainWindow::newEnum() {
+    project_new(QStringLiteral("enum"));
 }
 
 static void buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
@@ -1560,14 +1531,14 @@ void MainWindow::showTypeAliasesDialog() {
 
 // ── Project Lifecycle API ──
 
-QMdiSubWindow* MainWindow::project_new() {
+QMdiSubWindow* MainWindow::project_new(const QString& classKeyword) {
     auto* doc = new RcxDocument(this);
 
     QByteArray data(256, '\0');
     doc->loadData(data);
     doc->tree.baseAddress = 0x00400000;
 
-    buildEmptyStruct(doc->tree);
+    buildEmptyStruct(doc->tree, classKeyword);
 
     auto* sub = createTab(doc);
     rebuildWorkspaceModel();
@@ -1681,22 +1652,52 @@ void MainWindow::createWorkspaceDock() {
 
         auto structIdVar = index.data(Qt::UserRole + 1);
         uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
-        if (structId == 0 || structId == rcx::kGroupSentinel) return;
+
+        // Right-click on "Project" group → New Class / New Struct / New Enum
+        if (structId == rcx::kGroupSentinel) {
+            QMenu menu;
+            auto* actClass  = menu.addAction("New Class");
+            auto* actStruct = menu.addAction("New Struct");
+            auto* actEnum   = menu.addAction("New Enum");
+            QAction* chosen = menu.exec(m_workspaceTree->viewport()->mapToGlobal(pos));
+            if (chosen == actClass)       newClass();
+            else if (chosen == actStruct) newStruct();
+            else if (chosen == actEnum)   newEnum();
+            return;
+        }
+
+        if (structId == 0) return;
 
         auto subVar = index.data(Qt::UserRole);
         if (!subVar.isValid()) return;
         auto* sub = static_cast<QMdiSubWindow*>(subVar.value<void*>());
         if (!sub || !m_tabs.contains(sub)) return;
 
+        auto& tab = m_tabs[sub];
+        int ni = tab.doc->tree.indexOfId(structId);
+        if (ni < 0) return;
+        QString kw = tab.doc->tree.nodes[ni].resolvedClassKeyword();
+
         QMenu menu;
-        auto* deleteAction = menu.addAction(QIcon(":/vsicons/remove.svg"), "Delete");
-        if (menu.exec(m_workspaceTree->viewport()->mapToGlobal(pos)) == deleteAction) {
-            auto& tab = m_tabs[sub];
-            int ni = tab.doc->tree.indexOfId(structId);
-            if (ni >= 0) {
-                tab.ctrl->removeNode(ni);
-                rebuildWorkspaceModel();
-            }
+        QAction* actConvert = nullptr;
+        // class↔struct conversion only (no enum conversion)
+        if (kw == QStringLiteral("class"))
+            actConvert = menu.addAction("Convert to Struct");
+        else if (kw == QStringLiteral("struct"))
+            actConvert = menu.addAction("Convert to Class");
+        auto* actDelete = menu.addAction(QIcon(":/vsicons/remove.svg"), "Delete");
+
+        QAction* chosen = menu.exec(m_workspaceTree->viewport()->mapToGlobal(pos));
+        if (chosen == actDelete) {
+            tab.ctrl->removeNode(ni);
+            rebuildWorkspaceModel();
+        } else if (chosen && chosen == actConvert) {
+            QString newKw = kw == QStringLiteral("class")
+                ? QStringLiteral("struct") : QStringLiteral("class");
+            QString oldKw = tab.doc->tree.nodes[ni].resolvedClassKeyword();
+            tab.doc->undoStack.push(new rcx::RcxCommand(tab.ctrl,
+                rcx::cmd::ChangeClassKeyword{structId, oldKw, newKw}));
+            rebuildWorkspaceModel();
         }
     });
 
@@ -1897,26 +1898,10 @@ int main(int argc, char* argv[]) {
     rcx::MainWindow window;
     window.setWindowIcon(QIcon(":/icons/class.png"));
 
-    bool screenshotMode = app.arguments().contains("--screenshot");
-    if (screenshotMode)
-        window.setWindowOpacity(0.0);
     window.show();
 
     // Auto-open demo project from saved .rcx file
     QMetaObject::invokeMethod(&window, "selfTest");
-
-    if (screenshotMode) {
-        QString out = "screenshot.png";
-        int idx = app.arguments().indexOf("--screenshot");
-        if (idx + 1 < app.arguments().size())
-            out = app.arguments().at(idx + 1);
-
-        QTimer::singleShot(1000, [&window, out]() {
-            QDir().mkpath(QFileInfo(out).absolutePath());
-            window.grab().save(out);
-            ::_Exit(0);  // immediate exit — no need for clean shutdown in screenshot mode
-        });
-    }
 
     return app.exec();
 }

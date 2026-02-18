@@ -116,14 +116,6 @@ endforeach()
 
 include(deploy)
 
-if(TARGET deploy)
-    add_custom_target(screenshot ALL
-        COMMAND Reclass --screenshot ${CMAKE_BINARY_DIR}/screenshot.png
-        DEPENDS Reclass deploy
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Capturing UI screenshot with class open..."
-    )
-endif()
 
 set(_combine_script "${CMAKE_BINARY_DIR}/combine_sources.cmake")
 file(WRITE ${_combine_script} "

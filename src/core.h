@@ -380,9 +380,6 @@ struct NodeTree {
         return qMax(declaredSize, maxEnd);
     }
 
-    // Compute natural alignment of a struct (max alignment of direct children)
-    int computeStructAlignment(uint64_t structId) const;
-
     // Batch selection normalizers
     QSet<uint64_t> normalizePreferAncestors(const QSet<uint64_t>& ids) const;
     QSet<uint64_t> normalizePreferDescendants(const QSet<uint64_t>& ids) const;
@@ -660,16 +657,17 @@ inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
 }
 
 // ── CommandRow root-class spans ──
-// Combined CommandRow format ends with: "  struct▾ ClassName {"
+// Combined CommandRow format ends with: "  struct ClassName {"
 
 inline int commandRowRootStart(const QString& lineText) {
     int best = -1;
     int i;
-    i = lineText.lastIndexOf(QStringLiteral("struct\u25BE"));
+    // Match "struct " / "class " / "enum " as whole words before the class name
+    i = lineText.lastIndexOf(QStringLiteral("struct "));
     if (i > best) best = i;
-    i = lineText.lastIndexOf(QStringLiteral("class\u25BE"));
+    i = lineText.lastIndexOf(QStringLiteral("class "));
     if (i > best) best = i;
-    i = lineText.lastIndexOf(QStringLiteral("enum\u25BE"));
+    i = lineText.lastIndexOf(QStringLiteral("enum "));
     if (i > best) best = i;
     return best;
 }
@@ -678,8 +676,7 @@ inline ColumnSpan commandRowRootTypeSpan(const QString& lineText) {
     int start = commandRowRootStart(lineText);
     if (start < 0) return {};
     int end = start;
-    while (end < lineText.size() && lineText[end] != QChar(' ')
-           && lineText[end] != QChar(0x25BE)) end++;
+    while (end < lineText.size() && lineText[end] != QChar(' ')) end++;
     if (end <= start) return {};
     return {start, end, true};
 }

@@ -62,7 +62,7 @@ private slots:
     // ── Chevron span detection ──
 
     void testChevronSpanDetected() {
-        QString text = QStringLiteral("[\u25B8] source\u25BE \u00B7 0x1000 \u00B7 struct\u25BE Alpha {");
+        QString text = QStringLiteral("[\u25B8] source\u25BE \u00B7 0x1000 \u00B7 struct Alpha {");
         ColumnSpan span = commandRowChevronSpan(text);
         QVERIFY(span.valid);
         QCOMPARE(span.start, 0);
@@ -79,7 +79,7 @@ private slots:
     // ── Existing spans unbroken by chevron prefix ──
 
     void testSpansWithPrefix() {
-        QString text = QStringLiteral("[\u25B8] source\u25BE \u00B7 0x1000 \u00B7 struct\u25BE Alpha {");
+        QString text = QStringLiteral("[\u25B8] source\u25BE \u00B7 0x1000 \u00B7 struct Alpha {");
 
         ColumnSpan src = commandRowSrcSpan(text);
         QVERIFY(src.valid);

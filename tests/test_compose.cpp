@@ -1920,54 +1920,9 @@ private slots:
         }
     }
 
-    void testComputeStructAlignment() {
-        NodeTree tree;
-        tree.baseAddress = 0;
-
-        Node root;
-        root.kind = NodeKind::Struct;
-        root.name = "Root";
-        root.parentId = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        // Int32 has alignment 4
-        Node f1;
-        f1.kind = NodeKind::Int32;
-        f1.name = "a";
-        f1.parentId = rootId;
-        f1.offset = 0;
-        tree.addNode(f1);
-
-        QCOMPARE(tree.computeStructAlignment(rootId), 4);
-
-        // Add Hex64 (alignment 8) — max should become 8
-        Node f2;
-        f2.kind = NodeKind::Hex64;
-        f2.name = "b";
-        f2.parentId = rootId;
-        f2.offset = 8;
-        tree.addNode(f2);
-
-        QCOMPARE(tree.computeStructAlignment(rootId), 8);
-    }
-
-    void testComputeStructAlignmentEmpty() {
-        NodeTree tree;
-        Node root;
-        root.kind = NodeKind::Struct;
-        root.name = "Empty";
-        root.parentId = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        // Empty struct → alignment 1
-        QCOMPARE(tree.computeStructAlignment(rootId), 1);
-    }
-
     void testCommandRowRootNameSpan() {
         // Name span should cover the class name in the merged command row
-        QString text = "source\u25BE \u00B7 0x0 \u00B7 struct\u25BE MyClass {";
+        QString text = "source\u25BE \u00B7 0x0 \u00B7 struct MyClass {";
         ColumnSpan nameSpan = commandRowRootNameSpan(text);
         QVERIFY(nameSpan.valid);
 
