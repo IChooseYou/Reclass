@@ -736,6 +736,63 @@ private slots:
         QVERIFY(listView);
         QVERIFY(listView->model()->rowCount() > 2);
     }
+    // ── FieldType popup: primitive with [n] creates an array ──
+
+    void testFieldTypePrimitiveArrayCreation() {
+        auto* doc = new RcxDocument();
+        buildTwoRootTree(doc->tree);
+        doc->provider = std::make_unique<BufferProvider>(makeBuffer());
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        // Find the "x" field (Int32)
+        int xIdx = -1;
+        for (int i = 0; i < doc->tree.nodes.size(); i++) {
+            if (doc->tree.nodes[i].name == "x") { xIdx = i; break; }
+        }
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Int32);
+        uint64_t xNodeId = doc->tree.nodes[xIdx].id;
+
+        // Simulate the primitive-array path of applyTypePopupResult:
+        // beginMacro → changeNodeKind(Array) → ChangeArrayMeta → endMacro
+        doc->undoStack.beginMacro(QStringLiteral("Change to primitive array"));
+        ctrl->changeNodeKind(xIdx, NodeKind::Array);
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        doc->undoStack.push(new RcxCommand(ctrl,
+            cmd::ChangeArrayMeta{xNodeId, doc->tree.nodes[xIdx].elementKind,
+                                 NodeKind::Int32,
+                                 doc->tree.nodes[xIdx].arrayLen, 4}));
+        doc->undoStack.endMacro();
+        QApplication::processEvents();
+
+        // Node should now be an Array
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Array);
+        QCOMPARE(doc->tree.nodes[xIdx].elementKind, NodeKind::Int32);
+        QCOMPARE(doc->tree.nodes[xIdx].arrayLen, 4);
+
+        // Single undo reverses the entire macro
+        doc->undoStack.undo();
+        QApplication::processEvents();
+        xIdx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(xIdx >= 0);
+        QCOMPARE(doc->tree.nodes[xIdx].kind, NodeKind::Int32);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
 };
 
 QTEST_MAIN(TestTypeSelector)

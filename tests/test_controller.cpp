@@ -643,6 +643,36 @@ private slots:
         QCOMPARE(vals.size(), ValueHistory::kCapacity);
         QCOMPARE(vals.last(), vh.last());
     }
+    // ── Test: inline edit "int32_t[4]" on primitive converts to array ──
+    void testInlineEditPrimitiveArray() {
+        // Find a primitive field to convert
+        int idx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            if (m_doc->tree.nodes[i].name == "field_u32") { idx = i; break; }
+        }
+        QVERIFY(idx >= 0);
+        QCOMPARE(m_doc->tree.nodes[idx].kind, NodeKind::UInt32);
+        uint64_t nodeId = m_doc->tree.nodes[idx].id;
+
+        // Emit inlineEditCommitted with array syntax
+        emit m_editor->inlineEditCommitted(idx, 0, EditTarget::Type,
+                                           QStringLiteral("int32_t[4]"));
+        QApplication::processEvents();
+
+        // Node should now be an Array with elementKind=Int32, arrayLen=4
+        int newIdx = m_doc->tree.indexOfId(nodeId);
+        QVERIFY(newIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[newIdx].kind, NodeKind::Array);
+        QCOMPARE(m_doc->tree.nodes[newIdx].elementKind, NodeKind::Int32);
+        QCOMPARE(m_doc->tree.nodes[newIdx].arrayLen, 4);
+
+        // Undo should restore to UInt32
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        newIdx = m_doc->tree.indexOfId(nodeId);
+        QVERIFY(newIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[newIdx].kind, NodeKind::UInt32);
+    }
 };
 
 QTEST_MAIN(TestController)

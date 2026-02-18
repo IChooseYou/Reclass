@@ -256,13 +256,23 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     bool typeOk;
                     NodeKind elemKind = kindFromTypeName(elemTypeName, &typeOk);
                     if (typeOk && nodeIdx < m_doc->tree.nodes.size()) {
-                        const Node& node = m_doc->tree.nodes[nodeIdx];
-                        if (node.kind == NodeKind::Array) {
-                            m_doc->undoStack.push(new RcxCommand(this,
-                                cmd::ChangeArrayMeta{node.id,
-                                    node.elementKind, elemKind,
-                                    node.arrayLen, newCount}));
+                        const uint64_t nodeId = m_doc->tree.nodes[nodeIdx].id;
+                        bool wasSuppressed = m_suppressRefresh;
+                        m_suppressRefresh = true;
+                        m_doc->undoStack.beginMacro(QStringLiteral("Change to array"));
+                        if (m_doc->tree.nodes[nodeIdx].kind != NodeKind::Array)
+                            changeNodeKind(nodeIdx, NodeKind::Array);
+                        int idx = m_doc->tree.indexOfId(nodeId);
+                        if (idx >= 0) {
+                            auto& n = m_doc->tree.nodes[idx];
+                            if (n.elementKind != elemKind || n.arrayLen != newCount)
+                                m_doc->undoStack.push(new RcxCommand(this,
+                                    cmd::ChangeArrayMeta{nodeId, n.elementKind, elemKind,
+                                                         n.arrayLen, newCount}));
                         }
+                        m_doc->undoStack.endMacro();
+                        m_suppressRefresh = wasSuppressed;
+                        if (!m_suppressRefresh) refresh();
                     }
                 }
             } else {
@@ -2051,8 +2061,28 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
 
     if (mode == TypePopupMode::FieldType) {
         if (entry.entryKind == TypeEntry::Primitive) {
-            if (entry.primitiveKind != nodeKind)
-                changeNodeKind(nodeIdx, entry.primitiveKind);
+            if (spec.arrayCount > 0) {
+                // Primitive array: e.g. "int32_t[10]"
+                bool wasSuppressed = m_suppressRefresh;
+                m_suppressRefresh = true;
+                m_doc->undoStack.beginMacro(QStringLiteral("Change to primitive array"));
+                if (nodeKind != NodeKind::Array)
+                    changeNodeKind(nodeIdx, NodeKind::Array);
+                int idx = m_doc->tree.indexOfId(nodeId);
+                if (idx >= 0) {
+                    auto& n = m_doc->tree.nodes[idx];
+                    if (n.elementKind != entry.primitiveKind || n.arrayLen != spec.arrayCount)
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangeArrayMeta{nodeId, n.elementKind, entry.primitiveKind,
+                                                 n.arrayLen, spec.arrayCount}));
+                }
+                m_doc->undoStack.endMacro();
+                m_suppressRefresh = wasSuppressed;
+                if (!m_suppressRefresh) refresh();
+            } else {
+                if (entry.primitiveKind != nodeKind)
+                    changeNodeKind(nodeIdx, entry.primitiveKind);
+            }
         } else if (entry.entryKind == TypeEntry::Composite) {
             bool wasSuppressed = m_suppressRefresh;
             m_suppressRefresh = true;

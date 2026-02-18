@@ -334,7 +334,12 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
                 this, [this](int id, bool checked) {
             if (!checked) return;
             m_arrayCountEdit->setVisible(id == 3);
-            if (id == 3) m_arrayCountEdit->setFocus();
+            if (id == 3) {
+                if (m_arrayCountEdit->text().trimmed().isEmpty())
+                    m_arrayCountEdit->setText(QStringLiteral("1"));
+                m_arrayCountEdit->setFocus();
+                m_arrayCountEdit->selectAll();
+            }
             updateModifierPreview();
             applyFilter(m_filterEdit->text());
         });
