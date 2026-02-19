@@ -69,7 +69,8 @@ signals:
     void keywordConvertRequested(const QString& newKeyword);
     void nodeClicked(int line, uint64_t nodeId, Qt::KeyboardModifiers mods);
     void inlineEditCommitted(int nodeIdx, int subLine,
-                             EditTarget target, const QString& text);
+                             EditTarget target, const QString& text,
+                             uint64_t resolvedAddr = 0);
     void inlineEditCancelled();
     void typeSelectorRequested();
     void typePickerRequested(EditTarget target, int nodeIdx, QPoint globalPos);

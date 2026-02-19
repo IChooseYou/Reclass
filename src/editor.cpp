@@ -488,8 +488,10 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (id == 1 && (m_editState.target == EditTarget::Type
                      || m_editState.target == EditTarget::ArrayElementType
                      || m_editState.target == EditTarget::PointerTarget)) {
+            const LineMeta* lm = metaForLine(m_editState.line);
+            uint64_t addr = lm ? lm->offsetAddr : 0;
             auto info = endInlineEdit();
-            emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text);
+            emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text, addr);
         }
     });
 
@@ -1515,7 +1517,8 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     switch (t) {
     case EditTarget::Type:        s = typeSpan(*lm, typeW); break;
     case EditTarget::Name:        s = nameSpan(*lm, typeW, nameW); break;
-    case EditTarget::Value:       s = valueSpan(*lm, textLen, typeW, nameW); break;
+    case EditTarget::Value:       s = narrowPtrValueSpan(*lm,
+                                      valueSpan(*lm, textLen, typeW, nameW), lineText); break;
     case EditTarget::BaseAddress: break;  // No longer on header lines
     case EditTarget::ArrayIndex:
     case EditTarget::ArrayCount:
@@ -2368,8 +2371,12 @@ void RcxEditor::commitInlineEdit() {
     if (m_editState.target == EditTarget::Type && editedText.isEmpty())
         editedText = m_editState.original;
 
+    // Grab resolved address from LineMeta before endInlineEdit clears state
+    const LineMeta* lm = metaForLine(m_editState.line);
+    uint64_t addr = lm ? lm->offsetAddr : 0;
+
     auto info = endInlineEdit();
-    emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, editedText);
+    emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, editedText, addr);
 }
 
 // ── Cancel inline edit ──
@@ -2469,13 +2476,15 @@ void RcxEditor::showSourcePicker() {
 
     QAction* sel = menu.exec(pos);
     if (sel) {
+        const LineMeta* lm = metaForLine(m_editState.line);
+        uint64_t addr = lm ? lm->offsetAddr : 0;
         auto info = endInlineEdit();
         QString text = sel->text();
         if (sel->data().toString() == QStringLiteral("#clear"))
             text = QStringLiteral("#clear");
         else if (sel->data().isValid())
             text = QStringLiteral("#saved:") + QString::number(sel->data().toInt());
-        emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text);
+        emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text, addr);
     } else {
         cancelInlineEdit();
     }

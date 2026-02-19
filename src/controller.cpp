@@ -230,7 +230,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
 
     // Inline editing signals
     connect(editor, &RcxEditor::inlineEditCommitted,
-            this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text) {
+            this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text,
+                         uint64_t resolvedAddr) {
         // CommandRow BaseAddress/Source/RootClass edit has nodeIdx=-1
         if (nodeIdx < 0 && target != EditTarget::BaseAddress && target != EditTarget::Source
             && target != EditTarget::RootClassType && target != EditTarget::RootClassName) { refresh(); return; }
@@ -241,7 +242,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             const Node& node = m_doc->tree.nodes[nodeIdx];
             // ASCII edit on Hex nodes
             if (isHexPreview(node.kind)) {
-                setNodeValue(nodeIdx, subLine, text, /*isAscii=*/true);
+                setNodeValue(nodeIdx, subLine, text, /*isAscii=*/true, resolvedAddr);
             } else {
                 renameNode(nodeIdx, text);
             }
@@ -311,7 +312,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             break;
         }
         case EditTarget::Value:
-            setNodeValue(nodeIdx, subLine, text);
+            setNodeValue(nodeIdx, subLine, text, /*isAscii=*/false, resolvedAddr);
             break;
         case EditTarget::BaseAddress: {
             QString s = text.trimmed();
@@ -1023,14 +1024,22 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
 }
 
 void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
-                                  bool isAscii) {
+                                  bool isAscii, uint64_t resolvedAddr) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
     if (!m_doc->provider->isWritable()) return;
 
     const Node& node = m_doc->tree.nodes[nodeIdx];
-    int64_t signedAddr = m_doc->tree.computeOffset(nodeIdx);
-    if (signedAddr < 0) return;  // malformed tree: negative offset
-    uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(signedAddr);
+
+    // Use the compose-resolved address when available (correct for pointer children).
+    // Fall back to tree.baseAddress + computeOffset for callers that don't supply it.
+    uint64_t addr;
+    if (resolvedAddr != 0) {
+        addr = resolvedAddr;
+    } else {
+        int64_t signedAddr = m_doc->tree.computeOffset(nodeIdx);
+        if (signedAddr < 0) return;  // malformed tree: negative offset
+        addr = m_doc->tree.baseAddress + static_cast<uint64_t>(signedAddr);
+    }
 
     // For vector components, redirect to float parsing at sub-offset
     NodeKind editKind = node.kind;

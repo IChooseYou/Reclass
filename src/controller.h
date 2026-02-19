@@ -92,7 +92,8 @@ public:
     void removeNode(int nodeIdx);
     void toggleCollapse(int nodeIdx);
     void materializeRefChildren(int nodeIdx);
-    void setNodeValue(int nodeIdx, int subLine, const QString& text, bool isAscii = false);
+    void setNodeValue(int nodeIdx, int subLine, const QString& text,
+                      bool isAscii = false, uint64_t resolvedAddr = 0);
     void duplicateNode(int nodeIdx);
     void convertToTypedPointer(uint64_t nodeId);
     void splitHexNode(uint64_t nodeId);
