@@ -102,6 +102,8 @@ public:
 
     void applyCommand(const Command& cmd, bool isUndo);
     void refresh();
+    void applyTypePopupResult(TypePopupMode mode, int nodeIdx, const TypeEntry& entry, const QString& fullText);
+    uint64_t findOrCreateStructByName(const QString& typeName);
 
     // Selection
     void handleNodeClick(RcxEditor* source, int line, uint64_t nodeId,
@@ -124,10 +126,15 @@ public:
     const QVector<SavedSourceEntry>& savedSources() const { return m_savedSources; }
     int activeSourceIndex() const { return m_activeSourceIdx; }
     void switchSource(int idx) { switchToSavedSource(idx); }
+    void clearSources();
+    void selectSource(const QString& text);
 
     // Value tracking toggle (per-tab, off by default)
     bool trackValues() const { return m_trackValues; }
     void setTrackValues(bool on);
+
+    // Cross-tab type visibility: point at the project's full document list
+    void setProjectDocuments(QVector<RcxDocument*>* docs) { m_projectDocs = docs; }
 
     // Test accessor
     const QHash<uint64_t, ValueHistory>& valueHistory() const { return m_valueHistory; }
@@ -165,13 +172,14 @@ private:
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;
 
+    QVector<RcxDocument*>* m_projectDocs = nullptr;
+
     void connectEditor(RcxEditor* editor);
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
     void updateCommandRow();
     void switchToSavedSource(int idx);
     void pushSavedSourcesToEditors();
     void showTypePopup(RcxEditor* editor, TypePopupMode mode, int nodeIdx, QPoint globalPos);
-    void applyTypePopupResult(TypePopupMode mode, int nodeIdx, const TypeEntry& entry, const QString& fullText);
     TypeSelectorPopup* ensurePopup(RcxEditor* editor);
 
     // ── Auto-refresh methods ──

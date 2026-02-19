@@ -72,6 +72,7 @@ private:
     PluginManager   m_pluginManager;
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
+    QMenu*          m_sourceMenu = nullptr;
 
     struct SplitPane {
         QTabWidget*    tabWidget = nullptr;
@@ -89,11 +90,13 @@ private:
         int                activePaneIdx = 0;
     };
     QMap<QMdiSubWindow*, TabState> m_tabs;
-
+    QVector<RcxDocument*> m_allDocs;  // all open docs, shared with controllers
+    void rebuildAllDocs();
 
     void createMenus();
     void createStatusBar();
     void showPluginsDialog();
+    void populateSourceMenu();
     QIcon makeIcon(const QString& svgPath);
 
     RcxController* activeController() const;

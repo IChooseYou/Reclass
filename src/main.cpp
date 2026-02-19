@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "providerregistry.h"
 #include "generator.h"
 #include "import_reclass_xml.h"
 #include "import_source.h"
@@ -407,6 +408,9 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(file, "&Save", QKeySequence::Save, makeIcon(":/vsicons/save.svg"), this, &MainWindow::saveFile);
     Qt5Qt6AddAction(file, "Save &As...", QKeySequence::SaveAs, makeIcon(":/vsicons/save-as.svg"), this, &MainWindow::saveFileAs);
     file->addSeparator();
+    m_sourceMenu = file->addMenu("So&urce");
+    connect(m_sourceMenu, &QMenu::aboutToShow, this, &MainWindow::populateSourceMenu);
+    file->addSeparator();
     Qt5Qt6AddAction(file, "&Unload Project", QKeySequence(Qt::CTRL | Qt::Key_W), QIcon(), this, &MainWindow::closeFile);
     file->addSeparator();
     Qt5Qt6AddAction(file, "Export &C++ Header...", QKeySequence::UnknownKey, makeIcon(":/vsicons/export.svg"), this, &MainWindow::exportCpp);
@@ -657,12 +661,17 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
     // Create the initial split pane
     tab.panes.append(createSplitPane(tab));
 
+    // Give every controller the shared document list for cross-tab type visibility
+    ctrl->setProjectDocuments(&m_allDocs);
+    rebuildAllDocs();
+
     connect(sub, &QObject::destroyed, this, [this, sub]() {
         auto it = m_tabs.find(sub);
         if (it != m_tabs.end()) {
             it->doc->deleteLater();
             m_tabs.erase(it);
         }
+        rebuildAllDocs();
         rebuildWorkspaceModel();
     });
 
@@ -1731,6 +1740,12 @@ void MainWindow::createWorkspaceDock() {
     });
 }
 
+void MainWindow::rebuildAllDocs() {
+    m_allDocs.clear();
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
+        m_allDocs.append(it.value().doc);
+}
+
 void MainWindow::rebuildWorkspaceModel() {
     QVector<rcx::TabInfo> tabs;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
@@ -1742,6 +1757,41 @@ void MainWindow::rebuildWorkspaceModel() {
     }
     rcx::buildProjectExplorer(m_workspaceModel, tabs);
     m_workspaceTree->expandToDepth(1);
+}
+
+void MainWindow::populateSourceMenu() {
+    m_sourceMenu->clear();
+    auto* ctrl = activeController();
+
+    m_sourceMenu->addAction("File", this, [this]() {
+        if (auto* c = activeController()) c->selectSource(QStringLiteral("File"));
+    });
+
+    const auto& providers = ProviderRegistry::instance().providers();
+    for (const auto& prov : providers) {
+        QString name = prov.name;
+        m_sourceMenu->addAction(name, this, [this, name]() {
+            if (auto* c = activeController()) c->selectSource(name);
+        });
+    }
+
+    if (ctrl && !ctrl->savedSources().isEmpty()) {
+        m_sourceMenu->addSeparator();
+        for (int i = 0; i < ctrl->savedSources().size(); i++) {
+            const auto& e = ctrl->savedSources()[i];
+            auto* act = m_sourceMenu->addAction(
+                QStringLiteral("%1 '%2'").arg(e.kind, e.displayName),
+                this, [this, i]() {
+                    if (auto* c = activeController()) c->switchSource(i);
+                });
+            act->setCheckable(true);
+            act->setChecked(i == ctrl->activeSourceIndex());
+        }
+        m_sourceMenu->addSeparator();
+        m_sourceMenu->addAction("Clear All", this, [this]() {
+            if (auto* c = activeController()) c->clearSources();
+        });
+    }
 }
 
 void MainWindow::showPluginsDialog() {

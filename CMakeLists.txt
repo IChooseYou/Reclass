@@ -256,6 +256,20 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_context_menu COMMAND test_context_menu)
 
+    add_executable(test_source_management tests/test_source_management.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/controller.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+    target_include_directories(test_source_management PRIVATE src third_party/fadec)
+    target_link_libraries(test_source_management PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        QScintilla::QScintilla)
+    if(WIN32)
+        target_link_libraries(test_source_management PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+    endif()
+    add_test(NAME test_source_management COMMAND test_source_management)
+
     add_executable(test_editor tests/test_editor.cpp
         src/editor.cpp src/compose.cpp src/format.cpp
         src/providerregistry.cpp
@@ -302,6 +316,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_type_selector COMMAND test_type_selector)
 
+    add_executable(test_type_visibility tests/test_type_visibility.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/controller.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+    target_include_directories(test_type_visibility PRIVATE src third_party/fadec)
+    target_link_libraries(test_type_visibility PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        QScintilla::QScintilla)
+    if(WIN32)
+        target_link_libraries(test_type_visibility PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+    endif()
+    add_test(NAME test_type_visibility COMMAND test_type_visibility)
 
     add_executable(test_options_dialog tests/test_options_dialog.cpp
         src/optionsdialog.cpp src/themes/theme.cpp src/themes/thememanager.cpp)

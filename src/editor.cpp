@@ -2455,6 +2455,9 @@ void RcxEditor::showSourcePicker() {
             act->setChecked(m_savedSourceDisplay[i].active);
             act->setData(i);
         }
+        menu.addSeparator();
+        auto* clearAct = menu.addAction("Clear All");
+        clearAct->setData(QStringLiteral("#clear"));
     }
 
     int lineH = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
@@ -2468,7 +2471,9 @@ void RcxEditor::showSourcePicker() {
     if (sel) {
         auto info = endInlineEdit();
         QString text = sel->text();
-        if (sel->data().isValid())
+        if (sel->data().toString() == QStringLiteral("#clear"))
+            text = QStringLiteral("#clear");
+        else if (sel->data().isValid())
             text = QStringLiteral("#saved:") + QString::number(sel->data().toInt());
         emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text);
     } else {

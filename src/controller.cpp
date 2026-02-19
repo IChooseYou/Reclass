@@ -368,123 +368,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             break;
         }
-        case EditTarget::Source: {
-            if (text.startsWith(QStringLiteral("#saved:"))) {
-                int idx = text.mid(7).toInt();
-                switchToSavedSource(idx);
-            } else if (text == QStringLiteral("File")) {
-                auto* w = qobject_cast<QWidget*>(parent());
-                QString path = QFileDialog::getOpenFileName(w, "Load Binary Data", {}, "All Files (*)");
-                if (!path.isEmpty()) {
-                    // Save current source's base address before switching
-                    if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
-                        m_savedSources[m_activeSourceIdx].baseAddress = m_doc->tree.baseAddress;
-
-                    m_doc->loadData(path);
-
-                    // Check if this file is already saved
-                    int existingIdx = -1;
-                    for (int i = 0; i < m_savedSources.size(); i++) {
-                        if (m_savedSources[i].kind == QStringLiteral("File")
-                            && m_savedSources[i].filePath == path) {
-                            existingIdx = i;
-                            break;
-                        }
-                    }
-                    if (existingIdx >= 0) {
-                        m_activeSourceIdx = existingIdx;
-                        m_doc->tree.baseAddress = m_savedSources[existingIdx].baseAddress;
-                    } else {
-                        SavedSourceEntry entry;
-                        entry.kind = QStringLiteral("File");
-                        entry.displayName = QFileInfo(path).fileName();
-                        entry.filePath = path;
-                        entry.baseAddress = m_doc->tree.baseAddress;
-                        m_savedSources.append(entry);
-                        m_activeSourceIdx = m_savedSources.size() - 1;
-                    }
-                    refresh();
-                }
-            }
-            else
-            {
-                // Look up provider in registry
-                const auto* providerInfo = ProviderRegistry::instance().findProvider(text.toLower().replace(" ", ""));
-
-                if (providerInfo) {
-                    QString target;
-                    bool selected = false;
-
-                    // Execute provider's target selection
-                    if (providerInfo->isBuiltin) {
-                        // Built-in provider with factory function
-                        if (providerInfo->factory) {
-                            selected = providerInfo->factory(qobject_cast<QWidget*>(parent()), &target);
-                        }
-                    } else {
-                        // Plugin-based provider
-                        if (providerInfo->plugin) {
-                            selected = providerInfo->plugin->selectTarget(qobject_cast<QWidget*>(parent()), &target);
-                        }
-                    }
-
-                    if (selected && !target.isEmpty()) {
-                        // Create provider from target
-                        std::unique_ptr<Provider> provider;
-                        QString errorMsg;
-
-                        if (providerInfo->plugin)
-                        {
-                            provider = providerInfo->plugin->createProvider(target, &errorMsg);
-                        }
-
-                        // Apply provider or show error
-                        if (provider) {
-                            // Save current source's base address before switching
-                            if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
-                                m_savedSources[m_activeSourceIdx].baseAddress = m_doc->tree.baseAddress;
-
-                            uint64_t newBase = provider->base();
-                            QString displayName = provider->name();
-                            m_doc->undoStack.clear();
-                            m_doc->provider = std::move(provider);
-                            m_doc->dataPath.clear();
-                            if (m_doc->tree.baseAddress == 0)
-                                m_doc->tree.baseAddress = newBase;
-                            resetSnapshot();
-                            emit m_doc->documentChanged();
-
-                            // Save as a source for quick-switch
-                            QString identifier = providerInfo->identifier;
-                            int existingIdx = -1;
-                            for (int i = 0; i < m_savedSources.size(); i++) {
-                                if (m_savedSources[i].kind == identifier
-                                    && m_savedSources[i].providerTarget == target) {
-                                    existingIdx = i;
-                                    break;
-                                }
-                            }
-                            if (existingIdx >= 0) {
-                                m_activeSourceIdx = existingIdx;
-                                m_savedSources[existingIdx].baseAddress = m_doc->tree.baseAddress;
-                            } else {
-                                SavedSourceEntry entry;
-                                entry.kind = identifier;
-                                entry.displayName = displayName;
-                                entry.providerTarget = target;
-                                entry.baseAddress = m_doc->tree.baseAddress;
-                                m_savedSources.append(entry);
-                                m_activeSourceIdx = m_savedSources.size() - 1;
-                            }
-                            refresh();
-                        } else if (!errorMsg.isEmpty()) {
-                            QMessageBox::warning(qobject_cast<QWidget*>(parent()), "Provider Error", errorMsg);
-                        }
-                    }
-                }
-            }
+        case EditTarget::Source:
+            selectSource(text);
             break;
-        }
         case EditTarget::ArrayElementType: {
             if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) break;
             const Node& node = m_doc->tree.nodes[nodeIdx];
@@ -2007,6 +1893,29 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
     }
     }
 
+    // ── Add types from other open documents (not for Root mode) ──
+    if (mode != TypePopupMode::Root && m_projectDocs) {
+        QSet<QString> localNames;
+        for (const auto& e : entries)
+            if (e.entryKind == TypeEntry::Composite)
+                localNames.insert(e.displayName);
+        for (auto* doc : *m_projectDocs) {
+            if (doc == m_doc) continue;
+            for (const auto& n : doc->tree.nodes) {
+                if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+                QString name = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+                if (name.isEmpty() || localNames.contains(name)) continue;
+                localNames.insert(name);
+                TypeEntry e;
+                e.entryKind    = TypeEntry::Composite;
+                e.structId     = 0; // sentinel: not in local tree yet
+                e.displayName  = name;
+                e.classKeyword = n.resolvedClassKeyword();
+                entries.append(e);
+            }
+        }
+    }
+
     // ── Font with zoom ──
     QSettings settings("Reclass", "Reclass");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
@@ -2059,9 +1968,22 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Create new type"));
 
+        // Generate unique default type name
+        QString baseName = QStringLiteral("NewClass");
+        QString typeName = baseName;
+        int counter = 1;
+        QSet<QString> existing;
+        for (const auto& nd : m_doc->tree.nodes) {
+            if (nd.kind == NodeKind::Struct && !nd.structTypeName.isEmpty())
+                existing.insert(nd.structTypeName);
+        }
+        while (existing.contains(typeName))
+            typeName = baseName + QString::number(counter++);
+
         Node n;
         n.kind = NodeKind::Struct;
-        n.name = QString();
+        n.structTypeName = typeName;
+        n.name = QStringLiteral("instance");
         n.parentId = 0;
         n.offset = 0;
         n.id = m_doc->tree.reserveId();
@@ -2087,9 +2009,16 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
 
 void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                                          const TypeEntry& entry, const QString& fullText) {
+    // Resolve external types: structId==0 means from another document, import first
+    TypeEntry resolved = entry;
+    if (resolved.entryKind == TypeEntry::Composite && resolved.structId == 0
+        && !resolved.displayName.isEmpty()) {
+        resolved.structId = findOrCreateStructByName(resolved.displayName);
+    }
+
     if (mode == TypePopupMode::Root) {
-        if (entry.entryKind == TypeEntry::Composite)
-            setViewRootId(entry.structId);
+        if (resolved.entryKind == TypeEntry::Composite)
+            setViewRootId(resolved.structId);
         return;
     }
 
@@ -2108,7 +2037,7 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
     TypeSpec spec = parseTypeSpec(fullText);
 
     if (mode == TypePopupMode::FieldType) {
-        if (entry.entryKind == TypeEntry::Primitive) {
+        if (resolved.entryKind == TypeEntry::Primitive) {
             if (spec.arrayCount > 0) {
                 // Primitive array: e.g. "int32_t[10]"
                 bool wasSuppressed = m_suppressRefresh;
@@ -2119,19 +2048,19 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                 int idx = m_doc->tree.indexOfId(nodeId);
                 if (idx >= 0) {
                     auto& n = m_doc->tree.nodes[idx];
-                    if (n.elementKind != entry.primitiveKind || n.arrayLen != spec.arrayCount)
+                    if (n.elementKind != resolved.primitiveKind || n.arrayLen != spec.arrayCount)
                         m_doc->undoStack.push(new RcxCommand(this,
-                            cmd::ChangeArrayMeta{nodeId, n.elementKind, entry.primitiveKind,
+                            cmd::ChangeArrayMeta{nodeId, n.elementKind, resolved.primitiveKind,
                                                  n.arrayLen, spec.arrayCount}));
                 }
                 m_doc->undoStack.endMacro();
                 m_suppressRefresh = wasSuppressed;
                 if (!m_suppressRefresh) refresh();
             } else {
-                if (entry.primitiveKind != nodeKind)
-                    changeNodeKind(nodeIdx, entry.primitiveKind);
+                if (resolved.primitiveKind != nodeKind)
+                    changeNodeKind(nodeIdx, resolved.primitiveKind);
             }
-        } else if (entry.entryKind == TypeEntry::Composite) {
+        } else if (resolved.entryKind == TypeEntry::Composite) {
             bool wasSuppressed = m_suppressRefresh;
             m_suppressRefresh = true;
             m_doc->undoStack.beginMacro(QStringLiteral("Change to composite type"));
@@ -2141,9 +2070,9 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                 if (nodeKind != NodeKind::Pointer64)
                     changeNodeKind(nodeIdx, NodeKind::Pointer64);
                 int idx = m_doc->tree.indexOfId(nodeId);
-                if (idx >= 0 && m_doc->tree.nodes[idx].refId != entry.structId)
+                if (idx >= 0 && m_doc->tree.nodes[idx].refId != resolved.structId)
                     m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::ChangePointerRef{nodeId, m_doc->tree.nodes[idx].refId, entry.structId}));
+                        cmd::ChangePointerRef{nodeId, m_doc->tree.nodes[idx].refId, resolved.structId}));
 
             } else if (spec.arrayCount > 0) {
                 // Array modifier: e.g. "Material[10]" → Array + Struct element
@@ -2156,9 +2085,9 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                         m_doc->undoStack.push(new RcxCommand(this,
                             cmd::ChangeArrayMeta{nodeId, n.elementKind, NodeKind::Struct,
                                                  n.arrayLen, spec.arrayCount}));
-                    if (n.refId != entry.structId)
+                    if (n.refId != resolved.structId)
                         m_doc->undoStack.push(new RcxCommand(this,
-                            cmd::ChangePointerRef{nodeId, n.refId, entry.structId}));
+                            cmd::ChangePointerRef{nodeId, n.refId, resolved.structId}));
                 }
 
             } else {
@@ -2167,7 +2096,7 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                     changeNodeKind(nodeIdx, NodeKind::Struct);
                 int idx = m_doc->tree.indexOfId(nodeId);
                 if (idx >= 0) {
-                    int refIdx = m_doc->tree.indexOfId(entry.structId);
+                    int refIdx = m_doc->tree.indexOfId(resolved.structId);
                     QString targetName;
                     if (refIdx >= 0) {
                         const Node& ref = m_doc->tree.nodes[refIdx];
@@ -2178,9 +2107,9 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                         m_doc->undoStack.push(new RcxCommand(this,
                             cmd::ChangeStructTypeName{nodeId, oldTypeName, targetName}));
                     // Set refId so compose can expand the referenced struct's children
-                    if (m_doc->tree.nodes[idx].refId != entry.structId)
+                    if (m_doc->tree.nodes[idx].refId != resolved.structId)
                         m_doc->undoStack.push(new RcxCommand(this,
-                            cmd::ChangePointerRef{nodeId, m_doc->tree.nodes[idx].refId, entry.structId}));
+                            cmd::ChangePointerRef{nodeId, m_doc->tree.nodes[idx].refId, resolved.structId}));
                     // ChangePointerRef auto-sets collapsed=true when refId != 0
                 }
             }
@@ -2190,33 +2119,60 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
             if (!m_suppressRefresh) refresh();
         }
     } else if (mode == TypePopupMode::ArrayElement) {
-        if (entry.entryKind == TypeEntry::Primitive) {
-            if (entry.primitiveKind != elemKind) {
+        if (resolved.entryKind == TypeEntry::Primitive) {
+            if (resolved.primitiveKind != elemKind) {
                 m_doc->undoStack.push(new RcxCommand(this,
                     cmd::ChangeArrayMeta{nodeId,
-                        elemKind, entry.primitiveKind,
+                        elemKind, resolved.primitiveKind,
                         arrLen, arrLen}));
             }
-        } else if (entry.entryKind == TypeEntry::Composite) {
-            if (elemKind != NodeKind::Struct || nodeRefId != entry.structId) {
+        } else if (resolved.entryKind == TypeEntry::Composite) {
+            if (elemKind != NodeKind::Struct || nodeRefId != resolved.structId) {
                 m_doc->undoStack.push(new RcxCommand(this,
                     cmd::ChangeArrayMeta{nodeId,
                         elemKind, NodeKind::Struct,
                         arrLen, arrLen}));
-                if (nodeRefId != entry.structId) {
+                if (nodeRefId != resolved.structId) {
                     m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::ChangePointerRef{nodeId, nodeRefId, entry.structId}));
+                        cmd::ChangePointerRef{nodeId, nodeRefId, resolved.structId}));
                 }
             }
         }
     } else if (mode == TypePopupMode::PointerTarget) {
         // "void" entry → refId 0; composite entry → real structId
-        uint64_t realRefId = (entry.entryKind == TypeEntry::Composite) ? entry.structId : 0;
+        uint64_t realRefId = (resolved.entryKind == TypeEntry::Composite) ? resolved.structId : 0;
         if (realRefId != nodeRefId) {
             m_doc->undoStack.push(new RcxCommand(this,
                 cmd::ChangePointerRef{nodeId, nodeRefId, realRefId}));
         }
     }
+}
+
+uint64_t RcxController::findOrCreateStructByName(const QString& typeName) {
+    // Check if it already exists locally
+    for (const auto& n : m_doc->tree.nodes) {
+        if (n.parentId == 0 && n.kind == NodeKind::Struct
+            && (n.structTypeName == typeName || (n.structTypeName.isEmpty() && n.name == typeName)))
+            return n.id;
+    }
+    // Import: create a new root struct with that name + default hex fields
+    bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Import type"));
+    Node n;
+    n.kind = NodeKind::Struct;
+    n.structTypeName = typeName;
+    n.name = QStringLiteral("instance");
+    n.parentId = 0;
+    n.offset = 0;
+    n.id = m_doc->tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
+    for (int i = 0; i < 8; i++)
+        insertNode(n.id, i * 8, NodeKind::Hex64,
+                   QString("field_%1").arg(i * 8, 2, 16, QChar('0')));
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    return n.id;
 }
 
 void RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target) {
@@ -2266,6 +2222,117 @@ void RcxController::switchToSavedSource(int idx) {
         // Plugin-based provider (e.g. "processmemory" with target "pid:name")
         attachViaPlugin(entry.kind, entry.providerTarget);
     }
+}
+
+void RcxController::selectSource(const QString& text) {
+    if (text == QStringLiteral("#clear")) {
+        clearSources();
+    } else if (text.startsWith(QStringLiteral("#saved:"))) {
+        int idx = text.mid(7).toInt();
+        switchToSavedSource(idx);
+    } else if (text == QStringLiteral("File")) {
+        auto* w = qobject_cast<QWidget*>(parent());
+        QString path = QFileDialog::getOpenFileName(w, "Load Binary Data", {}, "All Files (*)");
+        if (!path.isEmpty()) {
+            if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
+                m_savedSources[m_activeSourceIdx].baseAddress = m_doc->tree.baseAddress;
+
+            m_doc->loadData(path);
+
+            int existingIdx = -1;
+            for (int i = 0; i < m_savedSources.size(); i++) {
+                if (m_savedSources[i].kind == QStringLiteral("File")
+                    && m_savedSources[i].filePath == path) {
+                    existingIdx = i;
+                    break;
+                }
+            }
+            if (existingIdx >= 0) {
+                m_activeSourceIdx = existingIdx;
+                m_doc->tree.baseAddress = m_savedSources[existingIdx].baseAddress;
+            } else {
+                SavedSourceEntry entry;
+                entry.kind = QStringLiteral("File");
+                entry.displayName = QFileInfo(path).fileName();
+                entry.filePath = path;
+                entry.baseAddress = m_doc->tree.baseAddress;
+                m_savedSources.append(entry);
+                m_activeSourceIdx = m_savedSources.size() - 1;
+            }
+            refresh();
+        }
+    } else {
+        const auto* providerInfo = ProviderRegistry::instance().findProvider(text.toLower().replace(" ", ""));
+        if (providerInfo) {
+            QString target;
+            bool selected = false;
+
+            if (providerInfo->isBuiltin) {
+                if (providerInfo->factory)
+                    selected = providerInfo->factory(qobject_cast<QWidget*>(parent()), &target);
+            } else {
+                if (providerInfo->plugin)
+                    selected = providerInfo->plugin->selectTarget(qobject_cast<QWidget*>(parent()), &target);
+            }
+
+            if (selected && !target.isEmpty()) {
+                std::unique_ptr<Provider> provider;
+                QString errorMsg;
+                if (providerInfo->plugin)
+                    provider = providerInfo->plugin->createProvider(target, &errorMsg);
+
+                if (provider) {
+                    if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
+                        m_savedSources[m_activeSourceIdx].baseAddress = m_doc->tree.baseAddress;
+
+                    uint64_t newBase = provider->base();
+                    QString displayName = provider->name();
+                    m_doc->undoStack.clear();
+                    m_doc->provider = std::move(provider);
+                    m_doc->dataPath.clear();
+                    if (m_doc->tree.baseAddress == 0)
+                        m_doc->tree.baseAddress = newBase;
+                    resetSnapshot();
+                    emit m_doc->documentChanged();
+
+                    QString identifier = providerInfo->identifier;
+                    int existingIdx = -1;
+                    for (int i = 0; i < m_savedSources.size(); i++) {
+                        if (m_savedSources[i].kind == identifier
+                            && m_savedSources[i].providerTarget == target) {
+                            existingIdx = i;
+                            break;
+                        }
+                    }
+                    if (existingIdx >= 0) {
+                        m_activeSourceIdx = existingIdx;
+                        m_savedSources[existingIdx].baseAddress = m_doc->tree.baseAddress;
+                    } else {
+                        SavedSourceEntry entry;
+                        entry.kind = identifier;
+                        entry.displayName = displayName;
+                        entry.providerTarget = target;
+                        entry.baseAddress = m_doc->tree.baseAddress;
+                        m_savedSources.append(entry);
+                        m_activeSourceIdx = m_savedSources.size() - 1;
+                    }
+                    refresh();
+                } else if (!errorMsg.isEmpty()) {
+                    QMessageBox::warning(qobject_cast<QWidget*>(parent()), "Provider Error", errorMsg);
+                }
+            }
+        }
+    }
+}
+
+void RcxController::clearSources() {
+    m_savedSources.clear();
+    m_activeSourceIdx = -1;
+    m_doc->provider = std::make_shared<NullProvider>();
+    m_doc->dataPath.clear();
+    resetSnapshot();
+    pushSavedSourcesToEditors();
+    refresh();
 }
 
 void RcxController::pushSavedSourcesToEditors() {

@@ -18,7 +18,11 @@ ThemeManager::ThemeManager() {
     loadUserThemes();
 
     QSettings settings("Reclass", "Reclass");
-    QString fallback = m_builtIn.isEmpty() ? QString() : m_builtIn[0].name;
+    QString fallback;
+    for (const auto& t : m_builtIn) {
+        if (t.name.contains("VS2022", Qt::CaseInsensitive)) { fallback = t.name; break; }
+    }
+    if (fallback.isEmpty() && !m_builtIn.isEmpty()) fallback = m_builtIn[0].name;
     QString saved = settings.value("theme", fallback).toString();
     auto all = themes();
     for (int i = 0; i < all.size(); i++) {
