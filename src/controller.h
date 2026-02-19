@@ -99,6 +99,7 @@ public:
     void showContextMenu(RcxEditor* editor, int line, int nodeIdx, int subLine, const QPoint& globalPos);
     void batchRemoveNodes(const QVector<int>& nodeIndices);
     void batchChangeKind(const QVector<int>& nodeIndices, NodeKind newKind);
+    void deleteRootStruct(uint64_t structId);
 
     void applyCommand(const Command& cmd, bool isUndo);
     void refresh();

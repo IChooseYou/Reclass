@@ -1698,7 +1698,53 @@ void MainWindow::createWorkspaceDock() {
 
         QAction* chosen = menu.exec(m_workspaceTree->viewport()->mapToGlobal(pos));
         if (chosen == actDelete) {
-            tab.ctrl->removeNode(ni);
+            QString typeName = tab.doc->tree.nodes[ni].structTypeName.isEmpty()
+                ? tab.doc->tree.nodes[ni].name
+                : tab.doc->tree.nodes[ni].structTypeName;
+            if (typeName.isEmpty()) typeName = QStringLiteral("(unnamed)");
+
+            // Collect detailed reference info
+            QStringList refDetails;
+            for (const auto& n : tab.doc->tree.nodes) {
+                if (n.refId == structId) {
+                    QString ownerName;
+                    uint64_t pid = n.parentId;
+                    while (pid != 0) {
+                        int pi = tab.doc->tree.indexOfId(pid);
+                        if (pi < 0) break;
+                        if (tab.doc->tree.nodes[pi].parentId == 0) {
+                            ownerName = tab.doc->tree.nodes[pi].structTypeName.isEmpty()
+                                ? tab.doc->tree.nodes[pi].name
+                                : tab.doc->tree.nodes[pi].structTypeName;
+                            break;
+                        }
+                        pid = tab.doc->tree.nodes[pi].parentId;
+                    }
+                    QString fieldDesc = ownerName.isEmpty()
+                        ? n.name
+                        : QStringLiteral("%1::%2").arg(ownerName, n.name);
+                    refDetails << QStringLiteral("  \u2022 %1 (%2)")
+                        .arg(fieldDesc, kindToString(n.kind));
+                }
+            }
+
+            QString msg;
+            if (refDetails.isEmpty()) {
+                msg = QString("Delete '%1'?").arg(typeName);
+            } else {
+                msg = QString("Delete '%1'?\n\n"
+                              "The following %2 field(s) reference this type "
+                              "and will become untyped (void):\n\n%3")
+                    .arg(typeName)
+                    .arg(refDetails.size())
+                    .arg(refDetails.join('\n'));
+            }
+
+            auto answer = QMessageBox::question(this, "Delete Type", msg,
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (answer != QMessageBox::Yes) return;
+
+            tab.ctrl->deleteRootStruct(structId);
             rebuildWorkspaceModel();
         } else if (chosen && chosen == actConvert) {
             QString newKw = kw == QStringLiteral("class")

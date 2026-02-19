@@ -776,6 +776,48 @@ void RcxController::removeNode(int nodeIdx) {
         cmd::Remove{nodeId, subtree, adjs}));
 }
 
+void RcxController::deleteRootStruct(uint64_t structId) {
+    int ni = m_doc->tree.indexOfId(structId);
+    if (ni < 0) return;
+    const Node& node = m_doc->tree.nodes[ni];
+    if (node.parentId != 0 || node.kind != NodeKind::Struct) return;
+
+    bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Delete root struct"));
+
+    // Clear all refId references pointing to this struct
+    for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+        auto& n = m_doc->tree.nodes[i];
+        if (n.refId == structId) {
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::ChangePointerRef{n.id, n.refId, (uint64_t)0}));
+        }
+    }
+
+    // Remove the struct + subtree (re-lookup since commands may shift indices)
+    ni = m_doc->tree.indexOfId(structId);
+    if (ni >= 0)
+        removeNode(ni);
+
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+
+    // Switch view if we just deleted the viewed root
+    if (m_viewRootId == structId) {
+        uint64_t nextRoot = 0;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.parentId == 0 && n.kind == NodeKind::Struct) {
+                nextRoot = n.id;
+                break;
+            }
+        }
+        setViewRootId(nextRoot);
+    }
+
+    if (!m_suppressRefresh) refresh();
+}
+
 void RcxController::toggleCollapse(int nodeIdx) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
     auto& node = m_doc->tree.nodes[nodeIdx];
