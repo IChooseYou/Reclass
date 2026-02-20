@@ -6,19 +6,25 @@ This tool helps you inspect raw bytes and interpret them as types (structs, arra
 
 ![Split view with rendered C/C++ output](docs/README_PIC3.png)
 
-## State
+## Data Sources
 
-- MCP (Model Context Protocol) bridge via `ReclassMcpBridge.exe`. The server starts by default and can be stopped from the File menu. It exposes all tool functionality to any MCP-compatible client (e.g. Claude Code) and falls back to UI prompts when the client requests something not yet covered by tools. To connect, add this to your MCP client config (e.g. `.mcp.json`):
-  ```json
-  {
-    "mcpServers": {
-      "ReclassMcpBridge": {
-        "command": "path/to/build/ReclassMcpBridge.exe",
-        "args": []
-      }
+- **File** — open any binary file and inspect its contents as structured data
+- **Process** — attach to a live process and read its memory in real time
+- **WinDbg** — load `.dmp` crash dump files or connect to live debugging sessions
+
+## MCP Integration
+
+Built-in [Model Context Protocol](https://modelcontextprotocol.io/) bridge via `ReclassMcpBridge`. The server does not start by default and can be toggled from the File menu. It exposes all tool functionality to any MCP-compatible client (e.g. Claude Code) and falls back to UI prompts when the client requests something not yet covered by tools. To connect, add this to your MCP client config (e.g. `.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "ReclassMcpBridge": {
+      "command": "path/to/build/ReclassMcpBridge",
+      "args": []
     }
   }
-  ```
+}
+```
 ## Build
 
  1. Prerequisites

@@ -22,22 +22,38 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.1'
-          arch: 'win64_msvc2022_64'
+          arch: 'win64_mingw'
           cache: true
           aqtversion: '==3.1.21'
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+          tools: 'tools_mingw1310'
 
       - name: Configure
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_UI_TESTS=OFF
+        shell: bash
+        run: |
+          # Find the MinGW bin directory installed by aqt
+          MINGW_BIN=$(find "$RUNNER_WORKSPACE" -path "*/mingw*/bin" -name "*.exe" -printf '%h\n' 2>/dev/null | head -1)
+          if [ -z "$MINGW_BIN" ]; then
+            MINGW_BIN=$(find "$IQTA_TOOLS" -path "*/mingw*/bin" -name "g++.exe" -printf '%h\n' 2>/dev/null | head -1)
+          fi
+          echo "MinGW bin: $MINGW_BIN"
+          export PATH="$MINGW_BIN:$PATH"
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_UI_TESTS=OFF \
+            -DCMAKE_C_COMPILER="$MINGW_BIN/gcc.exe" \
+            -DCMAKE_CXX_COMPILER="$MINGW_BIN/g++.exe"
 
       - name: Build
-        run: cmake --build build
+        shell: bash
+        run: |
+          MINGW_BIN=$(find "$IQTA_TOOLS" -path "*/mingw*/bin" -name "g++.exe" -printf '%h\n' 2>/dev/null | head -1)
+          export PATH="$MINGW_BIN:$PATH"
+          cmake --build build
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        shell: bash
+        run: |
+          MINGW_BIN=$(find "$IQTA_TOOLS" -path "*/mingw*/bin" -name "g++.exe" -printf '%h\n' 2>/dev/null | head -1)
+          export PATH="$MINGW_BIN:$PATH"
+          ctest --test-dir build --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -97,7 +113,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   linux:
-    needs: windows
     runs-on: ubuntu-22.04
 
     steps:
@@ -186,4 +201,3 @@ jobs:
           files: Reclass-linux64-qt6.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
