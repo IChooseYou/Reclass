@@ -208,6 +208,9 @@ public:
         // Kill Fusion's 3D bevel on QMenu — the OS drop shadow is enough
         if (elem == PE_FrameMenu)
             return;
+        // Kill the status bar item frame and panel border
+        if (elem == PE_FrameStatusBarItem || elem == PE_PanelStatusBar)
+            return;
         QProxyStyle::drawPrimitive(elem, opt, p, w);
     }
     void drawControl(ControlElement element, const QStyleOption* opt,
@@ -324,6 +327,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     overlay->show();
 
     m_mdiArea = new QMdiArea(this);
+    m_mdiArea->setFrameShape(QFrame::NoFrame);
     m_mdiArea->setViewMode(QMdiArea::TabbedView);
     m_mdiArea->setTabsClosable(true);
     m_mdiArea->setTabsMovable(true);
@@ -343,6 +347,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createWorkspaceDock();
     createMenus();
     createStatusBar();
+
+    // Eliminate gap between central widget and status bar
+    if (auto* ml = layout()) {
+        ml->setSpacing(0);
+        ml->setContentsMargins(0, 0, 0, 0);
+    }
+    // Separator line between central widget and status bar is killed in MenuBarStyle::drawControl
 
     // Restore menu bar title case setting (after menus are created)
     {
@@ -379,6 +390,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         for (int i = 0; i < tab->panes.size(); ++i) {
             if (tab->panes[i].tabWidget && tab->panes[i].tabWidget->isAncestorOf(now)) {
                 tab->activePaneIdx = i;
+                syncViewButtons(tab->panes[i].viewMode);
                 return;
             }
         }
@@ -551,12 +563,128 @@ private:
     QColor m_color;
 };
 
+// ── Custom-painted view tab button (no CSS) ──
+class ViewTabButton : public QPushButton {
+public:
+    static constexpr int kAccentH = 2;   // accent line height in pixels
+    static constexpr int kPadLR  = 12;   // horizontal padding
+    static constexpr int kPadBot = 4;    // extra bottom padding
+
+    QColor colBg, colBgChecked, colBgHover, colBgPressed;
+    QColor colText, colTextMuted, colAccent;
+
+    explicit ViewTabButton(const QString& text, QWidget* parent = nullptr)
+        : QPushButton(text, parent) {
+        setCheckable(true);
+        setFlat(true);
+        setCursor(Qt::PointingHandCursor);
+        setContentsMargins(0, 0, 0, 0);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Ignored);
+    }
+
+    QSize sizeHint() const override {
+        QFontMetrics fm(font());
+        int w = fm.horizontalAdvance(text()) + 2 * kPadLR;
+        int h = qRound((fm.height() + kAccentH + kPadBot) * 1.33);
+        return QSize(w, h);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        // Background
+        QColor bg = colBg;
+        if (isDown())          bg = colBgPressed;
+        else if (underMouse()) bg = colBgHover;
+        else if (isChecked())  bg = colBgChecked;
+        p.fillRect(rect(), bg);
+
+        // Accent line at y=0 when checked
+        if (isChecked())
+            p.fillRect(0, 0, width(), kAccentH, colAccent);
+
+        // Text
+        p.setPen(isChecked() || underMouse() || isDown() ? colText : colTextMuted);
+        p.setFont(font());
+        QRect textRect(kPadLR, kAccentH, width() - 2 * kPadLR, height() - kAccentH);
+        p.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, text());
+    }
+
+    void enterEvent(QEnterEvent*) override { update(); }
+    void leaveEvent(QEvent*) override { update(); }
+};
+
+// ── Borderless status bar with manual child layout ──
+// QStatusBarLayout hardcodes 2px margins that can't be overridden.
+// We bypass it entirely: children are placed manually in resizeEvent,
+// and addWidget() is NOT used. Instead, create children as direct
+// children and call manualLayout() to position them.
+class FlatStatusBar : public QStatusBar {
+public:
+    QWidget* tabRow   = nullptr;   // set by createStatusBar
+    QLabel*  label    = nullptr;   // set by createStatusBar
+
+    explicit FlatStatusBar(QWidget* parent = nullptr) : QStatusBar(parent) {
+        setSizeGripEnabled(false);
+    }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), palette().window());
+    }
+    void resizeEvent(QResizeEvent* e) override {
+        QStatusBar::resizeEvent(e);
+        manualLayout();
+    }
+    void showEvent(QShowEvent* e) override {
+        QStatusBar::showEvent(e);
+        manualLayout();
+    }
+private:
+    void manualLayout() {
+        if (!tabRow || !label) return;
+        int h = height();
+        int tw = tabRow->sizeHint().width();
+        tabRow->setGeometry(0, 0, tw, h);
+        label->setGeometry(tw, 0, width() - tw, h);
+    }
+};
+
 void MainWindow::createStatusBar() {
-    m_statusLabel = new QLabel("Ready");
+    // Replace the default QStatusBar with our borderless, manually-laid-out one.
+    // QStatusBarLayout hardcodes 2px margins; we bypass addWidget entirely.
+    auto* sb = new FlatStatusBar;
+    setStatusBar(sb);
+
+    m_statusLabel = new QLabel("Ready", sb);
     m_statusLabel->setContentsMargins(10, 0, 0, 0);
-    statusBar()->setContentsMargins(0, 0, 0, 0);
-    statusBar()->setSizeGripEnabled(false);  // disable ugly default grip
-    statusBar()->addWidget(m_statusLabel, 1);
+
+    // View toggle buttons (Reclass / C/C++) — custom painted, no CSS
+    m_viewBtnGroup = new QButtonGroup(this);
+    m_viewBtnGroup->setExclusive(true);
+
+    m_btnReclass = new ViewTabButton("Reclass");
+    m_btnReclass->setChecked(true);
+
+    m_btnRendered = new ViewTabButton("C/C++");
+
+    m_viewBtnGroup->addButton(m_btnReclass, 0);
+    m_viewBtnGroup->addButton(m_btnRendered, 1);
+
+    // Wrap buttons in a zero-margin container — direct child of status bar
+    auto* tabRow = new QWidget(sb);
+    auto* tabLay = new QHBoxLayout(tabRow);
+    tabLay->setContentsMargins(0, 0, 0, 0);
+    tabLay->setSpacing(0);
+    tabLay->addWidget(m_btnReclass);
+    tabLay->addWidget(m_btnRendered);
+
+    sb->tabRow = tabRow;
+    sb->label  = m_statusLabel;
+
+    connect(m_viewBtnGroup, &QButtonGroup::idClicked, this, [this](int id) {
+        setViewMode(id == 1 ? VM_Rendered : VM_Reclass);
+    });
 
     // Grip is a direct child of the main window, NOT in the status bar layout.
     // Positioned via reposition() in resizeEvent — immune to font/margin changes.
@@ -571,6 +699,18 @@ void MainWindow::createStatusBar() {
         sbPal.setColor(QPalette::WindowText, t.textDim);
         statusBar()->setPalette(sbPal);
         statusBar()->setAutoFillBackground(true);
+
+        auto applyViewTabColors = [&](ViewTabButton* btn) {
+            btn->colBg        = t.background;
+            btn->colBgChecked = t.backgroundAlt;
+            btn->colBgHover   = t.hover;
+            btn->colBgPressed = t.hover.darker(130);
+            btn->colText      = t.text;
+            btn->colTextMuted = t.textMuted;
+            btn->colAccent    = t.indHoverSpan;
+        };
+        applyViewTabColors(static_cast<ViewTabButton*>(m_btnReclass));
+        applyViewTabColors(static_cast<ViewTabButton*>(m_btnRendered));
     }
 
     // Sync status bar font with editor font at startup
@@ -579,22 +719,11 @@ void MainWindow::createStatusBar() {
         QFont f(fontName, 12);
         f.setFixedPitch(true);
         statusBar()->setFont(f);
+        m_btnReclass->setFont(f);
+        m_btnRendered->setFont(f);
     }
 }
 
-void MainWindow::applyTabWidgetStyle(QTabWidget* tw) {
-    const auto& t = ThemeManager::instance().current();
-    tw->setStyleSheet(QStringLiteral(
-        "QTabWidget::pane { border: none; }"
-        "QTabBar::tab {"
-        "  background: %1; color: %2; padding: 4px 12px; border: none; min-width: 60px;"
-        "}"
-        "QTabBar::tab:selected { color: %3; }"
-        "QTabBar::tab:hover { color: %3; background: %4; }")
-        .arg(t.background.name(), t.textMuted.name(),
-             t.text.name(), t.hover.name()));
-    tw->tabBar()->setExpanding(false);
-}
 
 void MainWindow::styleTabCloseButtons() {
     auto* tabBar = m_mdiArea->findChild<QTabBar*>();
@@ -632,7 +761,8 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
     pane.tabWidget = new QTabWidget;
     pane.tabWidget->setTabPosition(QTabWidget::South);
-    applyTabWidgetStyle(pane.tabWidget);
+    pane.tabWidget->tabBar()->setVisible(false);
+    pane.tabWidget->setDocumentMode(true);  // kill QTabWidget frame border
 
     // Create editor via controller (parent = tabWidget for ownership)
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
@@ -649,18 +779,20 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Add to splitter
     tab.splitter->addWidget(pane.tabWidget);
 
-    // Connect per-pane tab bar switching
+    // Connect per-pane page switching (driven by status bar buttons via setViewMode)
     QTabWidget* tw = pane.tabWidget;
     connect(tw, &QTabWidget::currentChanged, this, [this, tw](int index) {
-        // Find which pane this QTabWidget belongs to
         SplitPane* p = findPaneByTabWidget(tw);
         if (!p) return;
 
-        if (index == 1) p->viewMode = VM_Rendered;
-        else            p->viewMode = VM_Reclass;
+        p->viewMode = (index == 1) ? VM_Rendered : VM_Reclass;
+
+        // Sync status bar buttons if this is the active pane
+        auto* tab = activeTab();
+        if (tab && &tab->panes[tab->activePaneIdx] == p)
+            syncViewButtons(p->viewMode);
 
         if (index == 1) {
-            // Find the TabState that owns this pane and update rendered view
             for (auto& tab : m_tabs) {
                 for (auto& pane : tab.panes) {
                     if (&pane == p) {
@@ -717,6 +849,7 @@ static QString rootName(const NodeTree& tree, uint64_t viewRootId = 0) {
 
 QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
     auto* splitter = new QSplitter(Qt::Horizontal);
+    splitter->setHandleWidth(1);
     auto* ctrl = new RcxController(doc, splitter);
 
     auto* sub = m_mdiArea->addSubWindow(splitter);
@@ -1114,6 +1247,9 @@ void MainWindow::toggleMcp() {
 void MainWindow::applyTheme(const Theme& theme) {
     applyGlobalTheme(theme);
 
+    // Kill the 1px separator line between central widget and status bar
+    setStyleSheet("QMainWindow::separator { height: 0px; width: 0px; }");
+
     // Custom title bar
     m_titleBar->applyTheme(theme);
 
@@ -1140,9 +1276,24 @@ void MainWindow::applyTheme(const Theme& theme) {
         sbPal.setColor(QPalette::WindowText, theme.textDim);
         statusBar()->setPalette(sbPal);
     }
+    // View toggle buttons in status bar
+    {
+        auto applyColors = [&](ViewTabButton* btn) {
+            btn->colBg        = theme.background;
+            btn->colBgChecked = theme.backgroundAlt;
+            btn->colBgHover   = theme.hover;
+            btn->colBgPressed = theme.hover.darker(130);
+            btn->colText      = theme.text;
+            btn->colTextMuted = theme.textMuted;
+            btn->colAccent    = theme.indHoverSpan;
+            btn->update();
+        };
+        applyColors(static_cast<ViewTabButton*>(m_btnReclass));
+        applyColors(static_cast<ViewTabButton*>(m_btnRendered));
+    }
     // Resize grip (direct child of main window, not in status bar)
-    if (auto* grip = findChild<ResizeGrip*>("resizeGrip"))
-        grip->setGripColor(theme.textFaint);
+    if (auto* w = findChild<QWidget*>("resizeGrip"))
+        static_cast<ResizeGrip*>(w)->setGripColor(theme.textFaint);
 
     // Workspace tree: text color matches menu bar
     if (m_workspaceTree) {
@@ -1160,10 +1311,35 @@ void MainWindow::applyTheme(const Theme& theme) {
             "QToolButton:hover { color: %2; }")
             .arg(theme.textDim.name(), theme.indHoverSpan.name()));
 
-    // Split pane tab widgets
-    for (auto& state : m_tabs) {
-        for (auto& pane : state.panes) {
-            if (pane.tabWidget) applyTabWidgetStyle(pane.tabWidget);
+    // Rendered C/C++ views: update lexer colors, paper, margins
+    for (auto& tab : m_tabs) {
+        for (auto& pane : tab.panes) {
+            auto* sci = pane.rendered;
+            if (!sci) continue;
+            if (auto* lexer = qobject_cast<QsciLexerCPP*>(sci->lexer())) {
+                lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::Keyword);
+                lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::KeywordSet2);
+                lexer->setColor(theme.syntaxNumber, QsciLexerCPP::Number);
+                lexer->setColor(theme.syntaxString, QsciLexerCPP::DoubleQuotedString);
+                lexer->setColor(theme.syntaxString, QsciLexerCPP::SingleQuotedString);
+                lexer->setColor(theme.syntaxComment, QsciLexerCPP::Comment);
+                lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentLine);
+                lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentDoc);
+                lexer->setColor(theme.text, QsciLexerCPP::Default);
+                lexer->setColor(theme.text, QsciLexerCPP::Identifier);
+                lexer->setColor(theme.syntaxPreproc, QsciLexerCPP::PreProcessor);
+                lexer->setColor(theme.text, QsciLexerCPP::Operator);
+                for (int i = 0; i <= 127; i++)
+                    lexer->setPaper(theme.background, i);
+            }
+            sci->setPaper(theme.background);
+            sci->setColor(theme.text);
+            sci->setCaretForegroundColor(theme.text);
+            sci->setCaretLineBackgroundColor(theme.hover);
+            sci->setSelectionBackgroundColor(theme.selection);
+            sci->setSelectionForegroundColor(theme.text);
+            sci->setMarginsBackgroundColor(theme.backgroundAlt);
+            sci->setMarginsForegroundColor(theme.textDim);
         }
     }
 }
@@ -1253,6 +1429,8 @@ void MainWindow::setEditorFont(const QString& fontName) {
         m_dockTitleLabel->setFont(f);
     // Sync status bar font
     statusBar()->setFont(f);
+    m_btnReclass->setFont(f);
+    m_btnRendered->setFont(f);
 }
 
 RcxController* MainWindow::activeController() const {
@@ -1363,7 +1541,13 @@ void MainWindow::setViewMode(ViewMode mode) {
     pane->viewMode = mode;
     int idx = (mode == VM_Rendered) ? 1 : 0;
     pane->tabWidget->setCurrentIndex(idx);
-    // The QTabWidget::currentChanged signal will handle updating the rendered view
+    syncViewButtons(mode);
+}
+
+void MainWindow::syncViewButtons(ViewMode mode) {
+    QSignalBlocker block(m_viewBtnGroup);
+    if (mode == VM_Rendered) m_btnRendered->setChecked(true);
+    else                     m_btnReclass->setChecked(true);
 }
 
 // ── Find the root-level struct ancestor for a node ──
@@ -2078,8 +2262,8 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
         m_borderOverlay->setGeometry(rect());
         m_borderOverlay->raise();
     }
-    auto* grip = findChild<ResizeGrip*>("resizeGrip");
-    if (grip) {
+    if (auto* w = findChild<QWidget*>("resizeGrip")) {
+        auto* grip = static_cast<ResizeGrip*>(w);
         grip->reposition();
         grip->raise();
     }
