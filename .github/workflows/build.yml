@@ -31,13 +31,13 @@ jobs:
           arch: x64
 
       - name: Configure
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_UI_TESTS=OFF
 
       - name: Build
         run: cmake --build build
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure --exclude-regex "test_editor|test_controller|test_windbg_provider|test_com_security"
+        run: ctest --test-dir build --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -118,15 +118,13 @@ jobs:
           sudo apt-get install -y ninja-build libgl1-mesa-dev libfuse2 libxcb-cursor0
 
       - name: Configure
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_UI_TESTS=OFF
 
       - name: Build
         run: cmake --build build
 
       - name: Test
-        run: xvfb-run ctest --test-dir build --output-on-failure --exclude-regex "test_editor|test_controller"
-        env:
-          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure
 
       - name: Create AppImage
         run: |

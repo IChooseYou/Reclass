@@ -345,14 +345,6 @@ if(BUILD_TESTING)
         add_test(NAME test_windbg_provider COMMAND test_windbg_provider)
     endif()
 
-    # Standalone test: proves whether CoInitializeSecurity is needed for DebugConnect
-    # Requires a running WinDbg debug server on port 5055
-    if(WIN32)
-        add_executable(test_com_security tests/test_com_security.cpp)
-        target_link_libraries(test_com_security PRIVATE dbgeng ole32 version)
-        add_test(NAME test_com_security COMMAND test_com_security)
-    endif()
-
     # Deploy Qt runtime DLLs for tests (run windeployqt on a representative test exe
     # that links the broadest set of Qt modules; all test exes share the same output dir)
     if(TARGET ${QT}::windeployqt)
