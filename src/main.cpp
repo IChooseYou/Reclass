@@ -1770,7 +1770,7 @@ void MainWindow::showOptionsDialog() {
     current.menuBarTitleCase = m_titleBar->menuBarTitleCase();
     current.showIcon = QSettings("Reclass", "Reclass").value("showIcon", false).toBool();
     current.safeMode = QSettings("Reclass", "Reclass").value("safeMode", false).toBool();
-    current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", false).toBool();
+    current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
     current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
 
     OptionsDialog dlg(current, this);

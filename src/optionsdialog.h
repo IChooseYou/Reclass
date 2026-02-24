@@ -16,7 +16,7 @@ struct OptionsResult {
     bool    menuBarTitleCase = true;
     bool    showIcon = false;
     bool    safeMode = false;
-    bool    autoStartMcp = false;
+    bool    autoStartMcp = true;
     int     refreshMs = 660;
 };
 
