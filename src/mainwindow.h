@@ -14,11 +14,13 @@
 #include <QMap>
 #include <QButtonGroup>
 #include <QPushButton>
+#include <QTimer>
 #include <Qsci/qsciscintilla.h>
 
 namespace rcx {
 
 class McpBridge;
+class ShimmerLabel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -59,6 +61,11 @@ private slots:
     void showOptionsDialog();
 
 public:
+    // Status bar helpers — separate app / MCP channels
+    void setAppStatus(const QString& text);
+    void setMcpStatus(const QString& text);
+    void clearMcpStatus();
+
     // Project Lifecycle API
     QMdiSubWindow* project_new(const QString& classKeyword = QString());
     QMdiSubWindow* project_open(const QString& path = {});
@@ -69,7 +76,10 @@ private:
     enum ViewMode { VM_Reclass, VM_Rendered };
 
     QMdiArea*       m_mdiArea;
-    QLabel*         m_statusLabel;
+    ShimmerLabel*   m_statusLabel;
+    QString         m_appStatus;
+    bool            m_mcpBusy   = false;
+    QTimer*         m_mcpClearTimer = nullptr;
     QButtonGroup*   m_viewBtnGroup = nullptr;
     QPushButton*    m_btnReclass   = nullptr;
     QPushButton*    m_btnRendered  = nullptr;

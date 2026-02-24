@@ -170,12 +170,15 @@ void McpBridge::processLine(const QByteArray& line) {
     }
 
     if (method == "initialize") {
-        m_mainWindow->m_statusLabel->setText(QStringLiteral("MCP: client connected"));
+        m_mainWindow->setMcpStatus(QStringLiteral("MCP: client connected"));
+        QCoreApplication::processEvents();
         sendJson(handleInitialize(id, req.value("params").toObject()));
+        m_mainWindow->clearMcpStatus();
     } else if (method == "tools/list") {
-        m_mainWindow->m_statusLabel->setText(QStringLiteral("MCP: tools/list"));
+        m_mainWindow->setMcpStatus(QStringLiteral("MCP: tools/list"));
+        QCoreApplication::processEvents();
         sendJson(handleToolsList(id));
-        m_mainWindow->m_statusLabel->setText(QStringLiteral("Ready"));
+        m_mainWindow->clearMcpStatus();
     } else if (method == "tools/call") {
         sendJson(handleToolsCall(id, req.value("params").toObject()));
     } else {
@@ -403,8 +406,8 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     QString toolName = params.value("name").toString();
     QJsonObject args = params.value("arguments").toObject();
 
-    // Show tool activity in status bar
-    m_mainWindow->m_statusLabel->setText(QStringLiteral("MCP: %1").arg(toolName));
+    // Show tool activity in status bar (with shimmer)
+    m_mainWindow->setMcpStatus(QStringLiteral("MCP: %1").arg(toolName));
     QCoreApplication::processEvents();  // paint immediately
 
     QJsonObject result;
@@ -418,7 +421,7 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "tree.search")   result = toolTreeSearch(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
-    m_mainWindow->m_statusLabel->setText(QStringLiteral("Ready"));
+    m_mainWindow->clearMcpStatus();
 
     return okReply(id, result);
 }
@@ -526,6 +529,7 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
     state["modified"] = doc->modified;
     state["undoAvailable"] = doc->undoStack.canUndo();
     state["redoAvailable"] = doc->undoStack.canRedo();
+    state["statusText"] = m_mainWindow->m_appStatus;
 
     // Filtered tree: only emit nodes up to maxDepth from the filter root
     if (includeTree) {
@@ -1042,7 +1046,7 @@ QJsonObject McpBridge::toolStatusSet(const QJsonObject& args) {
         }
     }
     if (target == "statusBar" || target == "both") {
-        m_mainWindow->m_statusLabel->setText(text);
+        m_mainWindow->setAppStatus(text);
     }
 
     return makeTextResult("Status set: " + text);

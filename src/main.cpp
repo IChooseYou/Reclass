@@ -454,7 +454,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // Start MCP bridge
     m_mcp = new McpBridge(this, this);
-    if (QSettings("Reclass", "Reclass").value("autoStartMcp", false).toBool())
+    if (QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool())
         m_mcp->start();
 
     connect(m_mdiArea, &QMdiArea::subWindowActivated,
@@ -526,7 +526,7 @@ void MainWindow::createMenus() {
         }
     }
     file->addSeparator();
-    const auto itemName = QSettings("Reclass", "Reclass").value("autoStartMcp", false).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
+    const auto itemName = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
     m_mcpAction = Qt5Qt6AddAction(file, itemName, QKeySequence::UnknownKey, QIcon(), this, &MainWindow::toggleMcp);
     file->addSeparator();
     Qt5Qt6AddAction(file, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this, &MainWindow::showOptionsDialog);
@@ -716,6 +716,80 @@ protected:
     void leaveEvent(QEvent*) override { update(); }
 };
 
+// ── Shimmer label — gradient text sweep for MCP activity ──
+class ShimmerLabel : public QWidget {
+public:
+    explicit ShimmerLabel(QWidget* parent = nullptr) : QWidget(parent) {
+        m_timer.setInterval(30);
+        connect(&m_timer, &QTimer::timeout, this, [this]() {
+            m_phase += 0.012f;
+            if (m_phase > 1.0f) m_phase -= 1.0f;
+            update();
+        });
+    }
+
+    void setText(const QString& t) { m_text = t; update(); }
+    QString text() const { return m_text; }
+
+    void setShimmerActive(bool on) {
+        if (m_shimmer == on) return;
+        m_shimmer = on;
+        if (on) { m_phase = 0.0f; m_timer.start(); }
+        else    { m_timer.stop(); }
+        update();
+    }
+    bool shimmerActive() const { return m_shimmer; }
+
+    void setAlignment(Qt::Alignment a) { m_align = a; update(); }
+
+    // Colours configurable from theme
+    QColor colBase;     // dim text (normal)
+    QColor colBright;   // highlight sweep
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (m_text.isEmpty()) return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::TextAntialiasing);
+        p.setFont(font());
+
+        QRect r = contentsRect();
+
+        if (!m_shimmer) {
+            QColor c = colBase.isValid() ? colBase
+                                         : palette().color(QPalette::WindowText);
+            p.setPen(c);
+            p.drawText(r, m_align, m_text);
+            return;
+        }
+
+        // Shimmer: sweeping glow band behind text + bright text
+        QColor bright = colBright.isValid() ? colBright : QColor(255, 200, 80);
+
+        // 1. Sweeping glow band (semi-transparent background highlight)
+        qreal bandW = width() * 0.20;
+        qreal bandCenter = -bandW + (width() + 2 * bandW) * m_phase;
+        QLinearGradient bgGrad(bandCenter - bandW, 0, bandCenter + bandW, 0);
+        QColor glow = bright;
+        glow.setAlpha(35);
+        bgGrad.setColorAt(0.0, Qt::transparent);
+        bgGrad.setColorAt(0.5, glow);
+        bgGrad.setColorAt(1.0, Qt::transparent);
+        p.fillRect(rect(), QBrush(bgGrad));
+
+        // 2. Text in bright color
+        p.setPen(bright);
+        p.drawText(r, m_align, m_text);
+    }
+
+private:
+    QString      m_text;
+    bool         m_shimmer = false;
+    float        m_phase   = 0.0f;
+    Qt::Alignment m_align  = Qt::AlignLeft | Qt::AlignVCenter;
+    QTimer       m_timer;
+};
+
 // ── Borderless status bar with manual child layout ──
 // QStatusBarLayout hardcodes 2px margins that can't be overridden.
 // We bypass it entirely: children are placed manually in resizeEvent,
@@ -723,8 +797,8 @@ protected:
 // children and call manualLayout() to position them.
 class FlatStatusBar : public QStatusBar {
 public:
-    QWidget* tabRow   = nullptr;   // set by createStatusBar
-    QLabel*  label    = nullptr;   // set by createStatusBar
+    QWidget*       tabRow = nullptr;   // set by createStatusBar
+    ShimmerLabel*  label  = nullptr;   // set by createStatusBar
 
     void setDividerColor(const QColor& c) { m_div = c; update(); }
     void setTopLineColor(const QColor& c) { m_top = c; update(); }
@@ -802,7 +876,8 @@ void MainWindow::createStatusBar() {
     auto* sb = new FlatStatusBar;
     setStatusBar(sb);
 
-    m_statusLabel = new QLabel("Ready", sb);
+    m_statusLabel = new ShimmerLabel(sb);
+    m_statusLabel->setText("");
     m_statusLabel->setContentsMargins(0, 0, 0, 0);
     m_statusLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
 
@@ -865,10 +940,42 @@ void MainWindow::createStatusBar() {
         };
         applyViewTabColors(static_cast<ViewTabButton*>(m_btnReclass));
         applyViewTabColors(static_cast<ViewTabButton*>(m_btnRendered));
+
+        m_statusLabel->colBase   = t.textDim;
+        m_statusLabel->colBright = t.indHoverSpan;
     }
 
 }
 
+void MainWindow::setAppStatus(const QString& text) {
+    m_appStatus = text;
+    if (!m_mcpBusy) {
+        m_statusLabel->setText(text);
+        m_statusLabel->setShimmerActive(false);
+    }
+}
+
+void MainWindow::setMcpStatus(const QString& text) {
+    // Cancel any pending clear — new activity extends the shimmer
+    if (m_mcpClearTimer) m_mcpClearTimer->stop();
+    m_mcpBusy = true;
+    m_statusLabel->setText(text);
+    m_statusLabel->setShimmerActive(true);
+}
+
+void MainWindow::clearMcpStatus() {
+    // Delay the clear so the shimmer stays visible for at least 750ms
+    if (!m_mcpClearTimer) {
+        m_mcpClearTimer = new QTimer(this);
+        m_mcpClearTimer->setSingleShot(true);
+        connect(m_mcpClearTimer, &QTimer::timeout, this, [this]() {
+            m_mcpBusy = false;
+            m_statusLabel->setText(m_appStatus);
+            m_statusLabel->setShimmerActive(false);
+        });
+    }
+    m_mcpClearTimer->start(750);
+}
 
 void MainWindow::styleTabCloseButtons() {
     auto* tabBar = m_mdiArea->findChild<QTabBar*>();
@@ -1033,19 +1140,17 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
             auto& node = ctrl->document()->tree.nodes[nodeIdx];
             auto* ap = findActiveSplitPane();
             if (ap && ap->viewMode == VM_Rendered)
-                m_statusLabel->setText(
+                setAppStatus(
                     QString("Rendered: %1 %2")
                         .arg(kindToString(node.kind))
                         .arg(node.name));
             else
-                m_statusLabel->setText(
+                setAppStatus(
                     QString("%1 %2  offset: 0x%3  size: %4 bytes")
                         .arg(kindToString(node.kind))
                         .arg(node.name)
                         .arg(node.offset, 4, 16, QChar('0'))
                         .arg(node.byteSize()));
-        } else {
-            m_statusLabel->setText("Ready");
         }
         // Update all rendered panes on selection change
         auto it = m_tabs.find(sub);
@@ -1054,10 +1159,8 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
     });
     connect(ctrl, &RcxController::selectionChanged,
             this, [this](int count) {
-        if (count == 0)
-            m_statusLabel->setText("Ready");
-        else if (count > 1)
-            m_statusLabel->setText(QString("%1 nodes selected").arg(count));
+        if (count > 1)
+            setAppStatus(QString("%1 nodes selected").arg(count));
     });
 
     // Update rendered panes and workspace on document changes and undo/redo
@@ -1524,11 +1627,11 @@ void MainWindow::toggleMcp() {
     if (m_mcp->isRunning()) {
         m_mcp->stop();
         m_mcpAction->setText("Start &MCP Server");
-        m_statusLabel->setText("MCP server stopped");
+        setAppStatus("MCP server stopped");
     } else {
         m_mcp->start();
         m_mcpAction->setText("Stop &MCP Server");
-        m_statusLabel->setText("MCP server listening on pipe: ReclassMcpBridge");
+        setAppStatus("MCP server listening on pipe: ReclassMcpBridge");
     }
 }
 
@@ -1944,7 +2047,7 @@ void MainWindow::exportCpp() {
         return;
     }
     file.write(text.toUtf8());
-    m_statusLabel->setText("Exported to " + QFileInfo(path).fileName());
+    setAppStatus("Exported to " + QFileInfo(path).fileName());
 }
 
 // ── Export ReClass XML ──
@@ -1968,7 +2071,7 @@ void MainWindow::exportReclassXmlAction() {
     for (const auto& n : tab->doc->tree.nodes)
         if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
 
-    m_statusLabel->setText(QStringLiteral("Exported %1 classes to %2")
+    setAppStatus(QStringLiteral("Exported %1 classes to %2")
         .arg(classCount).arg(QFileInfo(path).fileName()));
 }
 
@@ -1999,7 +2102,7 @@ void MainWindow::importReclassXml() {
     m_mdiArea->closeAllSubWindows();
     createTab(doc);
     rebuildWorkspaceModel();
-    m_statusLabel->setText(QStringLiteral("Imported %1 classes from %2")
+    setAppStatus(QStringLiteral("Imported %1 classes from %2")
         .arg(classCount).arg(QFileInfo(filePath).fileName()));
 }
 
@@ -2049,7 +2152,7 @@ void MainWindow::importFromSource() {
     createTab(doc);
     rebuildWorkspaceModel();
     m_workspaceDock->show();
-    m_statusLabel->setText(QStringLiteral("Imported %1 classes from source").arg(classCount));
+    setAppStatus(QStringLiteral("Imported %1 classes from source").arg(classCount));
 }
 
 // ── Import PDB ──
@@ -2099,7 +2202,7 @@ void MainWindow::importPdb() {
     createTab(doc);
     rebuildWorkspaceModel();
     m_workspaceDock->show();
-    m_statusLabel->setText(QStringLiteral("Imported %1 classes from %2")
+    setAppStatus(QStringLiteral("Imported %1 classes from %2")
         .arg(classCount).arg(QFileInfo(pdbPath).fileName()));
 }
 
@@ -2232,7 +2335,7 @@ QMdiSubWindow* MainWindow::project_open(const QString& path) {
         int classCount = 0;
         for (const auto& n : doc->tree.nodes)
             if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
-        m_statusLabel->setText(QStringLiteral("Imported %1 classes from %2")
+        setAppStatus(QStringLiteral("Imported %1 classes from %2")
             .arg(classCount).arg(QFileInfo(filePath).fileName()));
         return sub;
     }
@@ -2610,7 +2713,7 @@ void MainWindow::showPluginsDialog() {
         if (!path.isEmpty()) {
             if (m_pluginManager.LoadPluginFromPath(path)) {
                 refreshList();
-                m_statusLabel->setText("Plugin loaded successfully");
+                setAppStatus("Plugin loaded successfully");
             } else {
                 QMessageBox::warning(&dialog, "Failed to Load Plugin",
                                      "Could not load the selected plugin.\nCheck the console for details.");
@@ -2636,7 +2739,7 @@ void MainWindow::showPluginsDialog() {
         if (reply == QMessageBox::Yes) {
             if (m_pluginManager.UnloadPlugin(pluginName)) {
                 refreshList();
-                m_statusLabel->setText("Plugin unloaded");
+                setAppStatus("Plugin unloaded");
             } else {
                 QMessageBox::warning(&dialog, "Failed to Unload",
                                      "Could not unload the selected plugin.");
