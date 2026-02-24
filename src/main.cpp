@@ -244,6 +244,8 @@ public:
             s.setHeight(s.height() + qRound(s.height() * 0.5));
         if (type == CT_MenuItem)
             s = QSize(s.width() + 24, s.height() + 4);
+        if (type == CT_TabBarTab)
+            s = QSize(s.width(), 24);
         return s;
     }
     int pixelMetric(PixelMetric metric, const QStyleOption* opt,
@@ -310,6 +312,21 @@ public:
                     QProxyStyle::drawControl(element, &patched, p, w);
                     return;
                 }
+            }
+        }
+        // MDI tab bar — override text color: dimmed for selected/hover
+        if (element == CE_TabBarTabLabel) {
+            if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt)) {
+                const auto& t = rcx::ThemeManager::instance().current();
+                QStyleOptionTab patched = *tab;
+                bool selected = tab->state & State_Selected;
+                bool hovered  = tab->state & State_MouseOver;
+                if (selected || hovered)
+                    patched.palette.setColor(QPalette::WindowText, t.textDim);
+                else
+                    patched.palette.setColor(QPalette::WindowText, t.textMuted);
+                QProxyStyle::drawControl(element, &patched, p, w);
+                return;
             }
         }
         // Tree view items — use theme.hover for selection instead of blue
@@ -1646,15 +1663,14 @@ void MainWindow::applyTheme(const Theme& theme) {
     // Update border overlay color
     updateBorderColor(isActiveWindow() ? theme.borderFocused : theme.border);
 
-    // MDI area tabs
+    // MDI area tabs — text color + height handled by MenuBarStyle QProxyStyle
     m_mdiArea->setStyleSheet(QStringLiteral(
         "QTabBar::tab {"
-        "  background: %1; color: %2; padding: 0px 16px; border: none; height: 24px;"
+        "  background: %1; padding: 0px 16px; border: none;"
         "}"
-        "QTabBar::tab:selected { color: %3; background: %4; }"
-        "QTabBar::tab:hover { color: %3; background: %5; }")
-        .arg(theme.background.name(), theme.textMuted.name(), theme.text.name(),
-             theme.backgroundAlt.name(), theme.hover.name()));
+        "QTabBar::tab:selected { background: %2; }"
+        "QTabBar::tab:hover { background: %3; }")
+        .arg(theme.background.name(), theme.backgroundAlt.name(), theme.hover.name()));
 
     // Re-style ✕ close buttons on MDI tabs
     styleTabCloseButtons();
@@ -2393,6 +2409,7 @@ void MainWindow::createWorkspaceDock() {
         const auto& t = ThemeManager::instance().current();
 
         auto* titleBar = new QWidget(m_workspaceDock);
+        titleBar->setFixedHeight(24);
         titleBar->setAutoFillBackground(true);
         {
             QPalette tbPal = titleBar->palette();
