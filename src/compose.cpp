@@ -296,7 +296,15 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             for (const auto& m : node.enumMembers)
                 maxNameLen = qMax(maxNameLen, (int)m.first.size());
 
-            for (int mi = 0; mi < node.enumMembers.size(); mi++) {
+            // Build display order sorted by value
+            QVector<int> order(node.enumMembers.size());
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                return node.enumMembers[a].second < node.enumMembers[b].second;
+            });
+
+            for (int oi = 0; oi < order.size(); oi++) {
+                int mi = order[oi];
                 const auto& m = node.enumMembers[mi];
                 LineMeta lm;
                 lm.nodeIdx    = nodeIdx;
@@ -304,6 +312,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.subLine    = mi;
                 lm.depth      = childDepth;
                 lm.lineKind   = LineKind::Field;
+                lm.isMemberLine = true;
                 lm.nodeKind   = NodeKind::UInt32;
                 lm.foldLevel  = computeFoldLevel(childDepth, false);
                 lm.markerMask = 0;
@@ -328,6 +337,57 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.offsetAddr = absAddr;
                 lm.ptrBase    = state.currentPtrBase;
                 state.emitLine(fmt::fmtStructFooter(node, depth, 0), lm);
+            }
+
+            state.visiting.remove(node.id);
+            return;
+        }
+
+        // Bitfield with members: render name : width = value lines
+        if (node.resolvedClassKeyword() == QStringLiteral("bitfield")
+            && !node.bitfieldMembers.isEmpty()) {
+            int childDepth = depth + 1;
+            int maxNameLen = 4;
+            for (const auto& m : node.bitfieldMembers)
+                maxNameLen = qMax(maxNameLen, (int)m.name.size());
+
+            for (int mi = 0; mi < node.bitfieldMembers.size(); mi++) {
+                const auto& m = node.bitfieldMembers[mi];
+                uint64_t bitVal = fmt::extractBits(prov, absAddr, node.elementKind,
+                                                   m.bitOffset, m.bitWidth);
+                LineMeta lm;
+                lm.nodeIdx    = nodeIdx;
+                lm.nodeId     = node.id;
+                lm.subLine    = mi;
+                lm.depth      = childDepth;
+                lm.lineKind   = LineKind::Field;
+                lm.isMemberLine = true;
+                lm.nodeKind   = node.elementKind;
+                lm.foldLevel  = computeFoldLevel(childDepth, false);
+                lm.markerMask = 0;
+                lm.offsetText = fmt::fmtOffsetMargin(absAddr, true, state.offsetHexDigits);
+                lm.offsetAddr = absAddr;
+                lm.ptrBase    = state.currentPtrBase;
+                state.emitLine(fmt::fmtBitfieldMember(m.name, m.bitWidth, bitVal,
+                                                       childDepth, maxNameLen), lm);
+            }
+
+            // Footer
+            if (!isArrayChild) {
+                LineMeta lm;
+                lm.nodeIdx   = nodeIdx;
+                lm.nodeId    = node.id;
+                lm.depth     = depth;
+                lm.lineKind  = LineKind::Footer;
+                lm.nodeKind  = node.kind;
+                lm.isRootHeader = isRootHeader;
+                lm.foldLevel = computeFoldLevel(depth, false);
+                lm.markerMask = 0;
+                int sz = sizeForKind(node.elementKind);
+                lm.offsetText = fmt::fmtOffsetMargin(absAddr + sz, false, state.offsetHexDigits);
+                lm.offsetAddr = absAddr + sz;
+                lm.ptrBase    = state.currentPtrBase;
+                state.emitLine(fmt::fmtStructFooter(node, depth, sz), lm);
             }
 
             state.visiting.remove(node.id);
@@ -741,7 +801,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     }
 
     // Emit CommandRow as line 0 (combined: source + address + root class type + name)
-    const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE \u00B7 0x0 \u00B7 struct NoName {");
+    const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE  0x0  struct NoName {");
     {
         LineMeta lm;
         lm.nodeIdx   = -1;

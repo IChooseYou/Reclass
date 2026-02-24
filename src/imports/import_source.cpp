@@ -894,20 +894,40 @@ static void emitHexPadding(NodeTree& tree, uint64_t parentId, int offset, int si
     }
 }
 
-// ── Bitfield grouping: emit a single hex node covering consecutive bitfields ──
+// ── Bitfield grouping: emit a bitfield container with named members ──
 
-static void emitBitfieldGroup(NodeTree& tree, uint64_t parentId, int offset, int totalBits) {
+static void emitBitfieldGroup(NodeTree& tree, uint64_t parentId, int offset,
+                               const QVector<ParsedField>& fields,
+                               int startIdx, int endIdx) {
+    int totalBits = 0;
+    for (int i = startIdx; i < endIdx; i++)
+        totalBits += fields[i].bitfieldWidth;
     int bytes = (totalBits + 7) / 8;
-    // Round up to nearest power-of-2 hex node
-    NodeKind hexKind;
-    if (bytes <= 1)      hexKind = NodeKind::Hex8;
-    else if (bytes <= 2) hexKind = NodeKind::Hex16;
-    else if (bytes <= 4) hexKind = NodeKind::Hex32;
-    else                 hexKind = NodeKind::Hex64;
+    NodeKind containerKind;
+    if (bytes <= 1)      containerKind = NodeKind::Hex8;
+    else if (bytes <= 2) containerKind = NodeKind::Hex16;
+    else if (bytes <= 4) containerKind = NodeKind::Hex32;
+    else                 containerKind = NodeKind::Hex64;
+
     Node n;
-    n.kind = hexKind;
+    n.kind = NodeKind::Struct;
+    n.classKeyword = QStringLiteral("bitfield");
+    n.elementKind = containerKind;
     n.parentId = parentId;
     n.offset = offset;
+    n.collapsed = false;
+
+    // Populate bitfield members with computed bit offsets
+    uint8_t bitOffset = 0;
+    for (int i = startIdx; i < endIdx; i++) {
+        BitfieldMember bm;
+        bm.name = fields[i].name;
+        bm.bitOffset = bitOffset;
+        bm.bitWidth = (uint8_t)fields[i].bitfieldWidth;
+        n.bitfieldMembers.append(bm);
+        bitOffset += bm.bitWidth;
+    }
+
     tree.addNode(n);
 }
 
@@ -929,13 +949,14 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
     for (int fi = 0; fi < fields.size(); fi++) {
         const auto& field = fields[fi];
 
-        // Bitfield group: consume consecutive bitfields, emit single hex node
+        // Bitfield group: consume consecutive bitfields, emit bitfield container
         if (field.bitfieldWidth >= 0) {
             int groupOffset;
             if (ctx.useCommentOffsets && field.commentOffset >= 0)
                 groupOffset = field.commentOffset - baseOffset;
             else
                 groupOffset = computedOffset;
+            int startIdx = fi;
             int totalBits = 0;
             while (fi < fields.size() && fields[fi].bitfieldWidth >= 0) {
                 totalBits += fields[fi].bitfieldWidth;
@@ -943,7 +964,8 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             }
             fi--; // compensate for outer loop increment
             if (totalBits > 0)
-                emitBitfieldGroup(ctx.tree, parentId, groupOffset, totalBits);
+                emitBitfieldGroup(ctx.tree, parentId, groupOffset,
+                                   fields, startIdx, fi + 1);
             int bytes = (totalBits + 7) / 8;
             int nodeSize = (bytes <= 1) ? 1 : (bytes <= 2) ? 2 : (bytes <= 4) ? 4 : 8;
             computedOffset = groupOffset + nodeSize;

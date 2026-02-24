@@ -780,7 +780,7 @@ void TestImportSource::structPrefixOnType() {
 }
 
 void TestImportSource::bitfieldSkipped() {
-    // Bitfields emit a hex placeholder covering the group
+    // Bitfields emit a bitfield container with named members
     NodeTree tree = importFromSource(QStringLiteral(
         "struct BF {\n"
         "    uint32_t normal;\n"
@@ -790,12 +790,20 @@ void TestImportSource::bitfieldSkipped() {
         "};\n"
     ));
     auto kids = childrenOf(tree, tree.nodes[0].id);
-    // normal + Hex16 (16 bits → 2 bytes) + after
+    // normal + bitfield container (16 bits → 2 bytes) + after
     QCOMPARE(kids.size(), 3);
     QCOMPARE(tree.nodes[kids[0]].name, QStringLiteral("normal"));
     QCOMPARE(tree.nodes[kids[0]].offset, 0);
-    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::Hex16);
+    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::Struct);
+    QCOMPARE(tree.nodes[kids[1]].resolvedClassKeyword(), QStringLiteral("bitfield"));
     QCOMPARE(tree.nodes[kids[1]].offset, 4);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers.size(), 2);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[0].name, QStringLiteral("bitA"));
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[0].bitWidth, (uint8_t)4);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[0].bitOffset, (uint8_t)0);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[1].name, QStringLiteral("bitB"));
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[1].bitWidth, (uint8_t)12);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[1].bitOffset, (uint8_t)4);
     QCOMPARE(tree.nodes[kids[2]].name, QStringLiteral("after"));
     QCOMPARE(tree.nodes[kids[2]].offset, 6);
 }
@@ -812,13 +820,22 @@ void TestImportSource::bitfieldWithOffsetsEmitsHex() {
         "};\n"
     ));
     auto kids = childrenOf(tree, tree.nodes[0].id);
-    // normal + hex64 (bitfield group: 64 bits) + after = 3
+    // normal + bitfield container (64 bits) + after = 3
     QCOMPARE(kids.size(), 3);
     QCOMPARE(tree.nodes[kids[0]].name, QStringLiteral("normal"));
     QCOMPARE(tree.nodes[kids[0]].offset, 0);
-    // Bitfield group emitted as Hex64 at offset 4
-    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::Hex64);
+    // Bitfield container at offset 4
+    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::Struct);
+    QCOMPARE(tree.nodes[kids[1]].resolvedClassKeyword(), QStringLiteral("bitfield"));
     QCOMPARE(tree.nodes[kids[1]].offset, 4);
+    QCOMPARE(tree.nodes[kids[1]].elementKind, NodeKind::Hex64);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers.size(), 4);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[0].name, QStringLiteral("Valid"));
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[0].bitWidth, (uint8_t)1);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[1].name, QStringLiteral("Dirty"));
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[2].name, QStringLiteral("PageFrameNumber"));
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[2].bitWidth, (uint8_t)36);
+    QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[3].name, QStringLiteral("Reserved"));
     // after at 0xC
     QCOMPARE(tree.nodes[kids[2]].name, QStringLiteral("after"));
     QCOMPARE(tree.nodes[kids[2]].offset, 0xC);

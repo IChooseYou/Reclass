@@ -41,7 +41,10 @@
         {"id":"182","kind":"Hex32","name":"State:3 StackCount:29","offset":0,"parentId":"180"},
 
         {"id":"190","kind":"Struct","name":"kexecute_options","structTypeName":"_KEXECUTE_OPTIONS","classKeyword":"union","offset":0,"parentId":"0","refId":"0","collapsed":true},
-        {"id":"191","kind":"Hex8","name":"ExecuteOptions","offset":0,"parentId":"190"},
+        {"id":"191","kind":"Struct","name":"","offset":0,"parentId":"190","refId":"0","collapsed":false},
+        {"id":"192","kind":"UInt8","name":"ExecuteDisable","offset":0,"parentId":"191"},
+        {"id":"193","kind":"Hex8","name":"ExecuteDisable:1 ExecuteEnable:1 DisableThunkEmulation:1 Permanent:1 ExecuteDispatchEnable:1 ImageDispatchEnable:1 DisableExceptionChainValidation:1 Spare:1","offset":0,"parentId":"191"},
+        {"id":"194","kind":"UInt8","name":"ExecuteOptions","offset":0,"parentId":"190"},
 
         {"id":"200","kind":"Struct","name":"se_audit_info","structTypeName":"_SE_AUDIT_PROCESS_CREATION_INFO","offset":0,"parentId":"0","refId":"0","collapsed":true},
         {"id":"201","kind":"Pointer64","name":"ImageFileName","offset":0,"parentId":"200"},

@@ -481,7 +481,7 @@ private slots:
 
         // Set CommandRow text with an ADDR value (simulates controller.updateCommandRow)
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000"));
+            QStringLiteral("source\u25BE  0xD87B5E5000"));
 
         // BaseAddress should be ALLOWED on CommandRow (ADDR field)
         bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
@@ -816,7 +816,7 @@ private slots:
 
         // Set CommandRow text with ADDR value (simulates controller)
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000"));
+            QStringLiteral("source\u25BE  0xD87B5E5000"));
 
         // Line 0 is CommandRow
         const LineMeta* lm = m_editor->metaForLine(0);
@@ -901,7 +901,7 @@ private slots:
 
         // Set CommandRow text with ADDR value (simulates controller)
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000"));
+            QStringLiteral("source\u25BE  0xD87B5E5000"));
 
         // Begin base address edit on line 0 (CommandRow ADDR field)
         bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
@@ -1038,7 +1038,7 @@ private slots:
 
         // Set CommandRow text with root class (simulates controller.updateCommandRow)
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000 \u00B7 struct _PEB64 {"));
+            QStringLiteral("source\u25BE  0xD87B5E5000  struct _PEB64 {"));
 
         // RootClassName should be allowed on CommandRow (line 0)
         bool ok = m_editor->beginInlineEdit(EditTarget::RootClassName, 0);
@@ -1053,7 +1053,7 @@ private slots:
 
         // Set CommandRow with root class
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE \u00B7 0xD87B5E5000 \u00B7 struct _PEB64 {"));
+            QStringLiteral("source\u25BE  0xD87B5E5000  struct _PEB64 {"));
 
         // Line 0 is CommandRow
         const LineMeta* lm = m_editor->metaForLine(0);
@@ -1099,7 +1099,7 @@ private slots:
 
         // Set command row text (simulates controller.updateCommandRow)
         QString cmdText = QStringLiteral(
-            "source\u25BE \u00B7 0xD87B5E5000 \u00B7 struct _PEB64 {");
+            "source\u25BE  0xD87B5E5000  struct _PEB64 {");
         m_editor->setCommandRowText(cmdText);
         QApplication::processEvents();
 
@@ -1177,7 +1177,7 @@ private slots:
         m_editor->applyDocument(m_result);
 
         QString cmdText = QStringLiteral(
-            "source\u25BE \u00B7 0xD87B5E5000 \u00B7 struct _PEB64 {");
+            "source\u25BE  0xD87B5E5000  struct _PEB64 {");
         m_editor->setCommandRowText(cmdText);
         QApplication::processEvents();
 

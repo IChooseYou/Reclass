@@ -115,6 +115,24 @@ bool exportReclassXml(const NodeTree& tree, const QString& filePath, QString* er
         while (i < children.size()) {
             const Node& child = tree.nodes[children[i]];
 
+            // Bitfield container: export as hex node (ReClassEx has no bitfield concept)
+            if (child.kind == NodeKind::Struct
+                && child.resolvedClassKeyword() == QStringLiteral("bitfield")) {
+                int sz = child.byteSize();
+                if (sz <= 0) sz = 4;
+                xml.writeStartElement(QStringLiteral("Node"));
+                xml.writeAttribute(QStringLiteral("Name"), child.name);
+                NodeKind hexKind = (sz <= 1) ? NodeKind::Hex8 : (sz <= 2) ? NodeKind::Hex16
+                    : (sz <= 4) ? NodeKind::Hex32 : NodeKind::Hex64;
+                xml.writeAttribute(QStringLiteral("Type"), QString::number(xmlTypeForKind(hexKind)));
+                xml.writeAttribute(QStringLiteral("Size"), QString::number(sz));
+                xml.writeAttribute(QStringLiteral("bHidden"), QStringLiteral("false"));
+                xml.writeAttribute(QStringLiteral("Comment"), QStringLiteral("bitfield"));
+                xml.writeEndElement();
+                i++;
+                continue;
+            }
+
             // Collapse consecutive hex nodes into a single Custom node (Type=21)
             if (isHexNode(child.kind)) {
                 int runStart = child.offset;

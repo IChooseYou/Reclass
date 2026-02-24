@@ -170,9 +170,12 @@ void McpBridge::processLine(const QByteArray& line) {
     }
 
     if (method == "initialize") {
+        m_mainWindow->m_statusLabel->setText(QStringLiteral("MCP: client connected"));
         sendJson(handleInitialize(id, req.value("params").toObject()));
     } else if (method == "tools/list") {
+        m_mainWindow->m_statusLabel->setText(QStringLiteral("MCP: tools/list"));
         sendJson(handleToolsList(id));
+        m_mainWindow->m_statusLabel->setText(QStringLiteral("Ready"));
     } else if (method == "tools/call") {
         sendJson(handleToolsCall(id, req.value("params").toObject()));
     } else {
@@ -211,20 +214,29 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     // 1. project.state
     tools.append(QJsonObject{
         {"name", "project.state"},
-        {"description", "Returns project state: node tree, base address, sources, provider info. "
-                        "Use depth/parentId to avoid dumping the whole tree. "
-                        "Call with depth:1 first to see top-level structs, then drill in with parentId."},
+        {"description", "Returns project state with paginated node tree. "
+                        "Responses return max 'limit' nodes (default 50). "
+                        "Use depth:1 first, then parentId to drill into a struct. "
+                        "Enum/bitfield member arrays are omitted by default (counts shown instead); "
+                        "pass includeMembers:true to get full arrays. "
+                        "Response includes returned/total/nextOffset for paging."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
                 {"tabIndex", QJsonObject{{"type", "integer"},
                     {"description", "MDI tab index (0-based). Omit for active tab."}}},
                 {"depth", QJsonObject{{"type", "integer"},
-                    {"description", "Max tree depth to return (default 1 = top-level structs only)."}}},
+                    {"description", "Max tree depth to return (default 1)."}}},
                 {"parentId", QJsonObject{{"type", "string"},
                     {"description", "Only return children of this node."}}},
                 {"includeTree", QJsonObject{{"type", "boolean"},
-                    {"description", "If false, return only provider/source info, no tree. Default true."}}}
+                    {"description", "If false, return only provider/source info, no tree. Default true."}}},
+                {"includeMembers", QJsonObject{{"type", "boolean"},
+                    {"description", "If true, include full enumMembers/bitfieldMembers arrays. Default false (shows counts only)."}}},
+                {"limit", QJsonObject{{"type", "integer"},
+                    {"description", "Max nodes to return (default 50, max 500)."}}},
+                {"offset", QJsonObject{{"type", "integer"},
+                    {"description", "Skip this many nodes (for pagination). Use nextOffset from previous response."}}}
             }}
         }}
     });
@@ -343,7 +355,8 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         {"description", "Trigger a UI action. Fallback for operations without dedicated tools. "
                         "Actions: undo, redo, new_file, open_file, save_file, save_file_as, "
                         "export_cpp, set_view_root, scroll_to_node, collapse_node, expand_node, "
-                        "select_node, refresh"},
+                        "select_node, refresh. "
+                        "export_cpp accepts optional nodeId to export a single struct (recommended for large projects)."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
@@ -354,6 +367,28 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                 {"filePath", QJsonObject{{"type", "string"}}}
             }},
             {"required", QJsonArray{"action"}}
+        }}
+    });
+
+    // 8. tree.search
+    tools.append(QJsonObject{
+        {"name", "tree.search"},
+        {"description", "Search for nodes by name (substring, case-insensitive). "
+                        "Returns compact results: id, name, kind, parentId, offset, childCount. "
+                        "Use kindFilter to narrow (e.g. 'Struct'). Max 100 results. "
+                        "Much faster than paging through project.state to find a specific type."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}},
+                {"query", QJsonObject{{"type", "string"},
+                    {"description", "Name substring to search for (case-insensitive)."}}},
+                {"kindFilter", QJsonObject{{"type", "string"},
+                    {"description", "Filter by node kind (e.g. 'Struct', 'Hex64', 'Array')."}}},
+                {"limit", QJsonObject{{"type", "integer"},
+                    {"description", "Max results to return (default 20, max 100)."}}}
+            }}
         }}
     });
 
@@ -368,6 +403,10 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     QString toolName = params.value("name").toString();
     QJsonObject args = params.value("arguments").toObject();
 
+    // Show tool activity in status bar
+    m_mainWindow->m_statusLabel->setText(QStringLiteral("MCP: %1").arg(toolName));
+    QCoreApplication::processEvents();  // paint immediately
+
     QJsonObject result;
     if      (toolName == "project.state")  result = toolProjectState(args);
     else if (toolName == "tree.apply")     result = toolTreeApply(args);
@@ -376,7 +415,10 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "hex.write")      result = toolHexWrite(args);
     else if (toolName == "status.set")     result = toolStatusSet(args);
     else if (toolName == "ui.action")      result = toolUiAction(args);
+    else if (toolName == "tree.search")   result = toolTreeSearch(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
+
+    m_mainWindow->m_statusLabel->setText(QStringLiteral("Ready"));
 
     return okReply(id, result);
 }
@@ -436,6 +478,9 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
 
     int maxDepth = args.value("depth").toInt(1);
     bool includeTree = args.contains("includeTree") ? args.value("includeTree").toBool() : true;
+    bool includeMembers = args.value("includeMembers").toBool(false);
+    int limit = qBound(1, args.value("limit").toInt(50), 500);
+    int offset = qMax(0, args.value("offset").toInt(0));
     QString parentIdStr = args.value("parentId").toString();
     uint64_t filterParentId = parentIdStr.isEmpty() ? 0 : parentIdStr.toULongLong();
 
@@ -489,11 +534,14 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
         for (int i = 0; i < tree.nodes.size(); i++)
             childMap[tree.nodes[i].parentId].append(i);
 
-        // BFS from filterParentId, respecting maxDepth
+        // BFS from filterParentId, respecting maxDepth + pagination
         QJsonArray nodeArr;
         struct QueueEntry { uint64_t parentId; int depth; };
         QVector<QueueEntry> queue;
         queue.append({filterParentId, 0});
+
+        int totalCount = 0;  // total nodes that match depth filter
+        int emitted = 0;
 
         while (!queue.isEmpty()) {
             auto entry = queue.takeFirst();
@@ -502,13 +550,47 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
             const auto& kids = childMap.value(entry.parentId);
             for (int ci : kids) {
                 const Node& n = tree.nodes[ci];
+
+                // Count all matching nodes for pagination metadata
+                totalCount++;
+
+                // Apply offset/limit pagination
+                if (totalCount <= offset) {
+                    // Still skipping — but enqueue children for counting
+                    if (entry.depth + 1 <= maxDepth)
+                        queue.append({n.id, entry.depth + 1});
+                    continue;
+                }
+                if (emitted >= limit) {
+                    // Past limit — just keep counting total
+                    if (entry.depth + 1 <= maxDepth)
+                        queue.append({n.id, entry.depth + 1});
+                    continue;
+                }
+
                 QJsonObject nj = n.toJson();
+
+                // Strip inline member arrays unless requested
+                if (!includeMembers) {
+                    if (nj.contains("enumMembers")) {
+                        int count = nj.value("enumMembers").toArray().size();
+                        nj.remove("enumMembers");
+                        nj["enumMemberCount"] = count;
+                    }
+                    if (nj.contains("bitfieldMembers")) {
+                        int count = nj.value("bitfieldMembers").toArray().size();
+                        nj.remove("bitfieldMembers");
+                        nj["bitfieldMemberCount"] = count;
+                    }
+                }
+
                 // Add computed size for containers
                 if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array) {
                     nj["computedSize"] = tree.structSpan(n.id, &childMap);
                     nj["childCount"] = childMap.value(n.id).size();
                 }
                 nodeArr.append(nj);
+                emitted++;
 
                 // Enqueue children if we haven't hit depth limit
                 if (entry.depth + 1 <= maxDepth)
@@ -520,6 +602,10 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
         treeObj["baseAddress"] = QString::number(tree.baseAddress, 16);
         treeObj["nextId"] = QString::number(tree.m_nextId);
         treeObj["nodes"] = nodeArr;
+        treeObj["returned"] = emitted;
+        treeObj["total"] = totalCount;
+        if (emitted < totalCount)
+            treeObj["nextOffset"] = offset + emitted;
         state["tree"] = treeObj;
     }
 
@@ -1004,7 +1090,24 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
     if (action == "export_cpp") {
         if (!doc) return makeTextResult("No active tab", true);
         const QHash<NodeKind, QString>* aliases = doc->typeAliases.isEmpty() ? nullptr : &doc->typeAliases;
-        QString code = renderCppAll(doc->tree, aliases);
+        QString code;
+        if (!nodeIdStr.isEmpty()) {
+            // Per-struct export
+            uint64_t nid = nodeIdStr.toULongLong();
+            code = renderCpp(doc->tree, nid, aliases);
+            if (code.isEmpty())
+                return makeTextResult("Node not found or not a struct: " + nodeIdStr, true);
+        } else {
+            code = renderCppAll(doc->tree, aliases);
+        }
+        // Truncate if too large (64 KB limit)
+        if (code.size() > 65536) {
+            int totalSize = code.size();
+            code.truncate(65536);
+            code += QStringLiteral("\n\n... truncated (%1 bytes total, showing first 64KB)"
+                                   "\nUse nodeId param to export a single struct.")
+                    .arg(totalSize);
+        }
         return makeTextResult(code);
     }
     if (action == "save_file") {
@@ -1051,6 +1154,70 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
     }
 
     return makeTextResult("Unknown action: " + action, true);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: tree.search
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolTreeSearch(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    const auto& tree = tab->doc->tree;
+    QString query = args.value("query").toString();
+    QString kindFilter = args.value("kindFilter").toString();
+    int limit = qBound(1, args.value("limit").toInt(20), 100);
+
+    if (query.isEmpty() && kindFilter.isEmpty())
+        return makeTextResult("Provide 'query' (name substring) and/or 'kindFilter' (e.g. 'Struct')", true);
+
+    // Build parent→children map for childCount
+    QHash<uint64_t, int> childCounts;
+    for (const auto& n : tree.nodes)
+        childCounts[n.parentId]++;
+
+    QJsonArray results;
+    for (const auto& n : tree.nodes) {
+        // Kind filter
+        if (!kindFilter.isEmpty()) {
+            if (kindToString(n.kind) != kindFilter) continue;
+        }
+        // Name substring match (case-insensitive)
+        if (!query.isEmpty()) {
+            bool nameMatch = n.name.contains(query, Qt::CaseInsensitive);
+            bool typeMatch = n.structTypeName.contains(query, Qt::CaseInsensitive);
+            if (!nameMatch && !typeMatch) continue;
+        }
+
+        QJsonObject nj;
+        nj["id"] = QString::number(n.id);
+        nj["name"] = n.name;
+        nj["kind"] = kindToString(n.kind);
+        nj["parentId"] = QString::number(n.parentId);
+        nj["offset"] = n.offset;
+        if (!n.structTypeName.isEmpty())
+            nj["structTypeName"] = n.structTypeName;
+        if (!n.classKeyword.isEmpty())
+            nj["classKeyword"] = n.classKeyword;
+        if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+            nj["childCount"] = childCounts.value(n.id, 0);
+        if (!n.enumMembers.isEmpty())
+            nj["enumMemberCount"] = n.enumMembers.size();
+        if (!n.bitfieldMembers.isEmpty())
+            nj["bitfieldMemberCount"] = n.bitfieldMembers.size();
+        results.append(nj);
+
+        if (results.size() >= limit) break;
+    }
+
+    QJsonObject out;
+    out["results"] = results;
+    out["count"] = results.size();
+    out["query"] = query;
+    if (!kindFilter.isEmpty()) out["kindFilter"] = kindFilter;
+    return makeTextResult(QString::fromUtf8(
+        QJsonDocument(out).toJson(QJsonDocument::Indented)));
 }
 
 // ════════════════════════════════════════════════════════════════════

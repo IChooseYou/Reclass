@@ -250,6 +250,15 @@ void RcxController::connectEditor(RcxEditor* editor) {
             if (text.isEmpty()) break;
             if (nodeIdx >= m_doc->tree.nodes.size()) break;
             const Node& node = m_doc->tree.nodes[nodeIdx];
+            // Enum member name edit
+            if (node.resolvedClassKeyword() == QStringLiteral("enum")
+                && subLine >= 0 && subLine < node.enumMembers.size()) {
+                auto members = node.enumMembers;
+                members[subLine].first = text;
+                m_doc->undoStack.push(new RcxCommand(this,
+                    cmd::ChangeEnumMembers{node.id, node.enumMembers, members}));
+                break;
+            }
             // ASCII edit on Hex nodes
             if (isHexPreview(node.kind)) {
                 setNodeValue(nodeIdx, subLine, text, /*isAscii=*/true, resolvedAddr);
@@ -321,9 +330,27 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             break;
         }
-        case EditTarget::Value:
+        case EditTarget::Value: {
+            // Enum member value edit
+            if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
+                const Node& node = m_doc->tree.nodes[nodeIdx];
+                if (node.resolvedClassKeyword() == QStringLiteral("enum")
+                    && subLine >= 0 && subLine < node.enumMembers.size()) {
+                    bool ok;
+                    int64_t val = text.toLongLong(&ok);
+                    if (!ok) val = text.toLongLong(&ok, 16);
+                    if (ok) {
+                        auto members = node.enumMembers;
+                        members[subLine].second = val;
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangeEnumMembers{node.id, node.enumMembers, members}));
+                    }
+                    break;
+                }
+            }
             setNodeValue(nodeIdx, subLine, text, /*isAscii=*/false, resolvedAddr);
             break;
+        }
         case EditTarget::BaseAddress: {
             QString s = text.trimmed();
             s.remove('`');          // WinDbg backtick separators (e.g. 7ff6`6cce0000)
@@ -569,9 +596,10 @@ void RcxController::refresh() {
     // Prune stale selections (nodes removed by undo/redo/delete)
     QSet<uint64_t> valid;
     for (uint64_t id : m_selIds) {
-        uint64_t nodeId = id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask);
+        uint64_t nodeId = id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                  | kMemberBit | kMemberSubMask);
         if (m_doc->tree.indexOfId(nodeId) >= 0)
-            valid.insert(id);  // Keep original ID (with footer/array bits if present)
+            valid.insert(id);  // Keep original ID (with footer/array/member bits if present)
     }
     m_selIds = valid;
 
@@ -1145,6 +1173,10 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             m_valueHistory.remove(c.nodeId);
             for (int ci : tree.subtreeIndices(c.nodeId))
                 m_valueHistory.remove(tree.nodes[ci].id);
+        } else if constexpr (std::is_same_v<T, cmd::ChangeEnumMembers>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0)
+                tree.nodes[idx].enumMembers = isUndo ? c.oldMembers : c.newMembers;
         }
     }, command);
 
@@ -1379,6 +1411,86 @@ void RcxController::splitHexNode(uint64_t nodeId) {
     refresh();
 }
 
+void RcxController::toggleBitfieldBit(uint64_t nodeId, int memberIdx) {
+    int ni = m_doc->tree.indexOfId(nodeId);
+    if (ni < 0) return;
+    const Node& node = m_doc->tree.nodes[ni];
+    if (node.resolvedClassKeyword() != QStringLiteral("bitfield")) return;
+    if (memberIdx < 0 || memberIdx >= node.bitfieldMembers.size()) return;
+    if (!m_doc->provider || !m_doc->provider->isWritable()) return;
+
+    const auto& bm = node.bitfieldMembers[memberIdx];
+    uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
+    int containerSize = sizeForKind(node.elementKind);
+    if (containerSize <= 0) containerSize = 4;
+
+    QByteArray oldBytes(containerSize, 0);
+    m_doc->provider->read(addr, oldBytes.data(), containerSize);
+
+    QByteArray newBytes = oldBytes;
+    // Toggle the bit
+    int byteIdx = bm.bitOffset / 8;
+    int bitInByte = bm.bitOffset % 8;
+    if (byteIdx < containerSize)
+        newBytes[byteIdx] = newBytes[byteIdx] ^ (1 << bitInByte);
+
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::WriteBytes{addr, oldBytes, newBytes}));
+    refresh();
+}
+
+void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
+    int ni = m_doc->tree.indexOfId(nodeId);
+    if (ni < 0) return;
+    const Node& node = m_doc->tree.nodes[ni];
+    if (node.resolvedClassKeyword() != QStringLiteral("bitfield")) return;
+    if (memberIdx < 0 || memberIdx >= node.bitfieldMembers.size()) return;
+    if (!m_doc->provider || !m_doc->provider->isWritable()) return;
+
+    const auto& bm = node.bitfieldMembers[memberIdx];
+    uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
+    int containerSize = sizeForKind(node.elementKind);
+    if (containerSize <= 0) containerSize = 4;
+
+    // Read current value
+    uint64_t curVal = fmt::extractBits(*m_doc->provider, addr, node.elementKind,
+                                       bm.bitOffset, bm.bitWidth);
+    uint64_t maxVal = (bm.bitWidth >= 64) ? UINT64_MAX : ((1ULL << bm.bitWidth) - 1);
+
+    bool ok = false;
+    QString input = QInputDialog::getText(nullptr,
+        QStringLiteral("Edit Bitfield Value"),
+        QStringLiteral("%1 (%2 bits, max %3):")
+            .arg(bm.name).arg(bm.bitWidth).arg(maxVal),
+        QLineEdit::Normal,
+        QString::number(curVal), &ok);
+    if (!ok || input.isEmpty()) return;
+
+    // Parse value (support hex with 0x prefix)
+    uint64_t newVal;
+    if (input.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        newVal = input.mid(2).toULongLong(&ok, 16);
+    else
+        newVal = input.toULongLong(&ok, 10);
+    if (!ok) return;
+    newVal &= maxVal;
+
+    QByteArray oldBytes(containerSize, 0);
+    m_doc->provider->read(addr, oldBytes.data(), containerSize);
+
+    // Read-modify-write: clear target bits and set new value
+    QByteArray newBytes = oldBytes;
+    uint64_t container = 0;
+    memcpy(&container, newBytes.constData(), qMin(containerSize, (int)sizeof(container)));
+    uint64_t mask = maxVal << bm.bitOffset;
+    container = (container & ~mask) | ((newVal & maxVal) << bm.bitOffset);
+    memcpy(newBytes.data(), &container, qMin(containerSize, (int)sizeof(container)));
+
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::WriteBytes{addr, oldBytes, newBytes}));
+    refresh();
+}
+
 void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                                      int subLine, const QPoint& globalPos) {
     auto icon = [](const char* name) { return QIcon(QStringLiteral(":/vsicons/%1").arg(name)); };
@@ -1534,6 +1646,31 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         const Node& node = m_doc->tree.nodes[nodeIdx];
         uint64_t nodeId = node.id;
         uint64_t parentId = node.parentId;
+
+        // ── Member line: enum or bitfield member ──
+        bool isEnumMember = node.resolvedClassKeyword() == QStringLiteral("enum")
+            && !node.enumMembers.isEmpty()
+            && subLine >= 0 && subLine < node.enumMembers.size();
+        bool isBitfieldMember = node.resolvedClassKeyword() == QStringLiteral("bitfield")
+            && !node.bitfieldMembers.isEmpty()
+            && subLine >= 0 && subLine < node.bitfieldMembers.size();
+
+        if (isEnumMember || isBitfieldMember) {
+            if (isBitfieldMember) {
+                const auto& bm = node.bitfieldMembers[subLine];
+                if (bm.bitWidth == 1) {
+                    menu.addAction("Toggle Bit", [this, nodeId, subLine]() {
+                        toggleBitfieldBit(nodeId, subLine);
+                    });
+                } else {
+                    menu.addAction("Edit Value...", [this, nodeId, subLine]() {
+                        editBitfieldValue(nodeId, subLine);
+                    });
+                }
+                menu.addSeparator();
+            }
+            // Fall through to always-available actions
+        } else {
 
         // Quick-convert suggestions for Hex nodes
         bool addedQuickConvert = false;
@@ -1756,6 +1893,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
 
         menu.addSeparator();
+        } // else (non-member node actions)
     }
 
     // ── Always-available actions ──
@@ -1885,6 +2023,8 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
             return nid | kFooterIdBit;
         if (lm.isArrayElement && lm.arrayElementIdx >= 0)
             return makeArrayElemSelId(nid, lm.arrayElementIdx);
+        if (lm.isMemberLine && lm.subLine >= 0)
+            return makeMemberSelId(nid, lm.subLine);
         return nid;
     };
 
@@ -1933,8 +2073,9 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
 
     if (m_selIds.size() == 1) {
         uint64_t sid = *m_selIds.begin();
-        // Strip footer/array bits for node lookup
-        int idx = m_doc->tree.indexOfId(sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask));
+        // Strip footer/array/member bits for node lookup
+        int idx = m_doc->tree.indexOfId(sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                                | kMemberBit | kMemberSubMask));
         if (idx >= 0) emit nodeSelected(idx);
     }
 }
@@ -1970,7 +2111,7 @@ void RcxController::updateCommandRow() {
         addr = QStringLiteral("0x") +
             QString::number(m_doc->tree.baseAddress, 16).toUpper();
 
-    QString row = QStringLiteral("%1 \u00B7 %2")
+    QString row = QStringLiteral("%1  %2")
         .arg(elide(src, 40), elide(addr, 24));
 
     // Build row 2: root class type + name (uses current view root)
@@ -2001,7 +2142,7 @@ void RcxController::updateCommandRow() {
     if (row2.isEmpty())
         row2 = QStringLiteral("struct NoName {");
 
-    QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral(" \u00B7 ") + row2;
+    QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral("  ") + row2;
 
     for (auto* ed : m_editors) {
         ed->setCommandRowText(combined);

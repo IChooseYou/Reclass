@@ -29,12 +29,12 @@ private slots:
     }
 
     void testFmtPointer64_null() {
-        QCOMPARE(fmt::fmtPointer64(0), QString("-> NULL"));
+        QCOMPARE(fmt::fmtPointer64(0), QString("0x0"));
     }
 
     void testFmtPointer64_nonNull() {
         QString s = fmt::fmtPointer64(0x400000);
-        QVERIFY(s.startsWith("-> 0x"));
+        QVERIFY(s.startsWith("0x"));
         QVERIFY(s.contains("400000"));
     }
 

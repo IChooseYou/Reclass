@@ -179,6 +179,14 @@ enum Marker : int {
     M_ACCENT    = 9,
 };
 
+// ── Bitfield member (name + bit position + width within a container) ──
+
+struct BitfieldMember {
+    QString name;
+    uint8_t bitOffset = 0;  // position from LSB within the container
+    uint8_t bitWidth  = 1;  // number of bits (1..64)
+};
+
 // ── Node ──
 
 struct Node {
@@ -197,6 +205,7 @@ struct Node {
     int      ptrDepth   = 0;   // Pointer: 0=struct/void ptr, 1=primitive*, 2=primitive**
     int      viewIndex  = 0;   // Array: current view offset (transient)
     QVector<QPair<QString, int64_t>> enumMembers; // Enum: name→value pairs
+    QVector<BitfieldMember> bitfieldMembers;       // Bitfield: per-bit member definitions
 
     // Note: Returns 0 for Array-of-Struct/Array. Use tree.structSpan() for accurate size.
     int byteSize() const {
@@ -208,6 +217,12 @@ struct Node {
             if (elemSz <= 0) return 0;
             return qMin(arrayLen, INT_MAX / elemSz) * elemSz;
         }
+        case NodeKind::Struct:
+            if (classKeyword == QStringLiteral("bitfield")) {
+                int sz = sizeForKind(elementKind);
+                return sz > 0 ? sz : 4;
+            }
+            return 0;
         default: return sizeForKind(kind);
         }
     }
@@ -240,6 +255,17 @@ struct Node {
             }
             o["enumMembers"] = arr;
         }
+        if (!bitfieldMembers.isEmpty()) {
+            QJsonArray arr;
+            for (const auto& m : bitfieldMembers) {
+                QJsonObject bm;
+                bm["name"] = m.name;
+                bm["bitOffset"] = m.bitOffset;
+                bm["bitWidth"] = m.bitWidth;
+                arr.append(bm);
+            }
+            o["bitfieldMembers"] = arr;
+        }
         return o;
     }
     static Node fromJson(const QJsonObject& o) {
@@ -263,6 +289,17 @@ struct Node {
                 QJsonObject em = v.toObject();
                 n.enumMembers.append({em["name"].toString(),
                                       em["value"].toString("0").toLongLong()});
+            }
+        }
+        if (o.contains("bitfieldMembers")) {
+            QJsonArray arr = o["bitfieldMembers"].toArray();
+            for (const auto& v : arr) {
+                QJsonObject bm = v.toObject();
+                BitfieldMember m;
+                m.name = bm["name"].toString();
+                m.bitOffset = (uint8_t)bm["bitOffset"].toInt(0);
+                m.bitWidth = (uint8_t)qBound(1, bm["bitWidth"].toInt(1), 64);
+                n.bitfieldMembers.append(m);
             }
         }
         return n;
@@ -512,6 +549,18 @@ inline int arrayElemIdxFromSelId(uint64_t selId) {
     return (int)((selId & kArrayElemMask) >> kArrayElemShift);
 }
 
+// Member selection encoding (enum/bitfield members) — mirrors array element pattern
+static constexpr uint64_t kMemberBit      = 0x2000000000000000ULL;
+static constexpr uint64_t kMemberSubShift = 48;
+static constexpr uint64_t kMemberSubMask  = 0x3FFF000000000000ULL;
+
+inline uint64_t makeMemberSelId(uint64_t nodeId, int subLine) {
+    return nodeId | kMemberBit | ((uint64_t)(subLine & 0x3FFF) << kMemberSubShift);
+}
+inline int memberSubFromSelId(uint64_t selId) {
+    return (int)((selId & kMemberSubMask) >> kMemberSubShift);
+}
+
 struct LineMeta {
     int      nodeIdx        = -1;
     uint64_t nodeId         = 0;
@@ -541,6 +590,7 @@ struct LineMeta {
     int      effectiveNameW = 22;  // Per-line name column width used for rendering
     QString  pointerTargetName;    // Resolved target type name for Pointer32/64 (empty = "void")
     bool     isArrayElement  = false;  // true for synthesized primitive array element lines
+    bool     isMemberLine   = false;  // true for enum member / bitfield member lines
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {
@@ -585,13 +635,15 @@ namespace cmd {
     struct ChangeStructTypeName { uint64_t nodeId; QString oldName, newName; };
     struct ChangeClassKeyword { uint64_t nodeId; QString oldKeyword, newKeyword; };
     struct ChangeOffset { uint64_t nodeId; int oldOffset, newOffset; };
+    struct ChangeEnumMembers { uint64_t nodeId;
+                               QVector<QPair<QString, int64_t>> oldMembers, newMembers; };
 }
 
 using Command = std::variant<
     cmd::ChangeKind, cmd::Rename, cmd::Collapse,
     cmd::Insert, cmd::Remove, cmd::ChangeBase, cmd::WriteBytes,
     cmd::ChangeArrayMeta, cmd::ChangePointerRef, cmd::ChangeStructTypeName,
-    cmd::ChangeClassKeyword, cmd::ChangeOffset
+    cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers
 >;
 
 // ── Column spans (for inline editing) ──
@@ -621,13 +673,13 @@ inline constexpr int kMaxNameW    = 128; // Maximum name column width
 inline constexpr int kCompactTypeW    = 20; // Type column cap for compact column mode
 
 inline ColumnSpan typeSpanFor(const LineMeta& lm, int typeW = kColType) {
-    if (lm.lineKind != LineKind::Field || lm.isContinuation) return {};
+    if (lm.lineKind != LineKind::Field || lm.isContinuation || lm.isMemberLine) return {};
     int ind = kFoldCol + lm.depth * 3;
     return {ind, ind + typeW, true};
 }
 
 inline ColumnSpan nameSpanFor(const LineMeta& lm, int typeW = kColType, int nameW = kColName) {
-    if (lm.isContinuation || lm.lineKind != LineKind::Field) return {};
+    if (lm.isContinuation || lm.lineKind != LineKind::Field || lm.isMemberLine) return {};
 
     int ind = kFoldCol + lm.depth * 3;
     int start = ind + typeW + kSepWidth;
@@ -642,6 +694,7 @@ inline ColumnSpan nameSpanFor(const LineMeta& lm, int typeW = kColType, int name
 inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/, int typeW = kColType, int nameW = kColName) {
     if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer ||
         lm.lineKind == LineKind::ArrayElementSeparator) return {};
+    if (lm.isMemberLine) return {};
     int ind = kFoldCol + lm.depth * 3;
 
     // Hex uses nameW for ASCII column (same as regular name column)
@@ -658,6 +711,27 @@ inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/, int typeW
 
     int start = ind + prefixW;
     return {start, start + valWidth, true};
+}
+
+// Member line spans (enum "name = value", bitfield "name : N = value")
+inline ColumnSpan memberNameSpanFor(const LineMeta& lm, const QString& lineText) {
+    if (!lm.isMemberLine) return {};
+    int ind = kFoldCol + lm.depth * 3;
+    int eq = lineText.indexOf(QLatin1String(" = "), ind);
+    if (eq < 0) return {};
+    int nameEnd = eq;
+    while (nameEnd > ind && lineText[nameEnd - 1] == ' ') nameEnd--;
+    return {ind, nameEnd, true};
+}
+
+inline ColumnSpan memberValueSpanFor(const LineMeta& lm, const QString& lineText) {
+    if (!lm.isMemberLine) return {};
+    int eq = lineText.indexOf(QLatin1String(" = "));
+    if (eq < 0) return {};
+    int valStart = eq + 3;
+    int valEnd = lineText.size();
+    while (valEnd > valStart && lineText[valEnd - 1] == ' ') valEnd--;
+    return {valStart, valEnd, true};
 }
 
 inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW = kColType, int nameW = kColName) {
@@ -681,30 +755,14 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW =
 // Line format: "source▾ · 0x140000000"
 
 inline ColumnSpan commandRowSrcSpan(const QString& lineText) {
-    int idx = lineText.indexOf(QStringLiteral(" \u00B7"));
-    if (idx < 0) return {};
+    // Source label ends at the ▾ dropdown arrow
+    int arrow = lineText.indexOf(QChar(0x25BE));
+    if (arrow < 0) return {};
     int start = 0;
-    while (start < idx && !lineText[start].isLetterOrNumber()
+    while (start < arrow && !lineText[start].isLetterOrNumber()
            && lineText[start] != '<' && lineText[start] != '\'') start++;
-    if (start >= idx) return {};
-    // Exclude trailing ▾ from the editable span
-    int end = idx;
-    while (end > start && lineText[end - 1] == QChar(0x25BE)) end--;
-    if (end <= start) return {};
-    return {start, end, true};
-}
-
-inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
-    int tag = lineText.indexOf(QStringLiteral(" \u00B7"));
-    if (tag < 0) return {};
-    int start = tag + 3;  // after " · "
-    // Scan to next " · " separator (or end of line) to support formulas with spaces
-    int nextSep = lineText.indexOf(QStringLiteral(" \u00B7"), start);
-    int end = (nextSep >= 0) ? nextSep : lineText.size();
-    // Trim trailing whitespace
-    while (end > start && lineText[end - 1].isSpace()) end--;
-    if (end <= start) return {};
-    return {start, end, true};
+    if (start >= arrow) return {};
+    return {start, arrow, true};
 }
 
 // ── CommandRow root-class spans ──
@@ -721,6 +779,25 @@ inline int commandRowRootStart(const QString& lineText) {
     i = lineText.lastIndexOf(QStringLiteral("enum "));
     if (i > best) best = i;
     return best;
+}
+
+inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
+    // Address starts at "0x" after the source dropdown arrow
+    int arrow = lineText.indexOf(QChar(0x25BE));
+    if (arrow < 0) return {};
+    int start = lineText.indexOf(QStringLiteral("0x"), arrow);
+    if (start < 0) {
+        // Formula mode: address is between arrow and root keyword
+        start = arrow + 1;
+        while (start < lineText.size() && lineText[start].isSpace()) start++;
+    }
+    // End at root keyword (struct/class/enum) or end of line
+    int rootStart = commandRowRootStart(lineText);
+    int end = (rootStart > start) ? rootStart : lineText.size();
+    // Trim trailing whitespace
+    while (end > start && lineText[end - 1].isSpace()) end--;
+    if (end <= start) return {};
+    return {start, end, true};
 }
 
 inline ColumnSpan commandRowRootTypeSpan(const QString& lineText) {
@@ -893,6 +970,11 @@ namespace fmt {
     QByteArray parseAsciiValue(const QString& text, int expectedSize, bool* ok);
     QString validateValue(NodeKind kind, const QString& text);
     QString fmtEnumMember(const QString& name, int64_t value, int depth, int nameW);
+    QString fmtBitfieldMember(const QString& name, uint8_t bitWidth,
+                              uint64_t value, int depth, int nameW);
+    uint64_t extractBits(const Provider& prov, uint64_t addr,
+                         NodeKind containerKind,
+                         uint8_t bitOffset, uint8_t bitWidth);
 } // namespace fmt
 
 // ── Compose function forward declaration ──

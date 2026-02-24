@@ -98,6 +98,8 @@ public:
     void duplicateNode(int nodeIdx);
     void convertToTypedPointer(uint64_t nodeId);
     void splitHexNode(uint64_t nodeId);
+    void toggleBitfieldBit(uint64_t nodeId, int memberIdx);
+    void editBitfieldValue(uint64_t nodeId, int memberIdx);
     void showContextMenu(RcxEditor* editor, int line, int nodeIdx, int subLine, const QPoint& globalPos);
     void batchRemoveNodes(const QVector<int>& nodeIndices);
     void batchChangeKind(const QVector<int>& nodeIndices, NodeKind newKind);

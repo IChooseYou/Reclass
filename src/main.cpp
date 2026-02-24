@@ -1417,7 +1417,9 @@ void MainWindow::removeNode() {
     QSet<uint64_t> ids = ctrl->selectedIds();
     QVector<int> indices;
     for (uint64_t id : ids) {
-        int idx = ctrl->document()->tree.indexOfId(id & ~kFooterIdBit);
+        int idx = ctrl->document()->tree.indexOfId(
+            id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                   | kMemberBit | kMemberSubMask));
         if (idx >= 0) indices.append(idx);
     }
     if (indices.size() > 1)
@@ -1878,7 +1880,8 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     QSet<uint64_t> selIds = tab.ctrl->selectedIds();
     if (selIds.size() >= 1) {
         uint64_t selId = *selIds.begin();
-        selId &= ~kFooterIdBit;
+        selId &= ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                   | kMemberBit | kMemberSubMask);
         rootId = findRootStructForNode(tab.doc->tree, selId);
     }
 

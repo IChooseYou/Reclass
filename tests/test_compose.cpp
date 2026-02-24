@@ -1924,7 +1924,7 @@ private slots:
 
     void testCommandRowRootNameSpan() {
         // Name span should cover the class name in the merged command row
-        QString text = "source\u25BE \u00B7 0x0 \u00B7 struct MyClass {";
+        QString text = "source\u25BE  0x0  struct MyClass {";
         ColumnSpan nameSpan = commandRowRootNameSpan(text);
         QVERIFY(nameSpan.valid);
 
@@ -2173,8 +2173,8 @@ private slots:
         QVERIFY(result.text.contains("Blue"));
         QVERIFY(result.text.contains("= 0"));
         QVERIFY(result.text.contains("= 2"));
-        // Header should contain "enum"
-        QVERIFY(result.text.contains("enum"));
+        // Header should contain the type name
+        QVERIFY(result.text.contains("Color"));
     }
 
     void testEnumCollapsed() {
@@ -2205,8 +2205,7 @@ private slots:
         // Collapsed: members should NOT appear
         QVERIFY(!result.text.contains("= 0"));
         QVERIFY(!result.text.contains("= 1"));
-        // But header should still show
-        QVERIFY(result.text.contains("enum"));
+        // But header should still show the type name
         QVERIFY(result.text.contains("Flags"));
     }
 
@@ -2349,6 +2348,91 @@ private slots:
             QVERIFY2(!hasCycle,
                      qPrintable(QString("Unexpected cycle marker on line %1").arg(i)));
         }
+    }
+
+    void testBitfieldMembers() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = QStringLiteral("Test");
+        root.structTypeName = QStringLiteral("Test");
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node bf;
+        bf.kind = NodeKind::Struct;
+        bf.classKeyword = QStringLiteral("bitfield");
+        bf.name = QStringLiteral("flags");
+        bf.elementKind = NodeKind::Hex32;
+        bf.parentId = rootId;
+        bf.offset = 0;
+        bf.collapsed = false;
+        bf.bitfieldMembers = {
+            {QStringLiteral("Valid"), 0, 1},
+            {QStringLiteral("Dirty"), 1, 1},
+            {QStringLiteral("PageNum"), 2, 20}
+        };
+        tree.addNode(bf);
+
+        NullProvider prov;
+        auto result = compose(tree, prov);
+
+        // Should contain bitfield member names
+        QVERIFY(result.text.contains(QStringLiteral("Valid")));
+        QVERIFY(result.text.contains(QStringLiteral("Dirty")));
+        QVERIFY(result.text.contains(QStringLiteral("PageNum")));
+        // Should contain : width = value format
+        QVERIFY(result.text.contains(QStringLiteral(": 1 =")));
+        QVERIFY(result.text.contains(QStringLiteral(": 20 =")));
+        // Member lines should have isMemberLine set
+        bool foundMemberLine = false;
+        for (const auto& lm : result.meta) {
+            if (lm.isMemberLine) {
+                foundMemberLine = true;
+                break;
+            }
+        }
+        QVERIFY(foundMemberLine);
+    }
+
+    void testBitfieldJsonRoundtrip() {
+        Node n;
+        n.id = 42;
+        n.kind = NodeKind::Struct;
+        n.classKeyword = QStringLiteral("bitfield");
+        n.elementKind = NodeKind::Hex64;
+        n.bitfieldMembers = {
+            {QStringLiteral("ExecuteDisable"), 63, 1},
+            {QStringLiteral("PageFrameNumber"), 12, 36}
+        };
+
+        QJsonObject json = n.toJson();
+        Node restored = Node::fromJson(json);
+
+        QCOMPARE(restored.classKeyword, QStringLiteral("bitfield"));
+        QCOMPARE(restored.bitfieldMembers.size(), 2);
+        QCOMPARE(restored.bitfieldMembers[0].name, QStringLiteral("ExecuteDisable"));
+        QCOMPARE(restored.bitfieldMembers[0].bitOffset, (uint8_t)63);
+        QCOMPARE(restored.bitfieldMembers[0].bitWidth, (uint8_t)1);
+        QCOMPARE(restored.bitfieldMembers[1].name, QStringLiteral("PageFrameNumber"));
+        QCOMPARE(restored.bitfieldMembers[1].bitOffset, (uint8_t)12);
+        QCOMPARE(restored.bitfieldMembers[1].bitWidth, (uint8_t)36);
+    }
+
+    void testBitfieldByteSize() {
+        Node n;
+        n.kind = NodeKind::Struct;
+        n.classKeyword = QStringLiteral("bitfield");
+        n.elementKind = NodeKind::Hex8;
+        QCOMPARE(n.byteSize(), 1);
+        n.elementKind = NodeKind::Hex16;
+        QCOMPARE(n.byteSize(), 2);
+        n.elementKind = NodeKind::Hex32;
+        QCOMPARE(n.byteSize(), 4);
+        n.elementKind = NodeKind::Hex64;
+        QCOMPARE(n.byteSize(), 8);
     }
 
 };

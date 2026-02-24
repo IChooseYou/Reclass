@@ -7,6 +7,7 @@
 #include <QHash>
 #include <QPair>
 #include <QSet>
+#include <QDebug>
 
 // ── RawPDB headers ──
 #include "PDB.h"
@@ -415,6 +416,7 @@ void PdbCtx::importFieldList(uint32_t fieldListIndex, uint64_t parentId) {
 
     auto maximumSize = rec->header.size - sizeof(uint16_t);
     QSet<QPair<int,int>> bitfieldSlots;
+    QHash<QPair<int,int>, uint64_t> bitfieldNodeIds;
 
     for (size_t i = 0; i < maximumSize; ) {
         auto* field = reinterpret_cast<const PDB::CodeView::TPI::FieldList*>(
@@ -440,7 +442,7 @@ void PdbCtx::importFieldList(uint32_t fieldListIndex, uint64_t parentId) {
             if (typeRec && typeRec->header.kind == TRK::LF_BITFIELD) {
                 uint32_t underlying = typeRec->data.LF_BITFIELD.type;
                 uint8_t bitLen = typeRec->data.LF_BITFIELD.length;
-                (void)bitLen;
+                uint8_t bitPos = typeRec->data.LF_BITFIELD.position;
 
                 // Determine slot size from underlying type
                 uint64_t slotSize = 4;
@@ -452,12 +454,26 @@ void PdbCtx::importFieldList(uint32_t fieldListIndex, uint64_t parentId) {
                 auto key = qMakePair((int)offset, (int)slotSize);
                 if (!bitfieldSlots.contains(key)) {
                     bitfieldSlots.insert(key);
+                    // Create bitfield container node
                     Node n;
-                    n.kind = hexForSize(slotSize);
-                    n.name = qname;
+                    n.kind = NodeKind::Struct;
+                    n.classKeyword = QStringLiteral("bitfield");
+                    n.elementKind = hexForSize(slotSize);
                     n.parentId = parentId;
                     n.offset = offset;
-                    tree.addNode(n);
+                    n.collapsed = false;
+                    int idx = tree.addNode(n);
+                    bitfieldNodeIds[key] = tree.nodes[idx].id;
+                }
+                // Add this member to the bitfield container
+                uint64_t bfNodeId = bitfieldNodeIds[key];
+                int bfIdx = tree.indexOfId(bfNodeId);
+                if (bfIdx >= 0) {
+                    BitfieldMember bm;
+                    bm.name = qname;
+                    bm.bitOffset = bitPos;
+                    bm.bitWidth = bitLen;
+                    tree.nodes[bfIdx].bitfieldMembers.append(bm);
                 }
             } else {
                 importMemberType(memberType, offset, qname, parentId);
@@ -641,7 +657,21 @@ void PdbCtx::importMemberType(uint32_t typeIndex, int offset, const QString& nam
                         uint32_t resolved = findUdtDefinitionIndex(pointeeRec->header.kind, typeName);
                         if (resolved != 0) defIndex = resolved;
                     }
-                    n.refId = importUDT(defIndex);
+                    // Skip anonymous pointer targets — they'd create root orphans
+                    const char* ptName = nullptr;
+                    const auto* defRec2 = tt->get(defIndex);
+                    if (defRec2) {
+                        if (defRec2->header.kind == TRK::LF_UNION)
+                            ptName = leafName(defRec2->data.LF_UNION.data,
+                                              unionLeafKind(defRec2->data.LF_UNION.data));
+                        else if (defRec2->header.kind == TRK::LF_STRUCTURE ||
+                                 defRec2->header.kind == TRK::LF_CLASS)
+                            ptName = leafName(defRec2->data.LF_CLASS.data,
+                                              defRec2->data.LF_CLASS.lfEasy.kind);
+                    }
+                    bool isAnonTarget = !ptName || ptName[0] == '<' || ptName[0] == '\0';
+                    if (!isAnonTarget)
+                        n.refId = importUDT(defIndex);
                 } else if (pointeeRec->header.kind == TRK::LF_PROCEDURE ||
                            pointeeRec->header.kind == TRK::LF_MFUNCTION) {
                     n.kind = (ptrSize <= 4) ? NodeKind::FuncPtr32 : NodeKind::FuncPtr64;
@@ -676,14 +706,44 @@ void PdbCtx::importMemberType(uint32_t typeIndex, int offset, const QString& nam
             if (resolved != 0) defIndex = resolved;
         }
 
-        uint64_t refId = importUDT(defIndex);
-
         const char* typeName = nullptr;
         bool isUnion = (rec->header.kind == TRK::LF_UNION);
         if (isUnion)
             typeName = leafName(rec->data.LF_UNION.data, unionLeafKind(rec->data.LF_UNION.data));
         else
             typeName = leafName(rec->data.LF_CLASS.data, rec->data.LF_CLASS.lfEasy.kind);
+
+        // Anonymous types: inline fields directly instead of creating root orphan
+        bool isAnonymous = !typeName || typeName[0] == '<' || typeName[0] == '\0';
+        if (isAnonymous) {
+            // Resolve to definition if needed
+            const auto* defRec = tt->get(defIndex);
+            uint32_t fieldListIdx = 0;
+            if (defRec) {
+                if (defRec->header.kind == TRK::LF_UNION)
+                    fieldListIdx = defRec->data.LF_UNION.field;
+                else if (defRec->header.kind == TRK::LF_STRUCTURE ||
+                         defRec->header.kind == TRK::LF_CLASS)
+                    fieldListIdx = defRec->data.LF_CLASS.field;
+            }
+            if (fieldListIdx != 0) {
+                // Create inline container (no refId, no root orphan)
+                Node n;
+                n.kind = NodeKind::Struct;
+                n.name = name;
+                n.classKeyword = isUnion ? QStringLiteral("union") : QStringLiteral("struct");
+                n.parentId = parentId;
+                n.offset = offset;
+                n.collapsed = true;
+                int idx = tree.addNode(n);
+                uint64_t inlineId = tree.nodes[idx].id;
+                importFieldList(fieldListIdx, inlineId);
+                break;
+            }
+            // Fallthrough if no field list
+        }
+
+        uint64_t refId = importUDT(defIndex);
 
         Node n;
         n.kind = NodeKind::Struct;
@@ -806,16 +866,21 @@ void PdbCtx::importMemberType(uint32_t typeIndex, int offset, const QString& nam
 
     case TRK::LF_BITFIELD: {
         uint32_t underlying = rec->data.LF_BITFIELD.type;
+        uint8_t bitLen = rec->data.LF_BITFIELD.length;
+        uint8_t bitPos = rec->data.LF_BITFIELD.position;
         uint64_t slotSize = 4;
         if (underlying < tt->firstIndex()) {
             NodeKind k = mapPrimitiveType(underlying);
             slotSize = sizeForKind(k);
         }
         Node n;
-        n.kind = hexForSize(slotSize);
+        n.kind = NodeKind::Struct;
+        n.classKeyword = QStringLiteral("bitfield");
+        n.elementKind = hexForSize(slotSize);
         n.name = name;
         n.parentId = parentId;
         n.offset = offset;
+        n.bitfieldMembers.append({name, bitPos, bitLen});
         tree.addNode(n);
         break;
     }
@@ -944,6 +1009,12 @@ QVector<PdbTypeInfo> enumeratePdbTypes(const QString& pdbPath, QString* errorMsg
         result.append(info);
     }
 
+    int enumCount = 0;
+    for (const auto& r : result)
+        if (r.isEnum) enumCount++;
+    qDebug() << "[PDB] enumeratePdbTypes:" << result.size() << "types,"
+             << enumCount << "enums";
+
     return result;
 }
 
@@ -960,18 +1031,33 @@ NodeTree importPdbSelected(const QString& pdbPath,
     ctx.tt = pdb.typeTable;
 
     int total = typeIndices.size();
+    int enumDispatched = 0, enumCreated = 0;
     for (int i = 0; i < total; i++) {
         uint32_t ti = typeIndices[i];
         const auto* rec = pdb.typeTable->get(ti);
-        if (rec && rec->header.kind == TRK::LF_ENUM)
-            ctx.importEnum(ti);
-        else
+        if (rec && rec->header.kind == TRK::LF_ENUM) {
+            enumDispatched++;
+            uint64_t id = ctx.importEnum(ti);
+            if (id != 0) enumCreated++;
+            else qDebug() << "[PDB] importEnum FAILED for typeIndex" << ti;
+        } else {
             ctx.importUDT(ti);
+        }
         if (progressCb && !progressCb(i + 1, total)) {
             if (errorMsg) *errorMsg = QStringLiteral("Import cancelled");
             return ctx.tree; // return partial result
         }
     }
+
+    // Count enum nodes in tree
+    int enumNodes = 0;
+    for (const auto& n : ctx.tree.nodes)
+        if (n.classKeyword == QLatin1String("enum")) enumNodes++;
+    qDebug() << "[PDB] importPdbSelected:" << total << "types,"
+             << enumDispatched << "enum dispatches,"
+             << enumCreated << "enum created,"
+             << enumNodes << "enum nodes in tree,"
+             << ctx.tree.nodes.size() << "total nodes";
 
     if (ctx.tree.nodes.isEmpty()) {
         if (errorMsg) *errorMsg = QStringLiteral("No types imported");

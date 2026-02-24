@@ -880,7 +880,7 @@ void RcxEditor::reformatMargins() {
     for (int i = 0; i < m_meta.size(); i++) {
         auto& lm = m_meta[i];
 
-        if (lm.isContinuation) {
+        if (lm.isContinuation || lm.isMemberLine) {
             lm.offsetText = QStringLiteral("  \u00B7 ");
         } else if (lm.offsetText.isEmpty()) {
             continue;
@@ -1079,8 +1079,11 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     for (uint64_t selId : selIds) {
         bool isFooterSel = (selId & kFooterIdBit) != 0;
         bool isArrayElemSel = (selId & kArrayElemBit) != 0;
+        bool isMemberSel = (selId & kMemberBit) != 0;
         int arrayElemIdx = isArrayElemSel ? arrayElemIdxFromSelId(selId) : -1;
-        uint64_t nodeId = selId & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask);
+        int memberSubLine = isMemberSel ? memberSubFromSelId(selId) : -1;
+        uint64_t nodeId = selId & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                    | kMemberBit | kMemberSubMask);
         auto it = m_nodeLineIndex.constFind(nodeId);
         if (it == m_nodeLineIndex.constEnd()) continue;
         for (int ln : *it) {
@@ -1094,8 +1097,13 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
                 if (!m_meta[ln].isArrayElement || m_meta[ln].arrayElementIdx != arrayElemIdx)
                     continue;
             } else if (m_meta[ln].isArrayElement) {
-                // Plain nodeId selection shouldn't highlight individual array elements
-                // (the header line is enough)
+                continue;
+            }
+            // Member line: match by subLine index
+            if (isMemberSel) {
+                if (!m_meta[ln].isMemberLine || m_meta[ln].subLine != memberSubLine)
+                    continue;
+            } else if (m_meta[ln].isMemberLine) {
                 continue;
             }
             m_sci->markerAdd(ln, M_SELECTED);
@@ -1127,7 +1135,8 @@ void RcxEditor::applyHoverHighlight() {
     if (prevId != 0) {
         // Check if old hovered line was a single-line highlight (footer or array element)
         bool prevSingleLine = (prevLine >= 0 && prevLine < m_meta.size() &&
-            (m_meta[prevLine].lineKind == LineKind::Footer || m_meta[prevLine].isArrayElement));
+            (m_meta[prevLine].lineKind == LineKind::Footer || m_meta[prevLine].isArrayElement
+             || m_meta[prevLine].isMemberLine));
         if (prevSingleLine) {
             m_sci->markerDelete(prevLine, M_HOVER);
         } else {
@@ -1143,11 +1152,13 @@ void RcxEditor::applyHoverHighlight() {
     if (!m_hoverInside) return;
     if (m_hoveredNodeId == 0) return;
 
-    // Footer and array elements highlight only the specific line
+    // Footer, array elements, and member lines highlight only the specific line
     bool hoveringFooter = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size() &&
                            m_meta[m_hoveredLine].lineKind == LineKind::Footer);
     bool hoveringArrayElem = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size() &&
                               m_meta[m_hoveredLine].isArrayElement);
+    bool hoveringMember = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size() &&
+                           m_meta[m_hoveredLine].isMemberLine);
 
     // Check if the hovered item is already selected (using appropriate ID)
     uint64_t checkId;
@@ -1155,12 +1166,14 @@ void RcxEditor::applyHoverHighlight() {
         checkId = m_hoveredNodeId | kFooterIdBit;
     else if (hoveringArrayElem)
         checkId = makeArrayElemSelId(m_hoveredNodeId, m_meta[m_hoveredLine].arrayElementIdx);
+    else if (hoveringMember)
+        checkId = makeMemberSelId(m_hoveredNodeId, m_meta[m_hoveredLine].subLine);
     else
         checkId = m_hoveredNodeId;
     if (m_currentSelIds.contains(checkId)) return;
 
-    if (hoveringFooter || hoveringArrayElem) {
-        // Single-line highlight for footers and array elements
+    if (hoveringFooter || hoveringArrayElem || hoveringMember) {
+        // Single-line highlight for footers, array elements, and member lines
         m_sci->markerAdd(m_hoveredLine, M_HOVER);
     } else {
         // Non-footer, non-array-element: highlight all lines for this node
@@ -1374,15 +1387,6 @@ void RcxEditor::applyCommandRowPills() {
         if (srcDrop >= 0 && (rootStart < 0 || srcDrop < rootStart))
             fillIndicatorCols(IND_HEX_DIM, line, srcDrop, srcDrop + 1);
     }
-    // Dim all " · " separators
-    int searchFrom = 0;
-    while (true) {
-        int tag = t.indexOf(QStringLiteral(" \u00B7"), searchFrom);
-        if (tag < 0) break;
-        fillIndicatorCols(IND_HEX_DIM, line, tag, tag + 3);
-        searchFrom = tag + 3;
-    }
-
     // Dim base address to match source/struct grey
     ColumnSpan addrSpan = commandRowAddrSpan(t);
     if (addrSpan.valid)
@@ -1615,6 +1619,12 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     if (!s.valid && t == EditTarget::Name)
         s = headerNameSpan(*lm, lineText);
 
+    // Member lines: override Name/Value spans
+    if (!s.valid && lm->isMemberLine) {
+        if (t == EditTarget::Name)  s = memberNameSpanFor(*lm, lineText);
+        if (t == EditTarget::Value) s = memberValueSpanFor(*lm, lineText);
+    }
+
     out = normalizeSpan(s, lineText, t, /*skipPrefixes=*/true);
     if (lineTextOut) *lineTextOut = lineText;
     return out.valid;
@@ -1727,6 +1737,12 @@ static bool hitTestTarget(QsciScintilla* sci,
     }
     if (!ns.valid)
         ns = headerNameSpan(lm, lineText);
+
+    // Member lines: use name/value spans from line text (no type span)
+    if (lm.isMemberLine) {
+        ns = memberNameSpanFor(lm, lineText);
+        vs = memberValueSpanFor(lm, lineText);
+    }
 
     if (inSpan(ts))      outTarget = EditTarget::Type;
     else if (inSpan(ns)) outTarget = EditTarget::Name;
@@ -2686,6 +2702,8 @@ void RcxEditor::updateEditableIndicators(int line) {
             checkId = lm->nodeId | kFooterIdBit;
         else if (lm->isArrayElement && lm->arrayElementIdx >= 0)
             checkId = makeArrayElemSelId(lm->nodeId, lm->arrayElementIdx);
+        else if (lm->isMemberLine && lm->subLine >= 0)
+            checkId = makeMemberSelId(lm->nodeId, lm->subLine);
         else
             checkId = lm->nodeId;
         return m_currentSelIds.contains(checkId);

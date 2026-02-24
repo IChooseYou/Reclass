@@ -121,15 +121,8 @@ QString fmtDouble(double v) {
 }
 QString fmtBool(uint8_t v)    { return v ? QStringLiteral("true") : QStringLiteral("false"); }
 
-QString fmtPointer32(uint32_t v) {
-    if (v == 0) return QStringLiteral("-> NULL");
-    return QStringLiteral("-> ") + hexVal(v);
-}
-
-QString fmtPointer64(uint64_t v) {
-    if (v == 0) return QStringLiteral("-> NULL");
-    return QStringLiteral("-> ") + hexVal(v);
-}
+QString fmtPointer32(uint32_t v) { return hexVal(v); }
+QString fmtPointer64(uint64_t v) { return hexVal(v); }
 
 // ── Indentation ──
 
@@ -148,11 +141,11 @@ QString fmtOffsetMargin(uint64_t absoluteOffset, bool isContinuation, int hexDig
 // ── Struct type name (for width calculation) ──
 
 QString structTypeName(const Node& node) {
-    // Full type string: "struct TypeName", "union TypeName", "class TypeName", etc.
-    QString base = node.resolvedClassKeyword();
+    // Named types: just the type name (e.g. "_LIST_ENTRY")
+    // Anonymous: just the keyword (e.g. "union", "struct")
     if (!node.structTypeName.isEmpty())
-        return base + QStringLiteral(" ") + node.structTypeName;
-    return base;
+        return node.structTypeName;
+    return node.resolvedClassKeyword();
 }
 
 // ── Struct header / footer ──
@@ -708,6 +701,29 @@ QString validateBaseAddress(const QString& text) {
 QString fmtEnumMember(const QString& name, int64_t value, int depth, int nameW) {
     QString ind = indent(depth);
     return ind + name.leftJustified(nameW) + QStringLiteral(" = ") + QString::number(value);
+}
+
+// ── Bitfield member formatting ──
+
+uint64_t extractBits(const Provider& prov, uint64_t addr,
+                     NodeKind containerKind,
+                     uint8_t bitOffset, uint8_t bitWidth) {
+    uint64_t container = 0;
+    switch (containerKind) {
+    case NodeKind::Hex8:  container = prov.readU8(addr);  break;
+    case NodeKind::Hex16: container = prov.readU16(addr); break;
+    case NodeKind::Hex32: container = prov.readU32(addr); break;
+    default:              container = prov.readU64(addr); break;
+    }
+    if (bitWidth >= 64) return container >> bitOffset;
+    return (container >> bitOffset) & ((1ULL << bitWidth) - 1);
+}
+
+QString fmtBitfieldMember(const QString& name, uint8_t bitWidth,
+                          uint64_t value, int depth, int nameW) {
+    QString ind = indent(depth);
+    return ind + name.leftJustified(nameW)
+         + QStringLiteral(" : %1 = %2").arg(bitWidth).arg(value);
 }
 
 } // namespace rcx::fmt
