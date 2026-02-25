@@ -244,8 +244,6 @@ public:
             s.setHeight(s.height() + qRound(s.height() * 0.5));
         if (type == CT_MenuItem)
             s = QSize(s.width() + 24, s.height() + 4);
-        if (type == CT_TabBarTab)
-            s = QSize(s.width(), 24);
         return s;
     }
     int pixelMetric(PixelMetric metric, const QStyleOption* opt,
@@ -312,21 +310,6 @@ public:
                     QProxyStyle::drawControl(element, &patched, p, w);
                     return;
                 }
-            }
-        }
-        // MDI tab bar — override text color: dimmed for selected/hover
-        if (element == CE_TabBarTabLabel) {
-            if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt)) {
-                const auto& t = rcx::ThemeManager::instance().current();
-                QStyleOptionTab patched = *tab;
-                bool selected = tab->state & State_Selected;
-                bool hovered  = tab->state & State_MouseOver;
-                if (selected || hovered)
-                    patched.palette.setColor(QPalette::WindowText, t.textDim);
-                else
-                    patched.palette.setColor(QPalette::WindowText, t.textMuted);
-                QProxyStyle::drawControl(element, &patched, p, w);
-                return;
             }
         }
         // Tree view items — use theme.hover for selection instead of blue
@@ -520,22 +503,19 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(file, "&Save", QKeySequence::Save, makeIcon(":/vsicons/save.svg"), this, &MainWindow::saveFile);
     Qt5Qt6AddAction(file, "Save &As...", QKeySequence::SaveAs, makeIcon(":/vsicons/save-as.svg"), this, &MainWindow::saveFileAs);
     file->addSeparator();
-    m_sourceMenu = file->addMenu("Current Tab So&urce");
-    connect(m_sourceMenu, &QMenu::aboutToShow, this, &MainWindow::populateSourceMenu);
-    file->addSeparator();
-    Qt5Qt6AddAction(file, "&Unload Project", QKeySequence(Qt::CTRL | Qt::Key_W), QIcon(), this, &MainWindow::closeFile);
-    file->addSeparator();
-    Qt5Qt6AddAction(file, "Export &C++ Header...", QKeySequence::UnknownKey, makeIcon(":/vsicons/export.svg"), this, &MainWindow::exportCpp);
-    Qt5Qt6AddAction(file, "Export ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportReclassXmlAction);
-    Qt5Qt6AddAction(file, "Import from &Source...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importFromSource);
-    Qt5Qt6AddAction(file, "&Import ReClass XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importReclassXml);
-    Qt5Qt6AddAction(file, "Import &PDB...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importPdb);
+    auto* importMenu = file->addMenu("&Import");
+    Qt5Qt6AddAction(importMenu, "From &Source...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importFromSource);
+    Qt5Qt6AddAction(importMenu, "ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importReclassXml);
+    Qt5Qt6AddAction(importMenu, "&PDB...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importPdb);
+    auto* exportMenu = file->addMenu("E&xport");
+    Qt5Qt6AddAction(exportMenu, "&C++ Header...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportCpp);
+    Qt5Qt6AddAction(exportMenu, "ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportReclassXmlAction);
     // Examples submenu — scan once at init
     {
         QDir exDir(QCoreApplication::applicationDirPath() + "/examples");
         QStringList rcxFiles = exDir.entryList({"*.rcx"}, QDir::Files, QDir::Name);
         if (!rcxFiles.isEmpty()) {
-            auto* examples = file->addMenu("&Examples");
+            auto* examples = file->addMenu("E&xamples");
             for (const QString& fn : rcxFiles) {
                 QString fullPath = exDir.absoluteFilePath(fn);
                 examples->addAction(fn, this, [this, fullPath]() { project_open(fullPath); });
@@ -543,10 +523,7 @@ void MainWindow::createMenus() {
         }
     }
     file->addSeparator();
-    const auto itemName = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
-    m_mcpAction = Qt5Qt6AddAction(file, itemName, QKeySequence::UnknownKey, QIcon(), this, &MainWindow::toggleMcp);
-    file->addSeparator();
-    Qt5Qt6AddAction(file, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this, &MainWindow::showOptionsDialog);
+    Qt5Qt6AddAction(file, "&Close Project", QKeySequence(Qt::CTRL | Qt::Key_W), QIcon(), this, &MainWindow::closeFile);
     file->addSeparator();
     Qt5Qt6AddAction(file, "E&xit", QKeySequence(Qt::Key_Close), makeIcon(":/vsicons/close.svg"), this, &QMainWindow::close);
 
@@ -554,13 +531,14 @@ void MainWindow::createMenus() {
     auto* edit = m_titleBar->menuBar()->addMenu("&Edit");
     Qt5Qt6AddAction(edit, "&Undo", QKeySequence::Undo, makeIcon(":/vsicons/arrow-left.svg"), this, &MainWindow::undo);
     Qt5Qt6AddAction(edit, "&Redo", QKeySequence::Redo, makeIcon(":/vsicons/arrow-right.svg"), this, &MainWindow::redo);
-    edit->addSeparator();
-    Qt5Qt6AddAction(edit, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
 
     // View
     auto* view = m_titleBar->menuBar()->addMenu("&View");
     Qt5Qt6AddAction(view, "Split &Horizontal", QKeySequence::UnknownKey, makeIcon(":/vsicons/split-horizontal.svg"), this, &MainWindow::splitView);
-    Qt5Qt6AddAction(view, "&Unsplit", QKeySequence::UnknownKey, makeIcon(":/vsicons/chrome-close.svg"), this, &MainWindow::unsplitView);
+    Qt5Qt6AddAction(view, "&Remove Split", QKeySequence::UnknownKey, makeIcon(":/vsicons/chrome-close.svg"), this, &MainWindow::unsplitView);
+    view->addSeparator();
+    m_sourceMenu = view->addMenu("&Data Source");
+    connect(m_sourceMenu, &QMenu::aboutToShow, this, &MainWindow::populateSourceMenu);
     view->addSeparator();
     auto* fontMenu = view->addMenu(makeIcon(":/vsicons/text-size.svg"), "&Font");
     auto* fontGroup = new QActionGroup(this);
@@ -607,8 +585,27 @@ void MainWindow::createMenus() {
             tab.ctrl->setCompactColumns(checked);
     });
 
+    auto* actRelOfs = view->addAction("R&elative Offsets");
+    actRelOfs->setCheckable(true);
+    actRelOfs->setChecked(settings.value("relativeOffsets", true).toBool());
+    connect(actRelOfs, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("relativeOffsets", checked);
+        for (auto& tab : m_tabs)
+            for (auto& pane : tab.panes)
+                pane.editor->setRelativeOffsets(checked);
+    });
+
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
+
+    // Tools
+    auto* tools = m_titleBar->menuBar()->addMenu("&Tools");
+    Qt5Qt6AddAction(tools, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
+    tools->addSeparator();
+    const auto mcpName = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
+    m_mcpAction = Qt5Qt6AddAction(tools, mcpName, QKeySequence::UnknownKey, QIcon(), this, &MainWindow::toggleMcp);
+    tools->addSeparator();
+    Qt5Qt6AddAction(tools, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this, &MainWindow::showOptionsDialog);
 
     // Plugins
     auto* plugins = m_titleBar->menuBar()->addMenu("&Plugins");
@@ -1035,6 +1032,8 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
     // Create editor via controller (parent = tabWidget for ownership)
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
+    pane.editor->setRelativeOffsets(
+        QSettings("Reclass", "Reclass").value("relativeOffsets", true).toBool());
     pane.tabWidget->addTab(pane.editor, "Reclass");     // index 0
 
     // Create per-pane rendered C++ view
@@ -1672,6 +1671,13 @@ void MainWindow::applyTheme(const Theme& theme) {
         "QTabBar::tab:hover { background: %3; }")
         .arg(theme.background.name(), theme.backgroundAlt.name(), theme.hover.name()));
 
+    // Dim MDI tab text via palette (Fusion reads WindowText, not CSS color:)
+    if (auto* tabBar = m_mdiArea->findChild<QTabBar*>()) {
+        QPalette tp = tabBar->palette();
+        tp.setColor(QPalette::WindowText, theme.textDim);
+        tabBar->setPalette(tp);
+    }
+
     // Re-style ✕ close buttons on MDI tabs
     styleTabCloseButtons();
 
@@ -1714,6 +1720,12 @@ void MainWindow::applyTheme(const Theme& theme) {
         tp.setColor(QPalette::Highlight, theme.hover);
         tp.setColor(QPalette::HighlightedText, theme.text);
         m_workspaceTree->setPalette(tp);
+    }
+    if (m_workspaceSearch) {
+        m_workspaceSearch->setStyleSheet(QStringLiteral(
+            "QLineEdit { background: %1; color: %2; border: none;"
+            " border-bottom: 1px solid %3; padding: 4px 6px; }")
+            .arg(theme.background.name(), theme.textDim.name(), theme.border.name()));
     }
 
     // Dock titlebar: restyle via palette + close button
@@ -2444,14 +2456,46 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceDock->setTitleBarWidget(titleBar);
     }
 
-    m_workspaceTree = new QTreeView(m_workspaceDock);
+    // Container widget: search box + tree view
+    auto* dockContainer = new QWidget(m_workspaceDock);
+    auto* dockLayout = new QVBoxLayout(dockContainer);
+    dockLayout->setContentsMargins(0, 0, 0, 0);
+    dockLayout->setSpacing(0);
+
+    m_workspaceSearch = new QLineEdit(dockContainer);
+    m_workspaceSearch->setPlaceholderText(QStringLiteral("Search..."));
+    m_workspaceSearch->setClearButtonEnabled(true);
+    {
+        const auto& t = ThemeManager::instance().current();
+        m_workspaceSearch->setStyleSheet(QStringLiteral(
+            "QLineEdit { background: %1; color: %2; border: none;"
+            " border-bottom: 1px solid %3; padding: 4px 6px; }")
+            .arg(t.background.name(), t.textDim.name(), t.border.name()));
+    }
+    dockLayout->addWidget(m_workspaceSearch);
+
+    m_workspaceTree = new QTreeView(dockContainer);
     m_workspaceModel = new QStandardItemModel(this);
     m_workspaceModel->setHorizontalHeaderLabels({"Name"});
-    m_workspaceTree->setModel(m_workspaceModel);
+
+    m_workspaceProxy = new QSortFilterProxyModel(this);
+    m_workspaceProxy->setSourceModel(m_workspaceModel);
+    m_workspaceProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    m_workspaceProxy->setRecursiveFilteringEnabled(true);
+
+    m_workspaceTree->setModel(m_workspaceProxy);
     m_workspaceTree->setHeaderHidden(true);
     m_workspaceTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_workspaceTree->setExpandsOnDoubleClick(false);
     m_workspaceTree->setMouseTracking(true);
+
+    connect(m_workspaceSearch, &QLineEdit::textChanged, this, [this](const QString& text) {
+        m_workspaceProxy->setFilterFixedString(text);
+        if (!text.isEmpty())
+            m_workspaceTree->expandAll();
+        else
+            m_workspaceTree->expandToDepth(0);
+    });
 
     // Override palette: selection + hover use theme colors (not default blue)
     {
@@ -2462,6 +2506,8 @@ void MainWindow::createWorkspaceDock() {
         tp.setColor(QPalette::HighlightedText, t.text);
         m_workspaceTree->setPalette(tp);
     }
+
+    dockLayout->addWidget(m_workspaceTree);
 
     m_workspaceTree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_workspaceTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
@@ -2565,7 +2611,7 @@ void MainWindow::createWorkspaceDock() {
         }
     });
 
-    m_workspaceDock->setWidget(m_workspaceTree);
+    m_workspaceDock->setWidget(dockContainer);
     addDockWidget(Qt::LeftDockWidgetArea, m_workspaceDock);
     m_workspaceDock->hide();
 
@@ -2586,12 +2632,23 @@ void MainWindow::createWorkspaceDock() {
 
         m_mdiArea->setActiveSubWindow(sub);
 
-        // Type/Enum node: navigate to it
         auto& tree = m_tabs[sub].doc->tree;
         int ni = tree.indexOfId(structId);
-        if (ni >= 0) tree.nodes[ni].collapsed = false;
-        m_tabs[sub].ctrl->setViewRootId(structId);
-        m_tabs[sub].ctrl->scrollToNodeId(structId);
+        if (ni < 0) return;
+
+        // Child member item: navigate to parent struct, then scroll to this member
+        uint64_t parentId = tree.nodes[ni].parentId;
+        if (parentId != 0) {
+            int pi = tree.indexOfId(parentId);
+            if (pi >= 0) tree.nodes[pi].collapsed = false;
+            m_tabs[sub].ctrl->setViewRootId(parentId);
+            m_tabs[sub].ctrl->scrollToNodeId(structId);
+        } else {
+            // Root type/enum: navigate directly
+            tree.nodes[ni].collapsed = false;
+            m_tabs[sub].ctrl->setViewRootId(structId);
+            m_tabs[sub].ctrl->scrollToNodeId(structId);
+        }
     });
 }
 
@@ -2611,7 +2668,7 @@ void MainWindow::rebuildWorkspaceModel() {
         tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
     rcx::buildProjectExplorer(m_workspaceModel, tabs);
-    m_workspaceTree->expandToDepth(1);
+    m_workspaceTree->expandToDepth(0);
 }
 
 void MainWindow::populateSourceMenu() {

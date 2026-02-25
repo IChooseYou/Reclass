@@ -61,6 +61,8 @@ public:
         m_disasmProvider = prov; m_disasmRealProv = realProv; m_disasmTree = tree;
     }
 
+    void setRelativeOffsets(bool rel) { m_relativeOffsets = rel; reformatMargins(); }
+
     // Saved sources for quick-switch in source picker
     void setSavedSources(const QVector<SavedSourceDisplay>& sources) { m_savedSourceDisplay = sources; }
 

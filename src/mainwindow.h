@@ -11,6 +11,8 @@
 #include <QDockWidget>
 #include <QTreeView>
 #include <QStandardItemModel>
+#include <QSortFilterProxyModel>
+#include <QLineEdit>
 #include <QMap>
 #include <QButtonGroup>
 #include <QPushButton>
@@ -137,11 +139,13 @@ private:
     RcxEditor* activePaneEditor();
 
     // Workspace dock
-    QDockWidget*        m_workspaceDock  = nullptr;
-    QTreeView*          m_workspaceTree  = nullptr;
-    QStandardItemModel* m_workspaceModel = nullptr;
-    QLabel*             m_dockTitleLabel = nullptr;
-    QToolButton*        m_dockCloseBtn   = nullptr;
+    QDockWidget*          m_workspaceDock   = nullptr;
+    QTreeView*            m_workspaceTree   = nullptr;
+    QStandardItemModel*   m_workspaceModel  = nullptr;
+    QSortFilterProxyModel* m_workspaceProxy = nullptr;
+    QLineEdit*            m_workspaceSearch = nullptr;
+    QLabel*               m_dockTitleLabel  = nullptr;
+    QToolButton*          m_dockCloseBtn    = nullptr;
     void createWorkspaceDock();
     void rebuildWorkspaceModel();
     void updateBorderColor(const QColor& color);

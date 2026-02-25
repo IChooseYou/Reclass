@@ -29,46 +29,88 @@ inline void buildProjectExplorer(QStandardItemModel* model,
     projectItem->setData(QVariant::fromValue(kGroupSentinel), Qt::UserRole + 1);
 
     // Collect all top-level structs/enums across all tabs
-    QVector<std::pair<const Node*, void*>> types, enums;
+    struct Entry { const Node* node; void* subPtr; const NodeTree* tree; };
+    QVector<Entry> types, enums;
     for (const auto& tab : tabs) {
         QVector<int> topLevel = tab.tree->childrenOf(0);
         for (int idx : topLevel) {
             const Node& n = tab.tree->nodes[idx];
             if (n.kind != NodeKind::Struct) continue;
             if (n.resolvedClassKeyword() == QStringLiteral("enum"))
-                enums.append({&n, tab.subPtr});
+                enums.append({&n, tab.subPtr, tab.tree});
             else
-                types.append({&n, tab.subPtr});
+                types.append({&n, tab.subPtr, tab.tree});
         }
     }
 
     auto nameOf = [](const Node* n) {
         return n->structTypeName.isEmpty() ? n->name : n->structTypeName;
     };
-    auto cmpName = [&](const std::pair<const Node*, void*>& a,
-                       const std::pair<const Node*, void*>& b) {
-        return nameOf(a.first).compare(nameOf(b.first), Qt::CaseInsensitive) < 0;
+    auto cmpName = [&](const Entry& a, const Entry& b) {
+        return nameOf(a.node).compare(nameOf(b.node), Qt::CaseInsensitive) < 0;
     };
     std::sort(types.begin(), types.end(), cmpName);
     std::sort(enums.begin(), enums.end(), cmpName);
 
-    for (const auto& [n, subPtr] : types) {
-        QString display = QStringLiteral("%1 (%2)")
-            .arg(nameOf(n), n->resolvedClassKeyword());
+    // Helper: type display string for a member node
+    auto memberTypeName = [](const Node& m) -> QString {
+        if (m.kind == NodeKind::Struct) {
+            QString stn = m.structTypeName.isEmpty() ? m.resolvedClassKeyword()
+                                                     : m.structTypeName;
+            return stn;
+        }
+        return QString::fromLatin1(kindToString(m.kind));
+    };
+
+    // Helper: is a Hex padding node
+    auto isHexPad = [](NodeKind k) {
+        return k == NodeKind::Hex8 || k == NodeKind::Hex16
+            || k == NodeKind::Hex32 || k == NodeKind::Hex64;
+    };
+
+    for (const auto& e : types) {
+        QVector<int> members = e.tree->childrenOf(e.node->id);
+
+        // Count non-hex members for display
+        int visibleCount = 0;
+        for (int mi : members)
+            if (!isHexPad(e.tree->nodes[mi].kind)) ++visibleCount;
+
+        QString display = QStringLiteral("%1 (%2) \u2014 %3")
+            .arg(nameOf(e.node), e.node->resolvedClassKeyword(),
+                 QString::number(visibleCount));
         auto* item = new QStandardItem(
             QIcon(":/vsicons/symbol-structure.svg"), display);
-        item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
-        item->setData(QVariant::fromValue(n->id), Qt::UserRole + 1);
+        item->setData(QVariant::fromValue(e.subPtr), Qt::UserRole);
+        item->setData(QVariant::fromValue(e.node->id), Qt::UserRole + 1);
+
+        // Add child rows sorted by offset (skip Hex padding)
+        std::sort(members.begin(), members.end(), [&](int a, int b) {
+            return e.tree->nodes[a].offset < e.tree->nodes[b].offset;
+        });
+        for (int mi : members) {
+            const Node& m = e.tree->nodes[mi];
+            if (isHexPad(m.kind)) continue;
+            QString childDisplay = QStringLiteral("%1 %2")
+                .arg(memberTypeName(m), m.name);
+            auto* childItem = new QStandardItem(childDisplay);
+            childItem->setData(QVariant::fromValue(e.subPtr), Qt::UserRole);
+            childItem->setData(QVariant::fromValue(m.id), Qt::UserRole + 1);
+            item->appendRow(childItem);
+        }
+
         projectItem->appendRow(item);
     }
 
-    for (const auto& [n, subPtr] : enums) {
-        QString display = QStringLiteral("%1 (%2)")
-            .arg(nameOf(n), n->resolvedClassKeyword());
+    for (const auto& e : enums) {
+        int count = e.node->enumMembers.size();
+        QString display = QStringLiteral("%1 (%2) \u2014 %3")
+            .arg(nameOf(e.node), e.node->resolvedClassKeyword(),
+                 QString::number(count));
         auto* item = new QStandardItem(
             QIcon(":/vsicons/symbol-enum.svg"), display);
-        item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
-        item->setData(QVariant::fromValue(n->id), Qt::UserRole + 1);
+        item->setData(QVariant::fromValue(e.subPtr), Qt::UserRole);
+        item->setData(QVariant::fromValue(e.node->id), Qt::UserRole + 1);
         projectItem->appendRow(item);
     }
 
