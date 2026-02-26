@@ -1468,39 +1468,35 @@ static ColumnSpan headerNameSpan(const LineMeta& lm, const QString& lineText) {
 }
 
 // Type name span for struct headers (not arrays)
-// Format: "struct TYPENAME NAME {" or collapsed variants
-// For "struct NAME {" (no typename), returns invalid span
+// Named structs format as: "_MMPTE  OriginalPte {" (type column = just the name)
+// Anonymous structs format as: "union {" or "struct {" (no clickable type)
 static ColumnSpan headerTypeNameSpan(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header) return {};
-    if (lm.isArrayHeader) return {};  // Arrays use arrayHeaderTypeSpan instead
+    if (lm.isArrayHeader) return {};
 
     int ind = kFoldCol + lm.depth * 3;
     int typeW = lm.effectiveTypeW;
     int typeEnd = ind + typeW;
-
-    // Clamp to actual line content
     if (typeEnd > lineText.size()) typeEnd = lineText.size();
 
-    // Extract the type column text and check if it has a typename
-    // Format: "struct" or "struct TYPENAME"
     QString typeCol = lineText.mid(ind, typeEnd - ind).trimmed();
+    if (typeCol.isEmpty()) return {};
 
-    // Find first space (after "struct")
-    int firstSpace = typeCol.indexOf(' ');
-    if (firstSpace < 0) return {};  // Just "struct", no typename
+    // Anonymous structs use bare keywords — not clickable
+    static const QStringList kKeywords = {
+        QStringLiteral("struct"), QStringLiteral("union"), QStringLiteral("class")
+    };
+    if (kKeywords.contains(typeCol)) return {};
 
-    // If there's content after "struct ", that's the typename
-    QString typename_ = typeCol.mid(firstSpace + 1).trimmed();
-    if (typename_.isEmpty()) return {};
+    // Named struct: entire type column is the type name (e.g. "_MMPTE")
+    // Find the actual text bounds within the padded column
+    int start = ind;
+    while (start < typeEnd && lineText[start] == ' ') start++;
+    int end = start;
+    while (end < typeEnd && lineText[end] != ' ') end++;
+    if (end <= start) return {};
 
-    // Return span of the typename within the type column
-    int typenameStart = ind + firstSpace + 1;
-    // Find where the typename actually ends (skip padding)
-    int typenameEnd = typenameStart;
-    while (typenameEnd < typeEnd && lineText[typenameEnd] != ' ')
-        typenameEnd++;
-
-    return {typenameStart, typenameEnd, true};
+    return {start, end, true};
 }
 
 // Type span for array headers: "int32_t[10]" in "int32_t[10] positions {"

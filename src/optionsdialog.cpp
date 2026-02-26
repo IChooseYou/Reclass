@@ -170,6 +170,14 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     auto* generatorLayout = new QVBoxLayout(generatorPage);
     generatorLayout->setContentsMargins(0, 0, 0, 0);
     generatorLayout->setSpacing(8);
+
+    auto* cppGroup = new QGroupBox("C++ Header");
+    auto* cppLayout = new QVBoxLayout(cppGroup);
+    m_assertCheck = new QCheckBox("Emit static_assert size checks");
+    m_assertCheck->setChecked(current.generatorAsserts);
+    cppLayout->addWidget(m_assertCheck);
+    generatorLayout->addWidget(cppGroup);
+
     generatorLayout->addStretch();
 
     m_pages->addWidget(generatorPage);                   // index 2
@@ -208,6 +216,7 @@ OptionsResult OptionsDialog::result() const {
     r.safeMode = m_safeModeCheck->isChecked();
     r.autoStartMcp = m_autoMcpCheck->isChecked();
     r.refreshMs = m_refreshSpin->value();
+    r.generatorAsserts = m_assertCheck->isChecked();
     return r;
 }
 

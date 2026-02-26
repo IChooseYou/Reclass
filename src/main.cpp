@@ -267,6 +267,16 @@ public:
         // Transparent menu bar background (no CSS needed)
         if (elem == PE_PanelMenuBar)
             return;
+        // Item-view row background — patch Highlight so the row bg matches CE_ItemViewItem
+        if (elem == PE_PanelItemViewRow) {
+            if (auto* vi = qstyleoption_cast<const QStyleOptionViewItem*>(opt)) {
+                QStyleOptionViewItem patched = *vi;
+                patched.palette.setColor(QPalette::Highlight,
+                    vi->palette.color(QPalette::Mid));
+                QProxyStyle::drawPrimitive(elem, &patched, p, w);
+                return;
+            }
+        }
         QProxyStyle::drawPrimitive(elem, opt, p, w);
     }
     void drawControl(ControlElement element, const QStyleOption* opt,
@@ -1804,6 +1814,7 @@ void MainWindow::showOptionsDialog() {
     current.safeMode = QSettings("Reclass", "Reclass").value("safeMode", false).toBool();
     current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
     current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
+    current.generatorAsserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
 
     OptionsDialog dlg(current, this);
     if (dlg.exec() != QDialog::Accepted) return; // OptionsDialog doesn't apply anything. Only apply on OK
@@ -1837,6 +1848,9 @@ void MainWindow::showOptionsDialog() {
         for (auto& tab : m_tabs)
             tab.ctrl->setRefreshInterval(r.refreshMs);
     }
+
+    if (r.generatorAsserts != current.generatorAsserts)
+        QSettings("Reclass", "Reclass").setValue("generatorAsserts", r.generatorAsserts);
 }
 
 void MainWindow::setEditorFont(const QString& fontName) {
@@ -2023,11 +2037,12 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     // Generate text
     const QHash<NodeKind, QString>* aliases =
         tab.doc->typeAliases.isEmpty() ? nullptr : &tab.doc->typeAliases;
+    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
     QString text;
     if (rootId != 0)
-        text = renderCpp(tab.doc->tree, rootId, aliases);
+        text = renderCpp(tab.doc->tree, rootId, aliases, asserts);
     else
-        text = renderCppAll(tab.doc->tree, aliases);
+        text = renderCppAll(tab.doc->tree, aliases, asserts);
 
     // Scroll restoration: save if same root, reset if different
     int restoreLine = 0;
@@ -2071,7 +2086,8 @@ void MainWindow::exportCpp() {
 
     const QHash<NodeKind, QString>* aliases =
         tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
-    QString text = renderCppAll(tab->doc->tree, aliases);
+    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    QString text = renderCppAll(tab->doc->tree, aliases, asserts);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QMessageBox::warning(this, "Export Failed",

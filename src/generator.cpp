@@ -68,6 +68,7 @@ struct GenContext {
     QString         output;
     int             padCounter = 0;
     const QHash<NodeKind, QString>* typeAliases = nullptr;
+    bool            emitAsserts = false;
 
     QString uniquePadName() {
         return QStringLiteral("_pad%1").arg(padCounter++, 4, 16, QChar('0'));
@@ -104,64 +105,70 @@ static QString offsetComment(int offset) {
     return QString(kCommentMarker) + QStringLiteral("// 0x%1").arg(QString::number(offset, 16).toUpper());
 }
 
-static QString emitField(GenContext& ctx, const Node& node) {
+static QString indent(int depth) {
+    return QString(depth * 4, ' ');
+}
+
+static QString emitField(GenContext& ctx, const Node& node, int depth, int baseOffset) {
     const NodeTree& tree = ctx.tree;
+    QString ind = indent(depth);
     QString name = sanitizeIdent(node.name.isEmpty()
         ? QStringLiteral("field_%1").arg(node.offset, 2, 16, QChar('0'))
         : node.name);
-    QString oc = offsetComment(node.offset);
+    QString oc = offsetComment(baseOffset + node.offset);
 
     switch (node.kind) {
     case NodeKind::Vec2:
-        return QStringLiteral("    %1 %2[2];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + QStringLiteral("%1 %2[2];").arg(ctx.cType(NodeKind::Float), name) + oc;
     case NodeKind::Vec3:
-        return QStringLiteral("    %1 %2[3];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + QStringLiteral("%1 %2[3];").arg(ctx.cType(NodeKind::Float), name) + oc;
     case NodeKind::Vec4:
-        return QStringLiteral("    %1 %2[4];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + QStringLiteral("%1 %2[4];").arg(ctx.cType(NodeKind::Float), name) + oc;
     case NodeKind::Mat4x4:
-        return QStringLiteral("    %1 %2[4][4];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + QStringLiteral("%1 %2[4][4];").arg(ctx.cType(NodeKind::Float), name) + oc;
     case NodeKind::UTF8:
-        return QStringLiteral("    %1 %2[%3];").arg(ctx.cType(NodeKind::UTF8), name).arg(node.strLen) + oc;
+        return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF8), name).arg(node.strLen) + oc;
     case NodeKind::UTF16:
-        return QStringLiteral("    %1 %2[%3];").arg(ctx.cType(NodeKind::UTF16), name).arg(node.strLen) + oc;
+        return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF16), name).arg(node.strLen) + oc;
     case NodeKind::Pointer32: {
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
                 QString target = ctx.structName(tree.nodes[refIdx]);
-                return QStringLiteral("    %1 %2;").arg(ctx.cType(NodeKind::Pointer32), name) +
-                    offsetComment(node.offset).replace(QStringLiteral("//"), QStringLiteral("// -> %1*").arg(target));
+                return ind + QStringLiteral("struct %1* %2;").arg(target, name) + oc;
             }
         }
-        return QStringLiteral("    %1 %2;").arg(ctx.cType(NodeKind::Pointer32), name) + oc;
+        return ind + QStringLiteral("%1 %2;").arg(ctx.cType(NodeKind::Pointer32), name) + oc;
     }
     case NodeKind::Pointer64: {
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
                 QString target = ctx.structName(tree.nodes[refIdx]);
-                return QStringLiteral("    %1* %2;").arg(target, name) + oc;
+                return ind + QStringLiteral("struct %1* %2;").arg(target, name) + oc;
             }
         }
-        return QStringLiteral("    void* %1;").arg(name) + oc;
+        return ind + QStringLiteral("void* %1;").arg(name) + oc;
     }
     case NodeKind::FuncPtr32:
-        return QStringLiteral("    void (*%1)();").arg(name) + oc;
+        return ind + QStringLiteral("void (*%1)();").arg(name) + oc;
     case NodeKind::FuncPtr64:
-        return QStringLiteral("    void (*%1)();").arg(name) + oc;
+        return ind + QStringLiteral("void (*%1)();").arg(name) + oc;
     default:
-        return QStringLiteral("    %1 %2;").arg(ctx.cType(node.kind), name) + oc;
+        return ind + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name) + oc;
     }
 }
 
-// ── Emit struct body (fields + padding) ──
+// ── Emit struct body (fields + padding) — Vergilius-style ──
 
-static void emitStructBody(GenContext& ctx, uint64_t structId) {
+static void emitStructBody(GenContext& ctx, uint64_t structId,
+                           bool isUnion, int depth, int baseOffset) {
     const NodeTree& tree = ctx.tree;
     int idx = tree.indexOfId(structId);
     if (idx < 0) return;
 
     int structSize = tree.structSpan(structId, &ctx.childMap);
+    QString ind = indent(depth);
 
     QVector<int> children = ctx.childMap.value(structId);
     std::sort(children.begin(), children.end(), [&](int a, int b) {
@@ -169,13 +176,12 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
     });
 
     // Helper: emit a padding/hex run as a single collapsed byte array
-    auto emitPadRun = [&](int offset, int size) {
+    auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
-        ctx.output += QStringLiteral("    %1 %2[0x%3];%4\n")
-            .arg(QStringLiteral("uint8_t"))
+        ctx.output += ind + QStringLiteral("uint8_t %1[0x%2];%3\n")
             .arg(ctx.uniquePadName())
             .arg(QString::number(size, 16).toUpper())
-            .arg(offsetComment(offset));
+            .arg(offsetComment(baseOffset + relOffset));
     };
 
     int cursor = 0;
@@ -189,13 +195,15 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
         else
             childSize = child.byteSize();
 
-        // Gap before this field
-        if (child.offset > cursor)
-            emitPadRun(cursor, child.offset - cursor);
-        else if (child.offset < cursor)
-            ctx.output += QStringLiteral("    // WARNING: overlap at offset 0x%1 (previous field ends at 0x%2)\n")
-                .arg(QString::number(child.offset, 16).toUpper())
-                .arg(QString::number(cursor, 16).toUpper());
+        // Gap/overlap handling (skip for unions)
+        if (!isUnion) {
+            if (child.offset > cursor)
+                emitPadRun(cursor, child.offset - cursor);
+            else if (child.offset < cursor)
+                ctx.output += ind + QStringLiteral("// WARNING: overlap at offset 0x%1 (previous field ends at 0x%2)\n")
+                    .arg(QString::number(baseOffset + child.offset, 16).toUpper())
+                    .arg(QString::number(baseOffset + cursor, 16).toUpper());
+        }
 
         // Collapse consecutive hex nodes into a single padding array
         if (isHexNode(child.kind)) {
@@ -206,8 +214,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
                 const Node& next = tree.nodes[children[j]];
                 if (!isHexNode(next.kind)) break;
                 int nextSize = next.byteSize();
-                // Allow gaps within the run (they become part of the pad)
-                if (next.offset < runEnd) break;  // overlap — stop merging
+                if (next.offset < runEnd) break;
                 runEnd = next.offset + nextSize;
                 j++;
             }
@@ -219,10 +226,31 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
 
         // Emit the field
         if (child.kind == NodeKind::Struct) {
-            emitStruct(ctx, child.id);
-            QString typeName = ctx.structName(child);
-            QString fieldName = sanitizeIdent(child.name);
-            ctx.output += QStringLiteral("    %1 %2;%3\n").arg(typeName, fieldName, offsetComment(child.offset));
+            bool isAnonymous = child.structTypeName.isEmpty();
+
+            if (isAnonymous) {
+                // Inline anonymous struct/union
+                QString kw = child.resolvedClassKeyword();
+                ctx.output += ind + kw + QStringLiteral("\n");
+                ctx.output += ind + QStringLiteral("{\n");
+                bool childIsUnion = (kw == QStringLiteral("union"));
+                emitStructBody(ctx, child.id, childIsUnion, depth + 1,
+                               baseOffset + child.offset);
+                QString fieldName = child.name.isEmpty()
+                    ? QString() : QStringLiteral(" ") + sanitizeIdent(child.name);
+                ctx.output += ind + QStringLiteral("}") + fieldName + QStringLiteral(";")
+                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+            } else {
+                // Named struct — reference by name with struct keyword prefix
+                QString kw = child.resolvedClassKeyword();
+                if (kw == QStringLiteral("enum") && child.enumMembers.isEmpty())
+                    kw = QStringLiteral("struct");
+                QString typeName = sanitizeIdent(child.structTypeName);
+                QString fieldName = sanitizeIdent(child.name);
+                ctx.output += ind + kw + QStringLiteral(" ") + typeName
+                    + QStringLiteral(" ") + fieldName + QStringLiteral(";")
+                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+            }
         } else if (child.kind == NodeKind::Array) {
             QVector<int> arrayKids = ctx.childMap.value(child.id);
             bool hasStructChild = false;
@@ -231,7 +259,6 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
             for (int ak : arrayKids) {
                 if (tree.nodes[ak].kind == NodeKind::Struct) {
                     hasStructChild = true;
-                    emitStruct(ctx, tree.nodes[ak].id);
                     elemTypeName = ctx.structName(tree.nodes[ak]);
                     break;
                 }
@@ -239,14 +266,16 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
 
             QString fieldName = sanitizeIdent(child.name);
             if (hasStructChild && !elemTypeName.isEmpty()) {
-                ctx.output += QStringLiteral("    %1 %2[%3];%4\n")
-                    .arg(elemTypeName, fieldName).arg(child.arrayLen).arg(offsetComment(child.offset));
+                ctx.output += ind + QStringLiteral("struct %1 %2[%3];%4\n")
+                    .arg(elemTypeName, fieldName).arg(child.arrayLen)
+                    .arg(offsetComment(baseOffset + child.offset));
             } else {
-                ctx.output += QStringLiteral("    %1 %2[%3];%4\n")
-                    .arg(ctx.cType(child.elementKind), fieldName).arg(child.arrayLen).arg(offsetComment(child.offset));
+                ctx.output += ind + QStringLiteral("%1 %2[%3];%4\n")
+                    .arg(ctx.cType(child.elementKind), fieldName).arg(child.arrayLen)
+                    .arg(offsetComment(baseOffset + child.offset));
             }
         } else {
-            ctx.output += emitField(ctx, child) + QStringLiteral("\n");
+            ctx.output += emitField(ctx, child, depth, baseOffset) + QStringLiteral("\n");
         }
 
         int childEnd = child.offset + childSize;
@@ -254,12 +283,12 @@ static void emitStructBody(GenContext& ctx, uint64_t structId) {
         i++;
     }
 
-    // Tail padding
-    if (cursor < structSize)
+    // Tail padding (skip for unions)
+    if (!isUnion && cursor < structSize)
         emitPadRun(cursor, structSize - cursor);
 }
 
-// ── Emit a complete struct definition ──
+// ── Emit a complete top-level struct definition (Vergilius-style) ──
 
 static void emitStruct(GenContext& ctx, uint64_t structId) {
     if (ctx.emittedIds.contains(structId)) return;
@@ -275,52 +304,17 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
         return;
     }
 
-    // For arrays, we don't emit a top-level struct — the array itself
-    // is a field inside its parent.  But we do emit struct element types.
     if (node.kind == NodeKind::Array) {
-        QVector<int> kids = ctx.childMap.value(structId);
-        for (int ki : kids) {
-            if (ctx.tree.nodes[ki].kind == NodeKind::Struct)
-                emitStruct(ctx, ctx.tree.nodes[ki].id);
-        }
         ctx.visiting.remove(structId);
         return;
     }
 
-    // Deduplicate by struct type name (different nodes may share the same type)
+    // Deduplicate by struct type name
     QString typeName = ctx.structName(node);
     if (ctx.emittedTypeNames.contains(typeName)) {
         ctx.emittedIds.insert(structId);
         ctx.visiting.remove(structId);
         return;
-    }
-
-    // Emit nested struct types first (dependency order)
-    QVector<int> children = ctx.childMap.value(structId);
-    for (int ci : children) {
-        const Node& child = ctx.tree.nodes[ci];
-        if (child.kind == NodeKind::Struct)
-            emitStruct(ctx, child.id);
-        else if (child.kind == NodeKind::Array) {
-            QVector<int> arrayKids = ctx.childMap.value(child.id);
-            for (int ak : arrayKids) {
-                if (ctx.tree.nodes[ak].kind == NodeKind::Struct)
-                    emitStruct(ctx, ctx.tree.nodes[ak].id);
-            }
-        }
-        // Forward-declare pointer target types if they're outside this subtree
-        if (child.kind == NodeKind::Pointer64 && child.refId != 0) {
-            int refIdx = ctx.tree.indexOfId(child.refId);
-            if (refIdx >= 0 && !ctx.emittedIds.contains(child.refId)
-                && !ctx.forwardDeclared.contains(child.refId)) {
-                QString fwdName = ctx.structName(ctx.tree.nodes[refIdx]);
-                QString fwdKw = ctx.tree.nodes[refIdx].resolvedClassKeyword();
-                if (fwdKw == QStringLiteral("enum") && ctx.tree.nodes[refIdx].enumMembers.isEmpty())
-                    fwdKw = QStringLiteral("struct");
-                ctx.output += QStringLiteral("%1 %2;\n").arg(fwdKw, fwdName);
-                ctx.forwardDeclared.insert(child.refId);
-            }
-        }
     }
 
     ctx.emittedIds.insert(structId);
@@ -342,15 +336,21 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
         return;
     }
 
-    if (kw == QStringLiteral("enum")) kw = QStringLiteral("struct");  // enum without members: fallback
-    ctx.output += QStringLiteral("%1 %2 {\n").arg(kw, typeName);
+    if (kw == QStringLiteral("enum")) kw = QStringLiteral("struct");
 
-    emitStructBody(ctx, structId);
+    // Size comment (Vergilius-style)
+    ctx.output += QStringLiteral("//0x%1 bytes (sizeof)\n")
+        .arg(QString::number(structSize, 16).toUpper());
+    ctx.output += kw + QStringLiteral(" ") + typeName + QStringLiteral("\n{\n");
+
+    emitStructBody(ctx, structId, kw == QStringLiteral("union"), 1, 0);
 
     ctx.output += QStringLiteral("};\n");
-    ctx.output += QStringLiteral("static_assert(sizeof(%1) == 0x%2, \"Size mismatch for %1\");\n\n")
-        .arg(typeName)
-        .arg(QString::number(structSize, 16).toUpper());
+    if (ctx.emitAsserts)
+        ctx.output += QStringLiteral("static_assert(sizeof(%1) == 0x%2, \"Size mismatch for %1\");\n")
+            .arg(typeName)
+            .arg(QString::number(structSize, 16).toUpper());
+    ctx.output += QStringLiteral("\n");
 
     ctx.visiting.remove(structId);
 }
@@ -404,14 +404,15 @@ static QString alignComments(const QString& raw) {
 // ── Public API ──
 
 QString renderCpp(const NodeTree& tree, uint64_t rootStructId,
-                  const QHash<NodeKind, QString>* typeAliases) {
+                  const QHash<NodeKind, QString>* typeAliases,
+                  bool emitAsserts) {
     int idx = tree.indexOfId(rootStructId);
     if (idx < 0) return {};
 
     const Node& root = tree.nodes[idx];
     if (root.kind != NodeKind::Struct) return {};
 
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
 
     ctx.output += QStringLiteral("#pragma once\n\n");
 
@@ -421,8 +422,9 @@ QString renderCpp(const NodeTree& tree, uint64_t rootStructId,
 }
 
 QString renderCppAll(const NodeTree& tree,
-                     const QHash<NodeKind, QString>* typeAliases) {
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases};
+                     const QHash<NodeKind, QString>* typeAliases,
+                     bool emitAsserts) {
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
 
     ctx.output += QStringLiteral("#pragma once\n\n");
 

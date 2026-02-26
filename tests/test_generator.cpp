@@ -46,27 +46,37 @@ private:
 
 private slots:
 
-    // ── Basic struct generation ──
+    // ── Basic struct generation (Vergilius-style) ──
 
     void testSimpleStruct() {
         auto tree = makeSimpleStruct();
         uint64_t rootId = tree.nodes[0].id;
-        QString result = rcx::renderCpp(tree, rootId);
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true);
 
         // Header
         QVERIFY(result.contains("#pragma once"));
-        QVERIFY(!result.contains("#include <cstdint>"));
-        QVERIFY(!result.contains("#pragma pack"));
 
-        // Struct definition
-        QVERIFY(result.contains("struct Player {"));
+        // Size comment (Vergilius-style)
+        QVERIFY(result.contains("//0x10 bytes (sizeof)"));
+
+        // Struct definition (brace on new line)
+        QVERIFY(result.contains("struct Player\n{"));
         QVERIFY(result.contains("int32_t health;"));
         QVERIFY(result.contains("float speed;"));
         QVERIFY(result.contains("uint64_t id;"));
         QVERIFY(result.contains("};"));
 
-        // static_assert - struct is 16 bytes (0+4 + 4+4 + 8+8 = 16)
+        // Offset comments
+        QVERIFY(result.contains("// 0x0"));
+        QVERIFY(result.contains("// 0x4"));
+        QVERIFY(result.contains("// 0x8"));
+
+        // static_assert
         QVERIFY(result.contains("static_assert(sizeof(Player) == 0x10"));
+
+        // Without emitAsserts, static_assert should not appear
+        QString noAsserts = rcx::renderCpp(tree, rootId);
+        QVERIFY(!noAsserts.contains("static_assert"));
     }
 
     // ── Padding gap detection ──
@@ -134,7 +144,7 @@ private slots:
         f2.offset = 16;
         tree.addNode(f2);
 
-        QString result = rcx::renderCpp(tree, rootId);
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true);
 
         // Gap between offset 1 and 16 = 15 bytes padding
         QVERIFY(result.contains("[0xF]"));
@@ -175,7 +185,47 @@ private slots:
         QVERIFY(result.contains("WARNING: overlap"));
     }
 
-    // ── Nested struct ──
+    // ── Union members should NOT produce overlap warnings ──
+
+    void testUnionNoOverlapWarning() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "TestUnion";
+        root.structTypeName = "TestUnion";
+        root.classKeyword = "union";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Two union members at offset 0
+        rcx::Node f1;
+        f1.kind = rcx::NodeKind::UInt64;
+        f1.name = "wide";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        rcx::Node f2;
+        f2.kind = rcx::NodeKind::UInt32;
+        f2.name = "narrow";
+        f2.parentId = rootId;
+        f2.offset = 0;
+        tree.addNode(f2);
+
+        QString result = rcx::renderCpp(tree, rootId);
+
+        // Vergilius-style: union keyword, brace on new line
+        QVERIFY(result.contains("union TestUnion\n{"));
+        QVERIFY(result.contains("uint64_t wide;"));
+        QVERIFY(result.contains("uint32_t narrow;"));
+        // Union members overlap by design — no warning
+        QVERIFY(!result.contains("WARNING"));
+        // No padding in unions
+        QVERIFY(!result.contains("_pad"));
+    }
+
+    // ── Nested struct: named sub-type referenced by name ──
 
     void testNestedStruct() {
         rcx::NodeTree tree;
@@ -222,23 +272,14 @@ private slots:
         f2.offset = 8;
         tree.addNode(f2);
 
-        QString result = rcx::renderCpp(tree, outerId);
+        QString result = rcx::renderCpp(tree, outerId, nullptr, true);
 
-        // Inner struct should be defined before outer
-        int innerPos = result.indexOf("struct Vec2f {");
-        int outerPos = result.indexOf("struct Outer {");
-        QVERIFY(innerPos >= 0);
-        QVERIFY(outerPos >= 0);
-        QVERIFY(innerPos < outerPos);
-
-        // Inner struct fields
-        QVERIFY(result.contains("float x;"));
-        QVERIFY(result.contains("float y;"));
-        QVERIFY(result.contains("static_assert(sizeof(Vec2f) == 0x8"));
-
-        // Outer struct uses inner type
-        QVERIFY(result.contains("Vec2f pos;"));
+        // Vergilius-style: named sub-types referenced by name with struct prefix
+        // No separate top-level definition for Vec2f in renderCpp
+        QVERIFY(result.contains("struct Outer\n{"));
+        QVERIFY(result.contains("struct Vec2f pos;"));
         QVERIFY(result.contains("int32_t score;"));
+        QVERIFY(result.contains("static_assert(sizeof(Outer) == 0xC"));
     }
 
     // ── Primitive array ──
@@ -325,15 +366,12 @@ private slots:
 
         QString result = rcx::renderCpp(tree, mainId);
 
-        // ptr64 with target → real C++ pointer
-        QVERIFY(result.contains("TargetData* pTarget;"));
+        // Vergilius-style: struct prefix on pointer targets
+        QVERIFY(result.contains("struct TargetData* pTarget;"));
         // ptr64 without target → void*
         QVERIFY(result.contains("void* pVoid;"));
-        // ptr32 with target → uint32_t with comment
-        QVERIFY(result.contains("uint32_t pTarget32;"));
-        QVERIFY(result.contains("-> TargetData*"));
-        // Forward declaration for TargetData
-        QVERIFY(result.contains("struct TargetData;"));
+        // ptr32 with target → struct X* (Vergilius-style, no forward decl needed)
+        QVERIFY(result.contains("struct TargetData* pTarget32;"));
     }
 
     // ── Vector and matrix types ──
@@ -457,10 +495,11 @@ private slots:
         bf.offset = 0;
         tree.addNode(bf);
 
-        QString result = rcx::renderCppAll(tree);
+        QString result = rcx::renderCppAll(tree, nullptr, true);
 
-        QVERIFY(result.contains("struct StructA {"));
-        QVERIFY(result.contains("struct StructB {"));
+        // Vergilius-style: brace on new line
+        QVERIFY(result.contains("struct StructA\n{"));
+        QVERIFY(result.contains("struct StructB\n{"));
         QVERIFY(result.contains("uint32_t valueA;"));
         QVERIFY(result.contains("uint64_t valueB;"));
         QVERIFY(result.contains("static_assert(sizeof(StructA) == 0x4"));
@@ -508,9 +547,9 @@ private slots:
         root.parentId = 0;
         tree.addNode(root);
 
-        QString result = rcx::renderCpp(tree, tree.nodes[0].id);
+        QString result = rcx::renderCpp(tree, tree.nodes[0].id, nullptr, true);
 
-        QVERIFY(result.contains("struct Empty {"));
+        QVERIFY(result.contains("struct Empty\n{"));
         QVERIFY(result.contains("};"));
         QVERIFY(result.contains("static_assert(sizeof(Empty) == 0x0"));
     }
@@ -537,7 +576,7 @@ private slots:
         QString result = rcx::renderCpp(tree, rootId);
 
         // Spaces and dashes should be replaced with underscores
-        QVERIFY(result.contains("struct my_struct_name {"));
+        QVERIFY(result.contains("struct my_struct_name\n{"));
         QVERIFY(result.contains("uint32_t field_with_spaces;"));
     }
 
@@ -546,7 +585,7 @@ private slots:
     void testExportToFile() {
         auto tree = makeSimpleStruct();
         uint64_t rootId = tree.nodes[0].id;
-        QString text = rcx::renderCpp(tree, rootId);
+        QString text = rcx::renderCpp(tree, rootId, nullptr, true);
 
         QTemporaryFile tmpFile;
         tmpFile.setAutoRemove(true);
@@ -561,7 +600,7 @@ private slots:
 
         QString readStr = QString::fromUtf8(readBack);
         QVERIFY(readStr.contains("#pragma once"));
-        QVERIFY(readStr.contains("struct Player {"));
+        QVERIFY(readStr.contains("struct Player\n{"));
         QVERIFY(readStr.contains("static_assert"));
     }
 
@@ -582,7 +621,7 @@ private slots:
         QVERIFY(!result.contains("struct "));
     }
 
-    // ── Deeply nested structs ──
+    // ── Deeply nested structs: referenced by name ──
 
     void testDeeplyNested() {
         rcx::NodeTree tree;
@@ -623,20 +662,101 @@ private slots:
 
         QString result = rcx::renderCpp(tree, aId);
 
-        // TypeC defined first, then TypeB, then TypeA
-        int cPos = result.indexOf("struct TypeC {");
-        int bPos = result.indexOf("struct TypeB {");
-        int aPos = result.indexOf("struct TypeA {");
-        QVERIFY(cPos >= 0);
-        QVERIFY(bPos >= 0);
-        QVERIFY(aPos >= 0);
-        QVERIFY(cPos < bPos);
-        QVERIFY(bPos < aPos);
+        // Vergilius-style: named sub-types referenced by name with struct prefix
+        // Only the root type gets a top-level definition
+        QVERIFY(result.contains("struct TypeA\n{"));
+        QVERIFY(result.contains("struct TypeB b;"));
+    }
 
-        // TypeA contains TypeB, TypeB contains TypeC
-        QVERIFY(result.contains("TypeB b;"));
-        QVERIFY(result.contains("TypeC c;"));
-        QVERIFY(result.contains("uint8_t val;"));
+    // ── Inline anonymous struct/union ──
+
+    void testInlineAnonymousStruct() {
+        rcx::NodeTree tree;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "_MMPFN";
+        root.structTypeName = "_MMPFN";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Anonymous union at offset 0 (no structTypeName)
+        rcx::Node anonUnion;
+        anonUnion.kind = rcx::NodeKind::Struct;
+        anonUnion.name = "";
+        anonUnion.structTypeName = "";
+        anonUnion.classKeyword = "union";
+        anonUnion.parentId = rootId;
+        anonUnion.offset = 0;
+        int ui = tree.addNode(anonUnion);
+        uint64_t unionId = tree.nodes[ui].id;
+
+        // Union member 1: named struct reference
+        rcx::Node listEntry;
+        listEntry.kind = rcx::NodeKind::Struct;
+        listEntry.name = "ListEntry";
+        listEntry.structTypeName = "_LIST_ENTRY";
+        listEntry.parentId = unionId;
+        listEntry.offset = 0;
+        tree.addNode(listEntry);
+
+        // Union member 2: a simple field
+        rcx::Node flags;
+        flags.kind = rcx::NodeKind::UInt64;
+        flags.name = "Flags";
+        flags.parentId = unionId;
+        flags.offset = 0;
+        tree.addNode(flags);
+
+        // Field after the anonymous union
+        rcx::Node pfn;
+        pfn.kind = rcx::NodeKind::UInt64;
+        pfn.name = "PfnCount";
+        pfn.parentId = rootId;
+        pfn.offset = 0x10;
+        tree.addNode(pfn);
+
+        QString result = rcx::renderCpp(tree, rootId);
+
+        // Anonymous union should be inlined, not a top-level anon_XXXX
+        QVERIFY(!result.contains("anon_"));
+        QVERIFY(result.contains("union\n    {"));
+        QVERIFY(result.contains("struct _LIST_ENTRY ListEntry;"));
+        QVERIFY(result.contains("uint64_t Flags;"));
+        QVERIFY(result.contains("};"));
+        QVERIFY(result.contains("uint64_t PfnCount;"));
+    }
+
+    // ── Opaque types: no stub definition ──
+
+    void testOpaqueTypeNoStub() {
+        rcx::NodeTree tree;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Container";
+        root.structTypeName = "Container";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Named struct child with no children of its own (opaque reference)
+        rcx::Node opaque;
+        opaque.kind = rcx::NodeKind::Struct;
+        opaque.name = "entry";
+        opaque.structTypeName = "_LIST_ENTRY";
+        opaque.parentId = rootId;
+        opaque.offset = 0;
+        tree.addNode(opaque);
+
+        QString result = rcx::renderCpp(tree, rootId);
+
+        // Should reference by name with struct prefix, no stub body
+        QVERIFY(result.contains("struct _LIST_ENTRY entry;"));
+        // Should NOT have a separate _LIST_ENTRY definition with padding
+        QVERIFY(!result.contains("struct _LIST_ENTRY\n{"));
+        QVERIFY(!result.contains("uint8_t _pad"));
     }
 };
 

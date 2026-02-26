@@ -2514,6 +2514,48 @@ private slots:
                  << QString("gapRight=%1 gapBottom=%2 (font-independent)")
                     .arg(gapR1).arg(gapB1);
     }
+
+    // ── Test: hovering struct type name shows PointingHand cursor ──
+    // Regression: headerTypeNameSpan returned invalid for named structs
+    // because it assumed "struct TYPENAME" format, but named structs are
+    // formatted as just "TYPENAME" (e.g. "_STRING64 CSDVersion").
+    void testStructTypeClickable() {
+        m_editor->applyDocument(m_result);
+        QApplication::processEvents();
+
+        // Find a named struct header (e.g. _STRING64 CSDVersion from makeTestTree)
+        int headerLine = -1;
+        for (int i = 0; i < m_result.meta.size(); i++) {
+            const auto& lm = m_result.meta[i];
+            if (lm.lineKind == LineKind::Header && lm.foldHead
+                && lm.nodeKind == NodeKind::Struct && !lm.isArrayHeader) {
+                headerLine = i;
+                break;
+            }
+        }
+        QVERIFY2(headerLine >= 0, "Should have a struct header");
+
+        const LineMeta* lm = m_editor->metaForLine(headerLine);
+        QVERIFY(lm);
+
+        // Scroll to ensure line is visible
+        m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_ENSUREVISIBLE, (unsigned long)headerLine);
+        m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_GOTOLINE, (unsigned long)headerLine);
+        QApplication::processEvents();
+
+        // The type column starts at kFoldCol + depth*3
+        int typeStart = 3 + lm->depth * 3;  // kFoldCol = 3
+
+        // Hover over type column — should show PointingHandCursor
+        // (Before fix: showed ArrowCursor because headerTypeNameSpan returned invalid)
+        QPoint typePos = colToViewport(m_editor->scintilla(), headerLine, typeStart + 1);
+        QVERIFY2(typePos.y() > 0, "Header line should be visible");
+        sendMouseMove(m_editor->scintilla()->viewport(), typePos);
+        QApplication::processEvents();
+        QCOMPARE(viewportCursor(m_editor), Qt::PointingHandCursor);
+    }
 };
 
 QTEST_MAIN(TestEditor)

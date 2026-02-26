@@ -4,6 +4,7 @@
 #include "generator.h"
 #include "mainwindow.h"
 #include <QCoreApplication>
+#include <QSettings>
 #include <QDebug>
 #include <cstring>
 
@@ -1094,15 +1095,16 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
     if (action == "export_cpp") {
         if (!doc) return makeTextResult("No active tab", true);
         const QHash<NodeKind, QString>* aliases = doc->typeAliases.isEmpty() ? nullptr : &doc->typeAliases;
+        bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
         QString code;
         if (!nodeIdStr.isEmpty()) {
             // Per-struct export
             uint64_t nid = nodeIdStr.toULongLong();
-            code = renderCpp(doc->tree, nid, aliases);
+            code = renderCpp(doc->tree, nid, aliases, asserts);
             if (code.isEmpty())
                 return makeTextResult("Node not found or not a struct: " + nodeIdStr, true);
         } else {
-            code = renderCppAll(doc->tree, aliases);
+            code = renderCppAll(doc->tree, aliases, asserts);
         }
         // Truncate if too large (64 KB limit)
         if (code.size() > 65536) {
