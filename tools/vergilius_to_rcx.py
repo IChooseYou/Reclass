@@ -556,12 +556,10 @@ def postprocess_bitfields(nodes):
     ids_to_remove = set()
 
     for node in nodes:
-        # Only process anonymous struct nodes (not unions, not named types)
+        # Process struct nodes (not unions, not already bitfields, not named types)
         if node.get('kind') != 'Struct':
             continue
         if node.get('classKeyword') in ('union', 'bitfield'):
-            continue
-        if node.get('name', '') != '':
             continue
         if node.get('structTypeName', ''):
             continue

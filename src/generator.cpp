@@ -101,7 +101,9 @@ static void emitStruct(GenContext& ctx, uint64_t structId);
 
 static const QChar kCommentMarker = QChar(0x01);
 
-static QString offsetComment(int offset) {
+static QString offsetComment(int offset, bool isSizeof = false) {
+    if (isSizeof)
+        return QString(kCommentMarker) + QStringLiteral("// sizeof 0x%1").arg(QString::number(offset, 16).toUpper());
     return QString(kCommentMarker) + QStringLiteral("// 0x%1").arg(QString::number(offset, 16).toUpper());
 }
 
@@ -226,6 +228,27 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
 
         // Emit the field
         if (child.kind == NodeKind::Struct) {
+            // Bitfield container — emit inline bitfield members
+            if (child.classKeyword == QStringLiteral("bitfield")
+                && !child.bitfieldMembers.isEmpty()) {
+                QString bfType = ctx.cType(child.elementKind);
+                if (bfType.isEmpty()) bfType = QStringLiteral("uint32_t");
+                QString fieldName = child.name.isEmpty()
+                    ? QString() : QStringLiteral(" ") + sanitizeIdent(child.name);
+                ctx.output += ind + QStringLiteral("struct\n");
+                ctx.output += ind + QStringLiteral("{\n");
+                QString bfInd = indent(depth + 1);
+                for (const auto& m : child.bitfieldMembers) {
+                    ctx.output += bfInd + bfType + QStringLiteral(" ")
+                        + sanitizeIdent(m.name) + QStringLiteral(" : ")
+                        + QString::number(m.bitWidth) + QStringLiteral(";")
+                        + offsetComment(baseOffset + child.offset)
+                        + QStringLiteral("\n");
+                }
+                ctx.output += ind + QStringLiteral("}") + fieldName + QStringLiteral(";")
+                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+            } else {
+
             bool isAnonymous = child.structTypeName.isEmpty();
 
             if (isAnonymous) {
@@ -251,6 +274,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
                     + QStringLiteral(" ") + fieldName + QStringLiteral(";")
                     + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
             }
+            } // end bitfield else
         } else if (child.kind == NodeKind::Array) {
             QVector<int> arrayKids = ctx.childMap.value(child.id);
             bool hasStructChild = false;
@@ -338,14 +362,13 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
 
     if (kw == QStringLiteral("enum")) kw = QStringLiteral("struct");
 
-    // Size comment (Vergilius-style)
-    ctx.output += QStringLiteral("//0x%1 bytes (sizeof)\n")
-        .arg(QString::number(structSize, 16).toUpper());
     ctx.output += kw + QStringLiteral(" ") + typeName + QStringLiteral("\n{\n");
 
     emitStructBody(ctx, structId, kw == QStringLiteral("union"), 1, 0);
 
-    ctx.output += QStringLiteral("};\n");
+    ctx.output += QStringLiteral("};")
+        + offsetComment(structSize, true)
+        + QStringLiteral("\n");
     if (ctx.emitAsserts)
         ctx.output += QStringLiteral("static_assert(sizeof(%1) == 0x%2, \"Size mismatch for %1\");\n")
             .arg(typeName)

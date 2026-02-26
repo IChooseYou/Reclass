@@ -56,8 +56,8 @@ private slots:
         // Header
         QVERIFY(result.contains("#pragma once"));
 
-        // Size comment (Vergilius-style)
-        QVERIFY(result.contains("//0x10 bytes (sizeof)"));
+        // Size comment on closing brace
+        QVERIFY(result.contains("// sizeof 0x10"));
 
         // Struct definition (brace on new line)
         QVERIFY(result.contains("struct Player\n{"));

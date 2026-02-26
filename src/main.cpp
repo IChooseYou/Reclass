@@ -251,9 +251,9 @@ public:
         // Kill the 1px frame margin Fusion reserves around QMenu contents
         if (metric == PM_MenuPanelWidth)
             return 0;
-        // Kill the separator between dock widgets / central widget
+        // Thin draggable separator between dock widgets / central widget
         if (metric == PM_DockWidgetSeparatorExtent)
-            return 0;
+            return 1;
         return QProxyStyle::pixelMetric(metric, opt, w);
     }
     void drawPrimitive(PrimitiveElement elem, const QStyleOption* opt,
@@ -1050,10 +1050,64 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         QSettings("Reclass", "Reclass").value("relativeOffsets", true).toBool());
     pane.tabWidget->addTab(pane.editor, "Reclass");     // index 0
 
-    // Create per-pane rendered C++ view
+    // Create per-pane rendered C++ view with find bar
+    pane.renderedContainer = new QWidget;
+    auto* rvLayout = new QVBoxLayout(pane.renderedContainer);
+    rvLayout->setContentsMargins(0, 0, 0, 0);
+    rvLayout->setSpacing(0);
     pane.rendered = new QsciScintilla;
     setupRenderedSci(pane.rendered);
-    pane.tabWidget->addTab(pane.rendered, "C/C++");     // index 1
+    rvLayout->addWidget(pane.rendered);
+
+    // Find bar (hidden by default)
+    pane.findBar = new QLineEdit;
+    pane.findBar->setPlaceholderText("Find...");
+    pane.findBar->setVisible(false);
+    const auto& fbTheme = ThemeManager::instance().current();
+    pane.findBar->setStyleSheet(
+        QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+                        " padding: 4px 8px; font-size: 13px; }")
+            .arg(fbTheme.backgroundAlt.name())
+            .arg(fbTheme.text.name())
+            .arg(fbTheme.border.name()));
+    rvLayout->addWidget(pane.findBar);
+
+    // Ctrl+F to show find bar
+    QsciScintilla* sci = pane.rendered;
+    QLineEdit* fb = pane.findBar;
+    auto* findAction = new QAction(pane.renderedContainer);
+    findAction->setShortcut(QKeySequence::Find);
+    findAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    pane.renderedContainer->addAction(findAction);
+    connect(findAction, &QAction::triggered, fb, [fb, sci]() {
+        fb->setVisible(true);
+        fb->setFocus();
+        fb->selectAll();
+    });
+
+    // Escape to hide find bar
+    auto* escAction = new QAction(fb);
+    escAction->setShortcut(QKeySequence(Qt::Key_Escape));
+    escAction->setShortcutContext(Qt::WidgetShortcut);
+    fb->addAction(escAction);
+    connect(escAction, &QAction::triggered, fb, [fb, sci]() {
+        fb->setVisible(false);
+        sci->setFocus();
+    });
+
+    // Search on text change and Enter
+    connect(fb, &QLineEdit::textChanged, sci, [sci](const QString& text) {
+        if (text.isEmpty()) return;
+        sci->findFirst(text, false, false, false, true, true, 0, 0);
+    });
+    connect(fb, &QLineEdit::returnPressed, sci, [sci, fb]() {
+        QString text = fb->text();
+        if (text.isEmpty()) return;
+        if (!sci->findNext())
+            sci->findFirst(text, false, false, false, true, true, 0, 0);
+    });
+
+    pane.tabWidget->addTab(pane.renderedContainer, "C/C++");     // index 1
 
     pane.tabWidget->setCurrentIndex(0);
     pane.viewMode = VM_Reclass;
@@ -1668,7 +1722,7 @@ void MainWindow::toggleMcp() {
 void MainWindow::applyTheme(const Theme& theme) {
     applyGlobalTheme(theme);
 
-    // Separator killed via PM_DockWidgetSeparatorExtent in MenuBarStyle
+    // Dock separator is 1px via PM_DockWidgetSeparatorExtent in MenuBarStyle
 
     // Custom title bar
     m_titleBar->applyTheme(theme);
@@ -2032,6 +2086,20 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
         selId &= ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
                    | kMemberBit | kMemberSubMask);
         rootId = findRootStructForNode(tab.doc->tree, selId);
+    }
+
+    // Fall back to the controller's current view root (set by double-click / navigation)
+    if (rootId == 0)
+        rootId = findRootStructForNode(tab.doc->tree, tab.ctrl->viewRootId());
+
+    // Last resort: first root-level struct in the project
+    if (rootId == 0) {
+        for (const auto& n : tab.doc->tree.nodes) {
+            if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct) {
+                rootId = n.id;
+                break;
+            }
+        }
     }
 
     // Generate text
@@ -2717,19 +2785,32 @@ void MainWindow::createWorkspaceDock() {
         int ni = tree.indexOfId(structId);
         if (ni < 0) return;
 
+        auto& tab = m_tabs[sub];
+
         // Child member item: navigate to parent struct, then scroll to this member
         uint64_t parentId = tree.nodes[ni].parentId;
         if (parentId != 0) {
             int pi = tree.indexOfId(parentId);
             if (pi >= 0) tree.nodes[pi].collapsed = false;
-            m_tabs[sub].ctrl->setViewRootId(parentId);
-            m_tabs[sub].ctrl->scrollToNodeId(structId);
+            tab.ctrl->setViewRootId(parentId);
+            tab.ctrl->scrollToNodeId(structId);
         } else {
             // Root type/enum: navigate directly
             tree.nodes[ni].collapsed = false;
-            m_tabs[sub].ctrl->setViewRootId(structId);
-            m_tabs[sub].ctrl->scrollToNodeId(structId);
+            tab.ctrl->setViewRootId(structId);
+            tab.ctrl->scrollToNodeId(structId);
         }
+
+        // If active pane is in C/C++ mode, refresh after navigation settles
+        QTimer::singleShot(0, this, [this, sub]() {
+            if (!m_tabs.contains(sub)) return;
+            auto& t = m_tabs[sub];
+            if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
+                auto& p = t.panes[t.activePaneIdx];
+                if (p.viewMode == VM_Rendered)
+                    updateRenderedView(t, p);
+            }
+        });
     });
 }
 

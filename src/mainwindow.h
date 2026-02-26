@@ -96,6 +96,8 @@ private:
         QTabWidget*    tabWidget = nullptr;
         RcxEditor*     editor    = nullptr;
         QsciScintilla* rendered  = nullptr;
+        QLineEdit*     findBar   = nullptr;
+        QWidget*       renderedContainer = nullptr;
         ViewMode       viewMode  = VM_Reclass;
         uint64_t       lastRenderedRootId = 0;
     };
