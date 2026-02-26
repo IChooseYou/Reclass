@@ -747,8 +747,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
     // Markers
     m_sci->setMarkerBackgroundColor(theme.markerPtr, M_PTR0);
     m_sci->setMarkerForegroundColor(theme.markerPtr, M_PTR0);
-    m_sci->setMarkerBackgroundColor(theme.markerCycle, M_CYCLE);
-    m_sci->setMarkerForegroundColor(theme.markerCycle, M_CYCLE);
+    m_sci->setMarkerBackgroundColor(theme.background, M_CYCLE);
+    m_sci->setMarkerForegroundColor(theme.background, M_CYCLE);
     m_sci->setMarkerBackgroundColor(theme.markerError, M_ERR);
     m_sci->setMarkerForegroundColor(QColor("#ffffff"), M_ERR);
     m_sci->setMarkerBackgroundColor(theme.background, M_STRUCT_BG);
