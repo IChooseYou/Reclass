@@ -312,9 +312,13 @@ public:
                 }
             }
         }
-        // Tree view items — use theme.hover for selection instead of blue
+        // Item views — visible hover + themed selection (Fusion's hover is invisible on dark bg)
         if (element == CE_ItemViewItem) {
             if (auto* vi = qstyleoption_cast<const QStyleOptionViewItem*>(opt)) {
+                bool hovered  = vi->state & State_MouseOver;
+                bool selected = vi->state & State_Selected;
+                if (hovered && !selected)
+                    p->fillRect(vi->rect, vi->palette.color(QPalette::Mid));
                 QStyleOptionViewItem patched = *vi;
                 patched.palette.setColor(QPalette::Highlight,
                     vi->palette.color(QPalette::Mid));               // theme.hover
@@ -2242,29 +2246,90 @@ void MainWindow::showTypeAliasesDialog() {
 
     QDialog dlg(this);
     dlg.setWindowTitle("Type Aliases");
-    dlg.resize(500, 400);
+    dlg.resize(400, 380);
 
     auto* layout = new QVBoxLayout(&dlg);
 
+    // Preset buttons (stdint + Windows only, no redundant Reset)
+    auto* presetRow = new QHBoxLayout;
+    auto* btnStdint  = new QPushButton("stdint (C99)", &dlg);
+    auto* btnWindows = new QPushButton("Windows (basetsd.h)", &dlg);
+    presetRow->addWidget(btnStdint);
+    presetRow->addWidget(btnWindows);
+    presetRow->addStretch();
+    layout->addLayout(presetRow);
+
     auto* table = new QTableWidget(&dlg);
     table->setColumnCount(2);
-    table->setHorizontalHeaderLabels({"NodeKind", "Alias (C type)"});
+    table->horizontalHeader()->setVisible(false);
     table->horizontalHeader()->setStretchLastSection(true);
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->setVisible(false);
 
-    // Populate with all NodeKind entries
-    int rowCount = static_cast<int>(std::size(kKindMeta));
-    table->setRowCount(rowCount);
-    for (int i = 0; i < rowCount; i++) {
-        const auto& meta = kKindMeta[i];
+    // Skip types that nobody aliases (Vec, Mat, Struct, Array)
+    auto shouldSkip = [](NodeKind k) {
+        return k == NodeKind::Vec2  || k == NodeKind::Vec3
+            || k == NodeKind::Vec4  || k == NodeKind::Mat4x4
+            || k == NodeKind::Struct || k == NodeKind::Array;
+    };
+
+    // Build filtered row→meta index mapping
+    QVector<int> rowMap;
+    int totalMeta = static_cast<int>(std::size(kKindMeta));
+    for (int i = 0; i < totalMeta; i++)
+        if (!shouldSkip(kKindMeta[i].kind)) rowMap.append(i);
+
+    table->setRowCount(rowMap.size());
+    for (int row = 0; row < rowMap.size(); row++) {
+        const auto& meta = kKindMeta[rowMap[row]];
         auto* kindItem = new QTableWidgetItem(QString::fromLatin1(meta.name));
         kindItem->setFlags(kindItem->flags() & ~Qt::ItemIsEditable);
-        table->setItem(i, 0, kindItem);
+        table->setItem(row, 0, kindItem);
 
         QString alias = tab->doc->typeAliases.value(meta.kind);
-        table->setItem(i, 1, new QTableWidgetItem(alias));
+        table->setItem(row, 1, new QTableWidgetItem(alias));
     }
+
+    // stdint preset: actual typeName values from kKindMeta
+    static QHash<NodeKind, QString> kStdintPreset;
+    if (kStdintPreset.isEmpty()) {
+        for (const auto& m : kKindMeta)
+            kStdintPreset[m.kind] = QString::fromLatin1(m.typeName);
+    }
+
+    // Windows (basetsd.h) preset mapping
+    static const QHash<NodeKind, QString> kWindowsPreset = {
+        {NodeKind::Int8,      QStringLiteral("CHAR")},
+        {NodeKind::Int16,     QStringLiteral("SHORT")},
+        {NodeKind::Int32,     QStringLiteral("LONG")},
+        {NodeKind::Int64,     QStringLiteral("LONGLONG")},
+        {NodeKind::UInt8,     QStringLiteral("UCHAR")},
+        {NodeKind::UInt16,    QStringLiteral("USHORT")},
+        {NodeKind::UInt32,    QStringLiteral("ULONG")},
+        {NodeKind::UInt64,    QStringLiteral("ULONGLONG")},
+        {NodeKind::Float,     QStringLiteral("FLOAT")},
+        {NodeKind::Double,    QStringLiteral("DOUBLE")},
+        {NodeKind::Bool,      QStringLiteral("BOOLEAN")},
+        {NodeKind::Pointer32, QStringLiteral("ULONG")},
+        {NodeKind::Pointer64, QStringLiteral("ULONG_PTR")},
+        {NodeKind::FuncPtr32, QStringLiteral("ULONG")},
+        {NodeKind::FuncPtr64, QStringLiteral("ULONG_PTR")},
+        {NodeKind::Hex8,      QStringLiteral("BYTE")},
+        {NodeKind::Hex16,     QStringLiteral("WORD")},
+        {NodeKind::Hex32,     QStringLiteral("DWORD")},
+        {NodeKind::Hex64,     QStringLiteral("DWORD64")},
+        {NodeKind::UTF8,      QStringLiteral("CHAR[]")},
+        {NodeKind::UTF16,     QStringLiteral("WCHAR[]")},
+    };
+
+    auto applyPreset = [&](const QHash<NodeKind, QString>& preset) {
+        for (int row = 0; row < rowMap.size(); row++)
+            table->item(row, 1)->setText(preset.value(kKindMeta[rowMap[row]].kind));
+    };
+
+    connect(btnStdint,  &QPushButton::clicked, [&]() { applyPreset(kStdintPreset); });
+    connect(btnWindows, &QPushButton::clicked, [&]() { applyPreset(kWindowsPreset); });
 
     layout->addWidget(table);
 
@@ -2279,10 +2344,10 @@ void MainWindow::showTypeAliasesDialog() {
 
     // Collect new aliases
     QHash<NodeKind, QString> newAliases;
-    for (int i = 0; i < rowCount; i++) {
-        QString val = table->item(i, 1)->text().trimmed();
+    for (int row = 0; row < rowMap.size(); row++) {
+        QString val = table->item(row, 1)->text().trimmed();
         if (!val.isEmpty())
-            newAliases[kKindMeta[i].kind] = val;
+            newAliases[kKindMeta[rowMap[row]].kind] = val;
     }
 
     tab->doc->typeAliases = newAliases;
