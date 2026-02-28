@@ -1,0 +1,111 @@
+#pragma once
+#include "scanner.h"
+#include "themes/theme.h"
+#include <QWidget>
+#include <QComboBox>
+#include <QLineEdit>
+#include <QCheckBox>
+#include <QPushButton>
+#include <QProgressBar>
+#include <QTableWidget>
+#include <QStyledItemDelegate>
+#include <QLabel>
+#include <functional>
+#include <memory>
+
+namespace rcx {
+
+// Delegate that paints address with dimmed high-bytes prefix
+class AddressDelegate : public QStyledItemDelegate {
+    Q_OBJECT
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QColor dimColor;
+    QColor brightColor;
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override;
+};
+
+class ScannerPanel : public QWidget {
+    Q_OBJECT
+public:
+    explicit ScannerPanel(QWidget* parent = nullptr);
+
+    using ProviderGetter = std::function<std::shared_ptr<Provider>()>;
+    void setProviderGetter(ProviderGetter getter);
+
+    void setEditorFont(const QFont& font);
+    void applyTheme(const Theme& theme);
+
+    // Test accessors
+    QComboBox*    modeCombo()    const { return m_modeCombo; }
+    QLineEdit*    patternEdit()  const { return m_patternEdit; }
+    QComboBox*    typeCombo()    const { return m_typeCombo; }
+    QLineEdit*    valueEdit()    const { return m_valueEdit; }
+    QCheckBox*    execCheck()    const { return m_execCheck; }
+    QCheckBox*    writeCheck()   const { return m_writeCheck; }
+    QPushButton*  scanButton()   const { return m_scanBtn; }
+    QPushButton*  updateButton() const { return m_updateBtn; }
+    QProgressBar* progressBar()  const { return m_progressBar; }
+    QTableWidget* resultsTable() const { return m_resultTable; }
+    QLabel*       statusLabel()  const { return m_statusLabel; }
+    QPushButton*  gotoButton()   const { return m_gotoBtn; }
+    QPushButton*  copyButton()   const { return m_copyBtn; }
+    ScanEngine*   engine()       const { return m_engine; }
+
+signals:
+    void goToAddress(uint64_t address);
+
+private slots:
+    void onModeChanged(int index);
+    void onScanClicked();
+    void onScanFinished(QVector<ScanResult> results);
+    void onGoToAddress();
+    void onCopyAddress();
+    void onResultDoubleClicked(int row, int col);
+    void onCellEdited(int row, int col);
+    void onUpdateClicked();
+
+private:
+    ScanRequest buildRequest();
+    void populateTable(bool showPrevious);
+    void updateComboWidth();
+
+    // Input widgets
+    QComboBox*    m_modeCombo;      // Signature / Value
+    QLineEdit*    m_patternEdit;    // Signature pattern input
+    QComboBox*    m_typeCombo;      // Value type dropdown
+    QLineEdit*    m_valueEdit;      // Value input
+    QLabel*       m_patternLabel;
+    QLabel*       m_typeLabel;
+    QLabel*       m_valueLabel;
+
+    // Filters
+    QCheckBox*    m_execCheck;
+    QCheckBox*    m_writeCheck;
+
+    // Actions
+    QPushButton*  m_scanBtn;
+    QPushButton*  m_updateBtn;
+    QProgressBar* m_progressBar;
+
+    // Results
+    QTableWidget*    m_resultTable;
+    AddressDelegate* m_addrDelegate;
+    QLabel*          m_statusLabel;
+    QPushButton*     m_gotoBtn;
+    QPushButton*     m_copyBtn;
+
+    // Engine
+    ScanEngine*   m_engine;
+    ProviderGetter m_providerGetter;
+    QVector<ScanResult> m_results;
+    int           m_lastScanMode = 0;   // 0=signature, 1=value
+    ValueType     m_lastValueType = ValueType::Int32;
+    QByteArray    m_lastPattern;        // serialized search value
+
+    QString formatValue(const QByteArray& bytes) const;
+    int     valueSize() const;
+};
+
+} // namespace rcx

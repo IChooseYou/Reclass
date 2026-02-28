@@ -57,5 +57,8 @@
         <file alias="remote.svg">vsicons/remote.svg</file>
         <file alias="plug.svg">vsicons/plug.svg</file>
         <file alias="clear-all.svg">vsicons/clear-all.svg</file>
+        <file alias="search.svg">vsicons/search.svg</file>
+        <file alias="regex.svg">vsicons/regex.svg</file>
+        <file alias="refresh.svg">vsicons/refresh.svg</file>
     </qresource>
 </RCC>

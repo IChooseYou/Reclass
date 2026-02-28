@@ -79,6 +79,10 @@ add_executable(Reclass
     src/imports/import_pdb.cpp
     src/imports/import_pdb_dialog.h
     src/imports/import_pdb_dialog.cpp
+    src/scanner.h
+    src/scanner.cpp
+    src/scannerpanel.h
+    src/scannerpanel.cpp
     src/mainwindow.h
     src/optionsdialog.h
     src/optionsdialog.cpp
@@ -234,6 +238,11 @@ if(BUILD_TESTING)
     target_include_directories(test_static_fields PRIVATE src)
     target_link_libraries(test_static_fields PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_static_fields COMMAND test_static_fields)
+
+    add_executable(test_scanner tests/test_scanner.cpp src/scanner.cpp)
+    target_include_directories(test_scanner PRIVATE src)
+    target_link_libraries(test_scanner PRIVATE ${QT}::Core ${QT}::Concurrent ${QT}::Test)
+    add_test(NAME test_scanner COMMAND test_scanner)
 
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
@@ -391,6 +400,14 @@ if(BUILD_TESTING)
         target_link_libraries(test_source_provider PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
     endif()
     add_test(NAME test_source_provider COMMAND test_source_provider)
+
+    add_executable(test_scanner_ui tests/test_scanner_ui.cpp
+        src/scanner.cpp src/scannerpanel.cpp src/addressparser.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp)
+    target_include_directories(test_scanner_ui PRIVATE src)
+    target_link_libraries(test_scanner_ui PRIVATE
+        ${QT}::Widgets ${QT}::Concurrent ${QT}::Test)
+    add_test(NAME test_scanner_ui COMMAND test_scanner_ui)
 
     # Disabled: WinDbg provider test has build errors (lastError API changed)
     #if(WIN32)
