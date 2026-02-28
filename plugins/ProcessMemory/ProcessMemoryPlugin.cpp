@@ -124,6 +124,51 @@ void ProcessMemoryProvider::cacheModules()
     }
 }
 
+QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const
+{
+    QVector<rcx::MemoryRegion> regions;
+    if (!m_handle) return regions;
+
+    MEMORY_BASIC_INFORMATION mbi;
+    uint64_t addr = 0;
+
+    while (VirtualQueryEx(m_handle, (LPCVOID)addr, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+        if (mbi.State == MEM_COMMIT &&
+            !(mbi.Protect & PAGE_NOACCESS) &&
+            !(mbi.Protect & PAGE_GUARD))
+        {
+            rcx::MemoryRegion region;
+            region.base = (uint64_t)mbi.BaseAddress;
+            region.size = mbi.RegionSize;
+            region.readable = true;
+            region.writable = (mbi.Protect & PAGE_READWRITE) ||
+                              (mbi.Protect & PAGE_WRITECOPY) ||
+                              (mbi.Protect & PAGE_EXECUTE_READWRITE) ||
+                              (mbi.Protect & PAGE_EXECUTE_WRITECOPY);
+            region.executable = (mbi.Protect & PAGE_EXECUTE) ||
+                                (mbi.Protect & PAGE_EXECUTE_READ) ||
+                                (mbi.Protect & PAGE_EXECUTE_READWRITE) ||
+                                (mbi.Protect & PAGE_EXECUTE_WRITECOPY);
+
+            // Match module name from cached module list
+            for (const auto& mod : m_modules) {
+                if (region.base >= mod.base && region.base < mod.base + mod.size) {
+                    region.moduleName = mod.name;
+                    break;
+                }
+            }
+
+            regions.append(region);
+        }
+
+        uint64_t next = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
+        if (next <= addr) break; // overflow protection
+        addr = next;
+    }
+
+    return regions;
+}
+
 #elif defined(__linux__)
 
 ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& processName)
@@ -280,6 +325,58 @@ void ProcessMemoryProvider::cacheModules()
             it->end - it->base
         });
     }
+}
+
+QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const
+{
+    QVector<rcx::MemoryRegion> regions;
+    if (m_fd < 0) return regions;
+
+    QString mapsPath = QStringLiteral("/proc/%1/maps").arg(m_pid);
+    std::ifstream mapsFile(mapsPath.toStdString());
+    if (!mapsFile.is_open()) return regions;
+
+    std::string line;
+    while (std::getline(mapsFile, line)) {
+        std::istringstream iss(line);
+        std::string addrRange, perms, offset, dev, inode, pathname;
+        iss >> addrRange >> perms >> offset >> dev >> inode;
+        std::getline(iss, pathname);
+
+        auto dash = addrRange.find('-');
+        if (dash == std::string::npos) continue;
+        uint64_t addrStart = std::stoull(addrRange.substr(0, dash), nullptr, 16);
+        uint64_t addrEnd = std::stoull(addrRange.substr(dash + 1), nullptr, 16);
+
+        if (perms.size() < 4) continue;
+        bool readable   = (perms[0] == 'r');
+        bool writable   = (perms[1] == 'w');
+        bool executable = (perms[2] == 'x');
+
+        if (!readable) continue;
+
+        rcx::MemoryRegion region;
+        region.base       = addrStart;
+        region.size       = addrEnd - addrStart;
+        region.readable   = readable;
+        region.writable   = writable;
+        region.executable = executable;
+
+        // Extract module name from pathname
+        size_t start = pathname.find_first_not_of(" \t");
+        if (start != std::string::npos) {
+            QString qpath = QString::fromStdString(pathname.substr(start));
+            if (qpath.startsWith('/') && !qpath.startsWith("/dev/") &&
+                !qpath.startsWith("/memfd:")) {
+                QFileInfo fi(qpath);
+                region.moduleName = fi.fileName();
+            }
+        }
+
+        regions.append(region);
+    }
+
+    return regions;
 }
 
 #endif // platform

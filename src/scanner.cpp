@@ -1,8 +1,11 @@
 #include "scanner.h"
 #include <QtConcurrent>
 #include <QMetaObject>
+#include <QElapsedTimer>
+#include <QDebug>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 namespace rcx {
 
@@ -393,12 +396,20 @@ void ScanEngine::start(std::shared_ptr<Provider> provider, const ScanRequest& re
 QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                                          const ScanRequest& req)
 {
+    QElapsedTimer timer;
+    timer.start();
+
     QVector<ScanResult> results;
 
     if (!prov || req.pattern.isEmpty())
         return results;
 
     auto regions = prov->enumerateRegions();
+    qDebug() << "[scan] regions:" << regions.size()
+             << " pattern:" << req.pattern.size() << "bytes"
+             << " align:" << req.alignment
+             << " filterExec:" << req.filterExecutable
+             << " filterWrite:" << req.filterWritable;
 
     // Fallback for providers that don't enumerate regions (file/buffer)
     if (regions.isEmpty()) {
@@ -423,6 +434,8 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
         if (req.filterWritable && !r.writable) continue;
         totalBytes += r.size;
     }
+
+    qDebug() << "[scan] total scannable:" << (totalBytes / 1024) << "KB across filtered regions";
 
     if (totalBytes == 0) return results;
 
@@ -473,6 +486,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                     ScanResult r;
                     r.address = region.base + off + (uint64_t)i;
                     r.regionModule = region.moduleName;
+                    r.scanValue = QByteArray(data + i, qMin(16, readLen - i));
                     results.append(r);
 
                     if (results.size() >= req.maxResults)
@@ -501,6 +515,100 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
     }
 
 done:
+    qDebug() << "[scan] done:" << results.size() << "results in" << timer.elapsed() << "ms"
+             << " scanned:" << (scannedBytes / 1024) << "KB";
+    return results;
+}
+
+void ScanEngine::startRescan(std::shared_ptr<Provider> provider,
+                              QVector<ScanResult> results, int readSize) {
+    if (isRunning()) return;
+
+    m_abort.store(false);
+
+    auto* watcher = new QFutureWatcher<QVector<ScanResult>>(this);
+    m_watcher = watcher;
+
+    connect(watcher, &QFutureWatcher<QVector<ScanResult>>::finished, this, [this, watcher]() {
+        auto results = watcher->result();
+        watcher->deleteLater();
+        if (m_watcher == watcher)
+            m_watcher = nullptr;
+        emit rescanFinished(results);
+    });
+
+    watcher->setFuture(QtConcurrent::run(
+        [this, provider, results = std::move(results), readSize]() mutable {
+            return runRescan(provider, std::move(results), readSize);
+        }));
+}
+
+QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
+                                           QVector<ScanResult> results, int readSize) {
+    QElapsedTimer timer;
+    timer.start();
+
+    int total = results.size();
+    if (total == 0 || !prov) return results;
+
+    qDebug() << "[rescan] start: " << total << "results, readSize:" << readSize;
+
+    // Save previous values
+    for (auto& r : results)
+        r.previousValue = r.scanValue;
+
+    // Sort indices by address for sequential chunked reads
+    QVector<int> order(total);
+    for (int i = 0; i < total; i++) order[i] = i;
+    std::sort(order.begin(), order.end(), [&results](int a, int b) {
+        return results[a].address < results[b].address;
+    });
+
+    constexpr int kChunk = 256 * 1024;
+    int updated = 0;
+    int lastPct = -1;
+    int chunks = 0;
+    uint64_t totalBytesRead = 0;
+    int i = 0;
+
+    while (i < total && !m_abort.load()) {
+        uint64_t spanBase = results[order[i]].address;
+        int spanEnd = i;
+
+        // Extend span while next result fits in the same chunk
+        while (spanEnd + 1 < total) {
+            uint64_t endAddr = results[order[spanEnd + 1]].address + readSize;
+            if (endAddr - spanBase > (uint64_t)kChunk) break;
+            spanEnd++;
+        }
+
+        uint64_t spanLast = results[order[spanEnd]].address;
+        int chunkLen = (int)(spanLast + readSize - spanBase);
+        QByteArray chunk(chunkLen, '\0');
+        prov->read(spanBase, chunk.data(), chunkLen);
+
+        for (int j = i; j <= spanEnd; j++) {
+            auto& r = results[order[j]];
+            int off = (int)(r.address - spanBase);
+            r.scanValue = chunk.mid(off, readSize);
+        }
+
+        chunks++;
+        totalBytesRead += chunkLen;
+        updated += (spanEnd - i + 1);
+        i = spanEnd + 1;
+
+        int pct = updated * 100 / total;
+        if (pct != lastPct) {
+            lastPct = pct;
+            QMetaObject::invokeMethod(this, "progress",
+                Qt::QueuedConnection, Q_ARG(int, pct));
+        }
+    }
+
+    qDebug() << "[rescan] done:" << updated << "/" << total << "results in"
+             << timer.elapsed() << "ms |" << chunks << "chunks,"
+             << (totalBytesRead / 1024) << "KB read";
     return results;
 }
 

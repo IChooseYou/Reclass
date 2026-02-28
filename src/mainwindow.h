@@ -2,6 +2,7 @@
 #include "controller.h"
 #include "titlebar.h"
 #include "pluginmanager.h"
+#include "scannerpanel.h"
 #include <QMainWindow>
 #include <QMdiArea>
 #include <QMdiSubWindow>
@@ -151,6 +152,13 @@ private:
     void createWorkspaceDock();
     void rebuildWorkspaceModel();
     void updateBorderColor(const QColor& color);
+
+    // Scanner dock
+    QDockWidget*          m_scannerDock      = nullptr;
+    ScannerPanel*         m_scannerPanel     = nullptr;
+    QLabel*               m_scanDockTitle    = nullptr;
+    QToolButton*          m_scanDockCloseBtn = nullptr;
+    void createScannerDock();
 
 protected:
     void changeEvent(QEvent* event) override;

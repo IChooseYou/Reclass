@@ -65,16 +65,21 @@ public:
     explicit ScanEngine(QObject* parent = nullptr);
 
     void start(std::shared_ptr<Provider> provider, const ScanRequest& req);
+    void startRescan(std::shared_ptr<Provider> provider,
+                     QVector<ScanResult> results, int readSize);
     void abort();
     bool isRunning() const;
 
 signals:
     void progress(int percent);
     void finished(QVector<ScanResult> results);
+    void rescanFinished(QVector<ScanResult> results);
     void error(QString message);
 
 private:
     QVector<ScanResult> runScan(std::shared_ptr<Provider> prov, const ScanRequest& req);
+    QVector<ScanResult> runRescan(std::shared_ptr<Provider> prov,
+                                   QVector<ScanResult> results, int readSize);
 
     std::atomic<bool> m_abort{false};
     QFutureWatcher<QVector<ScanResult>>* m_watcher = nullptr;

@@ -165,6 +165,10 @@ void WinDbgMemoryProvider::initInterfaces()
     qDebug() << "[WinDbg] IDebugDataSpaces hr=" << Qt::hex << (unsigned long)hr
              << "ptr=" << (void*)m_dataSpaces;
 
+    hr = m_client->QueryInterface(IID_IDebugDataSpaces2, (void**)&m_dataSpaces2);
+    qDebug() << "[WinDbg] IDebugDataSpaces2 hr=" << Qt::hex << (unsigned long)hr
+             << "ptr=" << (void*)m_dataSpaces2;
+
     hr = m_client->QueryInterface(IID_IDebugControl, (void**)&m_control);
     qDebug() << "[WinDbg] IDebugControl hr=" << Qt::hex << (unsigned long)hr
              << "ptr=" << (void*)m_control;
@@ -251,10 +255,11 @@ WinDbgMemoryProvider::~WinDbgMemoryProvider()
 void WinDbgMemoryProvider::cleanup()
 {
 #ifdef _WIN32
-    if (m_symbols)    { m_symbols->Release();    m_symbols = nullptr; }
-    if (m_control)    { m_control->Release();    m_control = nullptr; }
-    if (m_dataSpaces) { m_dataSpaces->Release(); m_dataSpaces = nullptr; }
-    if (m_client)     { m_client->Release();     m_client = nullptr; }
+    if (m_symbols)     { m_symbols->Release();     m_symbols = nullptr; }
+    if (m_control)     { m_control->Release();     m_control = nullptr; }
+    if (m_dataSpaces2) { m_dataSpaces2->Release(); m_dataSpaces2 = nullptr; }
+    if (m_dataSpaces)  { m_dataSpaces->Release();  m_dataSpaces = nullptr; }
+    if (m_client)      { m_client->Release();      m_client = nullptr; }
 #endif
 }
 
@@ -351,6 +356,112 @@ QString WinDbgMemoryProvider::getSymbol(uint64_t addr) const
 #endif
 }
 
+QVector<rcx::MemoryRegion> WinDbgMemoryProvider::enumerateRegions() const
+{
+    QVector<rcx::MemoryRegion> regions;
+#ifdef _WIN32
+    if (!m_dataSpaces) return regions;
+
+    // Enumerate modules — used for tagging (user-mode) or as the primary
+    // source of regions (kernel-mode, where QueryVirtual is unavailable).
+    struct ModInfo { uint64_t base; uint64_t size; QString name; };
+    QVector<ModInfo> modules;
+
+    if (m_symbols) {
+        dispatchToOwner([&]() {
+            ULONG loaded = 0, unloaded = 0;
+            if (FAILED(m_symbols->GetNumberModules(&loaded, &unloaded)))
+                return;
+            for (ULONG i = 0; i < loaded; i++) {
+                ULONG64 modBase = 0;
+                if (FAILED(m_symbols->GetModuleByIndex(i, &modBase)))
+                    continue;
+                DEBUG_MODULE_PARAMETERS params = {};
+                if (FAILED(m_symbols->GetModuleParameters(1, &modBase, 0, &params)))
+                    continue;
+                char nameBuf[256] = {};
+                ULONG nameSize = 0;
+                m_symbols->GetModuleNames(i, 0,
+                                          nullptr, 0, nullptr,
+                                          nameBuf, sizeof(nameBuf), &nameSize,
+                                          nullptr, 0, nullptr);
+                ModInfo mi;
+                mi.base = modBase;
+                mi.size = params.Size;
+                mi.name = QString::fromUtf8(nameBuf);
+                modules.append(mi);
+            }
+        });
+    }
+
+    // Try QueryVirtual first (user-mode debugging / user-mode dumps).
+    // MSDN: "This method is not available in kernel-mode debugging."
+    if (m_dataSpaces2) {
+        dispatchToOwner([&]() {
+            ULONG64 addr = 0;
+            int safety = 0;
+            constexpr int kMaxRegions = 500000;
+
+            while (safety++ < kMaxRegions) {
+                MEMORY_BASIC_INFORMATION64 mbi = {};
+                HRESULT hr = m_dataSpaces2->QueryVirtual(addr, &mbi);
+                if (FAILED(hr))
+                    break;
+
+                if (mbi.State == MEM_COMMIT &&
+                    !(mbi.Protect & PAGE_NOACCESS) &&
+                    !(mbi.Protect & PAGE_GUARD))
+                {
+                    rcx::MemoryRegion region;
+                    region.base = mbi.BaseAddress;
+                    region.size = mbi.RegionSize;
+                    region.readable = true;
+                    region.writable = (mbi.Protect & PAGE_READWRITE) ||
+                                      (mbi.Protect & PAGE_WRITECOPY) ||
+                                      (mbi.Protect & PAGE_EXECUTE_READWRITE) ||
+                                      (mbi.Protect & PAGE_EXECUTE_WRITECOPY);
+                    region.executable = (mbi.Protect & PAGE_EXECUTE) ||
+                                        (mbi.Protect & PAGE_EXECUTE_READ) ||
+                                        (mbi.Protect & PAGE_EXECUTE_READWRITE) ||
+                                        (mbi.Protect & PAGE_EXECUTE_WRITECOPY);
+
+                    for (const auto& mod : modules) {
+                        if (region.base >= mod.base && region.base < mod.base + mod.size) {
+                            region.moduleName = mod.name;
+                            break;
+                        }
+                    }
+
+                    regions.append(region);
+                }
+
+                ULONG64 next = mbi.BaseAddress + mbi.RegionSize;
+                if (next <= addr) break;
+                addr = next;
+            }
+        });
+    }
+
+    // Fallback for kernel-mode debugging: QueryVirtual is unavailable,
+    // so use loaded modules as scannable regions.  Each module image
+    // becomes one region — the scanner reads through module code/data.
+    if (regions.isEmpty() && !modules.isEmpty()) {
+        for (const auto& mod : modules) {
+            if (mod.size == 0) continue;
+            rcx::MemoryRegion region;
+            region.base = mod.base;
+            region.size = mod.size;
+            region.readable = true;
+            region.writable = false;
+            region.executable = true;
+            region.moduleName = mod.name;
+            regions.append(region);
+        }
+    }
+#endif
+    return regions;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // WinDbgMemoryPlugin implementation
 // ──────────────────────────────────────────────────────────────────────────
@@ -408,7 +519,7 @@ bool WinDbgMemoryPlugin::selectTarget(QWidget* parent, QString* target)
 {
     QDialog dlg(parent);
     dlg.setWindowTitle("WinDbg Settings");
-    dlg.resize(460, 260);
+    dlg.resize(460, 300);
 
     QPalette dlgPal = qApp->palette();
     dlg.setPalette(dlgPal);
@@ -418,7 +529,9 @@ bool WinDbgMemoryPlugin::selectTarget(QWidget* parent, QString* target)
 
     layout->addWidget(new QLabel(
         "Connect to a running WinDbg debug server.\n"
-        "In WinDbg, run:  .server tcp:port=5055"));
+        "In WinDbg, run:  .server tcp:port=5055\n\n"
+        "Non-invasive debug and dump files only.\n"
+        "Execution control (bp, g, t, p) is not supported."));
 
     layout->addSpacing(8);
     layout->addWidget(new QLabel("Connection string:"));

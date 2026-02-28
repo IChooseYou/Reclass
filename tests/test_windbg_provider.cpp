@@ -1,4 +1,5 @@
 #include <QTest>
+#include <QSignalSpy>
 #include <QByteArray>
 #include <QProcess>
 #include <QThread>
@@ -10,6 +11,7 @@
 #include <chrono>
 
 #include "providers/provider.h"
+#include "scanner.h"
 #include "../plugins/WinDbgMemory/WinDbgMemoryPlugin.h"
 
 #ifdef _WIN32
@@ -481,6 +483,128 @@ private slots:
         delete raw;
     }
 
+    // ── enumerateRegions ──
+
+    void provider_enumerateRegions()
+    {
+        WinDbgMemoryProvider prov(m_connString);
+        QVERIFY(prov.isValid());
+
+        auto regions = prov.enumerateRegions();
+        qDebug() << "enumerateRegions returned" << regions.size() << "regions";
+        QVERIFY2(!regions.isEmpty(), "Should return at least one memory region");
+
+        // Every region should have sane values
+        for (const auto& r : regions) {
+            QVERIFY(r.size > 0);
+            QVERIFY(r.readable);
+        }
+    }
+
+    void provider_enumerateRegions_hasModuleNames()
+    {
+        WinDbgMemoryProvider prov(m_connString);
+        QVERIFY(prov.isValid());
+
+        auto regions = prov.enumerateRegions();
+        QVERIFY(!regions.isEmpty());
+
+        // At least one region should have a module name
+        bool hasModule = false;
+        for (const auto& r : regions) {
+            if (!r.moduleName.isEmpty()) {
+                hasModule = true;
+                qDebug() << "Region base=0x" + QString::number(r.base, 16)
+                         << "size=" << r.size
+                         << "module=" << r.moduleName
+                         << "r/w/x:" << r.readable << r.writable << r.executable;
+                break;
+            }
+        }
+        QVERIFY2(hasModule, "At least one region should have a module name");
+    }
+
+    void provider_enumerateRegions_hasExecutable()
+    {
+        WinDbgMemoryProvider prov(m_connString);
+        QVERIFY(prov.isValid());
+
+        auto regions = prov.enumerateRegions();
+        QVERIFY(!regions.isEmpty());
+
+        bool hasExec = false;
+        for (const auto& r : regions) {
+            if (r.executable) { hasExec = true; break; }
+        }
+        QVERIFY2(hasExec, "Should have at least one executable region (code)");
+    }
+
+    // ── Scanner integration ──
+
+    void scanner_signature_mz()
+    {
+        // Scan for the MZ header — should find at least one match
+        auto prov = std::make_shared<WinDbgMemoryProvider>(m_connString);
+        QVERIFY(prov->isValid());
+
+        auto regions = prov->enumerateRegions();
+        QVERIFY2(!regions.isEmpty(), "Need regions for scan");
+
+        rcx::ScanRequest req;
+        QString err;
+        QVERIFY(rcx::parseSignature("4D 5A", req.pattern, req.mask, &err));
+        req.alignment = 1;
+        req.maxResults = 100;
+
+        rcx::ScanEngine engine;
+        QSignalSpy spy(&engine, &rcx::ScanEngine::finished);
+
+        engine.start(prov, req);
+        QVERIFY(spy.wait(30000));
+
+        auto results = spy.at(0).at(0).value<QVector<rcx::ScanResult>>();
+        qDebug() << "MZ scan found" << results.size() << "results";
+        QVERIFY2(!results.isEmpty(), "Should find at least one MZ header");
+
+        // Verify the first result is actually 'MZ'
+        uint8_t buf[2] = {};
+        prov->read(results[0].address, buf, 2);
+        QCOMPARE(buf[0], (uint8_t)'M');
+        QCOMPARE(buf[1], (uint8_t)'Z');
+    }
+
+    void scanner_value_int32()
+    {
+        // Read a known 4-byte value from offset 0x3C (PE offset) then scan for it.
+        // This only works for user-mode targets where address 0 is the main module.
+        auto prov = std::make_shared<WinDbgMemoryProvider>(m_connString);
+        QVERIFY(prov->isValid());
+
+        auto regions = prov->enumerateRegions();
+        QVERIFY2(!regions.isEmpty(), "Need regions for scan");
+
+        uint32_t peOffset = prov->readU32(0x3C);
+        if (peOffset == 0 || peOffset >= 0x1000)
+            QSKIP("Address 0 not readable (kernel session) — value scan test requires user-mode target");
+
+        rcx::ScanRequest req;
+        QString err;
+        QVERIFY(rcx::serializeValue(rcx::ValueType::UInt32,
+                                     QString::number(peOffset), req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.maxResults = 100;
+
+        rcx::ScanEngine engine;
+        QSignalSpy spy(&engine, &rcx::ScanEngine::finished);
+
+        engine.start(prov, req);
+        QVERIFY(spy.wait(30000));
+
+        auto results = spy.at(0).at(0).value<QVector<rcx::ScanResult>>();
+        qDebug() << "Value scan for" << peOffset << "found" << results.size() << "results";
+        QVERIFY2(!results.isEmpty(), "Should find the PE offset value somewhere");
+    }
+
     // ── Kernel/dump session tests ──
     // Set WINDBG_KERNEL_CONN to a target string:
     //   "dump:F:/path/to/file.dmp"          — open dump directly
@@ -500,7 +624,7 @@ private slots:
 
         WinDbgMemoryProvider prov(target);
         QVERIFY2(prov.isValid(),
-                 qPrintable("Should connect, lastError: " + prov.lastError()));
+                 qPrintable("Should connect to " + target));
         QCOMPARE(prov.kind(), QStringLiteral("WinDbg"));
 
         qDebug() << "Kernel provider name:" << prov.name();
@@ -520,7 +644,7 @@ private slots:
 
         WinDbgMemoryProvider prov(target);
         QVERIFY2(prov.isValid(),
-                 qPrintable("lastError: " + prov.lastError()));
+                 qPrintable("Failed to connect to " + target));
 
         bool ok = false;
         uint64_t addr = addrStr.toULongLong(&ok, 16);
@@ -560,7 +684,7 @@ private slots:
 
         WinDbgMemoryProvider prov(target);
         QVERIFY2(prov.isValid(),
-                 qPrintable("lastError: " + prov.lastError()));
+                 qPrintable("Failed to connect to " + target));
 
         if (addr == 0) addr = prov.base();
         if (addr == 0)
@@ -589,6 +713,67 @@ private slots:
                     .arg(buf[7], 2, 16, QChar('0'));
     }
 
+    void provider_kernel_enumerateRegions()
+    {
+        QString target = kernelTarget();
+        if (target.isEmpty())
+            QSKIP("Set WINDBG_KERNEL_CONN");
+
+        WinDbgMemoryProvider prov(target);
+        QVERIFY2(prov.isValid(),
+                 qPrintable("Failed to connect to " + target));
+
+        auto regions = prov.enumerateRegions();
+        qDebug() << "Kernel enumerateRegions returned" << regions.size() << "regions";
+        QVERIFY2(!regions.isEmpty(), "Should return kernel memory regions");
+
+        // Log first few regions
+        int logged = 0;
+        for (const auto& r : regions) {
+            if (logged++ >= 10) break;
+            qDebug() << "  base=0x" + QString::number(r.base, 16)
+                     << "size=" << r.size
+                     << "module=" << r.moduleName
+                     << "r/w/x:" << r.readable << r.writable << r.executable;
+        }
+    }
+
+    void provider_kernel_scan_signature()
+    {
+        QString target = kernelTarget();
+        if (target.isEmpty())
+            QSKIP("Set WINDBG_KERNEL_CONN");
+
+        auto prov = std::make_shared<WinDbgMemoryProvider>(target);
+        QVERIFY2(prov->isValid(),
+                 qPrintable("Failed to connect to " + target));
+
+        auto regions = prov->enumerateRegions();
+        if (regions.isEmpty())
+            QSKIP("No regions enumerated — QueryVirtual may not be supported for this target");
+
+        // Scan for MZ header in executable regions
+        rcx::ScanRequest req;
+        QString err;
+        QVERIFY(rcx::parseSignature("4D 5A 90 00", req.pattern, req.mask, &err));
+        req.alignment = 1;
+        req.filterExecutable = true;
+        req.maxResults = 50;
+
+        rcx::ScanEngine engine;
+        QSignalSpy spy(&engine, &rcx::ScanEngine::finished);
+
+        engine.start(prov, req);
+        QVERIFY(spy.wait(60000));
+
+        auto results = spy.at(0).at(0).value<QVector<rcx::ScanResult>>();
+        qDebug() << "Kernel MZ scan (exec only) found" << results.size() << "results";
+        for (const auto& r : results)
+            qDebug() << "  0x" + QString::number(r.address, 16) << r.regionModule;
+
+        QVERIFY2(!results.isEmpty(), "Should find MZ headers in kernel modules");
+    }
+
     void provider_kernel_read_backgroundThread()
     {
         QString target = kernelTarget();
@@ -605,7 +790,7 @@ private slots:
 
         WinDbgMemoryProvider prov(target);
         QVERIFY2(prov.isValid(),
-                 qPrintable("lastError: " + prov.lastError()));
+                 qPrintable("Failed to connect to " + target));
 
         // Simulate the controller's async refresh pattern
         QFuture<QByteArray> future = QtConcurrent::run([&prov, addr]() -> QByteArray {

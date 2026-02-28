@@ -9,6 +9,7 @@
 // Forward declarations for DbgEng COM interfaces
 struct IDebugClient;
 struct IDebugDataSpaces;
+struct IDebugDataSpaces2;
 struct IDebugControl;
 struct IDebugSymbols;
 
@@ -59,6 +60,7 @@ public:
     QString name() const override { return m_name; }
     QString kind() const override { return QStringLiteral("WinDbg"); }
     QString getSymbol(uint64_t addr) const override;
+    QVector<rcx::MemoryRegion> enumerateRegions() const override;
 
     bool isLive() const override { return m_isLive; }
     uint64_t base() const override { return m_base; }
@@ -73,10 +75,11 @@ private:
     template<typename Fn>
     void dispatchToOwner(Fn&& fn) const;
 
-    IDebugClient*     m_client = nullptr;
-    IDebugDataSpaces* m_dataSpaces = nullptr;
-    IDebugControl*    m_control = nullptr;
-    IDebugSymbols*    m_symbols = nullptr;
+    IDebugClient*      m_client = nullptr;
+    IDebugDataSpaces*  m_dataSpaces = nullptr;
+    IDebugDataSpaces2* m_dataSpaces2 = nullptr;
+    IDebugControl*     m_control = nullptr;
+    IDebugSymbols*     m_symbols = nullptr;
 
     QString  m_name;
     uint64_t m_base = 0;

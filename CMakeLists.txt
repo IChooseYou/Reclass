@@ -409,15 +409,15 @@ if(BUILD_TESTING)
         ${QT}::Widgets ${QT}::Concurrent ${QT}::Test)
     add_test(NAME test_scanner_ui COMMAND test_scanner_ui)
 
-    # Disabled: WinDbg provider test has build errors (lastError API changed)
-    #if(WIN32)
-    #    add_executable(test_windbg_provider tests/test_windbg_provider.cpp
-    #        plugins/WinDbgMemory/WinDbgMemoryPlugin.cpp)
-    #    target_include_directories(test_windbg_provider PRIVATE src plugins/WinDbgMemory)
-    #    target_link_libraries(test_windbg_provider PRIVATE
-    #        ${QT}::Widgets ${QT}::Concurrent ${QT}::Test dbgeng ole32)
-    #    add_test(NAME test_windbg_provider COMMAND test_windbg_provider)
-    #endif()
+    if(WIN32)
+        add_executable(test_windbg_provider tests/test_windbg_provider.cpp
+            plugins/WinDbgMemory/WinDbgMemoryPlugin.cpp
+            src/scanner.cpp)
+        target_include_directories(test_windbg_provider PRIVATE src plugins/WinDbgMemory)
+        target_link_libraries(test_windbg_provider PRIVATE
+            ${QT}::Widgets ${QT}::Concurrent ${QT}::Test dbgeng ole32)
+        add_test(NAME test_windbg_provider COMMAND test_windbg_provider)
+    endif()
 
     add_executable(bench_large_class tests/bench_large_class.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp

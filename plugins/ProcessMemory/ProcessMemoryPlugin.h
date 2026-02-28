@@ -28,6 +28,7 @@ public:
 
     bool isLive() const override { return true; }
     uint64_t base() const override { return m_base; }
+    QVector<rcx::MemoryRegion> enumerateRegions() const override;
     bool isReadable(uint64_t, int len) const override {
 #ifdef _WIN32
         return m_handle && len >= 0;

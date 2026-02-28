@@ -1,10 +1,20 @@
 #pragma once
 #include <QByteArray>
 #include <QString>
+#include <QVector>
 #include <cstdint>
 #include <cstring>
 
 namespace rcx {
+
+struct MemoryRegion {
+    uint64_t base       = 0;
+    uint64_t size       = 0;
+    bool     readable   = true;
+    bool     writable   = false;
+    bool     executable = false;
+    QString  moduleName;
+};
 
 class Provider {
 public:
@@ -53,6 +63,11 @@ public:
         Q_UNUSED(name);
         return 0;
     }
+
+    // Enumerate committed/readable memory regions.
+    // Used by the scan engine to know what address ranges to scan.
+    // Default: returns empty (scan engine falls back to [0, size())).
+    virtual QVector<MemoryRegion> enumerateRegions() const { return {}; }
 
     // --- Derived convenience (non-virtual, never override) ---
 

@@ -1,6 +1,8 @@
 #include "scannerpanel.h"
 #include "addressparser.h"
 #include <cstring>
+#include <QElapsedTimer>
+#include <QDebug>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -135,8 +137,8 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_resultTable->setColumnCount(2);
     m_resultTable->horizontalHeader()->hide();
     m_resultTable->verticalHeader()->hide();
-    m_resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_resultTable->horizontalHeader()->setStretchLastSection(false);
+    m_resultTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    m_resultTable->horizontalHeader()->setStretchLastSection(true);
     m_resultTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_resultTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_resultTable->setEditTriggers(QAbstractItemView::DoubleClicked);
@@ -169,11 +171,12 @@ ScannerPanel::ScannerPanel(QWidget* parent)
 
     mainLayout->addLayout(actionRow);
 
-    // ── Initial visibility: signature mode ──
+    // ── Initial state: signature mode ──
     m_typeLabel->hide();
     m_typeCombo->hide();
     m_valueLabel->hide();
     m_valueEdit->hide();
+    m_execCheck->setChecked(true);
 
     // ── Connections ──
     connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -225,6 +228,8 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     });
     connect(m_engine, &ScanEngine::finished,
             this, &ScannerPanel::onScanFinished);
+    connect(m_engine, &ScanEngine::rescanFinished,
+            this, &ScannerPanel::onRescanFinished);
     connect(m_engine, &ScanEngine::error, this, [this](const QString& msg) {
         m_statusLabel->setText(QStringLiteral("Error: %1").arg(msg));
         m_scanBtn->setText(QStringLiteral("Scan"));
@@ -240,6 +245,8 @@ void ScannerPanel::setEditorFont(const QFont& font) {
     m_resultTable->setFont(font);
     QFontMetrics fm(font);
     m_resultTable->verticalHeader()->setDefaultSectionSize(fm.height() + 6);
+    // Address column width: "00000000`00000000" + padding
+    m_resultTable->setColumnWidth(0, fm.horizontalAdvance(QStringLiteral("00000000`00000000")) + 20);
     m_patternEdit->setFont(font);
     m_valueEdit->setFont(font);
     m_modeCombo->setFont(font);
@@ -275,15 +282,16 @@ void ScannerPanel::onModeChanged(int index) {
     m_typeCombo->setVisible(!isSig);
     m_valueLabel->setVisible(!isSig);
     m_valueEdit->setVisible(!isSig);
+
+    // Auto-toggle filters: signatures → executable code, values → writable data
+    m_execCheck->setChecked(isSig);
+    m_writeCheck->setChecked(!isSig);
 }
 
 void ScannerPanel::onScanClicked() {
     if (m_engine->isRunning()) {
         m_engine->abort();
-        m_scanBtn->setText(QStringLiteral("Scan"));
-        m_progressBar->hide();
-        m_statusLabel->setText(QStringLiteral("Scan cancelled"));
-        return;
+        return; // finished/rescanFinished handler resets UI
     }
 
     // Get provider
@@ -344,41 +352,40 @@ ScanRequest ScannerPanel::buildRequest() {
 void ScannerPanel::onScanFinished(QVector<ScanResult> results) {
     m_scanBtn->setText(QStringLiteral("Scan"));
     m_progressBar->hide();
-    m_results = results;
+    m_results = std::move(results);
 
-    // Cache scan-time bytes
-    if (m_lastScanMode == 1) {
-        // Value mode — every result matched the same value, no re-read needed
-        for (auto& r : m_results) {
-            r.previousValue.clear();
+    // Bytes are cached by the engine during scan.
+    // Value mode: override with exact search pattern (engine caches raw chunk bytes).
+    for (auto& r : m_results) {
+        r.previousValue.clear();
+        if (m_lastScanMode == 1)
             r.scanValue = m_lastPattern;
-        }
-    } else {
-        // Signature mode — wildcards mean each match may differ, read actual bytes
-        std::shared_ptr<Provider> prov;
-        if (m_providerGetter)
-            prov = m_providerGetter();
-        for (auto& r : m_results) {
-            r.previousValue.clear();
-            r.scanValue = prov ? prov->readBytes(r.address, 16) : QByteArray();
-        }
     }
 
     m_updateBtn->setEnabled(!m_results.isEmpty());
-    populateTable(false);
+    {
+        QElapsedTimer pt;
+        pt.start();
+        populateTable(false);
+        qDebug() << "[panel] populateTable(initial):" << m_results.size()
+                 << "results," << pt.elapsed() << "ms";
+    }
 
+    int n = m_results.size();
     m_statusLabel->setText(QStringLiteral("%1 result%2")
-        .arg(m_results.size())
-        .arg(m_results.size() == 1 ? "" : "s"));
+        .arg(n).arg(n == 1 ? "" : "s"));
 }
 
 void ScannerPanel::populateTable(bool showPrevious) {
+    constexpr int kMaxRows = 10000;
+
     m_resultTable->blockSignals(true);
     int cols = showPrevious ? 3 : 2;
     m_resultTable->setColumnCount(cols);
-    m_resultTable->setRowCount(m_results.size());
+    int displayCount = qMin(m_results.size(), kMaxRows);
+    m_resultTable->setRowCount(displayCount);
 
-    for (int i = 0; i < m_results.size(); i++) {
+    for (int i = 0; i < displayCount; i++) {
         const auto& r = m_results[i];
 
         // Address column — WinDbg backtick format: 00000000`00000000
@@ -402,13 +409,11 @@ void ScannerPanel::populateTable(bool showPrevious) {
         }
     }
 
-    m_resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_resultTable->horizontalHeader()->setStretchLastSection(false);
     m_resultTable->blockSignals(false);
 }
 
 void ScannerPanel::onUpdateClicked() {
-    if (m_results.isEmpty()) return;
+    if (m_results.isEmpty() || m_engine->isRunning()) return;
 
     std::shared_ptr<Provider> prov;
     if (m_providerGetter)
@@ -418,55 +423,34 @@ void ScannerPanel::onUpdateClicked() {
         return;
     }
 
+    int readSize = (m_lastScanMode == 1) ? valueSize() : 16;
+
     m_updateBtn->setEnabled(false);
-    m_scanBtn->setEnabled(false);
+    m_scanBtn->setText(QStringLiteral("Cancel"));
     m_statusLabel->setText(QStringLiteral("Re-scanning..."));
     m_progressBar->setValue(0);
     m_progressBar->show();
 
-    int readSize = (m_lastScanMode == 1) ? valueSize() : 16;
-    int total = m_results.size();
+    m_engine->startRescan(prov, m_results, readSize);
+}
 
-    // Single pass: read new values + build table rows
-    m_resultTable->blockSignals(true);
-    m_resultTable->setColumnCount(3);
-    m_resultTable->setRowCount(total);
+void ScannerPanel::onRescanFinished(QVector<ScanResult> results) {
+    m_scanBtn->setText(QStringLiteral("Scan"));
+    m_progressBar->hide();
+    m_results = std::move(results);
+    m_updateBtn->setEnabled(!m_results.isEmpty());
 
-    for (int i = 0; i < total; i++) {
-        auto& r = m_results[i];
-        r.previousValue = r.scanValue;
-        r.scanValue = prov->readBytes(r.address, readSize);
-
-        QString hexPart = QStringLiteral("%1").arg(r.address, 16, 16, QLatin1Char('0')).toUpper();
-        hexPart.insert(8, '`');
-        auto* addrItem = new QTableWidgetItem(hexPart);
-        addrItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
-        m_resultTable->setItem(i, 0, addrItem);
-
-        auto* valItem = new QTableWidgetItem(formatValue(r.scanValue));
-        valItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
-        m_resultTable->setItem(i, 1, valItem);
-
-        auto* prevItem = new QTableWidgetItem(formatValue(r.previousValue));
-        prevItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
-        m_resultTable->setItem(i, 2, prevItem);
-
-        if ((i & 0xFF) == 0) {
-            m_progressBar->setValue(i * 100 / total);
-            QApplication::processEvents();
-        }
+    {
+        QElapsedTimer pt;
+        pt.start();
+        populateTable(true);
+        qDebug() << "[panel] populateTable(rescan):" << m_results.size()
+                 << "results," << pt.elapsed() << "ms";
     }
 
-    m_resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    m_resultTable->horizontalHeader()->setStretchLastSection(false);
-    m_resultTable->blockSignals(false);
-
-    m_progressBar->setValue(100);
-    m_progressBar->hide();
-    m_scanBtn->setEnabled(true);
-    m_updateBtn->setEnabled(true);
+    int n = m_results.size();
     m_statusLabel->setText(QStringLiteral("Updated %1 result%2")
-        .arg(total).arg(total == 1 ? "" : "s"));
+        .arg(n).arg(n == 1 ? "" : "s"));
 }
 
 void ScannerPanel::onGoToAddress() {

@@ -10,6 +10,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QClipboard>
+#include <QElapsedTimer>
 #include <cstring>
 #include "scannerpanel.h"
 #include "scanner.h"
@@ -29,6 +30,11 @@ private slots:
     void init() {
         m_panel = new ScannerPanel();
         m_panel->show();
+        // Clear mode-dependent filter defaults so BufferProvider scans
+        // (which have no executable regions) work without filter issues.
+        // The initialState_filterCheckboxes test verifies defaults separately.
+        m_panel->execCheck()->setChecked(false);
+        m_panel->writeCheck()->setChecked(false);
         QApplication::processEvents();
     }
 
@@ -77,8 +83,19 @@ private slots:
     }
 
     void initialState_filterCheckboxes() {
-        QVERIFY(!m_panel->execCheck()->isChecked());
-        QVERIFY(!m_panel->writeCheck()->isChecked());
+        // Verify defaults on a fresh panel (init() clears filters for test convenience)
+        ScannerPanel fresh;
+        // Signature mode default: executable checked, writable unchecked
+        QVERIFY(fresh.execCheck()->isChecked());
+        QVERIFY(!fresh.writeCheck()->isChecked());
+        // Switching to value mode flips them
+        fresh.modeCombo()->setCurrentIndex(1);
+        QVERIFY(!fresh.execCheck()->isChecked());
+        QVERIFY(fresh.writeCheck()->isChecked());
+        // Switching back restores signature defaults
+        fresh.modeCombo()->setCurrentIndex(0);
+        QVERIFY(fresh.execCheck()->isChecked());
+        QVERIFY(!fresh.writeCheck()->isChecked());
     }
 
     void initialState_patternPlaceholder() {
@@ -774,8 +791,10 @@ private slots:
         std::memcpy(newBytes.data(), &newVal, 4);
         prov->writeBytes(8, newBytes);
 
-        // Click update
+        // Click update — runs async
+        QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
         QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+        QVERIFY(rescanSpy.wait(5000));
         QApplication::processEvents();
         QCOMPARE(m_panel->resultsTable()->columnCount(), 3);
         // Current value = 99, previous = 50
@@ -821,16 +840,16 @@ private slots:
             prov->writeBytes(i * 4, nb);
         }
 
-        // Click Re-scan
+        // Click Re-scan — runs async
+        QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
         QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+        QVERIFY(rescanSpy.wait(5000));
         QApplication::processEvents();
 
         // Progress bar should be hidden (completed)
         QVERIFY(!m_panel->progressBar()->isVisible());
         // Table should have 3 columns now
         QCOMPARE(m_panel->resultsTable()->columnCount(), 3);
-        // All rows should be populated
-        QCOMPARE(m_panel->resultsTable()->rowCount(), m_panel->resultsTable()->rowCount());
         // Spot check first and last row
         QCOMPARE(m_panel->resultsTable()->item(0, 1)->text(), QStringLiteral("21"));
         QCOMPARE(m_panel->resultsTable()->item(0, 2)->text(), QStringLiteral("7"));
@@ -855,6 +874,7 @@ private slots:
         m_panel->setProviderGetter([prov]() { return prov; });
 
         m_panel->modeCombo()->setCurrentIndex(0); // Signature
+        m_panel->execCheck()->setChecked(false);  // BufferProvider has no exec regions
         m_panel->patternEdit()->setText("48 8B ??");
         QSignalSpy finSpy(m_panel->engine(), &ScanEngine::finished);
         QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
@@ -867,8 +887,10 @@ private slots:
         mod[0] = 0x48; mod[1] = 0x8B; mod[2] = (char)0xFF;
         prov->writeBytes(0, mod);
 
-        // Re-scan
+        // Re-scan — runs async
+        QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
         QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+        QVERIFY(rescanSpy.wait(5000));
         QApplication::processEvents();
 
         QVERIFY(!m_panel->progressBar()->isVisible());
@@ -908,8 +930,12 @@ private slots:
         QByteArray nb2(4, '\0');
         std::memcpy(nb2.data(), &v2, 4);
         prov->writeBytes(4, nb2);
-        QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
-        QApplication::processEvents();
+        {
+            QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
+            QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+            QVERIFY(rescanSpy.wait(5000));
+            QApplication::processEvents();
+        }
         QCOMPARE(m_panel->resultsTable()->item(0, 1)->text(), QStringLiteral("20"));
         QCOMPARE(m_panel->resultsTable()->item(0, 2)->text(), QStringLiteral("10"));
 
@@ -918,10 +944,159 @@ private slots:
         QByteArray nb3(4, '\0');
         std::memcpy(nb3.data(), &v3, 4);
         prov->writeBytes(4, nb3);
-        QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
-        QApplication::processEvents();
+        {
+            QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
+            QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+            QVERIFY(rescanSpy.wait(5000));
+            QApplication::processEvents();
+        }
         QCOMPARE(m_panel->resultsTable()->item(0, 1)->text(), QStringLiteral("30"));
         QCOMPARE(m_panel->resultsTable()->item(0, 2)->text(), QStringLiteral("20"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Provider getter is lazy (captures at scan time)
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Benchmark: initial scan + 10 re-scans on a large buffer
+    // ═══════════════════════════════════════════════════════════════════
+
+    void bench_rescan10x() {
+        // 1MB buffer, int32 value=42 placed every 512 bytes → 2048 results
+        constexpr int kBufSize = 1 * 1024 * 1024;
+        constexpr int kStride = 512;
+        constexpr int32_t kVal = 42;
+
+        QByteArray data(kBufSize, '\0');
+        int planted = 0;
+        for (int off = 0; off + 4 <= kBufSize; off += kStride) {
+            std::memcpy(data.data() + off, &kVal, 4);
+            planted++;
+        }
+        qDebug() << "[bench] buffer:" << (kBufSize / 1024) << "KB,"
+                 << planted << "planted values, stride:" << kStride;
+
+        auto prov = std::make_shared<BufferProvider>(data);
+        m_panel->setProviderGetter([prov]() { return prov; });
+
+        m_panel->modeCombo()->setCurrentIndex(1);
+        for (int i = 0; i < m_panel->typeCombo()->count(); i++) {
+            if (m_panel->typeCombo()->itemData(i).toInt() == (int)ValueType::Int32) {
+                m_panel->typeCombo()->setCurrentIndex(i);
+                break;
+            }
+        }
+        m_panel->valueEdit()->setText(QString::number(kVal));
+
+        // ── Initial scan ──
+        QElapsedTimer totalTimer;
+        totalTimer.start();
+
+        QSignalSpy finSpy(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(finSpy.wait(30000));
+        QApplication::processEvents();
+
+        int resultCount = m_panel->resultsTable()->rowCount();
+        qDebug() << "[bench] initial scan:" << totalTimer.elapsed() << "ms,"
+                 << resultCount << "results displayed";
+        QVERIFY(resultCount > 0);
+        QVERIFY(m_panel->updateButton()->isEnabled());
+
+        // ── 10 re-scans — mutate values each time ──
+        for (int iter = 1; iter <= 10; iter++) {
+            int32_t newVal = kVal + iter;
+            for (int off = 0; off + 4 <= kBufSize; off += kStride)
+                std::memcpy(prov->data().data() + off, &newVal, 4);
+
+            QElapsedTimer iterTimer;
+            iterTimer.start();
+
+            QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
+            QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+            QVERIFY2(rescanSpy.wait(30000),
+                     qPrintable(QString("rescan #%1 timed out").arg(iter)));
+            QApplication::processEvents();
+
+            qDebug() << "[bench] rescan #" << iter << ":" << iterTimer.elapsed() << "ms"
+                     << "| val:" << newVal
+                     << "| rows:" << m_panel->resultsTable()->rowCount()
+                     << "| status:" << m_panel->statusLabel()->text();
+
+            QVERIFY(m_panel->resultsTable()->item(0, 1) != nullptr);
+            QCOMPARE(m_panel->resultsTable()->item(0, 1)->text(),
+                     QString::number(newVal));
+            if (m_panel->resultsTable()->columnCount() >= 3) {
+                QCOMPARE(m_panel->resultsTable()->item(0, 2)->text(),
+                         QString::number(newVal - 1));
+            }
+            QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Scan"));
+            QVERIFY(!m_panel->progressBar()->isVisible());
+            QVERIFY(m_panel->updateButton()->isEnabled());
+        }
+
+        qDebug() << "[bench] total (scan + 10 rescans):" << totalTimer.elapsed() << "ms";
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Benchmark: signature re-scan (16 bytes per result)
+    // ═══════════════════════════════════════════════════════════════════
+
+    void bench_rescanSignature10x() {
+        // 1MB buffer with "MZ" planted every 4096 bytes → 256 results
+        constexpr int kBufSize = 1 * 1024 * 1024;
+        constexpr int kStride = 4096;
+
+        QByteArray data(kBufSize, '\0');
+        int planted = 0;
+        for (int off = 0; off + 2 <= kBufSize; off += kStride) {
+            data[off] = 0x4D; data[off + 1] = 0x5A;
+            planted++;
+        }
+        qDebug() << "[bench-sig] buffer:" << (kBufSize / 1024) << "KB,"
+                 << planted << "planted sigs";
+
+        auto prov = std::make_shared<BufferProvider>(data);
+        m_panel->setProviderGetter([prov]() { return prov; });
+
+        m_panel->modeCombo()->setCurrentIndex(0);
+        m_panel->patternEdit()->setText("4D 5A");
+
+        QElapsedTimer totalTimer;
+        totalTimer.start();
+
+        QSignalSpy finSpy(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(finSpy.wait(30000));
+        QApplication::processEvents();
+
+        qDebug() << "[bench-sig] initial scan:" << totalTimer.elapsed() << "ms,"
+                 << m_panel->resultsTable()->rowCount() << "results";
+        QVERIFY(m_panel->resultsTable()->rowCount() > 0);
+
+        for (int iter = 1; iter <= 10; iter++) {
+            for (int off = 0; off + 3 <= kBufSize; off += kStride)
+                prov->data().data()[off + 2] = (char)(iter & 0xFF);
+
+            QElapsedTimer iterTimer;
+            iterTimer.start();
+
+            QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
+            QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+            QVERIFY2(rescanSpy.wait(30000),
+                     qPrintable(QString("sig rescan #%1 timed out").arg(iter)));
+            QApplication::processEvents();
+
+            qDebug() << "[bench-sig] rescan #" << iter << ":" << iterTimer.elapsed() << "ms"
+                     << "| status:" << m_panel->statusLabel()->text();
+
+            QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Scan"));
+            QVERIFY(!m_panel->progressBar()->isVisible());
+            QVERIFY(m_panel->updateButton()->isEnabled());
+        }
+
+        qDebug() << "[bench-sig] total:" << totalTimer.elapsed() << "ms";
     }
 
     // ═══════════════════════════════════════════════════════════════════

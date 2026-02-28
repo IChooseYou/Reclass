@@ -440,6 +440,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(m_mdiArea);
 
     createWorkspaceDock();
+    createScannerDock();
     createMenus();
     createStatusBar();
 
@@ -611,6 +612,11 @@ void MainWindow::createMenus() {
 
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
+    {
+        auto* scanAct = m_scannerDock->toggleViewAction();
+        scanAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S));
+        view->addAction(scanAct);
+    }
 
     // Tools
     auto* tools = m_titleBar->menuBar()->addMenu("&Tools");
@@ -1813,6 +1819,25 @@ void MainWindow::applyTheme(const Theme& theme) {
             "QToolButton:hover { color: %2; }")
             .arg(theme.textDim.name(), theme.indHoverSpan.name()));
 
+    // Scanner dock
+    if (m_scannerPanel)
+        m_scannerPanel->applyTheme(theme);
+    if (m_scanDockTitle) {
+        QPalette lp = m_scanDockTitle->palette();
+        lp.setColor(QPalette::WindowText, theme.textDim);
+        m_scanDockTitle->setPalette(lp);
+    }
+    if (auto* titleBar = m_scannerDock ? m_scannerDock->titleBarWidget() : nullptr) {
+        QPalette tbPal = titleBar->palette();
+        tbPal.setColor(QPalette::Window, theme.backgroundAlt);
+        titleBar->setPalette(tbPal);
+    }
+    if (m_scanDockCloseBtn)
+        m_scanDockCloseBtn->setStyleSheet(QStringLiteral(
+            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
+            "QToolButton:hover { color: %2; }")
+            .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+
     // Rendered C/C++ views: update lexer colors, paper, margins
     for (auto& tab : m_tabs) {
         for (auto& pane : tab.panes) {
@@ -1933,6 +1958,11 @@ void MainWindow::setEditorFont(const QString& fontName) {
     // Sync dock titlebar font
     if (m_dockTitleLabel)
         m_dockTitleLabel->setFont(f);
+    // Sync scanner panel font
+    if (m_scannerPanel)
+        m_scannerPanel->setEditorFont(f);
+    if (m_scanDockTitle)
+        m_scanDockTitle->setFont(f);
 }
 
 RcxController* MainWindow::activeController() const {
@@ -2811,6 +2841,87 @@ void MainWindow::createWorkspaceDock() {
                     updateRenderedView(t, p);
             }
         });
+    });
+}
+
+// ── Scanner Dock ──
+
+void MainWindow::createScannerDock() {
+    m_scannerDock = new QDockWidget("Scanner", this);
+    m_scannerDock->setObjectName("ScannerDock");
+    m_scannerDock->setAllowedAreas(
+        Qt::BottomDockWidgetArea | Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+    m_scannerDock->setFeatures(
+        QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
+        QDockWidget::DockWidgetFloatable);
+
+    // Custom titlebar: label + close button (matches workspace dock)
+    {
+        const auto& t = ThemeManager::instance().current();
+
+        auto* titleBar = new QWidget(m_scannerDock);
+        titleBar->setFixedHeight(24);
+        titleBar->setAutoFillBackground(true);
+        {
+            QPalette tbPal = titleBar->palette();
+            tbPal.setColor(QPalette::Window, t.backgroundAlt);
+            titleBar->setPalette(tbPal);
+        }
+        auto* layout = new QHBoxLayout(titleBar);
+        layout->setContentsMargins(6, 2, 2, 2);
+        layout->setSpacing(0);
+
+        m_scanDockTitle = new QLabel("Scanner", titleBar);
+        {
+            QPalette lp = m_scanDockTitle->palette();
+            lp.setColor(QPalette::WindowText, t.textDim);
+            m_scanDockTitle->setPalette(lp);
+        }
+        layout->addWidget(m_scanDockTitle);
+
+        layout->addStretch();
+
+        m_scanDockCloseBtn = new QToolButton(titleBar);
+        m_scanDockCloseBtn->setText(QStringLiteral("\u2715"));
+        m_scanDockCloseBtn->setAutoRaise(true);
+        m_scanDockCloseBtn->setCursor(Qt::PointingHandCursor);
+        m_scanDockCloseBtn->setStyleSheet(QStringLiteral(
+            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
+            "QToolButton:hover { color: %2; }")
+            .arg(t.textDim.name(), t.indHoverSpan.name()));
+        connect(m_scanDockCloseBtn, &QToolButton::clicked, m_scannerDock, &QDockWidget::close);
+        layout->addWidget(m_scanDockCloseBtn);
+
+        m_scannerDock->setTitleBarWidget(titleBar);
+    }
+
+    m_scannerPanel = new ScannerPanel(m_scannerDock);
+    m_scannerPanel->applyTheme(ThemeManager::instance().current());
+    {
+        QSettings settings("Reclass", "Reclass");
+        QString fontName = settings.value("font", "JetBrains Mono").toString();
+        QFont f(fontName, 12);
+        f.setFixedPitch(true);
+        m_scannerPanel->setEditorFont(f);
+        m_scanDockTitle->setFont(f);
+    }
+    m_scannerDock->setWidget(m_scannerPanel);
+    addDockWidget(Qt::BottomDockWidgetArea, m_scannerDock);
+    m_scannerDock->hide();
+
+    // Wire provider getter: lazily captures the active tab's provider at scan time
+    m_scannerPanel->setProviderGetter([this]() -> std::shared_ptr<rcx::Provider> {
+        auto* ctrl = activeController();
+        return ctrl ? ctrl->document()->provider : nullptr;
+    });
+
+    // Wire "Go to Address" to rebase the active tab
+    connect(m_scannerPanel, &ScannerPanel::goToAddress, this, [this](uint64_t addr) {
+        auto* ctrl = activeController();
+        if (!ctrl) return;
+        ctrl->document()->tree.baseAddress = addr;
+        ctrl->document()->tree.baseAddressFormula.clear();
+        ctrl->refresh();
     });
 }
 

@@ -65,6 +65,7 @@ private slots:
     void onResultDoubleClicked(int row, int col);
     void onCellEdited(int row, int col);
     void onUpdateClicked();
+    void onRescanFinished(QVector<ScanResult> results);
 
 private:
     ScanRequest buildRequest();
