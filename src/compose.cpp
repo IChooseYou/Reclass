@@ -397,11 +397,11 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
         const QVector<int>& allChildren = childIndices(state, node.id);
 
-        // Split children into regular nodes and helpers (helpers render at the end)
-        QVector<int> regular, helperIdxs;
+        // Split children into regular nodes and static fields (static fields render at the end)
+        QVector<int> regular, staticIdxs;
         for (int ci : allChildren) {
-            if (tree.nodes[ci].isHelper)
-                helperIdxs.append(ci);
+            if (tree.nodes[ci].isStatic)
+                staticIdxs.append(ci);
             else
                 regular.append(ci);
         }
@@ -523,24 +523,9 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                         childrenAreArrayElements ? absAddr : 0);
         }
 
-        // ── Static helpers: render after regular children, before footer ──
-        if (!helperIdxs.isEmpty() && !node.collapsed) {
-            // Separator line
-            {
-                LineMeta lm;
-                lm.nodeIdx   = nodeIdx;
-                lm.nodeId    = node.id;
-                lm.depth     = childDepth;
-                lm.lineKind  = LineKind::Field;
-                lm.nodeKind  = NodeKind::Hex8; // neutral kind for separator
-                lm.foldLevel = computeFoldLevel(childDepth, false);
-                lm.markerMask = 0;
-                lm.offsetText = QString(state.offsetHexDigits, QChar(' '));
-                state.emitLine(fmt::indent(childDepth)
-                    + QStringLiteral("\u2500\u2500\u2500 helpers \u2500\u2500\u2500"), lm);
-            }
-
-            // Build identifier resolver for helper expressions
+        // ── Static fields: render after regular children, before footer ──
+        if (!staticIdxs.isEmpty() && !node.collapsed) {
+            // Build identifier resolver for static field expressions
             auto makeResolver = [&](uint64_t parentAbsAddr) {
                 AddressParserCallbacks cbs;
                 cbs.resolveIdentifier = [&tree, &prov, &regular, parentAbsAddr]
@@ -582,92 +567,143 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
             auto cbs = makeResolver(absAddr);
 
-            for (int hi : helperIdxs) {
-                const Node& helper = tree.nodes[hi];
+            for (int si : staticIdxs) {
+                const Node& sf = tree.nodes[si];
 
                 // Evaluate expression → absolute address
-                uint64_t helperAddr = 0;
+                uint64_t staticAddr = 0;
                 bool exprOk = false;
-                if (!helper.offsetExpr.isEmpty()) {
-                    auto result = AddressParser::evaluate(helper.offsetExpr, 8, &cbs);
+                if (!sf.offsetExpr.isEmpty()) {
+                    auto result = AddressParser::evaluate(sf.offsetExpr, 8, &cbs);
                     exprOk = result.ok;
                     if (result.ok)
-                        helperAddr = result.value;
+                        staticAddr = result.value;
                 }
 
-                // Format: "▸ type  name  = expr → 0xADDR"  (or "= expr  (error)" on failure)
-                int typeW = state.effectiveTypeW(node.id);
-                int nameW = state.effectiveNameW(node.id);
-
+                // Resolve type name
                 QString typeName;
-                if (helper.kind == NodeKind::Struct)
-                    typeName = fmt::structTypeName(helper);
-                else if (helper.kind == NodeKind::Pointer64 || helper.kind == NodeKind::Pointer32)
-                    typeName = fmt::pointerTypeName(helper.kind, resolvePointerTarget(tree, helper.refId));
+                if (sf.kind == NodeKind::Struct)
+                    typeName = fmt::structTypeName(sf);
+                else if (sf.kind == NodeKind::Pointer64 || sf.kind == NodeKind::Pointer32)
+                    typeName = fmt::pointerTypeName(sf.kind, resolvePointerTarget(tree, sf.refId));
                 else
-                    typeName = fmt::typeNameRaw(helper.kind);
+                    typeName = fmt::typeNameRaw(sf.kind);
 
-                bool overflow = state.compactColumns && typeName.size() > typeW;
-                QString type = overflow ? typeName : typeName.leftJustified(typeW);
-                QString name = overflow ? helper.name : helper.name.leftJustified(nameW);
+                bool isCollapsed = sf.collapsed;
 
-                QString exprPart;
-                if (!helper.offsetExpr.isEmpty()) {
-                    if (exprOk)
-                        exprPart = QStringLiteral("= %1 \u2192 0x%2")
-                            .arg(helper.offsetExpr)
-                            .arg(QString::number(helperAddr, 16).toUpper());
-                    else
-                        exprPart = QStringLiteral("= %1  (error)").arg(helper.offsetExpr);
+                // ── Header line: "static <type> <name> {" or collapsed: "static <type> <name> { return <expr>; }"
+                QString headerLine;
+                if (isCollapsed) {
+                    QString exprPart;
+                    if (!sf.offsetExpr.isEmpty()) {
+                        if (exprOk)
+                            exprPart = QStringLiteral("return %1 } \u2192 0x%2")
+                                .arg(sf.offsetExpr)
+                                .arg(QString::number(staticAddr, 16).toUpper());
+                        else
+                            exprPart = QStringLiteral("return %1 }  (error)").arg(sf.offsetExpr);
+                    } else {
+                        exprPart = QStringLiteral("}");
+                    }
+                    headerLine = fmt::indent(childDepth)
+                        + QStringLiteral("static ") + typeName
+                        + QStringLiteral(" ") + sf.name
+                        + QStringLiteral(" { ") + exprPart;
+                } else {
+                    headerLine = fmt::indent(childDepth)
+                        + QStringLiteral("static ") + typeName
+                        + QStringLiteral(" ") + sf.name
+                        + QStringLiteral(" {");
                 }
-
-                QString line = fmt::indent(childDepth) + type
-                    + QStringLiteral(" ") + name
-                    + QStringLiteral(" ") + exprPart;
 
                 LineMeta lm;
-                lm.nodeIdx    = hi;
-                lm.nodeId     = helper.id;
+                lm.nodeIdx    = si;
+                lm.nodeId     = sf.id;
                 lm.depth      = childDepth;
                 lm.lineKind   = LineKind::Header;
-                lm.nodeKind   = helper.kind;
+                lm.nodeKind   = sf.kind;
                 lm.foldHead      = true;
-                lm.foldCollapsed = true;  // helpers always start collapsed
-                lm.isHelperLine  = true;
+                lm.foldCollapsed = isCollapsed;
+                lm.isStaticLine  = true;
                 lm.foldLevel  = computeFoldLevel(childDepth, true);
                 lm.markerMask = (1u << M_STRUCT_BG);
-                lm.offsetText = QStringLiteral("~") + QString::number(helperAddr, 16)
+                lm.offsetText = QStringLiteral("~") + QString::number(staticAddr, 16)
                     .toUpper().rightJustified(state.offsetHexDigits - 1, '0');
-                lm.offsetAddr = helperAddr;
+                lm.offsetAddr = staticAddr;
                 lm.ptrBase    = state.currentPtrBase;
-                lm.effectiveTypeW = overflow ? typeName.size() : typeW;
-                lm.effectiveNameW = nameW;
-                state.emitLine(line, lm);
+                lm.effectiveTypeW = typeName.size() + 7; // "static " prefix
+                lm.effectiveNameW = sf.name.size();
+                state.emitLine(headerLine, lm);
 
-                // If helper is expanded (user clicked to expand), compose its children
-                if (!helper.collapsed && exprOk) {
-                    if (helper.kind == NodeKind::Struct || helper.kind == NodeKind::Array) {
-                        // Compose helper's children at the evaluated address
-                        const QVector<int>& helperKids = childIndices(state, helper.id);
-                        for (int hci : helperKids) {
-                            composeNode(state, tree, prov, hci, childDepth + 1,
-                                        helperAddr, helper.id, false, helper.id);
+                // ── Body + children (only when expanded) ──
+                if (!isCollapsed) {
+                    // Body line: "   return <expr>    → 0xADDR"
+                    {
+                        QString bodyLine;
+                        if (!sf.offsetExpr.isEmpty()) {
+                            if (exprOk)
+                                bodyLine = fmt::indent(childDepth + 1)
+                                    + QStringLiteral("return %1").arg(sf.offsetExpr);
+                            else
+                                bodyLine = fmt::indent(childDepth + 1)
+                                    + QStringLiteral("return %1  (error)").arg(sf.offsetExpr);
+                        } else {
+                            bodyLine = fmt::indent(childDepth + 1)
+                                + QStringLiteral("return 0");
                         }
-                        // Helper footer
+
+                        // Right-align resolved address
+                        if (exprOk && !sf.offsetExpr.isEmpty()) {
+                            bodyLine += QStringLiteral("  \u2192 0x")
+                                + QString::number(staticAddr, 16).toUpper();
+                        }
+
+                        LineMeta blm;
+                        blm.nodeIdx    = si;
+                        blm.nodeId     = sf.id;
+                        blm.depth      = childDepth + 1;
+                        blm.lineKind   = LineKind::Field;
+                        blm.nodeKind   = sf.kind;
+                        blm.isStaticLine = true;
+                        blm.foldLevel  = computeFoldLevel(childDepth + 1, false);
+                        blm.markerMask = 0;
+                        blm.offsetText = QString(state.offsetHexDigits, QChar(' '));
+                        blm.offsetAddr = staticAddr;
+                        blm.ptrBase    = state.currentPtrBase;
+                        state.emitLine(bodyLine, blm);
+                    }
+
+                    // If struct/array, compose children at evaluated address
+                    if (exprOk && (sf.kind == NodeKind::Struct || sf.kind == NodeKind::Array)) {
+                        const QVector<int>& staticKids = childIndices(state, sf.id);
+                        for (int sci : staticKids) {
+                            composeNode(state, tree, prov, sci, childDepth + 1,
+                                        staticAddr, sf.id, false, sf.id);
+                        }
+                    }
+
+                    // Footer line: "};"
+                    {
                         LineMeta flm;
-                        flm.nodeIdx   = hi;
-                        flm.nodeId    = helper.id;
+                        flm.nodeIdx   = si;
+                        flm.nodeId    = sf.id;
                         flm.depth     = childDepth;
                         flm.lineKind  = LineKind::Footer;
-                        flm.nodeKind  = helper.kind;
+                        flm.nodeKind  = sf.kind;
+                        flm.isStaticLine = true;
                         flm.foldLevel = computeFoldLevel(childDepth, false);
                         flm.markerMask = 0;
-                        int hSpan = tree.structSpan(helper.id, &state.childMap);
-                        flm.offsetText = fmt::fmtOffsetMargin(helperAddr + hSpan, false,
-                                                               state.offsetHexDigits);
-                        flm.offsetAddr = helperAddr + hSpan;
+                        if (exprOk && (sf.kind == NodeKind::Struct || sf.kind == NodeKind::Array)) {
+                            int sSpan = tree.structSpan(sf.id, &state.childMap);
+                            flm.offsetText = fmt::fmtOffsetMargin(staticAddr + sSpan, false,
+                                                                   state.offsetHexDigits);
+                            flm.offsetAddr = staticAddr + sSpan;
+                        } else {
+                            flm.offsetText = QString(state.offsetHexDigits, QChar(' '));
+                            flm.offsetAddr = staticAddr;
+                        }
                         flm.ptrBase    = state.currentPtrBase;
-                        state.emitLine(fmt::fmtStructFooter(helper, childDepth, hSpan), flm);
+                        state.emitLine(fmt::indent(childDepth) + QStringLiteral("};"), flm);
                     }
                 }
             }

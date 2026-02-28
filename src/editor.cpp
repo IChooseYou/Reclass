@@ -504,14 +504,14 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (m_editState.target == EditTarget::Value)
             QTimer::singleShot(0, this, &RcxEditor::validateEditLive);
 
-        // Autocomplete for helper expressions — show field names as user types
-        if (m_editState.target == EditTarget::HelperExpr && !m_helperCompletions.isEmpty()) {
+        // Autocomplete for static field expressions — show field names as user types
+        if (m_editState.target == EditTarget::StaticExpr && !m_staticCompletions.isEmpty()) {
             // Get word at cursor
             long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS);
             long wordStart = m_sci->SendScintilla(QsciScintillaBase::SCI_WORDSTARTPOSITION, pos, (long)1);
             int wordLen = (int)(pos - wordStart);
             if (wordLen >= 1) {
-                QByteArray list = m_helperCompletions.join(' ').toUtf8();
+                QByteArray list = m_staticCompletions.join(' ').toUtf8();
                 m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSETSEPARATOR, (long)' ');
                 m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSHOW, (uintptr_t)wordLen, list.constData());
             }
@@ -1501,6 +1501,20 @@ static ColumnSpan headerTypeNameSpan(const LineMeta& lm, const QString& lineText
     };
     if (kKeywords.contains(typeCol)) return {};
 
+    // Static field headers: "static hex64 target {" — skip "static " prefix
+    if (lm.isStaticLine) {
+        int cursor = ind;
+        while (cursor < typeEnd && lineText[cursor] == ' ') cursor++;
+        if (lineText.mid(cursor, 7) == QLatin1String("static "))
+            cursor += 7;
+        while (cursor < typeEnd && lineText[cursor] == ' ') cursor++;
+        int tStart = cursor;
+        while (cursor < typeEnd && lineText[cursor] != ' ') cursor++;
+        if (cursor > tStart)
+            return {tStart, cursor, true};
+        return {};
+    }
+
     // Named struct: entire type column is the type name (e.g. "_MMPTE")
     // Find the actual text bounds within the padded column
     int start = ind;
@@ -1586,7 +1600,8 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     if (lm->nodeIdx < 0) return false;
 
     // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
-    if ((t == EditTarget::Name || t == EditTarget::Value) && isHexNode(lm->nodeKind))
+    // Exception: static field names are always editable (they're function names)
+    if ((t == EditTarget::Name || t == EditTarget::Value) && isHexNode(lm->nodeKind) && !lm->isStaticLine)
         return false;
 
     QString lineText = getLineText(m_sci, line);
@@ -1612,9 +1627,9 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
         s = arrayElemCountSpanFor(*lm, lineText); break;
     case EditTarget::PointerTarget:
         s = pointerTargetSpanFor(*lm, lineText); break;
-    case EditTarget::HelperExpr:
-        if (lm->isHelperLine)
-            s = helperExprSpanFor(*lm, lineText);
+    case EditTarget::StaticExpr:
+        if (lm->isStaticLine)
+            s = staticExprSpanFor(*lm, lineText);
         break;
     case EditTarget::Source: break;
     }
@@ -2245,7 +2260,8 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
          || target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
         return false;
     // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
-    if ((target == EditTarget::Name || target == EditTarget::Value) && isHexNode(lm->nodeKind))
+    // Exception: static field names are always editable (they're function names, not hex labels)
+    if ((target == EditTarget::Name || target == EditTarget::Value) && isHexNode(lm->nodeKind) && !lm->isStaticLine)
         return false;
 
     QString lineText;

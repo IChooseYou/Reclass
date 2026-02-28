@@ -173,10 +173,10 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
     QString ind = indent(depth);
 
     QVector<int> allChildren = ctx.childMap.value(structId);
-    QVector<int> children, helperIdxs;
+    QVector<int> children, staticIdxs;
     for (int ci : allChildren) {
-        if (tree.nodes[ci].isHelper)
-            helperIdxs.append(ci);
+        if (tree.nodes[ci].isStatic)
+            staticIdxs.append(ci);
         else
             children.append(ci);
     }
@@ -318,12 +318,12 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
     if (!isUnion && cursor < structSize)
         emitPadRun(cursor, structSize - cursor);
 
-    // Emit helper comments (helpers are runtime-only, not part of struct layout)
-    for (int hi : helperIdxs) {
-        const Node& h = tree.nodes[hi];
-        QString hType = h.structTypeName.isEmpty() ? ctx.cType(h.kind) : h.structTypeName;
-        ctx.output += ind + QStringLiteral("// helper: %1 %2 @ %3\n")
-            .arg(hType, sanitizeIdent(h.name), h.offsetExpr);
+    // Emit static field comments (static fields are runtime-only, not part of struct layout)
+    for (int si : staticIdxs) {
+        const Node& sf = tree.nodes[si];
+        QString sfType = sf.structTypeName.isEmpty() ? ctx.cType(sf.kind) : sf.structTypeName;
+        ctx.output += ind + QStringLiteral("// static: %1 %2 @ %3\n")
+            .arg(sfType, sanitizeIdent(sf.name), sf.offsetExpr);
     }
 }
 

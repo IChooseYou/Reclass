@@ -230,6 +230,11 @@ if(BUILD_TESTING)
     target_link_libraries(test_addressparser PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_addressparser COMMAND test_addressparser)
 
+    add_executable(test_static_fields tests/test_static_fields.cpp src/compose.cpp src/format.cpp src/addressparser.cpp)
+    target_include_directories(test_static_fields PRIVATE src)
+    target_link_libraries(test_static_fields PRIVATE ${QT}::Core ${QT}::Test)
+    add_test(NAME test_static_fields COMMAND test_static_fields)
+
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
             src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)

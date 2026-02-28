@@ -758,9 +758,9 @@ private slots:
         QVERIFY(!result.contains("struct _LIST_ENTRY\n{"));
         QVERIFY(!result.contains("uint8_t _pad"));
     }
-    // ── Helper node generator tests ──
+    // ── Static field node generator tests ──
 
-    void testHelperNotInStructBody() {
+    void testStaticFieldNotInStructBody() {
         rcx::NodeTree tree;
 
         rcx::Node root;
@@ -778,32 +778,32 @@ private slots:
         f1.offset = 0;
         tree.addNode(f1);
 
-        rcx::Node helper;
-        helper.kind = rcx::NodeKind::Struct;
-        helper.name = "nt_hdr";
-        helper.structTypeName = "IMAGE_NT_HEADERS";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base + e_lfanew");
-        tree.addNode(helper);
+        rcx::Node sf;
+        sf.kind = rcx::NodeKind::Struct;
+        sf.name = "nt_hdr";
+        sf.structTypeName = "IMAGE_NT_HEADERS";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + e_lfanew");
+        tree.addNode(sf);
 
         QString result = rcx::renderCpp(tree, rootId);
 
-        // Helper should NOT appear as a member in the struct body
+        // Static field should NOT appear as a member in the struct body
         QVERIFY2(!result.contains("IMAGE_NT_HEADERS nt_hdr;"),
-                 qPrintable("Helper should not be in struct body:\n" + result));
+                 qPrintable("Static field should not be in struct body:\n" + result));
 
-        // Helper SHOULD appear as a comment
-        QVERIFY2(result.contains("// helper:"),
-                 qPrintable("Helper comment missing:\n" + result));
+        // Static field SHOULD appear as a comment
+        QVERIFY2(result.contains("// static:"),
+                 qPrintable("Static field comment missing:\n" + result));
         QVERIFY2(result.contains("nt_hdr"),
-                 qPrintable("Helper name missing from comment:\n" + result));
+                 qPrintable("Static field name missing from comment:\n" + result));
         QVERIFY2(result.contains("base + e_lfanew"),
-                 qPrintable("Helper expression missing from comment:\n" + result));
+                 qPrintable("Static field expression missing from comment:\n" + result));
     }
 
-    void testHelperCommentFormat() {
+    void testStaticFieldCommentFormat() {
         rcx::NodeTree tree;
 
         rcx::Node root;
@@ -821,26 +821,26 @@ private slots:
         f1.offset = 0;
         tree.addNode(f1);
 
-        rcx::Node helper;
-        helper.kind = rcx::NodeKind::Hex64;
-        helper.name = "ptr";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base + 0xFF");
-        tree.addNode(helper);
+        rcx::Node sf;
+        sf.kind = rcx::NodeKind::Hex64;
+        sf.name = "ptr";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + 0xFF");
+        tree.addNode(sf);
 
         QString result = rcx::renderCpp(tree, rootId);
 
         // The regular field should be in the struct body
         QVERIFY(result.contains("uint64_t base_field;"));
 
-        // Helper emitted as comment after struct body
-        QVERIFY(result.contains("// helper:"));
+        // Static field emitted as comment after struct body
+        QVERIFY(result.contains("// static:"));
         QVERIFY(result.contains("@ base + 0xFF"));
     }
 
-    void testStructSizeUnchangedByHelper() {
+    void testStructSizeUnchangedByStaticField() {
         rcx::NodeTree tree;
 
         rcx::Node root;
@@ -858,14 +858,14 @@ private slots:
         f1.offset = 0;
         tree.addNode(f1);
 
-        rcx::Node helper;
-        helper.kind = rcx::NodeKind::Struct;
-        helper.name = "big_helper";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        tree.addNode(helper);
+        rcx::Node sf;
+        sf.kind = rcx::NodeKind::Struct;
+        sf.name = "big_static";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
 
         QString result = rcx::renderCpp(tree, rootId, nullptr, true);
 

@@ -45,7 +45,7 @@ public:
     bool isEditing() const { return m_editState.active; }
     bool beginInlineEdit(EditTarget target, int line = -1, int col = -1);
     void cancelInlineEdit();
-    void setHelperCompletions(const QStringList& words) { m_helperCompletions = words; }
+    void setStaticCompletions(const QStringList& words) { m_staticCompletions = words; }
 
     void applySelectionOverlay(const QSet<uint64_t>& selIds);
     void setCommandRowText(const QString& line);
@@ -134,7 +134,7 @@ private:
         bool       lastValidationOk = true;  // track state to avoid redundant updates
     };
     InlineEditState m_editState;
-    QStringList m_helperCompletions;  // autocomplete words for HelperExpr editing
+    QStringList m_staticCompletions;  // autocomplete words for StaticExpr editing
 
     // ── Tab cycling state ──
     EditTarget m_lastTabTarget = EditTarget::Value;

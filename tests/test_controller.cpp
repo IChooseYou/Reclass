@@ -668,179 +668,179 @@ private slots:
         QVERIFY(newIdx >= 0);
         QCOMPARE(m_doc->tree.nodes[newIdx].kind, NodeKind::UInt32);
     }
-    // ── Helper node controller tests ──
+    // ── Static field node controller tests ──
 
-    void testAddHelper() {
+    void testAddStaticField() {
         uint64_t rootId = m_doc->tree.nodes[0].id;
         int origSize = m_doc->tree.nodes.size();
 
-        // Simulate "Add Helper" — same code as context menu action
-        Node helper;
-        helper.id = m_doc->tree.m_nextId++;
-        helper.kind = NodeKind::Hex64;
-        helper.name = QStringLiteral("helper");
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{helper, {}}));
+        // Simulate "Add Static Field" — same code as context menu action
+        Node sf;
+        sf.id = m_doc->tree.m_nextId++;
+        sf.kind = NodeKind::Hex64;
+        sf.name = QStringLiteral("static_field");
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{sf, {}}));
         QApplication::processEvents();
 
         QCOMPARE(m_doc->tree.nodes.size(), origSize + 1);
         const auto& h = m_doc->tree.nodes.back();
-        QCOMPARE(h.isHelper, true);
+        QCOMPARE(h.isStatic, true);
         QCOMPARE(h.offsetExpr, QStringLiteral("base"));
-        QCOMPARE(h.name, QStringLiteral("helper"));
+        QCOMPARE(h.name, QStringLiteral("static_field"));
         QCOMPARE(h.parentId, rootId);
     }
 
-    void testAddHelperUndo() {
+    void testAddStaticFieldUndo() {
         uint64_t rootId = m_doc->tree.nodes[0].id;
         int origSize = m_doc->tree.nodes.size();
 
-        Node helper;
-        helper.id = m_doc->tree.m_nextId++;
-        helper.kind = NodeKind::Hex64;
-        helper.name = QStringLiteral("helper");
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{helper, {}}));
+        Node sf;
+        sf.id = m_doc->tree.m_nextId++;
+        sf.kind = NodeKind::Hex64;
+        sf.name = QStringLiteral("static_field");
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{sf, {}}));
         QApplication::processEvents();
 
         QCOMPARE(m_doc->tree.nodes.size(), origSize + 1);
 
-        // Undo: helper should be gone
+        // Undo: static field should be gone
         m_doc->undoStack.undo();
         QApplication::processEvents();
         QCOMPARE(m_doc->tree.nodes.size(), origSize);
 
-        // Redo: helper should be back
+        // Redo: static field should be back
         m_doc->undoStack.redo();
         QApplication::processEvents();
         QCOMPARE(m_doc->tree.nodes.size(), origSize + 1);
-        QCOMPARE(m_doc->tree.nodes.back().isHelper, true);
+        QCOMPARE(m_doc->tree.nodes.back().isStatic, true);
     }
 
-    void testChangeHelperExpression() {
+    void testChangeStaticFieldExpression() {
         uint64_t rootId = m_doc->tree.nodes[0].id;
 
-        // Add a helper
-        Node helper;
-        helper.id = m_doc->tree.m_nextId++;
-        helper.kind = NodeKind::Hex64;
-        helper.name = QStringLiteral("helper");
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{helper, {}}));
+        // Add a static field
+        Node sf;
+        sf.id = m_doc->tree.m_nextId++;
+        sf.kind = NodeKind::Hex64;
+        sf.name = QStringLiteral("static_field");
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{sf, {}}));
         QApplication::processEvents();
 
-        uint64_t helperId = m_doc->tree.nodes.back().id;
+        uint64_t sfId = m_doc->tree.nodes.back().id;
 
         // Change expression
         m_doc->undoStack.push(new RcxCommand(m_ctrl,
-            cmd::ChangeOffsetExpr{helperId, QStringLiteral("base"), QStringLiteral("base + 0x10")}));
+            cmd::ChangeOffsetExpr{sfId, QStringLiteral("base"), QStringLiteral("base + 0x10")}));
         QApplication::processEvents();
 
-        int idx = m_doc->tree.indexOfId(helperId);
+        int idx = m_doc->tree.indexOfId(sfId);
         QVERIFY(idx >= 0);
         QCOMPARE(m_doc->tree.nodes[idx].offsetExpr, QStringLiteral("base + 0x10"));
 
         // Undo: old expression restored
         m_doc->undoStack.undo();
         QApplication::processEvents();
-        idx = m_doc->tree.indexOfId(helperId);
+        idx = m_doc->tree.indexOfId(sfId);
         QVERIFY(idx >= 0);
         QCOMPARE(m_doc->tree.nodes[idx].offsetExpr, QStringLiteral("base"));
     }
 
-    void testDeleteHelperPreservesStructSize() {
+    void testDeleteStaticFieldPreservesStructSize() {
         uint64_t rootId = m_doc->tree.nodes[0].id;
         int spanBefore = m_doc->tree.structSpan(rootId);
 
-        // Add a helper
-        Node helper;
-        helper.id = m_doc->tree.m_nextId++;
-        helper.kind = NodeKind::Hex64;
-        helper.name = QStringLiteral("helper");
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{helper, {}}));
+        // Add a static field
+        Node sf;
+        sf.id = m_doc->tree.m_nextId++;
+        sf.kind = NodeKind::Hex64;
+        sf.name = QStringLiteral("static_field");
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{sf, {}}));
         QApplication::processEvents();
 
-        // Struct size unchanged after adding helper
+        // Struct size unchanged after adding static field
         QCOMPARE(m_doc->tree.structSpan(rootId), spanBefore);
 
-        // Remove helper
-        uint64_t helperId = m_doc->tree.nodes.back().id;
-        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Remove{helperId}));
+        // Remove static field
+        uint64_t sfId = m_doc->tree.nodes.back().id;
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Remove{sfId}));
         QApplication::processEvents();
 
         // Struct size still unchanged
         QCOMPARE(m_doc->tree.structSpan(rootId), spanBefore);
     }
 
-    void testHelperRenamePreservesExpression() {
+    void testStaticFieldRenamePreservesExpression() {
         uint64_t rootId = m_doc->tree.nodes[0].id;
 
-        // Add a helper
-        Node helper;
-        helper.id = m_doc->tree.m_nextId++;
-        helper.kind = NodeKind::Hex64;
-        helper.name = QStringLiteral("my_helper");
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base + field_u32");
-        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{helper, {}}));
+        // Add a static field
+        Node sf;
+        sf.id = m_doc->tree.m_nextId++;
+        sf.kind = NodeKind::Hex64;
+        sf.name = QStringLiteral("my_static");
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + field_u32");
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{sf, {}}));
         QApplication::processEvents();
 
-        uint64_t helperId = m_doc->tree.nodes.back().id;
+        uint64_t sfId = m_doc->tree.nodes.back().id;
 
-        // Rename the helper
+        // Rename the static field
         m_doc->undoStack.push(new RcxCommand(m_ctrl,
-            cmd::Rename{helperId, QStringLiteral("my_helper"), QStringLiteral("renamed_helper")}));
+            cmd::Rename{sfId, QStringLiteral("my_static"), QStringLiteral("renamed_static")}));
         QApplication::processEvents();
 
-        int idx = m_doc->tree.indexOfId(helperId);
+        int idx = m_doc->tree.indexOfId(sfId);
         QVERIFY(idx >= 0);
-        QCOMPARE(m_doc->tree.nodes[idx].name, QStringLiteral("renamed_helper"));
+        QCOMPARE(m_doc->tree.nodes[idx].name, QStringLiteral("renamed_static"));
         // Expression should be preserved
         QCOMPARE(m_doc->tree.nodes[idx].offsetExpr, QStringLiteral("base + field_u32"));
-        QCOMPARE(m_doc->tree.nodes[idx].isHelper, true);
+        QCOMPARE(m_doc->tree.nodes[idx].isStatic, true);
     }
 
-    void testHelperTypeChangePreservesFlags() {
+    void testStaticFieldTypeChangePreservesFlags() {
         uint64_t rootId = m_doc->tree.nodes[0].id;
 
-        Node helper;
-        helper.id = m_doc->tree.m_nextId++;
-        helper.kind = NodeKind::Hex64;
-        helper.name = QStringLiteral("helper");
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{helper, {}}));
+        Node sf;
+        sf.id = m_doc->tree.m_nextId++;
+        sf.kind = NodeKind::Hex64;
+        sf.name = QStringLiteral("static_field");
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{sf, {}}));
         QApplication::processEvents();
 
-        uint64_t helperId = m_doc->tree.nodes.back().id;
+        uint64_t sfId = m_doc->tree.nodes.back().id;
 
         // Change kind to UInt32
         m_doc->undoStack.push(new RcxCommand(m_ctrl,
-            cmd::ChangeKind{helperId, NodeKind::Hex64, NodeKind::UInt32}));
+            cmd::ChangeKind{sfId, NodeKind::Hex64, NodeKind::UInt32}));
         QApplication::processEvents();
 
-        int idx = m_doc->tree.indexOfId(helperId);
+        int idx = m_doc->tree.indexOfId(sfId);
         QVERIFY(idx >= 0);
         QCOMPARE(m_doc->tree.nodes[idx].kind, NodeKind::UInt32);
-        // Helper flags must survive type change
-        QCOMPARE(m_doc->tree.nodes[idx].isHelper, true);
+        // Static field flags must survive type change
+        QCOMPARE(m_doc->tree.nodes[idx].isStatic, true);
         QCOMPARE(m_doc->tree.nodes[idx].offsetExpr, QStringLiteral("base"));
     }
 };

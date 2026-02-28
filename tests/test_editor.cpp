@@ -2556,6 +2556,218 @@ private slots:
         QApplication::processEvents();
         QCOMPARE(viewportCursor(m_editor), Qt::PointingHandCursor);
     }
+    // ── Static field: name must be editable (it's a function name, not hex label) ──
+
+    void testStaticFieldNameEditable() {
+        // Build a tree with one regular field + one static field
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Test";
+        root.structTypeName = "Test";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node f;
+        f.kind = NodeKind::UInt32;
+        f.name = "field_a";
+        f.parentId = rootId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "my_target";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(result);
+        QApplication::processEvents();
+
+        // Find the static field header line
+        int headerLine = -1;
+        for (int i = 0; i < result.meta.size(); i++) {
+            if (result.meta[i].isStaticLine && result.meta[i].lineKind == LineKind::Header) {
+                headerLine = i;
+                break;
+            }
+        }
+        QVERIFY2(headerLine >= 0, "Should have a static field header line");
+
+        const LineMeta* lm = m_editor->metaForLine(headerLine);
+        QVERIFY(lm);
+        QVERIFY(lm->isStaticLine);
+
+        // Verify the header text contains the name
+        QString text = m_editor->textWithMargins();
+        QStringList lines = text.split('\n');
+        QVERIFY2(headerLine < lines.size(), "header line in range");
+        QString hdrText = lines[headerLine];
+        QVERIFY2(hdrText.contains("my_target"), qPrintable("Header line should contain name: " + hdrText));
+
+        // The name should be inline-editable despite being a hex node kind
+        int nameStart = kFoldCol + lm->depth * 3 + lm->effectiveTypeW + kSepWidth;
+        bool ok = m_editor->beginInlineEdit(EditTarget::Name, headerLine, nameStart);
+        QVERIFY2(ok, qPrintable(QString("Static field name must be editable. line=%1 col=%2 depth=%3 typeW=%4 text='%5'")
+            .arg(headerLine).arg(nameStart).arg(lm->depth).arg(lm->effectiveTypeW).arg(hdrText)));
+        m_editor->cancelInlineEdit();
+    }
+
+    // ── Static field: type in header triggers type picker, not inline edit ──
+
+    void testStaticFieldTypeClickable() {
+        // Build same tree as above
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Test";
+        root.structTypeName = "Test";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node f;
+        f.kind = NodeKind::UInt32;
+        f.name = "field_a";
+        f.parentId = rootId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "my_target";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(result);
+        QApplication::processEvents();
+
+        // Find the static field header line
+        int headerLine = -1;
+        for (int i = 0; i < result.meta.size(); i++) {
+            if (result.meta[i].isStaticLine && result.meta[i].lineKind == LineKind::Header) {
+                headerLine = i;
+                break;
+            }
+        }
+        QVERIFY(headerLine >= 0);
+
+        const LineMeta* lm = m_editor->metaForLine(headerLine);
+        QVERIFY(lm);
+
+        // Scroll to ensure visible
+        m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_ENSUREVISIBLE, (unsigned long)headerLine);
+        m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_GOTOLINE, (unsigned long)headerLine);
+        QApplication::processEvents();
+
+        // Hover over the type column (after "static " prefix) — should be PointingHandCursor
+        // "static " is 7 chars, so the actual type starts at indent + 7
+        int typeCol = kFoldCol + lm->depth * 3 + 7;
+        QPoint typePos = colToViewport(m_editor->scintilla(), headerLine, typeCol + 1);
+        if (typePos.y() > 0) {
+            sendMouseMove(m_editor->scintilla()->viewport(), typePos);
+            QApplication::processEvents();
+            QCOMPARE(viewportCursor(m_editor), Qt::PointingHandCursor);
+        }
+    }
+
+    // ── Static field: body line expression is editable ──
+
+    void testStaticFieldExprEditable() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Test";
+        root.structTypeName = "Test";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "target";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + 0x10");
+        tree.addNode(sf);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(result);
+        QApplication::processEvents();
+
+        // Find the body line (Field with isStaticLine)
+        int bodyLine = -1;
+        for (int i = 0; i < result.meta.size(); i++) {
+            if (result.meta[i].isStaticLine && result.meta[i].lineKind == LineKind::Field) {
+                bodyLine = i;
+                break;
+            }
+        }
+        QVERIFY2(bodyLine >= 0, "Should have a static field body line");
+
+        // The expression should be editable via StaticExpr target
+        bool ok = m_editor->beginInlineEdit(EditTarget::StaticExpr, bodyLine);
+        QVERIFY2(ok, "Static field expression must be editable");
+        m_editor->cancelInlineEdit();
+    }
+
+    // ── No separator line for static fields ──
+
+    void testStaticFieldNoSeparator() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Test";
+        root.structTypeName = "Test";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node f;
+        f.kind = NodeKind::UInt32;
+        f.name = "a";
+        f.parentId = rootId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "target";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+
+        // No separator line with box-drawing characters should exist
+        QStringList lines = result.text.split('\n');
+        for (const auto& line : lines) {
+            QVERIFY2(!line.contains(QStringLiteral("\u2500\u2500\u2500\u2500 static \u2500\u2500\u2500\u2500")),
+                     "Static fields should not have a separator line");
+        }
+    }
 };
 
 QTEST_MAIN(TestEditor)

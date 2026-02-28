@@ -481,10 +481,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             break;
         }
-        case EditTarget::HelperExpr: {
+        case EditTarget::StaticExpr: {
             if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
                 const Node& node = m_doc->tree.nodes[nodeIdx];
-                if (node.isHelper && text != node.offsetExpr) {
+                if (node.isStatic && text != node.offsetExpr) {
                     m_doc->undoStack.push(new RcxCommand(this,
                         cmd::ChangeOffsetExpr{node.id, node.offsetExpr, text}));
                 }
@@ -1191,10 +1191,10 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].offsetExpr = isUndo ? c.oldExpr : c.newExpr;
-        } else if constexpr (std::is_same_v<T, cmd::ToggleHelper>) {
+        } else if constexpr (std::is_same_v<T, cmd::ToggleStatic>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
-                tree.nodes[idx].isHelper = isUndo ? c.oldVal : c.newVal;
+                tree.nodes[idx].isStatic = isUndo ? c.oldVal : c.newVal;
         }
     }, command);
 
@@ -1849,18 +1849,18 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             menu.addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
                 insertNode(nodeId, 0, NodeKind::Hex64, "newField");
             });
-            // Add Helper — inserts a static helper child
-            menu.addAction("Add Helper", [this, nodeId]() {
-                Node helper;
-                helper.id = m_doc->tree.m_nextId++;
-                helper.kind = NodeKind::Hex64;
-                helper.name = QStringLiteral("helper");
-                helper.parentId = nodeId;
-                helper.offset = 0;
-                helper.isHelper = true;
-                helper.offsetExpr = QStringLiteral("base");
+            // Add Static Field — inserts a static field child
+            menu.addAction("Add Static Field", [this, nodeId]() {
+                Node sf;
+                sf.id = m_doc->tree.m_nextId++;
+                sf.kind = NodeKind::Hex64;
+                sf.name = QStringLiteral("static_field");
+                sf.parentId = nodeId;
+                sf.offset = 0;
+                sf.isStatic = true;
+                sf.offsetExpr = QStringLiteral("base");
                 m_doc->undoStack.push(new RcxCommand(this,
-                    cmd::Insert{helper, {}}));
+                    cmd::Insert{sf, {}}));
             });
             if (node.collapsed) {
                 menu.addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
@@ -1876,8 +1876,29 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         }
 
-        // Helper-specific: Edit Expression inline
-        if (node.isHelper) {
+        // Add Static Field as sibling (for child nodes of a struct)
+        if (node.parentId != 0 && node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
+            uint64_t parentId = node.parentId;
+            int pi = m_doc->tree.indexOfId(parentId);
+            if (pi >= 0 && (m_doc->tree.nodes[pi].kind == NodeKind::Struct
+                         || m_doc->tree.nodes[pi].kind == NodeKind::Array)) {
+                menu.addAction("Add Static Field", [this, parentId]() {
+                    Node sf;
+                    sf.id = m_doc->tree.m_nextId++;
+                    sf.kind = NodeKind::Hex64;
+                    sf.name = QStringLiteral("static_field");
+                    sf.parentId = parentId;
+                    sf.offset = 0;
+                    sf.isStatic = true;
+                    sf.offsetExpr = QStringLiteral("base");
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::Insert{sf, {}}));
+                });
+            }
+        }
+
+        // Static field: Edit Expression inline
+        if (node.isStatic) {
             menu.addAction("Edit E&xpression", [this, editor, line, nodeId]() {
                 // Build completions list: "base" + sibling field names
                 QStringList completions;
@@ -1886,12 +1907,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 if (ni >= 0) {
                     uint64_t parentId = m_doc->tree.nodes[ni].parentId;
                     for (const Node& sib : m_doc->tree.nodes) {
-                        if (sib.parentId == parentId && !sib.isHelper && !sib.name.isEmpty())
+                        if (sib.parentId == parentId && !sib.isStatic && !sib.name.isEmpty())
                             completions << sib.name;
                     }
                 }
-                editor->setHelperCompletions(completions);
-                editor->beginInlineEdit(EditTarget::HelperExpr, line);
+                editor->setStaticCompletions(completions);
+                editor->beginInlineEdit(EditTarget::StaticExpr, line);
             });
         }
 
@@ -1947,6 +1968,27 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     }
 
     // ── Always-available actions ──
+
+    // Add Static Field to current view root (struct)
+    if (m_viewRootId != 0) {
+        int ri = m_doc->tree.indexOfId(m_viewRootId);
+        if (ri >= 0 && (m_doc->tree.nodes[ri].kind == NodeKind::Struct
+                     || m_doc->tree.nodes[ri].kind == NodeKind::Array)) {
+            uint64_t rootId = m_viewRootId;
+            menu.addAction("Add Static Field", [this, rootId]() {
+                Node sf;
+                sf.id = m_doc->tree.m_nextId++;
+                sf.kind = NodeKind::Hex64;
+                sf.name = QStringLiteral("static_field");
+                sf.parentId = rootId;
+                sf.offset = 0;
+                sf.isStatic = true;
+                sf.offsetExpr = QStringLiteral("base");
+                m_doc->undoStack.push(new RcxCommand(this,
+                    cmd::Insert{sf, {}}));
+            });
+        }
+    }
 
     menu.addAction(icon("diff-added.svg"), "Append bytes...", [this, &menu]() {
         bool ok;
@@ -2359,12 +2401,12 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                 e.sizeBytes    = m_doc->tree.structSpan(n.id);
 
                 QVector<int> kids = m_doc->tree.childrenOf(n.id);
-                int nonHelperCount = 0;
+                int nonStaticCount = 0;
                 int maxAlign = 1;
                 for (int i = 0; i < kids.size(); i++) {
                     const Node& child = m_doc->tree.nodes[kids[i]];
-                    if (child.isHelper) continue;
-                    nonHelperCount++;
+                    if (child.isStatic) continue;
+                    nonStaticCount++;
                     int childAlign = alignmentFor(child.kind);
                     if (childAlign > maxAlign) maxAlign = childAlign;
                     if (e.fieldSummary.size() < 6) {
@@ -2384,7 +2426,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                             .arg(typeName, child.name);
                     }
                 }
-                e.fieldCount = nonHelperCount;
+                e.fieldCount = nonStaticCount;
                 e.alignment  = maxAlign;
 
                 entries.append(e);

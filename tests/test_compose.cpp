@@ -2435,9 +2435,9 @@ private slots:
         QCOMPARE(n.byteSize(), 8);
     }
 
-    // ── Helper node compose tests ──
+    // ── Static field node compose tests ──
 
-    void testHelperSeparatorLine() {
+    void testStaticFieldHeaderLine() {
         NodeTree tree;
         tree.baseAddress = 0;
 
@@ -2456,27 +2456,27 @@ private slots:
         f1.offset = 0;
         tree.addNode(f1);
 
-        // Helper node
-        Node helper;
-        helper.kind = NodeKind::Hex64;
-        helper.name = "my_helper";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        tree.addNode(helper);
+        // Static field node
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "my_static";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
 
         NullProvider prov;
         ComposeResult result = compose(tree, prov);
 
-        // Separator with "helpers" text and box-drawing chars should appear
-        QVERIFY2(result.text.contains(QStringLiteral("helpers")),
-                 qPrintable("Expected 'helpers' separator in:\n" + result.text));
-        QVERIFY2(result.text.contains(QStringLiteral("\u2500")),
-                 qPrintable("Expected box-drawing separator char in:\n" + result.text));
+        // Header with "static" keyword and opening brace should appear
+        QVERIFY2(result.text.contains(QStringLiteral("static "))
+              && result.text.contains(QStringLiteral("my_static"))
+              && result.text.contains(QStringLiteral("{")),
+                 qPrintable("Expected static field header in:\n" + result.text));
     }
 
-    void testHelperDoesNotAffectStructSize() {
+    void testStaticFieldDoesNotAffectStructSize() {
         NodeTree tree;
         tree.baseAddress = 0;
 
@@ -2494,24 +2494,24 @@ private slots:
         f1.offset = 0;
         tree.addNode(f1);
 
-        // Struct span without helper
+        // Struct span without static field
         int spanBefore = tree.structSpan(rootId);
 
-        // Add helper
-        Node helper;
-        helper.kind = NodeKind::Struct;
-        helper.name = "helper";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base + 100");
-        tree.addNode(helper);
+        // Add static field
+        Node sf;
+        sf.kind = NodeKind::Struct;
+        sf.name = "static_field";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + 100");
+        tree.addNode(sf);
 
         int spanAfter = tree.structSpan(rootId);
         QCOMPARE(spanAfter, spanBefore);
     }
 
-    void testHelperIsHelperLineFlag() {
+    void testStaticFieldIsStaticLineFlag() {
         NodeTree tree;
         tree.baseAddress = 0;
 
@@ -2529,30 +2529,30 @@ private slots:
         f1.offset = 0;
         tree.addNode(f1);
 
-        Node helper;
-        helper.kind = NodeKind::Hex64;
-        helper.name = "my_helper";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        tree.addNode(helper);
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "my_static";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
 
         NullProvider prov;
         ComposeResult result = compose(tree, prov);
 
-        // At least one line should have isHelperLine set
-        bool foundHelper = false;
+        // At least one line should have isStaticLine set
+        bool foundStaticField = false;
         for (const auto& lm : result.meta) {
-            if (lm.isHelperLine) {
-                foundHelper = true;
+            if (lm.isStaticLine) {
+                foundStaticField = true;
                 break;
             }
         }
-        QVERIFY2(foundHelper, "Expected at least one LineMeta with isHelperLine=true");
+        QVERIFY2(foundStaticField, "Expected at least one LineMeta with isStaticLine=true");
     }
 
-    void testHelperCollapsedByDefault() {
+    void testStaticFieldCollapsed() {
         NodeTree tree;
         tree.baseAddress = 0;
 
@@ -2563,42 +2563,42 @@ private slots:
         int ri = tree.addNode(root);
         uint64_t rootId = tree.nodes[ri].id;
 
-        // Helper struct with a child (should still appear collapsed)
-        Node helper;
-        helper.kind = NodeKind::Struct;
-        helper.name = "inner";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        helper.collapsed = true;
-        int hi = tree.addNode(helper);
-        uint64_t helperId = tree.nodes[hi].id;
+        // Static field struct with a child (should still appear collapsed)
+        Node sf;
+        sf.kind = NodeKind::Struct;
+        sf.name = "inner";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        sf.collapsed = true;
+        int hi = tree.addNode(sf);
+        uint64_t sfId = tree.nodes[hi].id;
 
-        Node hChild;
-        hChild.kind = NodeKind::UInt32;
-        hChild.name = "x";
-        hChild.parentId = helperId;
-        hChild.offset = 0;
-        tree.addNode(hChild);
+        Node sfChild;
+        sfChild.kind = NodeKind::UInt32;
+        sfChild.name = "x";
+        sfChild.parentId = sfId;
+        sfChild.offset = 0;
+        tree.addNode(sfChild);
 
         NullProvider prov;
         ComposeResult result = compose(tree, prov);
 
-        // The helper's child should NOT have a visible line (it's collapsed)
+        // The static field's child should NOT have a visible line (it's collapsed)
         bool foundChildLine = false;
         for (const auto& lm : result.meta) {
             if (lm.nodeIdx >= 0 && lm.nodeIdx < tree.nodes.size()
                 && tree.nodes[lm.nodeIdx].name == QStringLiteral("x")
-                && tree.nodes[lm.nodeIdx].parentId == helperId) {
+                && tree.nodes[lm.nodeIdx].parentId == sfId) {
                 foundChildLine = true;
             }
         }
         QVERIFY2(!foundChildLine,
-                 "Helper's children should not be visible when collapsed");
+                 "Static field's children should not be visible when collapsed");
     }
 
-    void testHelperExpressionShownInText() {
+    void testStaticFieldExpressionShownInText() {
         NodeTree tree;
         tree.baseAddress = 0;
 
@@ -2609,14 +2609,14 @@ private slots:
         int ri = tree.addNode(root);
         uint64_t rootId = tree.nodes[ri].id;
 
-        Node helper;
-        helper.kind = NodeKind::Hex64;
-        helper.name = "my_helper";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base + 0x10");
-        tree.addNode(helper);
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "my_static";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + 0x10");
+        tree.addNode(sf);
 
         NullProvider prov;
         ComposeResult result = compose(tree, prov);

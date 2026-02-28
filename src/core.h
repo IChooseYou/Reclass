@@ -197,8 +197,8 @@ struct Node {
     QString  classKeyword;    // "struct", "class", or "enum" (empty = "struct")
     uint64_t parentId   = 0;   // 0 = root (no parent)
     int      offset     = 0;
-    bool     isHelper   = false;   // static helper — excluded from struct layout
-    QString  offsetExpr;           // C/C++ expression → absolute address (helpers only)
+    bool     isStatic   = false;   // static field — excluded from struct layout
+    QString  offsetExpr;           // C/C++ expression → absolute address (static fields only)
     int      arrayLen   = 1;   // Array: element count
     int      strLen     = 64;
     bool     collapsed  = false;
@@ -240,8 +240,8 @@ struct Node {
             o["classKeyword"] = classKeyword;
         o["parentId"]  = QString::number(parentId);
         o["offset"]    = offset;
-        if (isHelper)
-            o["isHelper"] = true;
+        if (isStatic)
+            o["isStatic"] = true;
         if (!offsetExpr.isEmpty())
             o["offsetExpr"] = offsetExpr;
         o["arrayLen"]  = arrayLen;
@@ -283,7 +283,7 @@ struct Node {
         n.classKeyword = o["classKeyword"].toString();
         n.parentId  = o["parentId"].toString("0").toULongLong();
         n.offset    = o["offset"].toInt(0);
-        n.isHelper  = o["isHelper"].toBool(false);
+        n.isStatic  = o["isStatic"].toBool(o["isHelper"].toBool(false));
         n.offsetExpr = o["offsetExpr"].toString();
         n.arrayLen  = qBound(1, o["arrayLen"].toInt(1), 1000000);
         n.strLen    = qBound(1, o["strLen"].toInt(64), 1000000);
@@ -445,7 +445,7 @@ struct NodeTree {
         QVector<int> kids = childMap ? childMap->value(structId) : childrenOf(structId);
         for (int ci : kids) {
             const Node& c = nodes[ci];
-            if (c.isHelper) continue;  // helpers don't affect struct size
+            if (c.isStatic) continue;  // static fields don't affect struct size
             int sz = (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
                 ? structSpan(c.id, childMap, visited) : c.byteSize();
             int end = c.offset + sz;
@@ -600,7 +600,7 @@ struct LineMeta {
     QString  pointerTargetName;    // Resolved target type name for Pointer32/64 (empty = "void")
     bool     isArrayElement  = false;  // true for synthesized primitive array element lines
     bool     isMemberLine   = false;  // true for enum member / bitfield member lines
-    bool     isHelperLine   = false;  // true for static helper node lines
+    bool     isStaticLine   = false;  // true for static field node lines
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {
@@ -648,7 +648,7 @@ namespace cmd {
     struct ChangeEnumMembers { uint64_t nodeId;
                                QVector<QPair<QString, int64_t>> oldMembers, newMembers; };
     struct ChangeOffsetExpr { uint64_t nodeId; QString oldExpr, newExpr; };
-    struct ToggleHelper     { uint64_t nodeId; bool oldVal, newVal; };
+    struct ToggleStatic     { uint64_t nodeId; bool oldVal, newVal; };
 }
 
 using Command = std::variant<
@@ -656,7 +656,7 @@ using Command = std::variant<
     cmd::Insert, cmd::Remove, cmd::ChangeBase, cmd::WriteBytes,
     cmd::ChangeArrayMeta, cmd::ChangePointerRef, cmd::ChangeStructTypeName,
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
-    cmd::ChangeOffsetExpr, cmd::ToggleHelper
+    cmd::ChangeOffsetExpr, cmd::ToggleStatic
 >;
 
 // ── Column spans (for inline editing) ──
@@ -669,7 +669,7 @@ struct ColumnSpan {
 
 enum class EditTarget { Name, Type, Value, BaseAddress, Source, ArrayIndex, ArrayCount,
                         ArrayElementType, ArrayElementCount, PointerTarget,
-                        RootClassType, RootClassName, TypeSelector, HelperExpr };
+                        RootClassType, RootClassName, TypeSelector, StaticExpr };
 
 // Column layout constants (shared with format.cpp span computation)
 inline constexpr int kFoldCol     = 3;   // 3-char fold indicator prefix per line
@@ -747,13 +747,20 @@ inline ColumnSpan memberValueSpanFor(const LineMeta& lm, const QString& lineText
     return {valStart, valEnd, true};
 }
 
-// Helper expression span: locates text between "= " and " →" (or end of line)
-inline ColumnSpan helperExprSpanFor(const LineMeta& /*lm*/, const QString& lineText) {
-    int eq = lineText.indexOf(QLatin1String("= "));
-    if (eq < 0) return {};
-    int exprStart = eq + 2;
-    int arrow = lineText.indexOf(QChar(0x2192), exprStart); // →
-    int exprEnd = (arrow > exprStart) ? arrow - 1 : lineText.size();
+// Static field expression span: locates text between "return " and "→" / "(error)" / end
+inline ColumnSpan staticExprSpanFor(const LineMeta& /*lm*/, const QString& lineText) {
+    int ret = lineText.indexOf(QLatin1String("return "));
+    if (ret < 0) return {};
+    int exprStart = ret + 7;
+    // End: before arrow, before "(error)", or line end
+    int exprEnd = lineText.size();
+    int arrow = lineText.indexOf(QChar(0x2192), exprStart);
+    if (arrow > exprStart) exprEnd = arrow;
+    int err = lineText.indexOf(QLatin1String("(error)"), exprStart);
+    if (err > exprStart && err < exprEnd) exprEnd = err;
+    // Also stop at " }" for collapsed format
+    int brace = lineText.indexOf(QLatin1String(" }"), exprStart);
+    if (brace > exprStart && brace < exprEnd) exprEnd = brace;
     while (exprEnd > exprStart && lineText[exprEnd - 1] == ' ') exprEnd--;
     return {exprStart, exprEnd, true};
 }

@@ -672,9 +672,9 @@ private slots:
         QCOMPARE(h.heatLevel(), 2); // warm (count=4 → 3-4 range)
     }
 
-    // ── Helper node serialization ──
+    // ── Static field node serialization ──
 
-    void testHelperJsonRoundTrip() {
+    void testStaticFieldJsonRoundTrip() {
         rcx::NodeTree tree;
         tree.baseAddress = 0x14000000;
 
@@ -692,27 +692,27 @@ private slots:
         field.offset = 0x3C;
         tree.addNode(field);
 
-        rcx::Node helper;
-        helper.kind = rcx::NodeKind::Struct;
-        helper.name = "nt_hdr";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base + e_lfanew");
-        tree.addNode(helper);
+        rcx::Node sf;
+        sf.kind = rcx::NodeKind::Struct;
+        sf.name = "nt_hdr";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + e_lfanew");
+        tree.addNode(sf);
 
         QJsonObject json = tree.toJson();
         rcx::NodeTree tree2 = rcx::NodeTree::fromJson(json);
 
         QCOMPARE(tree2.nodes.size(), 3);
         const auto& h = tree2.nodes[2];
-        QCOMPARE(h.isHelper, true);
+        QCOMPARE(h.isStatic, true);
         QCOMPARE(h.offsetExpr, QStringLiteral("base + e_lfanew"));
         QCOMPARE(h.name, QStringLiteral("nt_hdr"));
     }
 
-    void testHelperJsonBackwardCompat() {
-        // Old JSON without isHelper/offsetExpr should load with defaults
+    void testStaticFieldJsonBackwardCompat() {
+        // Old JSON without isStatic/offsetExpr should load with defaults
         rcx::NodeTree tree;
         rcx::Node root;
         root.kind = rcx::NodeKind::Struct;
@@ -723,11 +723,11 @@ private slots:
         QJsonObject json = tree.toJson();
         rcx::NodeTree tree2 = rcx::NodeTree::fromJson(json);
 
-        QCOMPARE(tree2.nodes[0].isHelper, false);
+        QCOMPARE(tree2.nodes[0].isStatic, false);
         QCOMPARE(tree2.nodes[0].offsetExpr, QString());
     }
 
-    void testStructSpanExcludesHelpers() {
+    void testStructSpanExcludesStaticFields() {
         using namespace rcx;
         NodeTree tree;
 
@@ -754,27 +754,27 @@ private slots:
         f2.offset = 4;
         tree.addNode(f2);
 
-        // Helper: should NOT affect span
-        Node helper;
-        helper.kind = NodeKind::Struct;
-        helper.name = "helper";
-        helper.parentId = rootId;
-        helper.offset = 0;
-        helper.isHelper = true;
-        helper.offsetExpr = QStringLiteral("base");
-        tree.addNode(helper);
+        // Static field: should NOT affect span
+        Node sf;
+        sf.kind = NodeKind::Struct;
+        sf.name = "static_field";
+        sf.parentId = rootId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
 
-        // Span should be max(0+4, 4+8) = 12, same as without helper
+        // Span should be max(0+4, 4+8) = 12, same as without static field
         QCOMPARE(tree.structSpan(rootId), 12);
     }
 
-    void testHelperExprSpanFor() {
+    void testStaticExprSpanFor() {
         using namespace rcx;
-        // Simulate a helper header line: "  ▸ struct NT_HEADERS  nt_hdr  = base + e_lfanew → 0x1400000E8"
+        // Simulate a static field body line: "   return base + e_lfanew  → 0x1400000E8"
         LineMeta lm;
-        lm.isHelperLine = true;
-        QString lineText = QStringLiteral("  \u25B8 struct NT_HEADERS  nt_hdr  = base + e_lfanew \u2192 0x1400000E8");
-        ColumnSpan span = helperExprSpanFor(lm, lineText);
+        lm.isStaticLine = true;
+        QString lineText = QStringLiteral("   return base + e_lfanew  \u2192 0x1400000E8");
+        ColumnSpan span = staticExprSpanFor(lm, lineText);
         QVERIFY(span.valid);
         QString expr = lineText.mid(span.start, span.end - span.start);
         QCOMPARE(expr.trimmed(), QStringLiteral("base + e_lfanew"));
