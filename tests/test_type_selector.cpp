@@ -861,10 +861,11 @@ private slots:
     void testPopupWidthScalesWithFont() {
         TypeSelectorPopup popup;
 
+        // Use a very long name so even font-9 exceeds the minimum popup width
         TypeEntry comp;
         comp.entryKind = TypeEntry::Composite;
         comp.structId = 100;
-        comp.displayName = QStringLiteral("MyLongStructName");
+        comp.displayName = QStringLiteral("MyExtremelyLongStructNameThatExceedsMinWidth");
         comp.classKeyword = QStringLiteral("struct");
         popup.setTypes({comp});
 
@@ -1464,6 +1465,191 @@ private slots:
         // should fall through to normal void pointer display
         QVERIFY2(!result.text.contains("hex64*"),
                  qPrintable("Should not show 'hex64*', got: " + result.text));
+    }
+    // ── Category chips and three-group filtering ──
+
+    void testCategoryEnumOnEntry() {
+        // Verify that Category enum values exist and are distinct
+        TypeEntry prim;
+        prim.category = TypeEntry::CatPrimitive;
+        QCOMPARE(prim.category, TypeEntry::CatPrimitive);
+
+        TypeEntry typ;
+        typ.category = TypeEntry::CatType;
+        QCOMPARE(typ.category, TypeEntry::CatType);
+
+        TypeEntry en;
+        en.category = TypeEntry::CatEnum;
+        QCOMPARE(en.category, TypeEntry::CatEnum);
+
+        QVERIFY(TypeEntry::CatPrimitive != TypeEntry::CatType);
+        QVERIFY(TypeEntry::CatType != TypeEntry::CatEnum);
+    }
+
+    void testCategoryDefaultIsPrimitive() {
+        TypeEntry e;
+        QCOMPARE(e.category, TypeEntry::CatPrimitive);
+    }
+
+    void testCompositesCategorizedInController() {
+        // Build tree with struct and enum types
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node st;
+        st.kind = NodeKind::Struct;
+        st.name = "Ball";
+        st.structTypeName = "Ball";
+        st.parentId = 0;
+        int si = tree.addNode(st);
+        uint64_t stId = tree.nodes[si].id;
+
+        { Node n; n.kind = NodeKind::Int32; n.name = "x"; n.parentId = stId;
+          n.offset = 0; tree.addNode(n); }
+
+        Node en;
+        en.kind = NodeKind::Struct;
+        en.name = "Color";
+        en.structTypeName = "Color";
+        en.classKeyword = QStringLiteral("enum");
+        en.parentId = 0;
+        tree.addNode(en);
+
+        // Simulate controller logic: tag composites
+        QVector<TypeEntry> entries;
+        for (const auto& n : tree.nodes) {
+            if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+            TypeEntry e;
+            e.entryKind    = TypeEntry::Composite;
+            e.structId     = n.id;
+            e.displayName  = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+            e.classKeyword = n.resolvedClassKeyword();
+            e.category     = (e.classKeyword == QStringLiteral("enum"))
+                           ? TypeEntry::CatEnum : TypeEntry::CatType;
+            entries.append(e);
+        }
+
+        QCOMPARE(entries.size(), 2);
+        // Ball → CatType, Color → CatEnum
+        bool foundType = false, foundEnum = false;
+        for (const auto& e : entries) {
+            if (e.displayName == "Ball") {
+                QCOMPARE(e.category, TypeEntry::CatType);
+                foundType = true;
+            }
+            if (e.displayName == "Color") {
+                QCOMPARE(e.category, TypeEntry::CatEnum);
+                foundEnum = true;
+            }
+        }
+        QVERIFY(foundType);
+        QVERIFY(foundEnum);
+    }
+
+    void testThreeGroupSections() {
+        // Create popup and set types with mixed categories
+        TypeSelectorPopup popup;
+        popup.setMode(TypePopupMode::FieldType);
+
+        QVector<TypeEntry> types;
+
+        // A primitive
+        TypeEntry prim;
+        prim.entryKind = TypeEntry::Primitive;
+        prim.primitiveKind = NodeKind::Int32;
+        prim.displayName = QStringLiteral("int32_t");
+        prim.category = TypeEntry::CatPrimitive;
+        types.append(prim);
+
+        // A struct type
+        TypeEntry st;
+        st.entryKind = TypeEntry::Composite;
+        st.structId = 1;
+        st.displayName = QStringLiteral("Player");
+        st.classKeyword = QStringLiteral("struct");
+        st.category = TypeEntry::CatType;
+        types.append(st);
+
+        // An enum type
+        TypeEntry en;
+        en.entryKind = TypeEntry::Composite;
+        en.structId = 2;
+        en.displayName = QStringLiteral("Color");
+        en.classKeyword = QStringLiteral("enum");
+        en.category = TypeEntry::CatEnum;
+        types.append(en);
+
+        popup.setTypes(types);
+
+        // The popup should have three sections in field mode:
+        // primitives → types → enums
+        // We can access via the internal model
+        auto* model = popup.findChild<QStringListModel*>();
+        QVERIFY(model != nullptr);
+        QStringList items = model->stringList();
+
+        // Should contain section headers
+        bool hasPrimSection = false, hasTypeSection = false, hasEnumSection = false;
+        for (const auto& item : items) {
+            if (item == QStringLiteral("primitives")) hasPrimSection = true;
+            if (item == QStringLiteral("types")) hasTypeSection = true;
+            if (item == QStringLiteral("enums")) hasEnumSection = true;
+        }
+        QVERIFY2(hasPrimSection, "Missing 'primitives' section header");
+        QVERIFY2(hasTypeSection, "Missing 'types' section header");
+        QVERIFY2(hasEnumSection, "Missing 'enums' section header");
+    }
+
+    // ── Test: struct embed auto-selects the current composite in popup ──
+
+    void testStructEmbedAutoSelectsCurrent() {
+        TypeSelectorPopup popup;
+        popup.setMode(TypePopupMode::FieldType);
+        QFont font(QStringLiteral("Consolas"), 10);
+        popup.setFont(font);
+
+        // Build entries: a primitive + two composites
+        QVector<TypeEntry> types;
+
+        TypeEntry prim;
+        prim.entryKind = TypeEntry::Primitive;
+        prim.primitiveKind = NodeKind::Int32;
+        prim.displayName = QStringLiteral("int32_t");
+        types.append(prim);
+
+        TypeEntry alpha;
+        alpha.entryKind = TypeEntry::Composite;
+        alpha.structId = 100;
+        alpha.displayName = QStringLiteral("Alpha");
+        alpha.classKeyword = QStringLiteral("struct");
+        alpha.category = TypeEntry::CatType;
+        types.append(alpha);
+
+        TypeEntry bravo;
+        bravo.entryKind = TypeEntry::Composite;
+        bravo.structId = 200;
+        bravo.displayName = QStringLiteral("Bravo");
+        bravo.classKeyword = QStringLiteral("struct");
+        bravo.category = TypeEntry::CatType;
+        types.append(bravo);
+
+        // Set Bravo as the current type (simulates struct embed field with refId=200)
+        popup.setTypes(types, &bravo);
+        popup.popup(QPoint(-9999, -9999));
+        QApplication::processEvents();
+
+        // The list view should auto-select the row matching Bravo
+        auto* listView = popup.findChild<QListView*>();
+        QVERIFY(listView != nullptr);
+        QModelIndex sel = listView->currentIndex();
+        QVERIFY2(sel.isValid(), "No item selected — auto-select failed");
+
+        // The selected row text should contain "Bravo"
+        QString selectedText = sel.data().toString();
+        QVERIFY2(selectedText.contains(QStringLiteral("Bravo")),
+                 qPrintable(QString("Expected 'Bravo' in selected text, got '%1'").arg(selectedText)));
+
+        popup.hide();
     }
 };
 

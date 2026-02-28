@@ -503,6 +503,19 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (m_updatingComment) return;  // Skip queuing during comment update
         if (m_editState.target == EditTarget::Value)
             QTimer::singleShot(0, this, &RcxEditor::validateEditLive);
+
+        // Autocomplete for helper expressions — show field names as user types
+        if (m_editState.target == EditTarget::HelperExpr && !m_helperCompletions.isEmpty()) {
+            // Get word at cursor
+            long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS);
+            long wordStart = m_sci->SendScintilla(QsciScintillaBase::SCI_WORDSTARTPOSITION, pos, (long)1);
+            int wordLen = (int)(pos - wordStart);
+            if (wordLen >= 1) {
+                QByteArray list = m_helperCompletions.join(' ').toUtf8();
+                m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSETSEPARATOR, (long)' ');
+                m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSHOW, (uintptr_t)wordLen, list.constData());
+            }
+        }
     });
 
     connect(m_sci, &QsciScintilla::selectionChanged,
@@ -1599,6 +1612,10 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
         s = arrayElemCountSpanFor(*lm, lineText); break;
     case EditTarget::PointerTarget:
         s = pointerTargetSpanFor(*lm, lineText); break;
+    case EditTarget::HelperExpr:
+        if (lm->isHelperLine)
+            s = helperExprSpanFor(*lm, lineText);
+        break;
     case EditTarget::Source: break;
     }
 

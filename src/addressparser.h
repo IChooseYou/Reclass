@@ -15,6 +15,7 @@ struct AddressParseResult {
 struct AddressParserCallbacks {
     std::function<uint64_t(const QString& name, bool* ok)> resolveModule;
     std::function<uint64_t(uint64_t addr, bool* ok)>       readPointer;
+    std::function<uint64_t(const QString& name, bool* ok)> resolveIdentifier;
 };
 
 class AddressParser {

@@ -17,6 +17,8 @@
 #include <QScreen>
 #include <QIntValidator>
 #include <QElapsedTimer>
+#include <QToolTip>
+#include <QHelpEvent>
 #include "themes/thememanager.h"
 
 namespace rcx {
@@ -54,6 +56,56 @@ TypeSpec parseTypeSpec(const QString& text) {
     return spec;
 }
 
+// ── Fuzzy scorer: subsequence match with word-boundary bonuses ──
+
+static int fuzzyScore(const QString& pattern, const QString& text,
+                      QVector<int>* outPositions = nullptr) {
+    int pLen = pattern.size(), tLen = text.size();
+    if (pLen == 0) return 1;
+    if (pLen > tLen) return 0;
+
+    // Quick subsequence reject
+    { int pi = 0;
+      for (int ti = 0; ti < tLen && pi < pLen; ti++)
+          if (pattern[pi].toLower() == text[ti].toLower()) pi++;
+      if (pi < pLen) return 0;
+    }
+
+    // Recursive best-match (bounded: max 4 branches per pattern char)
+    QVector<int> bestPos;
+    int best = 0;
+
+    auto solve = [&](auto& self, int pi, int ti, QVector<int>& cur, int score) -> void {
+        if (pi == pLen) {
+            if (score > best) { best = score; bestPos = cur; }
+            return;
+        }
+        int maxTi = tLen - (pLen - pi);
+        int branches = 0;
+        for (int i = ti; i <= maxTi && branches < 4; i++) {
+            if (pattern[pi].toLower() != text[i].toLower()) continue;
+            int bonus = 1;
+            if (i == 0)                                          bonus = 10;
+            else if (text[i - 1] == '_' || text[i - 1] == ' ') bonus = 8;
+            else if (text[i].isUpper() && text[i - 1].isLower()) bonus = 8;
+            if (!cur.isEmpty() && i == cur.last() + 1)          bonus += 5;
+            cur.append(i);
+            self(self, pi + 1, i + 1, cur, score + bonus);
+            cur.removeLast();
+            branches++;
+        }
+    };
+
+    QVector<int> cur;
+    solve(solve, 0, 0, cur, 0);
+    if (best > 0) {
+        best += qMax(0, 20 - (tLen - pLen));  // tightness bonus
+        if (pLen == tLen) best += 20;          // exact match bonus
+        if (outPositions) *outPositions = bestPos;
+    }
+    return best;
+}
+
 // ── Custom delegate: gutter checkmark + icon + text + sections ──
 
 class TypeSelectorDelegate : public QStyledItemDelegate {
@@ -62,10 +114,12 @@ public:
         : QStyledItemDelegate(parent), m_popup(popup) {}
 
     void setFont(const QFont& f) { m_font = f; }
-    void setFilteredTypes(const QVector<TypeEntry>* filtered, const TypeEntry* current, bool hasCurrent) {
+    void setLoading(bool v) { m_isLoading = v; }
+    void setFilteredTypes(const QVector<TypeEntry>* filtered) {
         m_filtered = filtered;
-        m_current = current;
-        m_hasCurrent = hasCurrent;
+    }
+    void setMatchPositions(const QVector<QVector<int>>* mp) {
+        m_matchPositions = mp;
     }
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
@@ -74,6 +128,23 @@ public:
 
         const auto& t = ThemeManager::instance().current();
         int row = index.row();
+
+        // Skeleton placeholder bars while loading
+        if (m_isLoading) {
+            QFontMetrics fm(m_font);
+            int barH = fm.height() - 2;
+            int x0 = option.rect.x() + fm.height() + 8;
+            int y0 = option.rect.y() + (option.rect.height() - barH) / 2;
+            int barW = 50 + ((row * 73 + 29) % 110);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(t.surface);
+            painter->drawRoundedRect(x0, y0, barW, barH, 3, 3);
+            // Size column placeholder
+            painter->drawRoundedRect(option.rect.right() - 46, y0, 30, barH, 3, 3);
+            painter->restore();
+            return;
+        }
+
         bool isSection = (m_filtered && row >= 0 && row < m_filtered->size()
                           && (*m_filtered)[row].entryKind == TypeEntry::Section);
         bool isDisabled = (m_filtered && row >= 0 && row < m_filtered->size()
@@ -101,7 +172,6 @@ public:
         // Scale metrics from font height
         QFontMetrics fmMain(m_font);
         int iconSz = fmMain.height();            // icon matches text height
-        int gutterW = fmMain.horizontalAdvance(QChar(0x25B8)) + 4;
         int iconColW = iconSz + 4;
 
         // Section: centered dim text with horizontal rules
@@ -129,31 +199,19 @@ public:
             return;
         }
 
-        // Gutter: side triangle if current
-        if (m_hasCurrent && m_filtered && row >= 0 && row < m_filtered->size()) {
-            const TypeEntry& entry = (*m_filtered)[row];
-            bool isCurrent = false;
-            if (m_current->entryKind == TypeEntry::Primitive && entry.entryKind == TypeEntry::Primitive)
-                isCurrent = (entry.primitiveKind == m_current->primitiveKind);
-            else if (m_current->entryKind == TypeEntry::Composite && entry.entryKind == TypeEntry::Composite)
-                isCurrent = (entry.structId == m_current->structId);
-            if (isCurrent) {
-                painter->setPen(t.text);
-                painter->setFont(m_font);
-                painter->drawText(QRect(x, y, gutterW, h), Qt::AlignCenter,
-                                  QString(QChar(0x25B8)));
-            }
-        }
-        x += gutterW;
-
-        // Icon (scaled to font height) — only for composite entries
+        // Icon (scaled to font height)
         bool hasIcon = (m_filtered && row >= 0 && row < m_filtered->size()
-                        && (*m_filtered)[row].entryKind == TypeEntry::Composite);
+                        && (*m_filtered)[row].entryKind != TypeEntry::Section);
         if (hasIcon) {
-            static QIcon structIcon(QStringLiteral(":/vsicons/symbol-structure.svg"));
-            QPixmap pm = structIcon.pixmap(iconSz, iconSz);
+            static QIcon structIcon(QStringLiteral(":/vsicons/symbol-class.svg"));
+            static QIcon enumIcon(QStringLiteral(":/vsicons/symbol-enum.svg"));
+            static QIcon primIcon(QStringLiteral(":/vsicons/symbol-variable.svg"));
+            const auto& entry = (*m_filtered)[row];
+            QIcon& icon = (entry.entryKind == TypeEntry::Composite)
+                ? (entry.category == TypeEntry::CatEnum ? enumIcon : structIcon)
+                : primIcon;
+            QPixmap pm = icon.pixmap(iconSz, iconSz);
             if (isDisabled) {
-                // Paint dimmed
                 QPixmap dimmed(pm.size());
                 dimmed.fill(Qt::transparent);
                 QPainter p(&dimmed);
@@ -162,12 +220,12 @@ public:
                 p.end();
                 painter->drawPixmap(x, y + (h - iconSz) / 2, dimmed);
             } else {
-                structIcon.paint(painter, x, y + (h - iconSz) / 2, iconSz, iconSz);
+                icon.paint(painter, x, y + (h - iconSz) / 2, iconSz, iconSz);
             }
         }
         x += iconColW;
 
-        // Text
+        // Text: type name in normal color, size suffix dimmed
         QColor textColor;
         if (isDisabled)
             textColor = t.textDim;
@@ -176,11 +234,54 @@ public:
         else
             textColor = option.palette.color(QPalette::Text);
 
-        painter->setPen(textColor);
         painter->setFont(m_font);
-        painter->drawText(QRect(x, y, option.rect.right() - x, h),
-                          Qt::AlignVCenter | Qt::AlignLeft,
-                          index.data().toString());
+        QString fullText = index.data().toString();
+        int dashIdx = fullText.lastIndexOf(QStringLiteral(" - "));
+        int rightPad = 6;
+
+        // Fuzzy-match highlight flags for the name portion
+        QVector<bool> hlFlags;
+        if (m_matchPositions && row >= 0 && row < m_matchPositions->size()
+            && !(*m_matchPositions)[row].isEmpty()) {
+            int nameLen = dashIdx > 0 ? dashIdx : fullText.size();
+            hlFlags.resize(nameLen, false);
+            for (int p : (*m_matchPositions)[row])
+                if (p < nameLen) hlFlags[p] = true;
+        }
+
+        // Lambda: draw text with optional highlight runs
+        int sizeColW = 55;
+        auto drawHL = [&](const QString& text, int x0, int maxW) {
+            if (hlFlags.isEmpty()) {
+                painter->setPen(textColor);
+                painter->drawText(QRect(x0, y, maxW, h),
+                                  Qt::AlignVCenter | Qt::AlignLeft, text);
+                return;
+            }
+            QFontMetrics fm(m_font);
+            int xp = x0;
+            int i = 0;
+            while (i < text.size()) {
+                bool hl = i < hlFlags.size() && hlFlags[i];
+                int s = i;
+                while (i < text.size() && (i < hlFlags.size() && hlFlags[i]) == hl) i++;
+                QString seg = text.mid(s, i - s);
+                int segW = fm.horizontalAdvance(seg);
+                painter->setPen(hl ? t.indHoverSpan : textColor);
+                painter->drawText(QRect(xp, y, segW, h), Qt::AlignVCenter, seg);
+                xp += segW;
+            }
+        };
+
+        if (dashIdx > 0) {
+            int nameW = option.rect.right() - x - sizeColW - rightPad;
+            drawHL(fullText.left(dashIdx), x, nameW);
+            painter->setPen(t.textDim);
+            painter->drawText(QRect(option.rect.right() - sizeColW - rightPad, y, sizeColW, h),
+                              Qt::AlignVCenter | Qt::AlignRight, fullText.mid(dashIdx + 3));
+        } else {
+            drawHL(fullText, x, option.rect.right() - x - rightPad);
+        }
 
         painter->restore();
     }
@@ -195,12 +296,35 @@ public:
         return QSize(200, h);
     }
 
+    bool helpEvent(QHelpEvent* event, QAbstractItemView* view,
+                   const QStyleOptionViewItem& option,
+                   const QModelIndex& index) override {
+        if (event->type() == QEvent::ToolTip && m_filtered) {
+            int row = index.row();
+            if (row >= 0 && row < m_filtered->size()) {
+                const auto& e = (*m_filtered)[row];
+                if (e.entryKind == TypeEntry::Composite && !e.fieldSummary.isEmpty()) {
+                    QString tip = QStringLiteral("%1 (%2 B, %3 fields)\n")
+                        .arg(e.displayName).arg(e.sizeBytes).arg(e.fieldCount);
+                    tip += e.fieldSummary.join(QChar('\n'));
+                    if (e.fieldCount > e.fieldSummary.size())
+                        tip += QStringLiteral("\n...");
+                    QToolTip::showText(event->globalPos(), tip, view);
+                    return true;
+                }
+            }
+            QToolTip::hideText();
+            return true;
+        }
+        return QStyledItemDelegate::helpEvent(event, view, option, index);
+    }
+
 private:
     TypeSelectorPopup* m_popup = nullptr;
     QFont m_font;
+    bool m_isLoading = false;
     const QVector<TypeEntry>* m_filtered = nullptr;
-    const TypeEntry* m_current = nullptr;
-    bool m_hasCurrent = false;
+    const QVector<QVector<int>>* m_matchPositions = nullptr;
 };
 
 // ── TypeSelectorPopup ──
@@ -228,151 +352,91 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     setLineWidth(0);
 
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setContentsMargins(8, 6, 8, 6);
     layout->setSpacing(4);
 
-    // Row 1: title + Esc hint
+    // ── Top: Filter + close ──
     {
         auto* row = new QHBoxLayout;
         row->setContentsMargins(0, 0, 0, 0);
-        m_titleLabel = new QLabel(QStringLiteral("Change type"));
-        m_titleLabel->setPalette(pal);
-        QFont bold = m_titleLabel->font();
-        bold.setBold(true);
-        m_titleLabel->setFont(bold);
-        row->addWidget(m_titleLabel);
 
-        row->addStretch();
+        m_filterEdit = new QLineEdit;
+        m_filterEdit->setPlaceholderText(QStringLiteral("Filter types..  (Ctrl+F)"));
+        m_filterEdit->setClearButtonEnabled(true);
+        m_filterEdit->setPalette(pal);
+        m_filterEdit->setStyleSheet(QStringLiteral(
+            "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 3px; }")
+            .arg(theme.border.name()));
+        m_filterEdit->setAccessibleName(QStringLiteral("Filter types"));
+        m_filterEdit->installEventFilter(this);
+        connect(m_filterEdit, &QLineEdit::textChanged,
+                this, &TypeSelectorPopup::applyFilter);
+        row->addWidget(m_filterEdit);
 
         m_escLabel = new QToolButton;
-        m_escLabel->setText(QStringLiteral("\u2715 Esc"));
+        m_escLabel->setText(QStringLiteral("\u2715"));
         m_escLabel->setAutoRaise(true);
         m_escLabel->setCursor(Qt::PointingHandCursor);
         m_escLabel->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 2px 6px; }"
+            "QToolButton { color: %1; border: none; padding: 2px 4px; }"
             "QToolButton:hover { color: %2; }")
             .arg(theme.textDim.name(), theme.indHoverSpan.name()));
-        connect(m_escLabel, &QToolButton::clicked, this, [this]() {
-            hide();
-        });
+        connect(m_escLabel, &QToolButton::clicked, this, [this]() { hide(); });
         row->addWidget(m_escLabel);
 
         layout->addLayout(row);
     }
 
-    // Row 2: + Create new type button (flat, no gradient)
+    // ── Category chips ──
     {
-        m_createBtn = new QToolButton;
-        m_createBtn->setText(QStringLiteral("+ Create new type\u2026"));
-        m_createBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        m_createBtn->setAutoRaise(true);
-        m_createBtn->setCursor(Qt::PointingHandCursor);
-        m_createBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 3px 6px; }"
-            "QToolButton:hover { color: %2; background: %3; }")
-            .arg(theme.textMuted.name(), theme.text.name(), theme.hover.name()));
-        connect(m_createBtn, &QToolButton::clicked, this, [this]() {
-            emit createNewTypeRequested();
-            hide();
-        });
-        layout->addWidget(m_createBtn);
-    }
+        m_chipRow = new QWidget;
+        auto* chipLayout = new QHBoxLayout(m_chipRow);
+        chipLayout->setContentsMargins(0, 0, 0, 2);
+        chipLayout->setSpacing(6);
 
-    // Separator
-    {
-        m_separator = new QFrame;
-        m_separator->setFrameShape(QFrame::HLine);
-        m_separator->setFrameShadow(QFrame::Plain);
-        QPalette sepPal = pal;
-        sepPal.setColor(QPalette::WindowText, theme.border);
-        m_separator->setPalette(sepPal);
-        m_separator->setFixedHeight(1);
-        layout->addWidget(m_separator);
-    }
-
-    // Row 3: Modifier toggles [ plain ] [ * ] [ ** ] [ [n] ]
-    {
-        m_modRow = new QWidget;
-        auto* modLayout = new QHBoxLayout(m_modRow);
-        modLayout->setContentsMargins(0, 0, 0, 0);
-        modLayout->setSpacing(3);
-
-        m_modGroup = new QButtonGroup(this);
-        m_modGroup->setExclusive(true);
-
-        QString btnStyle = QStringLiteral(
+        QString chipStyle = QStringLiteral(
             "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-            "  padding: 2px 8px; border-radius: 3px; }"
+            "  padding: 2px 8px; border-radius: 10px; }"
             "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
-            "QToolButton:hover:!checked { background: %6; }")
+            "QToolButton:hover:!checked { background: %6; }"
+            "QToolButton:pressed { background: %7; }")
             .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
-                 theme.text.name(), theme.selected.name(), theme.hover.name());
+                 theme.text.name(), theme.selected.name(), theme.hover.name(),
+                 theme.surface.name());
 
-        auto makeToggle = [&](const QString& label, int id) -> QToolButton* {
+        auto makeChip = [&](const QString& label) -> QToolButton* {
             auto* btn = new QToolButton;
             btn->setText(label);
             btn->setCheckable(true);
+            btn->setChecked(true);
             btn->setCursor(Qt::PointingHandCursor);
-            btn->setStyleSheet(btnStyle);
-            m_modGroup->addButton(btn, id);
-            modLayout->addWidget(btn);
+            btn->setStyleSheet(chipStyle);
+            chipLayout->addWidget(btn);
             return btn;
         };
 
-        m_btnPlain  = makeToggle(QStringLiteral("plain"), 0);
-        m_btnPtr    = makeToggle(QStringLiteral("*"),     1);
-        m_btnDblPtr = makeToggle(QStringLiteral("**"),    2);
-        m_btnArray  = makeToggle(QStringLiteral("[n]"),   3);
-        m_btnPlain->setChecked(true);
+        m_chipPrim  = makeChip(QStringLiteral("P"));
+        m_chipTypes = makeChip(QStringLiteral("T"));
+        m_chipEnums = makeChip(QStringLiteral("E"));
+        m_chipPrim->setAccessibleName(QStringLiteral("Show primitives"));
+        m_chipTypes->setAccessibleName(QStringLiteral("Show composites"));
+        m_chipEnums->setAccessibleName(QStringLiteral("Show enums"));
+        chipLayout->addStretch();
 
-        // Array count input (shown only when [n] is active)
-        m_arrayCountEdit = new QLineEdit;
-        m_arrayCountEdit->setPlaceholderText(QStringLiteral("n"));
-        m_arrayCountEdit->setValidator(new QIntValidator(1, 99999, m_arrayCountEdit));
-        m_arrayCountEdit->setFixedWidth(50);
-        m_arrayCountEdit->setPalette(pal);
-        m_arrayCountEdit->hide();
-        modLayout->addWidget(m_arrayCountEdit);
+        m_statusLabel = new QLabel;
+        m_statusLabel->setStyleSheet(QStringLiteral(
+            "QLabel { color: %1; padding: 1px 4px; }").arg(theme.textDim.name()));
+        chipLayout->addWidget(m_statusLabel);
 
-        modLayout->addStretch();
-        layout->addWidget(m_modRow);
+        layout->addWidget(m_chipRow);
 
-        connect(m_modGroup, &QButtonGroup::idToggled,
-                this, [this](int id, bool checked) {
-            if (!checked) return;
-            m_arrayCountEdit->setVisible(id == 3);
-            if (id == 3) {
-                if (m_arrayCountEdit->text().trimmed().isEmpty())
-                    m_arrayCountEdit->setText(QStringLiteral("1"));
-                m_arrayCountEdit->setFocus();
-                m_arrayCountEdit->selectAll();
-            }
-            updateModifierPreview();
-        });
-        connect(m_arrayCountEdit, &QLineEdit::textChanged,
-                this, [this]() { updateModifierPreview(); });
+        auto refilter = [this]() { applyFilter(m_filterEdit->text()); };
+        connect(m_chipPrim,  &QToolButton::toggled, this, refilter);
+        connect(m_chipTypes, &QToolButton::toggled, this, refilter);
+        connect(m_chipEnums, &QToolButton::toggled, this, refilter);
     }
 
-    // Row 4: Filter + preview
-    {
-        m_filterEdit = new QLineEdit;
-        m_filterEdit->setPlaceholderText(QStringLiteral("Filter types\u2026"));
-        m_filterEdit->setClearButtonEnabled(true);
-        m_filterEdit->setPalette(pal);
-        m_filterEdit->installEventFilter(this);
-        connect(m_filterEdit, &QLineEdit::textChanged,
-                this, &TypeSelectorPopup::applyFilter);
-        layout->addWidget(m_filterEdit);
-
-        m_previewLabel = new QLabel;
-        m_previewLabel->setPalette(pal);
-        m_previewLabel->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; padding: 1px 6px; }").arg(theme.syntaxType.name()));
-        m_previewLabel->hide();
-        layout->addWidget(m_previewLabel);
-    }
-
-    // Row 4: List
+    // ── List view (main content) ──
     {
         m_model = new QStringListModel(this);
         m_listView = new QListView;
@@ -383,6 +447,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_listView->setMouseTracking(true);
         m_listView->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_listView->viewport()->setAttribute(Qt::WA_Hover, true);
+        m_listView->setAccessibleName(QStringLiteral("Type list"));
         m_listView->installEventFilter(this);
 
         auto* delegate = new TypeSelectorDelegate(this, m_listView);
@@ -390,11 +455,137 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
 
         layout->addWidget(m_listView, 1);
 
-        connect(m_listView, &QListView::clicked,
+        connect(m_listView, &QListView::doubleClicked,
                 this, [this](const QModelIndex& index) {
             acceptIndex(index.row());
         });
+        connect(m_listView->selectionModel(), &QItemSelectionModel::currentChanged,
+                this, [this]() { updateModifierPreview(); });
     }
+
+    // ── Action row: "Apply as: ..." + modifiers + "+ New" ──
+    {
+        auto* row = new QHBoxLayout;
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(6);
+
+        m_titleLabel = new QLabel;
+        m_titleLabel->setPalette(pal);
+        m_titleLabel->setAlignment(Qt::AlignVCenter);
+        m_titleLabel->setTextFormat(Qt::RichText);
+        QFont bold = m_titleLabel->font();
+        bold.setBold(true);
+        m_titleLabel->setFont(bold);
+        row->addWidget(m_titleLabel);
+
+        row->addStretch();
+
+        // Modifier toggles: [*] [**] [[] count]
+        {
+            m_modRow = new QWidget;
+            auto* modLayout = new QHBoxLayout(m_modRow);
+            modLayout->setContentsMargins(0, 0, 0, 0);
+            modLayout->setSpacing(3);
+
+            m_modGroup = new QButtonGroup(this);
+            m_modGroup->setExclusive(false);
+
+            QString btnStyle = QStringLiteral(
+                "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+                "  padding: 2px 8px; border-radius: 3px; }"
+                "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
+                "QToolButton:hover:!checked { background: %6; }"
+                "QToolButton:pressed { background: %7; }")
+                .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
+                     theme.text.name(), theme.selected.name(), theme.hover.name(),
+                     theme.surface.name());
+
+            auto makeToggle = [&](const QString& label, int id) -> QToolButton* {
+                auto* btn = new QToolButton;
+                btn->setText(label);
+                btn->setCheckable(true);
+                btn->setCursor(Qt::PointingHandCursor);
+                btn->setStyleSheet(btnStyle);
+                m_modGroup->addButton(btn, id);
+                modLayout->addWidget(btn);
+                return btn;
+            };
+
+            m_btnPtr    = makeToggle(QStringLiteral("*"),  1);
+            m_btnDblPtr = makeToggle(QStringLiteral("**"), 2);
+            m_btnArray  = makeToggle(QStringLiteral("[]"), 3);
+
+            m_arrayCountEdit = new QLineEdit;
+            m_arrayCountEdit->setPlaceholderText(QStringLiteral("n"));
+            m_arrayCountEdit->setValidator(new QIntValidator(1, 99999, m_arrayCountEdit));
+            m_arrayCountEdit->setFixedWidth(50);
+            m_arrayCountEdit->setPalette(pal);
+            m_arrayCountEdit->hide();
+            modLayout->addWidget(m_arrayCountEdit);
+
+            row->addWidget(m_modRow);
+
+            connect(m_modGroup, &QButtonGroup::idClicked,
+                    this, [this](int id) {
+                QAbstractButton* btn = m_modGroup->button(id);
+                if (btn->isChecked()) {
+                    for (auto* b : m_modGroup->buttons())
+                        if (b != btn) b->setChecked(false);
+                }
+                // If unchecked (toggled off), all buttons stay unchecked = plain
+                m_arrayCountEdit->setVisible(m_btnArray->isChecked());
+                if (m_btnArray->isChecked()) {
+                    if (m_arrayCountEdit->text().trimmed().isEmpty())
+                        m_arrayCountEdit->setText(QStringLiteral("1"));
+                    m_arrayCountEdit->setFocus();
+                    m_arrayCountEdit->selectAll();
+                }
+                updateModifierPreview();
+            });
+            connect(m_arrayCountEdit, &QLineEdit::textChanged,
+                    this, [this]() { updateModifierPreview(); });
+        }
+
+        m_createBtn = new QToolButton;
+        m_createBtn->setText(QStringLiteral("+ New"));
+        m_createBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        m_createBtn->setAutoRaise(true);
+        m_createBtn->setCursor(Qt::PointingHandCursor);
+        m_createBtn->setAccessibleName(QStringLiteral("Create new type"));
+        m_createBtn->setStyleSheet(QStringLiteral(
+            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+            "  padding: 2px 10px; border-radius: 3px; }"
+            "QToolButton:hover { color: %4; background: %5; border-color: %5; }"
+            "QToolButton:pressed { background: %6; }")
+            .arg(theme.text.name(), theme.background.name(), theme.border.name(),
+                 theme.text.name(), theme.selected.name(), theme.surface.name()));
+        connect(m_createBtn, &QToolButton::clicked, this, [this]() {
+            emit createNewTypeRequested();
+            hide();
+        });
+        row->addWidget(m_createBtn);
+
+        m_saveBtn = new QToolButton;
+        m_saveBtn->setText(QStringLiteral("Save"));
+        m_saveBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        m_saveBtn->setAutoRaise(true);
+        m_saveBtn->setCursor(Qt::PointingHandCursor);
+        m_saveBtn->setAccessibleName(QStringLiteral("Save"));
+        m_saveBtn->setStyleSheet(QStringLiteral(
+            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+            "  padding: 2px 10px; border-radius: 3px; }"
+            "QToolButton:hover { color: %4; background: %5; border-color: %5; }"
+            "QToolButton:pressed { background: %6; }")
+            .arg(theme.text.name(), theme.background.name(), theme.border.name(),
+                 theme.text.name(), theme.selected.name(), theme.surface.name()));
+        connect(m_saveBtn, &QToolButton::clicked, this, [this]() {
+            acceptCurrent();
+        });
+        row->addWidget(m_saveBtn);
+
+        layout->addLayout(row);
+    }
+
 }
 
 void TypeSelectorPopup::warmUp() {
@@ -431,25 +622,76 @@ void TypeSelectorPopup::warmUp() {
     QApplication::processEvents();
 }
 
+void TypeSelectorPopup::popupLoading(const QPoint& globalPos) {
+    m_loading = true;
+    auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
+    if (delegate) delegate->setLoading(true);
+
+    // Clear stale selection from previous use
+    m_listView->selectionModel()->clearSelection();
+    m_listView->selectionModel()->clearCurrentIndex();
+
+    // Fill model with dummy rows for skeleton bars
+    QStringList dummy;
+    for (int i = 0; i < 12; i++) dummy << QString();
+    m_model->setStringList(dummy);
+
+    // Reset UI to empty state
+    m_titleLabel->clear();
+    if (m_statusLabel) m_statusLabel->clear();
+
+    // Default popup size (compact — 66% of old width)
+    QFontMetrics fm(m_font);
+    int rowH = fm.height() + 8;
+    int popupW = 560;
+    int popupH = qMax(400, rowH * 14 + rowH * 2 + 20);
+
+    QScreen* screen = QApplication::screenAt(globalPos);
+    if (screen) {
+        QRect avail = screen->availableGeometry();
+        if (globalPos.y() + popupH > avail.bottom())
+            popupH = avail.bottom() - globalPos.y();
+        if (globalPos.x() + popupW > avail.right())
+            popupW = avail.right() - globalPos.x();
+    }
+
+    setFixedSize(popupW, popupH);
+    move(globalPos);
+    show();
+    raise();
+    activateWindow();
+    m_filterEdit->setFocus();
+}
+
 void TypeSelectorPopup::setFont(const QFont& font) {
     m_font = font;
 
     m_titleLabel->setFont([&]() {
-        QFont f = font; f.setBold(true); return f;
+        QFont f = font;
+        f.setPointSize(qMax(7, font.pointSize() * 3 / 4));
+        f.setBold(true);
+        return f;
     }());
     m_escLabel->setFont(font);
-    m_createBtn->setFont(font);
     m_filterEdit->setFont(font);
     m_listView->setFont(font);
-    m_previewLabel->setFont(font);
 
     QFont smallFont = font;
     smallFont.setPointSize(qMax(7, font.pointSize() - 1));
-    m_btnPlain->setFont(smallFont);
     m_btnPtr->setFont(smallFont);
     m_btnDblPtr->setFont(smallFont);
     m_btnArray->setFont(smallFont);
     m_arrayCountEdit->setFont(smallFont);
+
+    m_createBtn->setFont(smallFont);
+    m_saveBtn->setFont(smallFont);
+
+    QFont chipFont = font;
+    chipFont.setPointSize(qMax(7, (int)(font.pointSize() * 0.75)));
+    m_chipPrim->setFont(chipFont);
+    m_chipTypes->setFont(chipFont);
+    m_chipEnums->setFont(chipFont);
+    if (m_statusLabel) m_statusLabel->setFont(chipFont);
 
     auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
     if (delegate)
@@ -472,46 +714,77 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
     m_titleLabel->setPalette(pal);
     m_filterEdit->setPalette(pal);
     m_listView->setPalette(pal);
-    m_previewLabel->setPalette(pal);
     m_arrayCountEdit->setPalette(pal);
 
-    // Separator
-    QPalette sepPal = pal;
-    sepPal.setColor(QPalette::WindowText, theme.border);
-    m_separator->setPalette(sepPal);
-
-    // Esc button
+    // Esc button (snapped to corner)
     m_escLabel->setStyleSheet(QStringLiteral(
-        "QToolButton { color: %1; border: none; padding: 2px 6px; }"
+        "QToolButton { color: %1; border: none; padding: 2px 4px; }"
         "QToolButton:hover { color: %2; }")
         .arg(theme.textDim.name(), theme.indHoverSpan.name()));
 
     // Create button
     m_createBtn->setStyleSheet(QStringLiteral(
-        "QToolButton { color: %1; border: none; padding: 3px 6px; }"
-        "QToolButton:hover { color: %2; background: %3; }")
-        .arg(theme.textMuted.name(), theme.text.name(), theme.hover.name()));
+        "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+        "  padding: 2px 10px; border-radius: 3px; }"
+        "QToolButton:hover { color: %4; background: %5; border-color: %5; }"
+        "QToolButton:pressed { background: %6; }")
+        .arg(theme.text.name(), theme.background.name(), theme.border.name(),
+             theme.text.name(), theme.selected.name(), theme.surface.name()));
+
+    // Save button
+    m_saveBtn->setStyleSheet(QStringLiteral(
+        "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+        "  padding: 2px 10px; border-radius: 3px; }"
+        "QToolButton:hover { color: %4; background: %5; border-color: %5; }"
+        "QToolButton:pressed { background: %6; }")
+        .arg(theme.text.name(), theme.background.name(), theme.border.name(),
+             theme.text.name(), theme.selected.name(), theme.surface.name()));
+
+    // Filter (no focus accent)
+    m_filterEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 3px; }")
+        .arg(theme.border.name()));
 
     // Modifier toggle buttons
     QString btnStyle = QStringLiteral(
         "QToolButton { color: %1; background: %2; border: 1px solid %3;"
         "  padding: 2px 8px; border-radius: 3px; }"
         "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
-        "QToolButton:hover:!checked { background: %6; }")
+        "QToolButton:hover:!checked { background: %6; }"
+        "QToolButton:pressed { background: %7; }")
         .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
-             theme.text.name(), theme.selected.name(), theme.hover.name());
-    m_btnPlain->setStyleSheet(btnStyle);
+             theme.text.name(), theme.selected.name(), theme.hover.name(),
+             theme.surface.name());
     m_btnPtr->setStyleSheet(btnStyle);
     m_btnDblPtr->setStyleSheet(btnStyle);
     m_btnArray->setStyleSheet(btnStyle);
 
-    // Preview label
-    m_previewLabel->setStyleSheet(QStringLiteral(
-        "QLabel { color: %1; padding: 1px 6px; }").arg(theme.syntaxType.name()));
+    // Category chip buttons
+    {
+        QString chipStyle = QStringLiteral(
+            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+            "  padding: 2px 8px; border-radius: 10px; }"
+            "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
+            "QToolButton:hover:!checked { background: %6; }"
+            "QToolButton:pressed { background: %7; }")
+            .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
+                 theme.text.name(), theme.selected.name(), theme.hover.name(),
+                 theme.surface.name());
+        m_chipPrim->setStyleSheet(chipStyle);
+        m_chipTypes->setStyleSheet(chipStyle);
+        m_chipEnums->setStyleSheet(chipStyle);
+    }
+
+    // Status label
+    if (m_statusLabel) {
+        m_statusLabel->setStyleSheet(QStringLiteral(
+            "QLabel { color: %1; padding: 1px 2px; }").arg(theme.textDim.name()));
+    }
+
 }
 
-void TypeSelectorPopup::setTitle(const QString& title) {
-    m_titleLabel->setText(title);
+void TypeSelectorPopup::setTitle(const QString& /*title*/) {
+    // Title is now dynamic — set by updateModifierPreview()
 }
 
 void TypeSelectorPopup::setMode(TypePopupMode mode) {
@@ -519,9 +792,9 @@ void TypeSelectorPopup::setMode(TypePopupMode mode) {
     bool showMods = (mode == TypePopupMode::FieldType
                      || mode == TypePopupMode::ArrayElement);
     m_modRow->setVisible(showMods);
-    // Always reset to plain — prevents stale state from leaking across modes
-    // (PointerTarget hides buttons but applyFilter still reads their state)
-    m_btnPlain->setChecked(true);
+    // Reset all modifiers — no modifier = plain
+    for (auto* b : m_modGroup->buttons())
+        b->setChecked(false);
     m_arrayCountEdit->clear();
     m_arrayCountEdit->hide();
 }
@@ -530,19 +803,28 @@ void TypeSelectorPopup::setCurrentNodeSize(int bytes) {
     m_currentNodeSize = bytes;
 }
 
+void TypeSelectorPopup::setPointerSize(int bytes) {
+    m_pointerSize = bytes;
+}
+
 void TypeSelectorPopup::setModifier(int modId, int arrayCount) {
+    for (auto* b : m_modGroup->buttons())
+        b->setChecked(false);
     if (modId == 1)      m_btnPtr->setChecked(true);
     else if (modId == 2) m_btnDblPtr->setChecked(true);
     else if (modId == 3) {
         m_btnArray->setChecked(true);
         m_arrayCountEdit->setText(QString::number(arrayCount));
         m_arrayCountEdit->show();
-    } else {
-        m_btnPlain->setChecked(true);
     }
+    // else: all unchecked = plain (no modifier)
 }
 
 void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntry* current) {
+    m_loading = false;
+    auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
+    if (delegate) delegate->setLoading(false);
+
     m_allTypes = types;
     if (current) {
         m_currentEntry = *current;
@@ -553,47 +835,8 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
     }
     // Don't reset modifier buttons here — setMode() already resets to plain,
     // and setModifier() may have preselected a button between setMode/setTypes.
-    m_previewLabel->hide();
-
     m_filterEdit->clear();
     applyFilter(QString());
-}
-
-void TypeSelectorPopup::popup(const QPoint& globalPos) {
-    QFontMetrics fm(m_font);
-    int maxTextW = fm.horizontalAdvance(QStringLiteral("Choose element type      Esc"));
-    for (const auto& t : m_allTypes) {
-        QString text = t.classKeyword.isEmpty()
-            ? t.displayName
-            : (t.classKeyword + QStringLiteral(" ") + t.displayName);
-        int gutterW = fm.horizontalAdvance(QChar(0x25B8)) + 4;
-        int iconColW = fm.height() + 4;
-        int w = gutterW + iconColW + fm.horizontalAdvance(text) + 16;
-        if (w > maxTextW) maxTextW = w;
-    }
-    int popupW = qBound(280, maxTextW + 24, 500);
-    int rowH = fm.height() + 8;
-    int headerH = rowH * 3 + 30;
-    if (m_modRow->isVisible())
-        headerH += rowH + 4;  // extra row for modifier toggles
-    int listH = qBound(rowH * 3, rowH * (int)m_filteredTypes.size(), rowH * 14);
-    int popupH = headerH + listH;
-
-    QScreen* screen = QApplication::screenAt(globalPos);
-    if (screen) {
-        QRect avail = screen->availableGeometry();
-        if (globalPos.y() + popupH > avail.bottom())
-            popupH = avail.bottom() - globalPos.y();
-        if (globalPos.x() + popupW > avail.right())
-            popupW = avail.right() - globalPos.x();
-    }
-
-    setFixedSize(popupW, popupH);
-    move(globalPos);
-    show();
-    raise();
-    activateWindow();
-    m_filterEdit->setFocus();
 
     // Pre-select current type in list
     if (m_hasCurrent) {
@@ -613,113 +856,243 @@ void TypeSelectorPopup::popup(const QPoint& globalPos) {
     }
 }
 
+void TypeSelectorPopup::popup(const QPoint& globalPos) {
+    QFontMetrics fm(m_font);
+    int maxTextW = fm.horizontalAdvance(QStringLiteral("Choose element type        "));
+    for (const auto& t : m_allTypes) {
+        int iconColW = fm.height() + 4;
+        int w = iconColW + fm.horizontalAdvance(t.displayName) + 16;
+        if (w > maxTextW) maxTextW = w;
+    }
+    int popupW = qBound(480, maxTextW + 24, 560);
+    int rowH = fm.height() + 8;
+    int headerH = rowH * 2 + 10;   // filter + chips + separator
+    int footerH = rowH + 6;        // separator + action row
+    int listH = qBound(rowH * 3, rowH * (int)m_filteredTypes.size(), rowH * 14);
+    int popupH = qMax(400, headerH + listH + footerH);
+
+    QScreen* screen = QApplication::screenAt(globalPos);
+    if (screen) {
+        QRect avail = screen->availableGeometry();
+        if (globalPos.y() + popupH > avail.bottom())
+            popupH = avail.bottom() - globalPos.y();
+        if (globalPos.x() + popupW > avail.right())
+            popupW = avail.right() - globalPos.x();
+    }
+
+    setFixedSize(popupW, popupH);
+    move(globalPos);
+    show();
+    raise();
+    activateWindow();
+    m_filterEdit->setFocus();
+}
+
 void TypeSelectorPopup::updateModifierPreview() {
-    int modId = m_modGroup->checkedId();
-    if (modId <= 0) {
-        m_previewLabel->hide();
+    const auto& t = ThemeManager::instance().current();
+    QModelIndex idx = m_listView->currentIndex();
+    int row = idx.isValid() ? idx.row() : -1;
+
+    if (row < 0 || row >= m_filteredTypes.size()
+        || m_filteredTypes[row].entryKind == TypeEntry::Section) {
+        m_titleLabel->setText(QStringLiteral("<span style='color:%1'>Select a type</span>")
+            .arg(t.textDim.name()));
         return;
     }
+
+    const TypeEntry& entry = m_filteredTypes[row];
+
+    // Disabled entry
+    if (!entry.enabled) {
+        m_titleLabel->setText(QStringLiteral("<span style='color:%1'>Not selectable</span>")
+            .arg(t.textDim.name()));
+        return;
+    }
+
+    int modId = m_modGroup->checkedId();
+
+    // Build modifier suffix
     QString suffix;
     if (modId == 1) suffix = QStringLiteral("*");
     else if (modId == 2) suffix = QStringLiteral("**");
     else if (modId == 3) {
-        QString countText = m_arrayCountEdit->text().trimmed();
-        suffix = countText.isEmpty()
-            ? QStringLiteral("[n]")
-            : QStringLiteral("[%1]").arg(countText);
+        QString c = m_arrayCountEdit->text().trimmed();
+        suffix = c.isEmpty() ? QStringLiteral("[n]") : QStringLiteral("[%1]").arg(c);
     }
-    m_previewLabel->setText(QStringLiteral("\u2192 <type>%1").arg(suffix));
-    m_previewLabel->show();
+
+    // Compute resulting size
+    int newSize = entry.sizeBytes;
+    if (modId == 1 || modId == 2)
+        newSize = m_pointerSize;
+    else if (modId == 3 && newSize > 0) {
+        QString c = m_arrayCountEdit->text().trimmed();
+        bool ok; int count = c.toInt(&ok);
+        if (ok && count > 0) newSize *= count;
+    }
+
+    // Format: "type+modifier → size (+diff)"
+    QString label = QStringLiteral("<span style='color:%1'>%2%3</span>")
+        .arg(t.text.name(), entry.displayName, suffix);
+
+    if (newSize > 0) {
+        label += QStringLiteral("<span style='color:%1'> \u2192 %2</span>")
+            .arg(t.textDim.name()).arg(newSize);
+
+        if (m_currentNodeSize > 0 && newSize != m_currentNodeSize) {
+            int diff = newSize - m_currentNodeSize;
+            label += QStringLiteral("<span style='color:%1'> (%2%3)</span>")
+                .arg(t.textDim.name(),
+                     diff > 0 ? QStringLiteral("+") : QString(),
+                     QString::number(diff));
+        }
+    }
+
+    m_titleLabel->setText(label);
 }
 
 void TypeSelectorPopup::applyFilter(const QString& text) {
     m_filteredTypes.clear();
+    m_matchPositions.clear();
     QStringList displayStrings;
 
     QString filterBase = text.trimmed();
 
-    // Separate primitives and composites (all types shown regardless of modifier)
-    QVector<TypeEntry> primitives, composites;
-    for (const auto& t : m_allTypes) {
-        if (t.entryKind == TypeEntry::Section) continue;
-        bool matchesFilter = filterBase.isEmpty()
-            || t.displayName.contains(filterBase, Qt::CaseInsensitive)
-            || t.classKeyword.contains(filterBase, Qt::CaseInsensitive);
-        if (!matchesFilter) continue;
+    bool showPrim  = m_chipPrim  && m_chipPrim->isChecked();
+    bool showTypes = m_chipTypes && m_chipTypes->isChecked();
+    bool showEnums = m_chipEnums && m_chipEnums->isChecked();
 
-        if (t.entryKind == TypeEntry::Primitive)
-            primitives.append(t);
-        else if (t.entryKind == TypeEntry::Composite)
-            composites.append(t);
+    auto catAllowed = [&](const TypeEntry& t) {
+        if (t.entryKind == TypeEntry::Primitive) return showPrim;
+        return (t.category == TypeEntry::CatEnum) ? showEnums : showTypes;
+    };
+
+    auto makeLabel = [](const TypeEntry& e) {
+        QString label = e.displayName;
+        if (e.sizeBytes > 0) label += QStringLiteral(" - %1").arg(e.sizeBytes);
+        return label;
+    };
+
+    int primCount = 0, typeCount = 0, enumCount = 0;
+
+    if (!filterBase.isEmpty()) {
+        // ── Fuzzy search: flat ranked list, no section headers ──
+        struct Scored { TypeEntry entry; int score; QVector<int> pos; };
+        QVector<Scored> scored;
+
+        for (const auto& t : m_allTypes) {
+            if (t.entryKind == TypeEntry::Section) continue;
+            QVector<int> pos;
+            int sc = fuzzyScore(filterBase, t.displayName, &pos);
+            if (sc <= 0) continue;
+            if (t.entryKind == TypeEntry::Primitive) primCount++;
+            else if (t.category == TypeEntry::CatEnum) enumCount++;
+            else typeCount++;
+            if (catAllowed(t))
+                scored.append({t, sc, pos});
+        }
+        std::sort(scored.begin(), scored.end(),
+                  [](const Scored& a, const Scored& b) { return a.score > b.score; });
+
+        for (const auto& s : scored) {
+            m_filteredTypes.append(s.entry);
+            m_matchPositions.append(s.pos);
+            displayStrings << makeLabel(s.entry);
+        }
+    } else {
+        // ── No filter: grouped sections, alphabetical ──
+        QVector<TypeEntry> primitives, types, enums;
+        for (const auto& t : m_allTypes) {
+            if (t.entryKind == TypeEntry::Section) continue;
+            if (t.entryKind == TypeEntry::Primitive) {
+                primCount++;
+                if (showPrim) primitives.append(t);
+            } else if (t.category == TypeEntry::CatEnum) {
+                enumCount++;
+                if (showEnums) enums.append(t);
+            } else {
+                typeCount++;
+                if (showTypes) types.append(t);
+            }
+        }
+
+        auto alphabetical = [](const TypeEntry& a, const TypeEntry& b) {
+            return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
+        };
+        if (m_mode != TypePopupMode::Root && m_currentNodeSize > 0 && !primitives.isEmpty()) {
+            QVector<TypeEntry> sameSize, other;
+            for (const auto& p : primitives) {
+                if (sizeForKind(p.primitiveKind) == m_currentNodeSize) sameSize.append(p);
+                else other.append(p);
+            }
+            std::sort(sameSize.begin(), sameSize.end(), alphabetical);
+            std::sort(other.begin(), other.end(), alphabetical);
+            primitives = sameSize + other;
+        } else {
+            std::sort(primitives.begin(), primitives.end(), alphabetical);
+        }
+        std::sort(types.begin(), types.end(), alphabetical);
+        std::sort(enums.begin(), enums.end(), alphabetical);
+
+        auto appendSection = [&](const QString& title, const QVector<TypeEntry>& items) {
+            if (items.isEmpty()) return;
+            TypeEntry sec;
+            sec.entryKind = TypeEntry::Section;
+            sec.displayName = title;
+            sec.enabled = false;
+            m_filteredTypes.append(sec);
+            m_matchPositions.append(QVector<int>());
+            displayStrings << sec.displayName;
+            for (const auto& c : items) {
+                m_filteredTypes.append(c);
+                m_matchPositions.append(QVector<int>());
+                displayStrings << makeLabel(c);
+            }
+        };
+
+        if (m_mode == TypePopupMode::Root) {
+            appendSection(QStringLiteral("types"), types);
+            appendSection(QStringLiteral("enums"), enums);
+            appendSection(QStringLiteral("primitives"), primitives);
+        } else {
+            appendSection(QStringLiteral("primitives"), primitives);
+            appendSection(QStringLiteral("types"), types);
+            appendSection(QStringLiteral("enums"), enums);
+        }
     }
 
-    auto alphabetical = [](const TypeEntry& a, const TypeEntry& b) {
-        return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
-    };
+    // Empty state
+    int resultCount = 0;
+    for (const auto& f : m_filteredTypes)
+        if (f.entryKind != TypeEntry::Section) resultCount++;
 
-    // For non-Root modes, sort primitives: same-size first, then rest — alphabetical within each group
-    if (m_mode != TypePopupMode::Root && m_currentNodeSize > 0 && !primitives.isEmpty()) {
-        QVector<TypeEntry> sameSize, other;
-        for (const auto& p : primitives) {
-            if (sizeForKind(p.primitiveKind) == m_currentNodeSize)
-                sameSize.append(p);
-            else
-                other.append(p);
-        }
-        std::sort(sameSize.begin(), sameSize.end(), alphabetical);
-        std::sort(other.begin(), other.end(), alphabetical);
-        primitives = sameSize + other;
-    } else {
-        std::sort(primitives.begin(), primitives.end(), alphabetical);
-    }
-
-    // Helper lambdas for appending sections
-    auto appendPrimitives = [&]() {
-        if (primitives.isEmpty()) return;
-        TypeEntry sec;
-        sec.entryKind = TypeEntry::Section;
-        sec.displayName = QStringLiteral("primitives");
-        sec.enabled = false;
-        m_filteredTypes.append(sec);
-        displayStrings << sec.displayName;
-        for (const auto& p : primitives) {
-            m_filteredTypes.append(p);
-            displayStrings << p.displayName;
-        }
-    };
-    auto appendComposites = [&]() {
-        if (composites.isEmpty()) return;
-        TypeEntry sec;
-        sec.entryKind = TypeEntry::Section;
-        sec.displayName = QStringLiteral("project types");
-        sec.enabled = false;
-        m_filteredTypes.append(sec);
-        displayStrings << sec.displayName;
-        for (const auto& c : composites) {
-            m_filteredTypes.append(c);
-            QString label = c.classKeyword.isEmpty()
-                ? c.displayName
-                : (c.classKeyword + QStringLiteral(" ") + c.displayName);
-            displayStrings << label;
-        }
-    };
-
-    // Root mode: project types first (composites are the primary selection)
-    if (m_mode == TypePopupMode::Root) {
-        appendComposites();
-        appendPrimitives();
-    } else {
-        appendPrimitives();
-        appendComposites();
+    if (resultCount == 0) {
+        TypeEntry empty;
+        empty.entryKind = TypeEntry::Section;
+        empty.displayName = QStringLiteral("No matching types");
+        empty.enabled = false;
+        m_filteredTypes.append(empty);
+        m_matchPositions.append(QVector<int>());
+        displayStrings << empty.displayName;
     }
 
     m_model->setStringList(displayStrings);
 
-    auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
-    if (delegate)
-        delegate->setFilteredTypes(&m_filteredTypes, &m_currentEntry, m_hasCurrent);
+    auto updateChipLabel = [](QToolButton* btn, const QString& abbrev, int count) {
+        btn->setText(QStringLiteral("%1 (%2)").arg(abbrev).arg(count));
+    };
+    if (m_chipPrim)  updateChipLabel(m_chipPrim,  QStringLiteral("P"),  primCount);
+    if (m_chipTypes) updateChipLabel(m_chipTypes, QStringLiteral("T"),  typeCount);
+    if (m_chipEnums) updateChipLabel(m_chipEnums, QStringLiteral("E"),  enumCount);
 
-    // Select first selectable item
+    if (m_statusLabel)
+        m_statusLabel->setText(QStringLiteral("%1 results").arg(resultCount));
+
+    auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
+    if (delegate) {
+        delegate->setFilteredTypes(&m_filteredTypes);
+        delegate->setMatchPositions(&m_matchPositions);
+    }
+
     int first = nextSelectableRow(0, 1);
     if (first >= 0)
         m_listView->setCurrentIndex(m_model->index(first));
@@ -774,6 +1147,13 @@ bool TypeSelectorPopup::eventFilter(QObject* obj, QEvent* event) {
             return true;
         }
 
+        // Ctrl+F focuses the filter from anywhere
+        if (ke->key() == Qt::Key_F && (ke->modifiers() & Qt::ControlModifier)) {
+            m_filterEdit->setFocus();
+            m_filterEdit->selectAll();
+            return true;
+        }
+
         if (obj == m_filterEdit) {
             if (ke->key() == Qt::Key_Down) {
                 m_listView->setFocus();
@@ -816,6 +1196,15 @@ bool TypeSelectorPopup::eventFilter(QObject* obj, QEvent* event) {
             }
             if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
                 acceptCurrent();
+                return true;
+            }
+            // Backspace in list removes last filter char
+            if (ke->key() == Qt::Key_Backspace) {
+                QString txt = m_filterEdit->text();
+                if (!txt.isEmpty()) {
+                    m_filterEdit->setText(txt.left(txt.size() - 1));
+                    m_filterEdit->setFocus();
+                }
                 return true;
             }
             // Forward printable keys to filter edit for type-to-filter

@@ -213,6 +213,186 @@ private slots:
         QVERIFY(r.ok);
         QCOMPARE(r.value, 0x600ULL);
     }
+
+    // -- Identifier resolution --
+
+    void identBase() {
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            *ok = (name == "base");
+            return *ok ? 0x140000000ULL : 0;
+        };
+        auto r = AddressParser::evaluate("base", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x140000000ULL);
+    }
+
+    void identFieldName() {
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            if (name == "base")     { *ok = true; return 0x140000000ULL; }
+            if (name == "e_lfanew") { *ok = true; return 0xE8ULL; }
+            *ok = false; return 0;
+        };
+        auto r = AddressParser::evaluate("base + e_lfanew", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x1400000E8ULL);
+    }
+
+    void identUnknown() {
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString&, bool* ok) -> uint64_t {
+            *ok = false; return 0;
+        };
+        auto r = AddressParser::evaluate("unknown_var", 8, &cbs);
+        QVERIFY(!r.ok);
+        QVERIFY(r.error.contains("unknown identifier"));
+    }
+
+    // -- Hex vs identifier disambiguation --
+
+    void hexDisambigDEAD() {
+        // "DEAD" is all hex digits → should parse as hex number 0xDEAD
+        auto r = AddressParser::evaluate("DEAD");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0xDEADULL);
+    }
+
+    void hexDisambigBase() {
+        // "base" has 's' (non-hex) → identifier
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            *ok = (name == "base"); return *ok ? 42ULL : 0;
+        };
+        auto r = AddressParser::evaluate("base", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 42ULL);
+    }
+
+    void hexDisambigABCwithUnderscore() {
+        // "ABC_field" has '_' → identifier, not hex
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            *ok = (name == "ABC_field"); return *ok ? 99ULL : 0;
+        };
+        auto r = AddressParser::evaluate("ABC_field", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 99ULL);
+    }
+
+    // -- Bitwise operators --
+
+    void bitwiseAnd() {
+        auto r = AddressParser::evaluate("0xFF & 0x0F");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x0FULL);
+    }
+
+    void bitwiseOr() {
+        auto r = AddressParser::evaluate("0xA0 | 0x0B");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0xABULL);
+    }
+
+    void bitwiseXor() {
+        auto r = AddressParser::evaluate("0xA ^ 0x5");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0xFULL);
+    }
+
+    void shiftLeft() {
+        auto r = AddressParser::evaluate("1 << 4");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x10ULL);
+    }
+
+    void shiftRight() {
+        auto r = AddressParser::evaluate("0xFF00 >> 8");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0xFFULL);
+    }
+
+    // -- Unary bitwise NOT --
+
+    void unaryNot() {
+        auto r = AddressParser::evaluate("~0");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0xFFFFFFFFFFFFFFFFULL);
+    }
+
+    void unaryNotMask() {
+        // ~0xFFF = 0xFFFFFFFFFFFFF000
+        auto r = AddressParser::evaluate("~0xFFF");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0xFFFFFFFFFFFFF000ULL);
+    }
+
+    // -- Operator precedence --
+
+    void shiftPrecedence() {
+        // C precedence: shift binds looser than addition
+        // 1 + 2 << 3 = (1 + 2) << 3 = 3 << 3 = 24 = 0x18
+        auto r = AddressParser::evaluate("1 + 2 << 3");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x18ULL);
+    }
+
+    void andOrPrecedence() {
+        // & binds tighter than |
+        // 0xFF | 0x100 & 0xF00 = 0xFF | (0x100 & 0xF00) = 0xFF | 0x100 = 0x1FF
+        auto r = AddressParser::evaluate("0xFF | 0x100 & 0xF00");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x1FFULL);
+    }
+
+    void xorPrecedence() {
+        // ^ between & and |: a | b ^ c & d = a | (b ^ (c & d))
+        // 0xF0 | 0x0F ^ 0xFF & 0x0F = 0xF0 | (0x0F ^ (0xFF & 0x0F))
+        //   = 0xF0 | (0x0F ^ 0x0F) = 0xF0 | 0x00 = 0xF0
+        auto r = AddressParser::evaluate("0xF0 | 0x0F ^ 0xFF & 0x0F");
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0xF0ULL);
+    }
+
+    // -- E_lfanew end-to-end --
+
+    void elfanewScenario() {
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            if (name == "base")     { *ok = true; return 0x140000000ULL; }
+            if (name == "e_lfanew") { *ok = true; return 0xE8ULL; }
+            *ok = false; return 0;
+        };
+        // base + e_lfanew = 0x140000000 + 0xE8 = 0x1400000E8
+        auto r = AddressParser::evaluate("base + e_lfanew", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x1400000E8ULL);
+    }
+
+    void pageAlignedExpr() {
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            if (name == "base")     { *ok = true; return 0x140000000ULL; }
+            if (name == "e_lfanew") { *ok = true; return 0xE8ULL; }
+            *ok = false; return 0;
+        };
+        // (base + e_lfanew) & ~0xFFF = 0x1400000E8 & ~0xFFF = 0x140000000
+        auto r = AddressParser::evaluate("(base + e_lfanew) & ~0xFFF", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x140000000ULL);
+    }
+
+    // -- Validate with new syntax --
+
+    void validateIdentifier() {
+        QCOMPARE(AddressParser::validate("base + e_lfanew"), QString());
+    }
+
+    void validateBitwiseOps() {
+        QCOMPARE(AddressParser::validate("0xFF & 0x0F"), QString());
+        QCOMPARE(AddressParser::validate("1 << 4"), QString());
+        QCOMPARE(AddressParser::validate("~0xFFF"), QString());
+    }
 };
 
 QTEST_GUILESS_MAIN(TestAddressParser)

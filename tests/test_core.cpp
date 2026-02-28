@@ -671,6 +671,114 @@ private slots:
         QCOMPARE(h.count, 4);       // 4 transitions
         QCOMPARE(h.heatLevel(), 2); // warm (count=4 → 3-4 range)
     }
+
+    // ── Helper node serialization ──
+
+    void testHelperJsonRoundTrip() {
+        rcx::NodeTree tree;
+        tree.baseAddress = 0x14000000;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "DOS_HEADER";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node field;
+        field.kind = rcx::NodeKind::UInt32;
+        field.name = "e_lfanew";
+        field.parentId = rootId;
+        field.offset = 0x3C;
+        tree.addNode(field);
+
+        rcx::Node helper;
+        helper.kind = rcx::NodeKind::Struct;
+        helper.name = "nt_hdr";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base + e_lfanew");
+        tree.addNode(helper);
+
+        QJsonObject json = tree.toJson();
+        rcx::NodeTree tree2 = rcx::NodeTree::fromJson(json);
+
+        QCOMPARE(tree2.nodes.size(), 3);
+        const auto& h = tree2.nodes[2];
+        QCOMPARE(h.isHelper, true);
+        QCOMPARE(h.offsetExpr, QStringLiteral("base + e_lfanew"));
+        QCOMPARE(h.name, QStringLiteral("nt_hdr"));
+    }
+
+    void testHelperJsonBackwardCompat() {
+        // Old JSON without isHelper/offsetExpr should load with defaults
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Test";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+
+        QJsonObject json = tree.toJson();
+        rcx::NodeTree tree2 = rcx::NodeTree::fromJson(json);
+
+        QCOMPARE(tree2.nodes[0].isHelper, false);
+        QCOMPARE(tree2.nodes[0].offsetExpr, QString());
+    }
+
+    void testStructSpanExcludesHelpers() {
+        using namespace rcx;
+        NodeTree tree;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Regular field: offset 0, size 4
+        Node f1;
+        f1.kind = NodeKind::UInt32;
+        f1.name = "a";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        // Regular field: offset 4, size 8
+        Node f2;
+        f2.kind = NodeKind::UInt64;
+        f2.name = "b";
+        f2.parentId = rootId;
+        f2.offset = 4;
+        tree.addNode(f2);
+
+        // Helper: should NOT affect span
+        Node helper;
+        helper.kind = NodeKind::Struct;
+        helper.name = "helper";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base");
+        tree.addNode(helper);
+
+        // Span should be max(0+4, 4+8) = 12, same as without helper
+        QCOMPARE(tree.structSpan(rootId), 12);
+    }
+
+    void testHelperExprSpanFor() {
+        using namespace rcx;
+        // Simulate a helper header line: "  ▸ struct NT_HEADERS  nt_hdr  = base + e_lfanew → 0x1400000E8"
+        LineMeta lm;
+        lm.isHelperLine = true;
+        QString lineText = QStringLiteral("  \u25B8 struct NT_HEADERS  nt_hdr  = base + e_lfanew \u2192 0x1400000E8");
+        ColumnSpan span = helperExprSpanFor(lm, lineText);
+        QVERIFY(span.valid);
+        QString expr = lineText.mid(span.start, span.end - span.start);
+        QCOMPARE(expr.trimmed(), QStringLiteral("base + e_lfanew"));
+    }
 };
 
 QTEST_MAIN(TestCore)

@@ -758,6 +758,121 @@ private slots:
         QVERIFY(!result.contains("struct _LIST_ENTRY\n{"));
         QVERIFY(!result.contains("uint8_t _pad"));
     }
+    // ── Helper node generator tests ──
+
+    void testHelperNotInStructBody() {
+        rcx::NodeTree tree;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "MyStruct";
+        root.structTypeName = "MyStruct";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node f1;
+        f1.kind = rcx::NodeKind::UInt32;
+        f1.name = "e_lfanew";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        rcx::Node helper;
+        helper.kind = rcx::NodeKind::Struct;
+        helper.name = "nt_hdr";
+        helper.structTypeName = "IMAGE_NT_HEADERS";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base + e_lfanew");
+        tree.addNode(helper);
+
+        QString result = rcx::renderCpp(tree, rootId);
+
+        // Helper should NOT appear as a member in the struct body
+        QVERIFY2(!result.contains("IMAGE_NT_HEADERS nt_hdr;"),
+                 qPrintable("Helper should not be in struct body:\n" + result));
+
+        // Helper SHOULD appear as a comment
+        QVERIFY2(result.contains("// helper:"),
+                 qPrintable("Helper comment missing:\n" + result));
+        QVERIFY2(result.contains("nt_hdr"),
+                 qPrintable("Helper name missing from comment:\n" + result));
+        QVERIFY2(result.contains("base + e_lfanew"),
+                 qPrintable("Helper expression missing from comment:\n" + result));
+    }
+
+    void testHelperCommentFormat() {
+        rcx::NodeTree tree;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Test";
+        root.structTypeName = "Test";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node f1;
+        f1.kind = rcx::NodeKind::UInt64;
+        f1.name = "base_field";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        rcx::Node helper;
+        helper.kind = rcx::NodeKind::Hex64;
+        helper.name = "ptr";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base + 0xFF");
+        tree.addNode(helper);
+
+        QString result = rcx::renderCpp(tree, rootId);
+
+        // The regular field should be in the struct body
+        QVERIFY(result.contains("uint64_t base_field;"));
+
+        // Helper emitted as comment after struct body
+        QVERIFY(result.contains("// helper:"));
+        QVERIFY(result.contains("@ base + 0xFF"));
+    }
+
+    void testStructSizeUnchangedByHelper() {
+        rcx::NodeTree tree;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Small";
+        root.structTypeName = "Small";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node f1;
+        f1.kind = rcx::NodeKind::UInt32;
+        f1.name = "x";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        rcx::Node helper;
+        helper.kind = rcx::NodeKind::Struct;
+        helper.name = "big_helper";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base");
+        tree.addNode(helper);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true);
+
+        // static_assert should use only the regular field size (4 bytes)
+        QVERIFY2(result.contains("sizeof(Small) == 0x4"),
+                 qPrintable("Expected sizeof(Small) == 0x4:\n" + result));
+    }
 };
 
 QTEST_MAIN(TestGenerator)

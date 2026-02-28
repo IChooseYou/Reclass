@@ -1,4 +1,5 @@
 #include "core.h"
+#include "addressparser.h"
 #include <algorithm>
 #include <numeric>
 
@@ -394,12 +395,21 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             return;
         }
 
-        const QVector<int>& children = childIndices(state, node.id);
+        const QVector<int>& allChildren = childIndices(state, node.id);
+
+        // Split children into regular nodes and helpers (helpers render at the end)
+        QVector<int> regular, helperIdxs;
+        for (int ci : allChildren) {
+            if (tree.nodes[ci].isHelper)
+                helperIdxs.append(ci);
+            else
+                regular.append(ci);
+        }
 
         int childDepth = depth + 1;
 
         // Primitive arrays with no child nodes: synthesize element lines dynamically
-        if (node.kind == NodeKind::Array && children.isEmpty()
+        if (node.kind == NodeKind::Array && regular.isEmpty()
             && node.elementKind != NodeKind::Struct && node.elementKind != NodeKind::Array) {
             int elemSize = sizeForKind(node.elementKind);
             int eTW = state.effectiveTypeW(node.id);
@@ -443,7 +453,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
         // Struct arrays with refId but no child nodes: synthesize by expanding the
         // referenced struct for each element (like repeated pointer deref)
-        if (node.kind == NodeKind::Array && children.isEmpty()
+        if (node.kind == NodeKind::Array && regular.isEmpty()
             && node.elementKind == NodeKind::Struct && node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
@@ -460,7 +470,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
         // Embedded struct with refId but no child nodes: expand referenced struct's
         // children at this node's offset (single instance, like array with count=1)
-        if (node.kind == NodeKind::Struct && children.isEmpty() && node.refId != 0) {
+        if (node.kind == NodeKind::Struct && regular.isEmpty() && node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
                 const QVector<int>& refChildren = childIndices(state, node.refId);
@@ -504,13 +514,163 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         // For arrays, render children as condensed (no header/footer for struct elements)
         bool childrenAreArrayElements = (node.kind == NodeKind::Array);
         int elementIdx = 0;
-        for (int childIdx : children) {
+        for (int childIdx : regular) {
             // Pass this container's id as the scope for children (for per-scope widths)
             // For array elements, also pass the element index for [N] separator
             composeNode(state, tree, prov, childIdx, childDepth, base, rootId,
                         childrenAreArrayElements, node.id,
                         childrenAreArrayElements ? elementIdx++ : -1,
                         childrenAreArrayElements ? absAddr : 0);
+        }
+
+        // ── Static helpers: render after regular children, before footer ──
+        if (!helperIdxs.isEmpty() && !node.collapsed) {
+            // Separator line
+            {
+                LineMeta lm;
+                lm.nodeIdx   = nodeIdx;
+                lm.nodeId    = node.id;
+                lm.depth     = childDepth;
+                lm.lineKind  = LineKind::Field;
+                lm.nodeKind  = NodeKind::Hex8; // neutral kind for separator
+                lm.foldLevel = computeFoldLevel(childDepth, false);
+                lm.markerMask = 0;
+                lm.offsetText = QString(state.offsetHexDigits, QChar(' '));
+                state.emitLine(fmt::indent(childDepth)
+                    + QStringLiteral("\u2500\u2500\u2500 helpers \u2500\u2500\u2500"), lm);
+            }
+
+            // Build identifier resolver for helper expressions
+            auto makeResolver = [&](uint64_t parentAbsAddr) {
+                AddressParserCallbacks cbs;
+                cbs.resolveIdentifier = [&tree, &prov, &regular, parentAbsAddr]
+                        (const QString& name, bool* ok) -> uint64_t {
+                    if (name == QStringLiteral("base")) {
+                        *ok = true;
+                        return parentAbsAddr;
+                    }
+                    // Find sibling field by name, read its value
+                    for (int ci : regular) {
+                        const Node& sib = tree.nodes[ci];
+                        if (sib.name == name) {
+                            int sz = sib.byteSize();
+                            uint64_t sibAddr = parentAbsAddr + sib.offset;
+                            if (sz > 0 && prov.isValid() && prov.isReadable(sibAddr, sz)) {
+                                *ok = true;
+                                if (sz == 1) return (uint64_t)prov.readU8(sibAddr);
+                                if (sz == 2) return (uint64_t)prov.readU16(sibAddr);
+                                if (sz == 4) return (uint64_t)prov.readU32(sibAddr);
+                                return prov.readU64(sibAddr);
+                            }
+                            *ok = false;
+                            return 0;
+                        }
+                    }
+                    *ok = false;
+                    return 0;
+                };
+                cbs.readPointer = [&prov](uint64_t addr, bool* ok) -> uint64_t {
+                    if (prov.isValid() && prov.isReadable(addr, 8)) {
+                        *ok = true;
+                        return prov.readU64(addr);
+                    }
+                    *ok = false;
+                    return 0;
+                };
+                return cbs;
+            };
+
+            auto cbs = makeResolver(absAddr);
+
+            for (int hi : helperIdxs) {
+                const Node& helper = tree.nodes[hi];
+
+                // Evaluate expression → absolute address
+                uint64_t helperAddr = 0;
+                bool exprOk = false;
+                if (!helper.offsetExpr.isEmpty()) {
+                    auto result = AddressParser::evaluate(helper.offsetExpr, 8, &cbs);
+                    exprOk = result.ok;
+                    if (result.ok)
+                        helperAddr = result.value;
+                }
+
+                // Format: "▸ type  name  = expr → 0xADDR"  (or "= expr  (error)" on failure)
+                int typeW = state.effectiveTypeW(node.id);
+                int nameW = state.effectiveNameW(node.id);
+
+                QString typeName;
+                if (helper.kind == NodeKind::Struct)
+                    typeName = fmt::structTypeName(helper);
+                else if (helper.kind == NodeKind::Pointer64 || helper.kind == NodeKind::Pointer32)
+                    typeName = fmt::pointerTypeName(helper.kind, resolvePointerTarget(tree, helper.refId));
+                else
+                    typeName = fmt::typeNameRaw(helper.kind);
+
+                bool overflow = state.compactColumns && typeName.size() > typeW;
+                QString type = overflow ? typeName : typeName.leftJustified(typeW);
+                QString name = overflow ? helper.name : helper.name.leftJustified(nameW);
+
+                QString exprPart;
+                if (!helper.offsetExpr.isEmpty()) {
+                    if (exprOk)
+                        exprPart = QStringLiteral("= %1 \u2192 0x%2")
+                            .arg(helper.offsetExpr)
+                            .arg(QString::number(helperAddr, 16).toUpper());
+                    else
+                        exprPart = QStringLiteral("= %1  (error)").arg(helper.offsetExpr);
+                }
+
+                QString line = fmt::indent(childDepth) + type
+                    + QStringLiteral(" ") + name
+                    + QStringLiteral(" ") + exprPart;
+
+                LineMeta lm;
+                lm.nodeIdx    = hi;
+                lm.nodeId     = helper.id;
+                lm.depth      = childDepth;
+                lm.lineKind   = LineKind::Header;
+                lm.nodeKind   = helper.kind;
+                lm.foldHead      = true;
+                lm.foldCollapsed = true;  // helpers always start collapsed
+                lm.isHelperLine  = true;
+                lm.foldLevel  = computeFoldLevel(childDepth, true);
+                lm.markerMask = (1u << M_STRUCT_BG);
+                lm.offsetText = QStringLiteral("~") + QString::number(helperAddr, 16)
+                    .toUpper().rightJustified(state.offsetHexDigits - 1, '0');
+                lm.offsetAddr = helperAddr;
+                lm.ptrBase    = state.currentPtrBase;
+                lm.effectiveTypeW = overflow ? typeName.size() : typeW;
+                lm.effectiveNameW = nameW;
+                state.emitLine(line, lm);
+
+                // If helper is expanded (user clicked to expand), compose its children
+                if (!helper.collapsed && exprOk) {
+                    if (helper.kind == NodeKind::Struct || helper.kind == NodeKind::Array) {
+                        // Compose helper's children at the evaluated address
+                        const QVector<int>& helperKids = childIndices(state, helper.id);
+                        for (int hci : helperKids) {
+                            composeNode(state, tree, prov, hci, childDepth + 1,
+                                        helperAddr, helper.id, false, helper.id);
+                        }
+                        // Helper footer
+                        LineMeta flm;
+                        flm.nodeIdx   = hi;
+                        flm.nodeId    = helper.id;
+                        flm.depth     = childDepth;
+                        flm.lineKind  = LineKind::Footer;
+                        flm.nodeKind  = helper.kind;
+                        flm.foldLevel = computeFoldLevel(childDepth, false);
+                        flm.markerMask = 0;
+                        int hSpan = tree.structSpan(helper.id, &state.childMap);
+                        flm.offsetText = fmt::fmtOffsetMargin(helperAddr + hSpan, false,
+                                                               state.offsetHexDigits);
+                        flm.offsetAddr = helperAddr + hSpan;
+                        flm.ptrBase    = state.currentPtrBase;
+                        state.emitLine(fmt::fmtStructFooter(helper, childDepth, hSpan), flm);
+                    }
+                }
+            }
         }
     }
 

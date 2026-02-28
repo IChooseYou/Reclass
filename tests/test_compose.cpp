@@ -2435,6 +2435,198 @@ private slots:
         QCOMPARE(n.byteSize(), 8);
     }
 
+    // ── Helper node compose tests ──
+
+    void testHelperSeparatorLine() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Regular field
+        Node f1;
+        f1.kind = NodeKind::UInt32;
+        f1.name = "field_a";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        // Helper node
+        Node helper;
+        helper.kind = NodeKind::Hex64;
+        helper.name = "my_helper";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base");
+        tree.addNode(helper);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+
+        // Separator with "helpers" text and box-drawing chars should appear
+        QVERIFY2(result.text.contains(QStringLiteral("helpers")),
+                 qPrintable("Expected 'helpers' separator in:\n" + result.text));
+        QVERIFY2(result.text.contains(QStringLiteral("\u2500")),
+                 qPrintable("Expected box-drawing separator char in:\n" + result.text));
+    }
+
+    void testHelperDoesNotAffectStructSize() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node f1;
+        f1.kind = NodeKind::UInt32;
+        f1.name = "a";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        // Struct span without helper
+        int spanBefore = tree.structSpan(rootId);
+
+        // Add helper
+        Node helper;
+        helper.kind = NodeKind::Struct;
+        helper.name = "helper";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base + 100");
+        tree.addNode(helper);
+
+        int spanAfter = tree.structSpan(rootId);
+        QCOMPARE(spanAfter, spanBefore);
+    }
+
+    void testHelperIsHelperLineFlag() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node f1;
+        f1.kind = NodeKind::UInt32;
+        f1.name = "field_a";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        Node helper;
+        helper.kind = NodeKind::Hex64;
+        helper.name = "my_helper";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base");
+        tree.addNode(helper);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+
+        // At least one line should have isHelperLine set
+        bool foundHelper = false;
+        for (const auto& lm : result.meta) {
+            if (lm.isHelperLine) {
+                foundHelper = true;
+                break;
+            }
+        }
+        QVERIFY2(foundHelper, "Expected at least one LineMeta with isHelperLine=true");
+    }
+
+    void testHelperCollapsedByDefault() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Helper struct with a child (should still appear collapsed)
+        Node helper;
+        helper.kind = NodeKind::Struct;
+        helper.name = "inner";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base");
+        helper.collapsed = true;
+        int hi = tree.addNode(helper);
+        uint64_t helperId = tree.nodes[hi].id;
+
+        Node hChild;
+        hChild.kind = NodeKind::UInt32;
+        hChild.name = "x";
+        hChild.parentId = helperId;
+        hChild.offset = 0;
+        tree.addNode(hChild);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+
+        // The helper's child should NOT have a visible line (it's collapsed)
+        bool foundChildLine = false;
+        for (const auto& lm : result.meta) {
+            if (lm.nodeIdx >= 0 && lm.nodeIdx < tree.nodes.size()
+                && tree.nodes[lm.nodeIdx].name == QStringLiteral("x")
+                && tree.nodes[lm.nodeIdx].parentId == helperId) {
+                foundChildLine = true;
+            }
+        }
+        QVERIFY2(!foundChildLine,
+                 "Helper's children should not be visible when collapsed");
+    }
+
+    void testHelperExpressionShownInText() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node helper;
+        helper.kind = NodeKind::Hex64;
+        helper.name = "my_helper";
+        helper.parentId = rootId;
+        helper.offset = 0;
+        helper.isHelper = true;
+        helper.offsetExpr = QStringLiteral("base + 0x10");
+        tree.addNode(helper);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+
+        // The composed text should contain the expression and arrow
+        QVERIFY2(result.text.contains(QStringLiteral("base + 0x10")),
+                 qPrintable("Expected expression in text:\n" + result.text));
+        QVERIFY2(result.text.contains(QStringLiteral("\u2192")),
+                 qPrintable("Expected arrow (\u2192) in text:\n" + result.text));
+    }
 };
 
 QTEST_MAIN(TestCompose)

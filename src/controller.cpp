@@ -481,6 +481,16 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             break;
         }
+        case EditTarget::HelperExpr: {
+            if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
+                const Node& node = m_doc->tree.nodes[nodeIdx];
+                if (node.isHelper && text != node.offsetExpr) {
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeOffsetExpr{node.id, node.offsetExpr, text}));
+                }
+            }
+            break;
+        }
         case EditTarget::ArrayIndex:
         case EditTarget::ArrayCount:
             // Array navigation removed - these cases are unreachable
@@ -1177,6 +1187,14 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].enumMembers = isUndo ? c.oldMembers : c.newMembers;
+        } else if constexpr (std::is_same_v<T, cmd::ChangeOffsetExpr>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0)
+                tree.nodes[idx].offsetExpr = isUndo ? c.oldExpr : c.newExpr;
+        } else if constexpr (std::is_same_v<T, cmd::ToggleHelper>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0)
+                tree.nodes[idx].isHelper = isUndo ? c.oldVal : c.newVal;
         }
     }, command);
 
@@ -1831,6 +1849,19 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             menu.addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
                 insertNode(nodeId, 0, NodeKind::Hex64, "newField");
             });
+            // Add Helper — inserts a static helper child
+            menu.addAction("Add Helper", [this, nodeId]() {
+                Node helper;
+                helper.id = m_doc->tree.m_nextId++;
+                helper.kind = NodeKind::Hex64;
+                helper.name = QStringLiteral("helper");
+                helper.parentId = nodeId;
+                helper.offset = 0;
+                helper.isHelper = true;
+                helper.offsetExpr = QStringLiteral("base");
+                m_doc->undoStack.push(new RcxCommand(this,
+                    cmd::Insert{helper, {}}));
+            });
             if (node.collapsed) {
                 menu.addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
                     int ni = m_doc->tree.indexOfId(nodeId);
@@ -1843,6 +1874,25 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 });
             }
 
+        }
+
+        // Helper-specific: Edit Expression inline
+        if (node.isHelper) {
+            menu.addAction("Edit E&xpression", [this, editor, line, nodeId]() {
+                // Build completions list: "base" + sibling field names
+                QStringList completions;
+                completions << QStringLiteral("base");
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) {
+                    uint64_t parentId = m_doc->tree.nodes[ni].parentId;
+                    for (const Node& sib : m_doc->tree.nodes) {
+                        if (sib.parentId == parentId && !sib.isHelper && !sib.name.isEmpty())
+                            completions << sib.name;
+                    }
+                }
+                editor->setHelperCompletions(completions);
+                editor->beginInlineEdit(EditTarget::HelperExpr, line);
+            });
         }
 
         // Dissolve Union: available on union itself or any of its children
@@ -2167,164 +2217,29 @@ TypeSelectorPopup* RcxController::ensurePopup(RcxEditor* editor) {
 void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                                   int nodeIdx, QPoint globalPos) {
     const Node* node = nullptr;
-    if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size())
+    if (nodeIdx >= 0 && nodeIdx < (int)m_doc->tree.nodes.size())
         node = &m_doc->tree.nodes[nodeIdx];
 
-    // ── Build entry list based on mode ──
-    QVector<TypeEntry> entries;
-    TypeEntry currentEntry;
-    bool hasCurrent = false;
-    int preModId = 0;        // modifier to preselect: 0=plain, 1=*, 2=**, 3=[n]
-    int preArrayCount = 0;   // array count when preModId==3
-
-    auto addPrimitives = [&](bool enabled, bool excludeStructArrayPad) {
-        for (const auto& m : kKindMeta) {
-            if (excludeStructArrayPad &&
-                (m.kind == NodeKind::Struct || m.kind == NodeKind::Array))
-                continue;
-            TypeEntry e;
-            e.entryKind     = TypeEntry::Primitive;
-            e.primitiveKind = m.kind;
-            e.displayName   = QString::fromLatin1(m.typeName);
-            e.enabled       = enabled;
-            entries.append(e);
-        }
-    };
-
-    auto addComposites = [&](const std::function<bool(const Node&, const TypeEntry&)>& isCurrent) {
-        for (const auto& n : m_doc->tree.nodes) {
-            if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
-            TypeEntry e;
-            e.entryKind    = TypeEntry::Composite;
-            e.structId     = n.id;
-            e.displayName  = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-            e.classKeyword = n.resolvedClassKeyword();
-            entries.append(e);
-            if (!hasCurrent && node && isCurrent(*node, e)) {
-                currentEntry = e;
-                hasCurrent = true;
-            }
-        }
-    };
-
-    switch (mode) {
-    case TypePopupMode::Root:
-        // No primitives in Root mode – only project types are valid roots
-        addComposites([&](const Node&, const TypeEntry& e) {
-            return e.structId == m_viewRootId;
-        });
-        break;
-
-    case TypePopupMode::FieldType: {
-        addPrimitives(/*enabled=*/true, /*excludeStructArrayPad=*/false);
-        bool isPtr = node
-            && (node->kind == NodeKind::Pointer32 || node->kind == NodeKind::Pointer64);
-        bool isTypedPtr = isPtr && node->refId != 0;
+    // ── Determine modifier preset (cheap — only reads node properties) ──
+    int preModId = 0;
+    int preArrayCount = 0;
+    if (mode == TypePopupMode::FieldType && node) {
+        bool isPtr = (node->kind == NodeKind::Pointer32 || node->kind == NodeKind::Pointer64);
         bool isPrimPtr  = isPtr && node->ptrDepth > 0 && node->refId == 0;
-        bool isArray = node && node->kind == NodeKind::Array;
-
-        if (isPrimPtr) {
-            // Primitive pointer (e.g. int32* or f64**) — current = element kind, modifier = *//**
-            preModId = (node->ptrDepth >= 2) ? 2 : 1;
-            for (auto& e : entries) {
-                if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->elementKind) {
-                    currentEntry = e;
-                    hasCurrent = true;
-                    break;
-                }
-            }
-        } else if (isTypedPtr) {
-            // Typed pointer (e.g. Ball*) — current = composite target, modifier = *
-            preModId = 1;
-        } else if (isArray) {
-            // Array — modifier = [n]
-            preModId = 3;
-            preArrayCount = node->arrayLen;
-            if (node->elementKind != NodeKind::Struct) {
-                // Primitive array — mark element kind as current
-                for (auto& e : entries) {
-                    if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->elementKind) {
-                        currentEntry = e;
-                        hasCurrent = true;
-                        break;
-                    }
-                }
-            }
-        } else if (node) {
-            // Plain primitive — mark current
-            for (auto& e : entries) {
-                if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->kind) {
-                    currentEntry = e;
-                    hasCurrent = true;
-                    break;
-                }
-            }
-        }
-        // For isTypedPtr or struct-array: current is a Composite, set by addComposites below
-        addComposites([&](const Node& n, const TypeEntry& e) {
-            if (isTypedPtr && n.refId == e.structId) return true;
-            if (isArray && n.elementKind == NodeKind::Struct && n.refId == e.structId) return true;
-            return false;
-        });
-        break;
+        bool isTypedPtr = isPtr && node->refId != 0;
+        bool isArray = node->kind == NodeKind::Array;
+        if (isPrimPtr)       preModId = (node->ptrDepth >= 2) ? 2 : 1;
+        else if (isTypedPtr) preModId = 1;
+        else if (isArray)  { preModId = 3; preArrayCount = node->arrayLen; }
     }
 
-    case TypePopupMode::ArrayElement:
-        addPrimitives(/*enabled=*/true, /*excludeStructArrayPad=*/true);
-        if (node) {
-            for (auto& e : entries) {
-                if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->elementKind) {
-                    currentEntry = e;
-                    hasCurrent = true;
-                    break;
-                }
-            }
-        }
-        addComposites([](const Node& n, const TypeEntry& e) {
-            return n.elementKind == NodeKind::Struct && n.refId == e.structId;
-        });
-        break;
-
-    case TypePopupMode::PointerTarget: {
-        // "void" entry as a primitive with a special display
-        TypeEntry voidEntry;
-        voidEntry.entryKind     = TypeEntry::Primitive;
-        voidEntry.primitiveKind = NodeKind::Hex8; // unused, but needs a value
-        voidEntry.displayName   = QStringLiteral("void");
-        voidEntry.enabled       = true;
-        entries.append(voidEntry);
-        if (node && node->refId == 0) {
-            currentEntry = voidEntry;
-            hasCurrent = true;
-        }
-        addComposites([](const Node& n, const TypeEntry& e) {
-            return n.refId == e.structId;
-        });
-        break;
-    }
-    }
-
-    // ── Add types from other open documents (not for Root mode) ──
-    if (mode != TypePopupMode::Root && m_projectDocs) {
-        QSet<QString> localNames;
-        for (const auto& e : entries)
-            if (e.entryKind == TypeEntry::Composite)
-                localNames.insert(e.displayName);
-        for (auto* doc : *m_projectDocs) {
-            if (doc == m_doc) continue;
-            for (const auto& n : doc->tree.nodes) {
-                if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
-                QString name = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-                if (name.isEmpty() || localNames.contains(name)) continue;
-                localNames.insert(name);
-                TypeEntry e;
-                e.entryKind    = TypeEntry::Composite;
-                e.structId     = 0; // sentinel: not in local tree yet
-                e.displayName  = name;
-                e.classKeyword = n.resolvedClassKeyword();
-                entries.append(e);
-            }
-        }
+    // ── Node size for same-size sorting (cheap) ──
+    int nodeSize = 0;
+    if (node) {
+        if (mode == TypePopupMode::ArrayElement)
+            nodeSize = sizeForKind(node->elementKind);
+        else
+            nodeSize = sizeForKind(node->kind);
     }
 
     // ── Font with zoom ──
@@ -2339,7 +2254,6 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
     // ── Position ──
     QPoint pos = globalPos;
     if (mode == TypePopupMode::Root) {
-        // Bottom-left of the [▸] span on line 0
         long lineStart = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, 0);
         int lineH = (int)sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
         int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION,
@@ -2349,29 +2263,13 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         pos = sci->viewport()->mapToGlobal(QPoint(x, y + lineH));
     }
 
-    // ── Configure and show popup ──
+    // ── Configure popup + show skeleton instantly ──
     auto* popup = ensurePopup(editor);
     popup->setFont(font);
     popup->setMode(mode);
-
-    // Preselect modifier button to reflect current node state (after setMode resets to plain)
     if (preModId > 0)
         popup->setModifier(preModId, preArrayCount);
-
-    // Pass current node size for same-size sorting
-    int nodeSize = 0;
-    if (node) {
-        if (mode == TypePopupMode::ArrayElement)
-            nodeSize = sizeForKind(node->elementKind);
-        else
-            nodeSize = sizeForKind(node->kind);
-    }
     popup->setCurrentNodeSize(nodeSize);
-
-    static const char* titles[] = { "Change root", "Change type",
-                                    "Element type", "Pointer target" };
-    popup->setTitle(QString::fromLatin1(titles[(int)mode]));
-    popup->setTypes(entries, hasCurrent ? &currentEntry : nullptr);
 
     connect(popup, &TypeSelectorPopup::typeSelected,
             this, [this, mode, nodeIdx](const TypeEntry& entry, const QString& fullText) {
@@ -2383,7 +2281,6 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Create new type"));
 
-        // Generate unique default type name
         QString baseName = QStringLiteral("NewClass");
         QString typeName = baseName;
         int counter = 1;
@@ -2404,7 +2301,6 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         n.id = m_doc->tree.reserveId();
         m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
 
-        // Populate with default hex nodes (8 x Hex64 = 64 bytes)
         for (int i = 0; i < 8; i++) {
             insertNode(n.id, i * 8, NodeKind::Hex64,
                        QString("field_%1").arg(i * 8, 2, 16, QChar('0')));
@@ -2419,7 +2315,212 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         applyTypePopupResult(mode, nodeIdx, newEntry, QString());
     });
 
-    popup->popup(pos);
+    popup->popupLoading(pos);
+
+    // ── Deferred: build entry list + fill content (runs next event-loop tick) ──
+    int gen = ++m_typePopupGen;
+    QTimer::singleShot(0, this, [this, popup, mode, nodeIdx, gen]() {
+        if (gen != m_typePopupGen) return;  // popup was reopened, discard stale load
+
+        const Node* node = nullptr;
+        if (nodeIdx >= 0 && nodeIdx < (int)m_doc->tree.nodes.size())
+            node = &m_doc->tree.nodes[nodeIdx];
+
+        QVector<TypeEntry> entries;
+        TypeEntry currentEntry;
+        bool hasCurrent = false;
+
+        auto addPrimitives = [&](bool enabled, bool excludeStructArrayPad) {
+            for (const auto& m : kKindMeta) {
+                if (excludeStructArrayPad &&
+                    (m.kind == NodeKind::Struct || m.kind == NodeKind::Array))
+                    continue;
+                TypeEntry e;
+                e.entryKind     = TypeEntry::Primitive;
+                e.primitiveKind = m.kind;
+                e.displayName   = QString::fromLatin1(m.typeName);
+                e.enabled       = enabled;
+                e.sizeBytes     = m.size;
+                e.alignment     = m.align;
+                entries.append(e);
+            }
+        };
+
+        auto addComposites = [&](const std::function<bool(const Node&, const TypeEntry&)>& isCurrent) {
+            for (const auto& n : m_doc->tree.nodes) {
+                if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+                TypeEntry e;
+                e.entryKind    = TypeEntry::Composite;
+                e.structId     = n.id;
+                e.displayName  = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+                e.classKeyword = n.resolvedClassKeyword();
+                e.category     = (e.classKeyword == QStringLiteral("enum"))
+                               ? TypeEntry::CatEnum : TypeEntry::CatType;
+                e.sizeBytes    = m_doc->tree.structSpan(n.id);
+
+                QVector<int> kids = m_doc->tree.childrenOf(n.id);
+                int nonHelperCount = 0;
+                int maxAlign = 1;
+                for (int i = 0; i < kids.size(); i++) {
+                    const Node& child = m_doc->tree.nodes[kids[i]];
+                    if (child.isHelper) continue;
+                    nonHelperCount++;
+                    int childAlign = alignmentFor(child.kind);
+                    if (childAlign > maxAlign) maxAlign = childAlign;
+                    if (e.fieldSummary.size() < 6) {
+                        auto* cm = kindMeta(child.kind);
+                        QString typeName = cm ? QString::fromLatin1(cm->typeName)
+                                              : QStringLiteral("???");
+                        if (child.kind == NodeKind::Struct && child.refId != 0) {
+                            int refIdx = m_doc->tree.indexOfId(child.refId);
+                            if (refIdx >= 0) {
+                                const Node& ref = m_doc->tree.nodes[refIdx];
+                                typeName = ref.structTypeName.isEmpty()
+                                         ? ref.name : ref.structTypeName;
+                            }
+                        }
+                        e.fieldSummary << QStringLiteral("0x%1: %2 %3")
+                            .arg(child.offset, 2, 16, QChar('0'))
+                            .arg(typeName, child.name);
+                    }
+                }
+                e.fieldCount = nonHelperCount;
+                e.alignment  = maxAlign;
+
+                entries.append(e);
+                if (!hasCurrent && node && isCurrent(*node, e)) {
+                    currentEntry = e;
+                    hasCurrent = true;
+                }
+            }
+        };
+
+        switch (mode) {
+        case TypePopupMode::Root:
+            addComposites([this](const Node&, const TypeEntry& e) {
+                return e.structId == m_viewRootId;
+            });
+            break;
+
+        case TypePopupMode::FieldType: {
+            addPrimitives(/*enabled=*/true, /*excludeStructArrayPad=*/false);
+            bool isPtr = node
+                && (node->kind == NodeKind::Pointer32 || node->kind == NodeKind::Pointer64);
+            bool isTypedPtr = isPtr && node->refId != 0;
+            bool isPrimPtr  = isPtr && node->ptrDepth > 0 && node->refId == 0;
+            bool isArray = node && node->kind == NodeKind::Array;
+
+            if (isPrimPtr) {
+                for (auto& e : entries) {
+                    if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->elementKind) {
+                        currentEntry = e;
+                        hasCurrent = true;
+                        break;
+                    }
+                }
+            } else if (isTypedPtr) {
+                // current set by addComposites below
+            } else if (isArray) {
+                if (node->elementKind != NodeKind::Struct) {
+                    for (auto& e : entries) {
+                        if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->elementKind) {
+                            currentEntry = e;
+                            hasCurrent = true;
+                            break;
+                        }
+                    }
+                }
+            } else if (node) {
+                if (!(node->kind == NodeKind::Struct && node->refId != 0)) {
+                    for (auto& e : entries) {
+                        if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->kind) {
+                            currentEntry = e;
+                            hasCurrent = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            addComposites([&](const Node& n, const TypeEntry& e) {
+                if (isTypedPtr && n.refId == e.structId) return true;
+                if (isArray && n.elementKind == NodeKind::Struct && n.refId == e.structId) return true;
+                if (!isPtr && !isArray && n.kind == NodeKind::Struct && n.refId == e.structId) return true;
+                return false;
+            });
+            break;
+        }
+
+        case TypePopupMode::ArrayElement:
+            addPrimitives(/*enabled=*/true, /*excludeStructArrayPad=*/true);
+            if (node) {
+                for (auto& e : entries) {
+                    if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->elementKind) {
+                        currentEntry = e;
+                        hasCurrent = true;
+                        break;
+                    }
+                }
+            }
+            addComposites([](const Node& n, const TypeEntry& e) {
+                return n.elementKind == NodeKind::Struct && n.refId == e.structId;
+            });
+            break;
+
+        case TypePopupMode::PointerTarget: {
+            TypeEntry voidEntry;
+            voidEntry.entryKind     = TypeEntry::Primitive;
+            voidEntry.primitiveKind = NodeKind::Hex8;
+            voidEntry.displayName   = QStringLiteral("void");
+            voidEntry.enabled       = true;
+            entries.append(voidEntry);
+            addPrimitives(/*enabled=*/true, /*excludeStructArrayPad=*/true);
+            if (node && node->refId == 0 && node->ptrDepth <= 1) {
+                currentEntry = voidEntry;
+                hasCurrent = true;
+            } else if (node && node->refId == 0 && node->ptrDepth > 0) {
+                for (auto& e : entries) {
+                    if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->elementKind) {
+                        currentEntry = e;
+                        hasCurrent = true;
+                        break;
+                    }
+                }
+            }
+            addComposites([](const Node& n, const TypeEntry& e) {
+                return n.refId == e.structId;
+            });
+            break;
+        }
+        }
+
+        // Add types from other open documents
+        if (mode != TypePopupMode::Root && m_projectDocs) {
+            QSet<QString> localNames;
+            for (const auto& e : entries)
+                if (e.entryKind == TypeEntry::Composite)
+                    localNames.insert(e.displayName);
+            for (auto* doc : *m_projectDocs) {
+                if (doc == m_doc) continue;
+                for (const auto& n : doc->tree.nodes) {
+                    if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+                    QString name = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+                    if (name.isEmpty() || localNames.contains(name)) continue;
+                    localNames.insert(name);
+                    TypeEntry e;
+                    e.entryKind    = TypeEntry::Composite;
+                    e.structId     = 0;
+                    e.displayName  = name;
+                    e.classKeyword = n.resolvedClassKeyword();
+                    e.category     = (e.classKeyword == QStringLiteral("enum"))
+                                   ? TypeEntry::CatEnum : TypeEntry::CatType;
+                    e.sizeBytes    = doc->tree.structSpan(n.id);
+                    entries.append(e);
+                }
+            }
+        }
+
+        popup->setTypes(entries, hasCurrent ? &currentEntry : nullptr);
+    });
 }
 
 void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,

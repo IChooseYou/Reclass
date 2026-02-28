@@ -168,6 +168,7 @@ private:
 
     // ── Cached type selector popup (avoids ~350ms cold-start on first show) ──
     QPointer<TypeSelectorPopup> m_cachedPopup;
+    int m_typePopupGen = 0;  // generation counter for deferred content loading
 
     // ── Auto-refresh state ──
     using PageMap = QHash<uint64_t, QByteArray>;
@@ -177,7 +178,7 @@ private:
     PageMap         m_prevPages;
     QSet<int64_t>   m_changedOffsets;
     QHash<uint64_t, ValueHistory> m_valueHistory;
-    bool            m_trackValues = false;
+    bool            m_trackValues = true;
     uint64_t        m_refreshGen = 0;
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;

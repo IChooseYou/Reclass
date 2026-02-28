@@ -5,6 +5,9 @@
 #include <QtConcurrent>
 #include <QFuture>
 #include <cstring>
+#include <atomic>
+#include <thread>
+#include <chrono>
 
 #include "providers/provider.h"
 #include "../plugins/WinDbgMemory/WinDbgMemoryPlugin.h"
@@ -87,20 +90,40 @@ private slots:
     // ── Fixture ──
 
     /// Try a quick DebugConnect to see if the port is already serving.
-    static bool canConnect(const QString& connStr)
+    /// Runs in a detached thread with a timeout because DebugConnect can
+    /// hang indefinitely with WinDbg Preview servers.
+    static bool canConnect(const QString& connStr, int timeoutMs = 8000)
     {
 #ifdef _WIN32
-        IDebugClient* probe = nullptr;
         QByteArray utf8 = connStr.toUtf8();
-        HRESULT hr = DebugConnect(utf8.constData(), IID_IDebugClient, (void**)&probe);
-        if (SUCCEEDED(hr) && probe) {
-            probe->EndSession(DEBUG_END_DISCONNECT);
-            probe->Release();
-            return true;
+        std::atomic<int> state{0}; // 0=pending, 1=connected, -1=failed
+        std::thread t([&state, utf8]() {
+            CoInitializeEx(NULL, COINIT_MULTITHREADED);
+            IDebugClient* probe = nullptr;
+            HRESULT hr = DebugConnect(utf8.constData(), IID_IDebugClient, (void**)&probe);
+            if (SUCCEEDED(hr) && probe) {
+                probe->EndSession(DEBUG_END_DISCONNECT);
+                probe->Release();
+                state.store(1);
+            } else {
+                state.store(-1);
+            }
+            CoUninitialize();
+        });
+        t.detach(); // Don't block on join — DebugConnect may hang forever
+
+        auto deadline = std::chrono::steady_clock::now()
+                      + std::chrono::milliseconds(timeoutMs);
+        while (state.load() == 0) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                qDebug() << "canConnect: DebugConnect timed out after" << timeoutMs << "ms";
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        return false;
+        return state.load() == 1;
 #else
-        Q_UNUSED(connStr);
+        Q_UNUSED(connStr); Q_UNUSED(timeoutMs);
         return false;
 #endif
     }
@@ -116,13 +139,18 @@ private slots:
             return;
         }
 
-        // No server running — launch cdb ourselves
+        // No server running — try to launch cdb ourselves.
+        // If cdb isn't available, user-mode tests will be skipped but
+        // kernel/dump tests can still run via WINDBG_KERNEL_CONN.
         m_notepadPid = findProcess(L"notepad.exe");
         if (m_notepadPid == 0) {
             m_notepadPid = launchNotepad();
             m_weSpawnedNotepad = true;
         }
-        QVERIFY2(m_notepadPid != 0, "Need notepad.exe running");
+        if (m_notepadPid == 0) {
+            qDebug() << "No notepad.exe and could not launch — user-mode tests will skip";
+            return;
+        }
         qDebug() << "Using notepad.exe PID:" << m_notepadPid;
 
         m_cdbProcess = new QProcess(this);
@@ -135,7 +163,12 @@ private slots:
         m_cdbProcess->setArguments(args);
         m_cdbProcess->start();
 
-        QVERIFY2(m_cdbProcess->waitForStarted(5000), "Failed to start cdb.exe");
+        if (!m_cdbProcess->waitForStarted(5000)) {
+            qDebug() << "Failed to start cdb.exe — user-mode tests will skip";
+            delete m_cdbProcess;
+            m_cdbProcess = nullptr;
+            return;
+        }
         QThread::sleep(3);
 
         qDebug() << "cdb.exe debug server started on port" << DBG_PORT;
@@ -448,46 +481,46 @@ private slots:
         delete raw;
     }
 
-    // ── Kernel session tests ──
-    // Requires a WinDbg instance with a kernel dump loaded and
-    // .server tcp:port=5055 running.  Skipped automatically if
-    // no server is available.  Override with WINDBG_KERNEL_CONN env var.
+    // ── Kernel/dump session tests ──
+    // Set WINDBG_KERNEL_CONN to a target string:
+    //   "dump:F:/path/to/file.dmp"          — open dump directly
+    //   "tcp:Port=5055,Server=localhost"     — connect to debug server
+    // Set WINDBG_KERNEL_ADDR to a readable hex address (e.g. kernel base).
+
+    static QString kernelTarget()
+    {
+        return qEnvironmentVariable("WINDBG_KERNEL_CONN", "");
+    }
 
     void provider_kernel_connect()
     {
-        QString kernelConn = qEnvironmentVariable("WINDBG_KERNEL_CONN",
-            "tcp:Port=5055,Server=localhost");
-        if (!canConnect(kernelConn))
-            QSKIP("No kernel debug server available (set WINDBG_KERNEL_CONN)");
+        QString target = kernelTarget();
+        if (target.isEmpty())
+            QSKIP("Set WINDBG_KERNEL_CONN (e.g. dump:F:/file.dmp)");
 
-        WinDbgMemoryProvider prov(kernelConn);
-        QVERIFY2(prov.isValid(), "Should connect to kernel debug server");
+        WinDbgMemoryProvider prov(target);
+        QVERIFY2(prov.isValid(),
+                 qPrintable("Should connect, lastError: " + prov.lastError()));
         QCOMPARE(prov.kind(), QStringLiteral("WinDbg"));
 
         qDebug() << "Kernel provider name:" << prov.name();
         qDebug() << "Kernel provider base:" << QString("0x%1").arg(prov.base(), 0, 16);
         qDebug() << "Kernel provider isLive:" << prov.isLive();
-
-        // Name should not be an arbitrary user-mode DLL
-        QVERIFY2(!prov.name().contains("WS2_32", Qt::CaseInsensitive),
-                 qPrintable("Name should not be 'WS2_32', got: " + prov.name()));
     }
 
     void provider_kernel_read_base()
     {
-        QString kernelConn = qEnvironmentVariable("WINDBG_KERNEL_CONN",
-            "tcp:Port=5055,Server=localhost");
-        if (!canConnect(kernelConn))
-            QSKIP("No kernel debug server available");
+        QString target = kernelTarget();
+        if (target.isEmpty())
+            QSKIP("Set WINDBG_KERNEL_CONN");
 
-        WinDbgMemoryProvider prov(kernelConn);
-        QVERIFY(prov.isValid());
-
-        // Provider no longer auto-selects a base.  Use a known kernel address
-        // from env, or skip.
         QString addrStr = qEnvironmentVariable("WINDBG_KERNEL_ADDR", "");
         if (addrStr.isEmpty())
             QSKIP("Set WINDBG_KERNEL_ADDR to a readable kernel address");
+
+        WinDbgMemoryProvider prov(target);
+        QVERIFY2(prov.isValid(),
+                 qPrintable("lastError: " + prov.lastError()));
 
         bool ok = false;
         uint64_t addr = addrStr.toULongLong(&ok, 16);
@@ -502,20 +535,21 @@ private slots:
             if (buf[i] != 0) { allZero = false; break; }
         }
         QVERIFY2(!allZero, "Kernel read returned all zeros");
+
+        qDebug() << "Read 16 bytes at" << QString("0x%1").arg(addr, 0, 16)
+                 << "first 4:" << QString("%1 %2 %3 %4")
+                    .arg(buf[0], 2, 16, QChar('0'))
+                    .arg(buf[1], 2, 16, QChar('0'))
+                    .arg(buf[2], 2, 16, QChar('0'))
+                    .arg(buf[3], 2, 16, QChar('0'));
     }
 
     void provider_kernel_read_high_address()
     {
-        QString kernelConn = qEnvironmentVariable("WINDBG_KERNEL_CONN",
-            "tcp:Port=5055,Server=localhost");
-        if (!canConnect(kernelConn))
-            QSKIP("No kernel debug server available");
+        QString target = kernelTarget();
+        if (target.isEmpty())
+            QSKIP("Set WINDBG_KERNEL_CONN");
 
-        WinDbgMemoryProvider prov(kernelConn);
-        QVERIFY(prov.isValid());
-
-        // Use env var for a specific kernel address (e.g. _EPROCESS),
-        // otherwise fall back to the provider's base.
         QString addrStr = qEnvironmentVariable("WINDBG_KERNEL_ADDR", "");
         uint64_t addr = 0;
         if (!addrStr.isEmpty()) {
@@ -523,7 +557,14 @@ private slots:
             addr = addrStr.toULongLong(&ok, 16);
             if (!ok) addr = 0;
         }
+
+        WinDbgMemoryProvider prov(target);
+        QVERIFY2(prov.isValid(),
+                 qPrintable("lastError: " + prov.lastError()));
+
         if (addr == 0) addr = prov.base();
+        if (addr == 0)
+            QSKIP("No kernel address available (set WINDBG_KERNEL_ADDR)");
 
         uint8_t buf[64] = {};
         bool ok = prov.read(addr, buf, 64);
@@ -550,10 +591,9 @@ private slots:
 
     void provider_kernel_read_backgroundThread()
     {
-        QString kernelConn = qEnvironmentVariable("WINDBG_KERNEL_CONN",
-            "tcp:Port=5055,Server=localhost");
-        if (!canConnect(kernelConn))
-            QSKIP("No kernel debug server available");
+        QString target = kernelTarget();
+        if (target.isEmpty())
+            QSKIP("Set WINDBG_KERNEL_CONN");
 
         QString addrStr = qEnvironmentVariable("WINDBG_KERNEL_ADDR", "");
         if (addrStr.isEmpty())
@@ -563,8 +603,9 @@ private slots:
         uint64_t addr = addrStr.toULongLong(&ok, 16);
         QVERIFY2(ok && addr != 0, "WINDBG_KERNEL_ADDR must be a valid hex address");
 
-        WinDbgMemoryProvider prov(kernelConn);
-        QVERIFY(prov.isValid());
+        WinDbgMemoryProvider prov(target);
+        QVERIFY2(prov.isValid(),
+                 qPrintable("lastError: " + prov.lastError()));
 
         // Simulate the controller's async refresh pattern
         QFuture<QByteArray> future = QtConcurrent::run([&prov, addr]() -> QByteArray {

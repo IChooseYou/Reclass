@@ -172,7 +172,14 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = indent(depth);
 
-    QVector<int> children = ctx.childMap.value(structId);
+    QVector<int> allChildren = ctx.childMap.value(structId);
+    QVector<int> children, helperIdxs;
+    for (int ci : allChildren) {
+        if (tree.nodes[ci].isHelper)
+            helperIdxs.append(ci);
+        else
+            children.append(ci);
+    }
     std::sort(children.begin(), children.end(), [&](int a, int b) {
         return tree.nodes[a].offset < tree.nodes[b].offset;
     });
@@ -310,6 +317,14 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
     // Tail padding (skip for unions)
     if (!isUnion && cursor < structSize)
         emitPadRun(cursor, structSize - cursor);
+
+    // Emit helper comments (helpers are runtime-only, not part of struct layout)
+    for (int hi : helperIdxs) {
+        const Node& h = tree.nodes[hi];
+        QString hType = h.structTypeName.isEmpty() ? ctx.cType(h.kind) : h.structTypeName;
+        ctx.output += ind + QStringLiteral("// helper: %1 %2 @ %3\n")
+            .arg(hType, sanitizeIdent(h.name), h.offsetExpr);
+    }
 }
 
 // ── Emit a complete top-level struct definition (Vergilius-style) ──
