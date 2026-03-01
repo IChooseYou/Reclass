@@ -30,6 +30,7 @@ class MainWindow : public QMainWindow {
     friend class McpBridge;
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
 
 private slots:
     void newClass();
