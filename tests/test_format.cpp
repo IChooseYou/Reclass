@@ -13,14 +13,54 @@ private slots:
     }
 
     void testFmtInt32() {
-        // fmtInt32 outputs hex representation (0xffffffd6 for -42)
-        QCOMPARE(fmt::fmtInt32(-42), QString("0xffffffd6"));
-        QCOMPARE(fmt::fmtInt32(0),   QString("0x0"));
+        // fmtInt32 outputs decimal representation
+        QCOMPARE(fmt::fmtInt32(-42), QString("-42"));
+        QCOMPARE(fmt::fmtInt32(0),   QString("0"));
     }
 
     void testFmtFloat() {
-        QString s = fmt::fmtFloat(3.14159f);
-        QVERIFY(s.contains("3.14"));
+        // Positive: 7 chars body. Negative: '-' + 7 chars = 8.
+        auto check = [](float v, const char* expected) {
+            QString s = fmt::fmtFloat(v);
+            QCOMPARE(s, QString(expected));
+        };
+
+        // Basic positive/negative
+        check( 3.14159f,  "3.1416f");
+        check(-3.14159f,  "-3.1416f");
+
+        // Zero
+        check( 0.f,       "0.0000f");
+
+        // Small values
+        check( 0.02f,     "0.0200f");
+        check(-0.069f,    "-0.0690f");
+
+        // Values >= 10 — 3 decimal places
+        check( 15.6543f,  "15.654f");
+        check(-77.6624f,  "-77.662f");
+
+        // Values >= 100 — 2 decimal places
+        check( 500.f,     "500.00f");
+
+        // Values >= 1000 — 1 decimal place
+        check( 5000.f,    "5000.0f");
+
+        // Values >= 10000 — 0 decimal places + "."
+        check( 50000.f,   "50000.f");
+
+        // Overflow cap
+        check( 100000.f,  "99999+f");
+        check(-100000.f,  "-99999+f");
+
+        // Special values
+        check( 1.f / 0.f, "inff");
+        check(-1.f / 0.f, "-inff");
+        QCOMPARE(fmt::fmtFloat(std::nanf("")), QString("NaN"));
+
+        // 1.0 exactly
+        check( 1.f,       "1.0000f");
+        check(-1.f,       "-1.0000f");
     }
 
     void testFmtBool() {

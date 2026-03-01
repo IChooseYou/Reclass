@@ -80,38 +80,38 @@ static QString rawHex(uint64_t v, int digits) {
     return QString::number(v, 16).rightJustified(digits, '0');
 }
 
-QString fmtInt8(int8_t v)     { return hexVal((uint8_t)v); }
-QString fmtInt16(int16_t v)   { return hexVal((uint16_t)v); }
-QString fmtInt32(int32_t v)   { return hexVal((uint32_t)v); }
-QString fmtInt64(int64_t v)   { return hexVal((uint64_t)v); }
+QString fmtInt8(int8_t v)     { return QString::number(v); }
+QString fmtInt16(int16_t v)   { return QString::number(v); }
+QString fmtInt32(int32_t v)   { return QString::number(v); }
+QString fmtInt64(int64_t v)   { return QString::number((qlonglong)v); }
 QString fmtUInt8(uint8_t v)   { return hexVal(v); }
 QString fmtUInt16(uint16_t v) { return hexVal(v); }
 QString fmtUInt32(uint32_t v) { return hexVal(v); }
 QString fmtUInt64(uint64_t v) { return hexVal(v); }
 
 QString fmtFloat(float v) {
+    // Fixed 7-char body: digits + "." + decimals + "f"
+    // Negative values get a '-' prefix (8 chars total), positive stay 7.
     if (std::isnan(v)) return QStringLiteral("NaN");
     if (std::isinf(v)) return v > 0 ? QStringLiteral("inff") : QStringLiteral("-inff");
 
-    // 6 significant digits — covers full single-precision range
-    QString s = QString::number(v, 'g', 6);
+    float av = std::fabs(v);
+    if (av >= 100000.f)
+        return v < 0 ? QStringLiteral("-99999+f") : QStringLiteral("99999+f");
 
-    // If 'g' chose scientific notation, reformat as plain decimal
-    if (s.contains('e') || s.contains('E')) {
-        s = QString::number(v, 'f', 8);
-        if (s.contains('.')) {
-            int i = s.size() - 1;
-            while (i > 0 && s[i] == '0') i--;
-            if (s[i] == '.') i++;  // keep at least one decimal digit
-            s.truncate(i + 1);
+    // body = digits + "." + decimals + "f", target exactly 7 chars.
+    // Start with max decimals, reduce if integer part is wide or rounding overflows.
+    for (int dec = 4; dec >= 0; dec--) {
+        QString body = QString::number(av, 'f', dec);
+        body += (dec == 0) ? QStringLiteral(".f") : QStringLiteral("f");
+        if (body.size() == 7) {
+            if (v < 0.f) body.prepend('-');
+            return body;
         }
     }
 
-    if (!s.contains('.'))
-        s += QStringLiteral(".f");
-    else
-        s += QLatin1Char('f');
-    return s;
+    // Rounding pushed past 99999 — use overflow cap
+    return v < 0 ? QStringLiteral("-99999+f") : QStringLiteral("99999+f");
 }
 QString fmtDouble(double v) {
     QString s = QString::number(v, 'g', 6);
@@ -333,7 +333,7 @@ static QString readValueImpl(const Node& node, const Provider& prov,
         int count = sizeForKind(node.kind) / 4;
         QStringList parts;
         for (int i = 0; i < count; i++)
-            parts << fmtFloat(prov.readF32(addr + i * 4)).trimmed();
+            parts << fmtFloat(prov.readF32(addr + i * 4));
         return parts.join(QStringLiteral(", "));
     }
     case NodeKind::Mat4x4: {
@@ -342,7 +342,7 @@ static QString readValueImpl(const Node& node, const Provider& prov,
         QString line = QStringLiteral("row%1 [").arg(subLine);
         for (int c = 0; c < 4; c++) {
             if (c > 0) line += QStringLiteral(", ");
-            line += fmtFloat(prov.readF32(addr + (subLine * 4 + c) * 4)).trimmed();
+            line += fmtFloat(prov.readF32(addr + (subLine * 4 + c) * 4));
         }
         line += QStringLiteral("]");
         return line;

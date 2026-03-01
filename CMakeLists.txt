@@ -251,6 +251,7 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/plugins/RemoteProcessMemory)
     target_link_libraries(test_32bit_support PRIVATE ${QT}::Core ${QT}::Widgets ${QT}::Test)
     add_test(NAME test_32bit_support COMMAND test_32bit_support)
+    set_tests_properties(test_32bit_support PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
