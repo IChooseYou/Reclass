@@ -47,6 +47,24 @@ if(WIN32)
     target_link_libraries(raw_pdb PRIVATE rpcrt4)
 endif()
 
+# Fadec — generate decode tables (.inc files) from instrs.txt at configure time
+find_package(Python3 3.9 REQUIRED)
+set(FADEC_DIR "${CMAKE_SOURCE_DIR}/third_party/fadec")
+if(NOT EXISTS "${FADEC_DIR}/fadec-decode-public.inc")
+    message(STATUS "Generating fadec decode tables...")
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} "${FADEC_DIR}/parseinstrs.py" decode
+                "${FADEC_DIR}/instrs.txt"
+                "${FADEC_DIR}/fadec-decode-public.inc"
+                "${FADEC_DIR}/fadec-decode-private.inc"
+                --32 --64
+        RESULT_VARIABLE _fadec_result
+    )
+    if(NOT _fadec_result EQUAL 0)
+        message(FATAL_ERROR "Failed to generate fadec decode tables")
+    endif()
+endif()
+
 add_executable(Reclass
     src/main.cpp
     src/editor.h
