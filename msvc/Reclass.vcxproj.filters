@@ -1,0 +1,223 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>qml;cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Source Files\imports">
+      <UniqueIdentifier>{A1B2C3D4-0001-0001-0001-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\mcp">
+      <UniqueIdentifier>{A1B2C3D4-0001-0001-0001-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\themes">
+      <UniqueIdentifier>{A1B2C3D4-0001-0001-0001-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;hm;inl;inc;xsd</Extensions>
+    </Filter>
+    <Filter Include="Header Files\imports">
+      <UniqueIdentifier>{A1B2C3D4-0002-0001-0001-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\mcp">
+      <UniqueIdentifier>{A1B2C3D4-0002-0001-0001-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\providers">
+      <UniqueIdentifier>{A1B2C3D4-0002-0001-0001-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\themes">
+      <UniqueIdentifier>{A1B2C3D4-0002-0001-0001-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>qrc;rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Form Files">
+      <UniqueIdentifier>{99349809-55BA-4b9d-BF79-8FDBB0286EB3}</UniqueIdentifier>
+      <Extensions>ui</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <QtRcc Include="..\src\resources.qrc">
+      <Filter>Resource Files</Filter>
+    </QtRcc>
+  </ItemGroup>
+  <ItemGroup>
+    <QtUic Include="..\src\processpicker.ui">
+      <Filter>Form Files</Filter>
+    </QtUic>
+  </ItemGroup>
+  <ItemGroup>
+    <QtMoc Include="..\src\controller.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\editor.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\mainwindow.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\optionsdialog.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\processpicker.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\scanner.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\scannerpanel.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\titlebar.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\typeselectorpopup.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\imports\import_pdb_dialog.h">
+      <Filter>Header Files\imports</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\mcp\mcp_bridge.h">
+      <Filter>Header Files\mcp</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\themes\themeeditor.h">
+      <Filter>Header Files\themes</Filter>
+    </QtMoc>
+    <QtMoc Include="..\src\themes\thememanager.h">
+      <Filter>Header Files\themes</Filter>
+    </QtMoc>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\addressparser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\core.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\disasm.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\generator.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\iplugin.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\pluginmanager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\providerregistry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\workspace_model.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\imports\export_reclass_xml.h">
+      <Filter>Header Files\imports</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\imports\import_pdb.h">
+      <Filter>Header Files\imports</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\imports\import_reclass_xml.h">
+      <Filter>Header Files\imports</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\imports\import_source.h">
+      <Filter>Header Files\imports</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\providers\buffer_provider.h">
+      <Filter>Header Files\providers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\providers\null_provider.h">
+      <Filter>Header Files\providers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\providers\provider.h">
+      <Filter>Header Files\providers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\providers\snapshot_provider.h">
+      <Filter>Header Files\providers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\themes\theme.h">
+      <Filter>Header Files\themes</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\addressparser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\compose.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\controller.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\disasm.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\editor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\format.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\generator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\optionsdialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\pluginmanager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\processpicker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\providerregistry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\scanner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\scannerpanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\titlebar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\typeselectorpopup.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\imports\export_reclass_xml.cpp">
+      <Filter>Source Files\imports</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\imports\import_pdb.cpp">
+      <Filter>Source Files\imports</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\imports\import_pdb_dialog.cpp">
+      <Filter>Source Files\imports</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\imports\import_reclass_xml.cpp">
+      <Filter>Source Files\imports</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\imports\import_source.cpp">
+      <Filter>Source Files\imports</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\mcp\mcp_bridge.cpp">
+      <Filter>Source Files\mcp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\themes\theme.cpp">
+      <Filter>Source Files\themes</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\themes\themeeditor.cpp">
+      <Filter>Source Files\themes</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\themes\thememanager.cpp">
+      <Filter>Source Files\themes</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

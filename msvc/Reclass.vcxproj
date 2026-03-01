@@ -1,0 +1,191 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{C369F1FE-37C2-4C66-AC6D-ECB2B2B4AD5E}</ProjectGuid>
+    <Keyword>QtVS_v304</Keyword>
+    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0</WindowsTargetPlatformVersion>
+    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Condition="Exists('$(QtMsBuild)\qt_defaults.props')">
+    <Import Project="$(QtMsBuild)\qt_defaults.props" />
+  </ImportGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
+    <QtInstall>Qt 6.10.2 MSVC</QtInstall>
+    <QtModules>core;gui;widgets;concurrent;network;svg</QtModules>
+    <QtBuildConfig>debug</QtBuildConfig>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
+    <QtInstall>Qt 6.10.2 MSVC</QtInstall>
+    <QtModules>core;gui;widgets;concurrent;network;svg</QtModules>
+    <QtBuildConfig>release</QtBuildConfig>
+  </PropertyGroup>
+  <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
+    <Message Importance="High" Text="QtMsBuild: could not locate qt.targets, qt.props; project may not build correctly." />
+  </Target>
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="$(QtMsBuild)\Qt.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="$(QtMsBuild)\Qt.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\third_party\fadec\;..\third_party\raw_pdb\src\;..\third_party\qscintilla\src\;..\src\</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>dwmapi.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Link>
+      <AdditionalDependencies>dwmapi.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
+    <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="Configuration">
+    <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <QtRcc Include="..\src\resources.qrc" />
+  </ItemGroup>
+  <ItemGroup>
+    <QtUic Include="..\src\processpicker.ui" />
+  </ItemGroup>
+  <ItemGroup>
+    <QtMoc Include="..\src\controller.h" />
+    <QtMoc Include="..\src\editor.h" />
+    <QtMoc Include="..\src\mainwindow.h" />
+    <QtMoc Include="..\src\optionsdialog.h" />
+    <QtMoc Include="..\src\processpicker.h" />
+    <QtMoc Include="..\src\scanner.h" />
+    <QtMoc Include="..\src\scannerpanel.h" />
+    <QtMoc Include="..\src\titlebar.h" />
+    <QtMoc Include="..\src\typeselectorpopup.h" />
+    <QtMoc Include="..\src\imports\import_pdb_dialog.h" />
+    <QtMoc Include="..\src\mcp\mcp_bridge.h" />
+    <QtMoc Include="..\src\themes\themeeditor.h" />
+    <QtMoc Include="..\src\themes\thememanager.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\addressparser.h" />
+    <ClInclude Include="..\src\core.h" />
+    <ClInclude Include="..\src\disasm.h" />
+    <ClInclude Include="..\src\generator.h" />
+    <ClInclude Include="..\src\iplugin.h" />
+    <ClInclude Include="..\src\pluginmanager.h" />
+    <ClInclude Include="..\src\providerregistry.h" />
+    <ClInclude Include="..\src\workspace_model.h" />
+    <ClInclude Include="..\src\imports\export_reclass_xml.h" />
+    <ClInclude Include="..\src\imports\import_pdb.h" />
+    <ClInclude Include="..\src\imports\import_reclass_xml.h" />
+    <ClInclude Include="..\src\imports\import_source.h" />
+    <ClInclude Include="..\src\providers\buffer_provider.h" />
+    <ClInclude Include="..\src\providers\null_provider.h" />
+    <ClInclude Include="..\src\providers\provider.h" />
+    <ClInclude Include="..\src\providers\snapshot_provider.h" />
+    <ClInclude Include="..\src\themes\theme.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\addressparser.cpp" />
+    <ClCompile Include="..\src\compose.cpp" />
+    <ClCompile Include="..\src\controller.cpp" />
+    <ClCompile Include="..\src\disasm.cpp" />
+    <ClCompile Include="..\src\editor.cpp" />
+    <ClCompile Include="..\src\format.cpp" />
+    <ClCompile Include="..\src\generator.cpp" />
+    <ClCompile Include="..\src\main.cpp" />
+    <ClCompile Include="..\src\optionsdialog.cpp" />
+    <ClCompile Include="..\src\pluginmanager.cpp" />
+    <ClCompile Include="..\src\processpicker.cpp" />
+    <ClCompile Include="..\src\providerregistry.cpp" />
+    <ClCompile Include="..\src\scanner.cpp" />
+    <ClCompile Include="..\src\scannerpanel.cpp" />
+    <ClCompile Include="..\src\titlebar.cpp" />
+    <ClCompile Include="..\src\typeselectorpopup.cpp" />
+    <ClCompile Include="..\src\imports\export_reclass_xml.cpp" />
+    <ClCompile Include="..\src\imports\import_pdb.cpp" />
+    <ClCompile Include="..\src\imports\import_pdb_dialog.cpp" />
+    <ClCompile Include="..\src\imports\import_reclass_xml.cpp" />
+    <ClCompile Include="..\src\imports\import_source.cpp" />
+    <ClCompile Include="..\src\mcp\mcp_bridge.cpp" />
+    <ClCompile Include="..\src\themes\theme.cpp" />
+    <ClCompile Include="..\src\themes\themeeditor.cpp" />
+    <ClCompile Include="..\src\themes\thememanager.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="fadec.vcxproj">
+      <Project>{6A30A4F0-1A8D-4C6E-82D4-0A0D9693AA40}</Project>
+    </ProjectReference>
+    <ProjectReference Include="qscintilla.vcxproj">
+      <Project>{F7124B57-7682-4702-B725-4D844DC41ADA}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\third_party\raw_pdb\build\RawPDB.vcxproj">
+      <Project>{fbe3dbfa-20a7-4f99-9326-ed82c8b7b910}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
+    <Import Project="$(QtMsBuild)\qt.targets" />
+  </ImportGroup>
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>
