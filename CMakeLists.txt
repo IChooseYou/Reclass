@@ -37,9 +37,9 @@ add_library(raw_pdb STATIC ${RAW_PDB_SRCS})
 target_include_directories(raw_pdb PUBLIC third_party/raw_pdb/src)
 target_compile_features(raw_pdb PRIVATE cxx_std_11)
 # PDB_CRT.h forward-declares printf/memcmp/etc with __cdecl which conflicts
-# with MinGW.  Force-include a prefix header that pulls in the real CRT headers
-# and strips __cdecl so the redeclarations are compatible.
-if(MINGW)
+# with non-MSVC compilers (GCC, Clang, MinGW).  Force-include a prefix header
+# that pulls in the real CRT headers and strips __cdecl.
+if(NOT MSVC)
     target_compile_options(raw_pdb PUBLIC
         -include "${CMAKE_CURRENT_SOURCE_DIR}/cmake/raw_pdb_prefix.h")
 endif()
