@@ -109,7 +109,7 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
         SYSTEMTIME st;
         GetLocalTime(&st);
         wchar_t dumpPath[MAX_PATH];
-        _snwprintf(dumpPath, MAX_PATH,
+        _snwprintf_s(dumpPath, MAX_PATH,
                    L"%sreclass_crash_%04d%02d%02d_%02d%02d%02d.dmp",
                    exePath, st.wYear, st.wMonth, st.wDay,
                    st.wHour, st.wMinute, st.wSecond);
@@ -1389,6 +1389,28 @@ static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QStri
               n.parentId = clsId; n.offset = 16; n.collapsed = true; tree.addNode(n); }
         }
     }
+}
+
+MainWindow::~MainWindow() {
+    /*
+     * When MainWindow is destroyed:
+     *
+	 *	  1. ~MainWindow() runs (our code — plugin DLLs still loaded)
+	 *	  2. MainWindow member variables are destroyed (m_pluginManager — unloads plugin DLLs)
+	 *	  3. QObject::~QObject() runs — destroys child widgets (QMdiSubWindow → RcxController → ~RcxController())
+     * 
+     */
+
+    // Disconnect all subwindow destroyed signals before members are torn down,
+    // so the lambdas capturing 'this' never fire on a half-destroyed object.
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+        disconnect(it.key(), &QObject::destroyed, this, nullptr);
+        // Release providers now while plugin DLLs are still loaded;
+        // if deferred to Qt child cleanup the DLL code may already be unloaded.
+        it->doc->provider.reset();
+        it->ctrl->resetProvider();
+    }
+    m_tabs.clear();
 }
 
 void MainWindow::newClass() {

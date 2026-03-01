@@ -127,6 +127,7 @@ public:
     void setEditorFont(const QString& fontName);
     void setRefreshInterval(int ms);
     void setCompactColumns(bool v);
+    void resetProvider();
 
     // MCP bridge accessors
     void setSuppressRefresh(bool v) { m_suppressRefresh = v; }

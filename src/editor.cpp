@@ -3262,6 +3262,11 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, 0);
     m_sci->setReadOnly(false);
 
+    // Suppress modification notifications during replace to avoid
+    // QScintilla accessibility crash (textDeleted called with null text).
+    long savedMask = m_sci->SendScintilla(QsciScintillaBase::SCI_GETMODEVENTMASK);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMODEVENTMASK, 0);
+
     long start = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, 0);
     long end   = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION, 0);
     QByteArray utf8 = s.toUtf8();
@@ -3269,6 +3274,8 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, start);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, end);
     m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET, (uintptr_t)utf8.size(), utf8.constData());
+
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMODEVENTMASK, savedMask);
 
     // Adjust saved cursor/anchor for length change in line 0
     long delta = (long)utf8.size() - oldLen;

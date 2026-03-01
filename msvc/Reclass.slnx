@@ -1,0 +1,17 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/plugins/">
+    <Project Path="ProcessMemoryPlugin.vcxproj" Id="8792f51b-4951-4bad-b130-2f0efdeff64b" />
+    <Project Path="WinDbgMemoryPlugin.vcxproj" Id="e25d358e-20f0-448b-bb2f-55e9d1f8e7ca" />
+    <Project Path="RemoteProcessMemoryPlugin.vcxproj" Id="39e2ddf6-cb76-4063-b957-66ecf1252010" />
+    <Project Path="RcNetCompatPlugin.vcxproj" Id="6b775e9c-9cb6-45fd-86a0-be948a778969" />
+  </Folder>
+  <Folder Name="/third_party/">
+    <Project Path="../third_party/raw_pdb/build/RawPDB.vcxproj" Id="fbe3dbfa-20a7-4f99-9326-ed82c8b7b910" />
+    <Project Path="fadec.vcxproj" Id="6a30a4f0-1a8d-4c6e-82d4-0a0d9693aa40" />
+    <Project Path="qscintilla.vcxproj" Id="f7124b57-7682-4702-b725-4d844dc41ada" />
+  </Folder>
+  <Project Path="Reclass.vcxproj" Id="c369f1fe-37c2-4c66-ac6d-ecb2b2b4ad5e" />
+</Solution>

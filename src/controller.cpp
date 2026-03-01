@@ -165,6 +165,12 @@ RcxController::~RcxController() {
         m_refreshWatcher->cancel();
         m_refreshWatcher->waitForFinished();
     }
+
+    m_snapshotProv.reset();
+}
+
+void RcxController::resetProvider() {
+    m_snapshotProv.reset();
 }
 
 RcxEditor* RcxController::primaryEditor() const {
