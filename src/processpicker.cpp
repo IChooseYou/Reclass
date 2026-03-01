@@ -100,7 +100,10 @@ void ProcessPicker::onProcessSelected()
     
     int row = item->row();
     m_selectedPid = ui->processTable->item(row, 0)->data(Qt::EditRole).toUInt();
-    m_selectedName = ui->processTable->item(row, 1)->text();
+    // Use original name stored in UserRole (without architecture suffix)
+    QVariant origName = ui->processTable->item(row, 1)->data(Qt::UserRole);
+    m_selectedName = origName.isValid() ? origName.toString()
+                                        : ui->processTable->item(row, 1)->text();
     
     accept();
 }
@@ -158,11 +161,16 @@ void ProcessPicker::enumerateProcesses()
                 {
                     info.path = "";
                 }
+                // Detect 32-bit (WoW64) process
+                BOOL isWow64 = FALSE;
+                if (IsWow64Process(hProcess, &isWow64) && isWow64)
+                    info.is32Bit = true;
+
                 CloseHandle(hProcess);
 
                 processes.append(info);
             }
-            
+
         } while (Process32NextW(snapshot, &pe32));
     }
     
@@ -204,6 +212,16 @@ void ProcessPicker::enumerateProcesses()
         info.name = procName;
         info.path = resolvedPath;
         info.icon = defaultIcon;
+
+        // Detect 32-bit ELF process
+        QFile exeFile(exePath);
+        if (exeFile.open(QIODevice::ReadOnly)) {
+            QByteArray header = exeFile.read(5);
+            if (header.size() >= 5 && header[4] == 1) // ELFCLASS32
+                info.is32Bit = true;
+            exeFile.close();
+        }
+
         processes.append(info);
     }
 #else
@@ -227,11 +245,16 @@ void ProcessPicker::populateTable(const QList<ProcessInfo>& processes)
         pidItem->setData(Qt::EditRole, (int)proc.pid);
         ui->processTable->setItem(i, 0, pidItem);
         
-        // Name column with icon
-        auto* nameItem = new QTableWidgetItem(proc.name);
+        // Name column with icon and architecture indicator
+        QString displayName = proc.is32Bit
+            ? proc.name + QStringLiteral(" (32-bit)")
+            : proc.name;
+        auto* nameItem = new QTableWidgetItem(displayName);
         if (!proc.icon.isNull()) {
             nameItem->setIcon(proc.icon);
         }
+        // Store original name for selectedProcessName()
+        nameItem->setData(Qt::UserRole, proc.name);
         ui->processTable->setItem(i, 1, nameItem);
         
         // Path column with tooltip for full path

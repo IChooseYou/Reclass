@@ -32,6 +32,7 @@ public:
     QString  kind() const override { return QStringLiteral("RemoteProcess"); }
     bool     isLive() const override { return true; }
     uint64_t base() const override { return m_base; }
+    int      pointerSize() const override { return m_pointerSize; }
     bool     isReadable(uint64_t, int len) const override { return m_connected && len >= 0; }
     QString  getSymbol(uint64_t addr) const override;
     uint64_t symbolToAddress(const QString& n) const override;
@@ -45,6 +46,7 @@ private:
     QString  m_processName;
     bool     m_connected;
     uint64_t m_base;
+    int      m_pointerSize = 8;
     mutable std::shared_ptr<IpcClient> m_ipc;
     QVector<ModuleInfo> m_modules;
 };

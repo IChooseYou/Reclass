@@ -66,7 +66,8 @@ struct PluginProcessInfo {
     QString name;
     QString path;
     QIcon icon;
-    
+    bool is32Bit = false;
+
     PluginProcessInfo() : pid(0) {}
     PluginProcessInfo(uint32_t p, const QString& n, const QString& pth = QString(), const QIcon& i = QIcon())
         : pid(p), name(n), path(pth), icon(i) {}

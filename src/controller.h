@@ -141,6 +141,7 @@ public:
     // Value tracking toggle (per-tab, off by default)
     bool trackValues() const { return m_trackValues; }
     void setTrackValues(bool on);
+    void resetChangeTracking();
 
     // Cross-tab type visibility: point at the project's full document list
     void setProjectDocuments(QVector<RcxDocument*>* docs) { m_projectDocs = docs; }

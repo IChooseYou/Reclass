@@ -14,8 +14,12 @@ struct TypeInfo {
     int      size; // bytes (0 = dynamic/pointer)
 };
 
-static QHash<QString, TypeInfo> buildTypeTable() {
+static QHash<QString, TypeInfo> buildTypeTable(int ptrSize = 8) {
     QHash<QString, TypeInfo> t;
+    // Pointer/size_t kinds depend on target architecture
+    NodeKind ptrKind  = (ptrSize >= 8) ? NodeKind::Pointer64 : NodeKind::Pointer32;
+    NodeKind uintpKind = (ptrSize >= 8) ? NodeKind::UInt64   : NodeKind::UInt32;
+    NodeKind intpKind  = (ptrSize >= 8) ? NodeKind::Int64    : NodeKind::Int32;
 
     // stdint.h
     t[QStringLiteral("uint8_t")]  = {NodeKind::UInt8,  1};
@@ -85,35 +89,35 @@ static QHash<QString, TypeInfo> buildTypeTable() {
     t[QStringLiteral("LONG64")]    = {NodeKind::Int64,  8};
     t[QStringLiteral("INT64")]     = {NodeKind::Int64,  8};
 
-    // Platform pointer-size types
-    t[QStringLiteral("PVOID")]      = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("LPVOID")]     = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("HANDLE")]     = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("HMODULE")]    = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("HWND")]       = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("HINSTANCE")]  = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("SIZE_T")]     = {NodeKind::UInt64, 8};
-    t[QStringLiteral("ULONG_PTR")] = {NodeKind::UInt64, 8};
-    t[QStringLiteral("UINT_PTR")]  = {NodeKind::UInt64, 8};
-    t[QStringLiteral("DWORD_PTR")] = {NodeKind::UInt64, 8};
-    t[QStringLiteral("LONG_PTR")]  = {NodeKind::Int64,  8};
-    t[QStringLiteral("INT_PTR")]   = {NodeKind::Int64,  8};
-    t[QStringLiteral("SSIZE_T")]   = {NodeKind::Int64,  8};
-    t[QStringLiteral("uintptr_t")] = {NodeKind::UInt64, 8};
-    t[QStringLiteral("intptr_t")]  = {NodeKind::Int64,  8};
-    t[QStringLiteral("size_t")]    = {NodeKind::UInt64, 8};
-    t[QStringLiteral("ptrdiff_t")] = {NodeKind::Int64,  8};
-    t[QStringLiteral("ssize_t")]   = {NodeKind::Int64,  8};
+    // Platform pointer-size types (depend on target architecture)
+    t[QStringLiteral("PVOID")]      = {ptrKind,   ptrSize};
+    t[QStringLiteral("LPVOID")]     = {ptrKind,   ptrSize};
+    t[QStringLiteral("HANDLE")]     = {ptrKind,   ptrSize};
+    t[QStringLiteral("HMODULE")]    = {ptrKind,   ptrSize};
+    t[QStringLiteral("HWND")]       = {ptrKind,   ptrSize};
+    t[QStringLiteral("HINSTANCE")]  = {ptrKind,   ptrSize};
+    t[QStringLiteral("SIZE_T")]     = {uintpKind, ptrSize};
+    t[QStringLiteral("ULONG_PTR")] = {uintpKind, ptrSize};
+    t[QStringLiteral("UINT_PTR")]  = {uintpKind, ptrSize};
+    t[QStringLiteral("DWORD_PTR")] = {uintpKind, ptrSize};
+    t[QStringLiteral("LONG_PTR")]  = {intpKind,  ptrSize};
+    t[QStringLiteral("INT_PTR")]   = {intpKind,  ptrSize};
+    t[QStringLiteral("SSIZE_T")]   = {intpKind,  ptrSize};
+    t[QStringLiteral("uintptr_t")] = {uintpKind, ptrSize};
+    t[QStringLiteral("intptr_t")]  = {intpKind,  ptrSize};
+    t[QStringLiteral("size_t")]    = {uintpKind, ptrSize};
+    t[QStringLiteral("ptrdiff_t")] = {intpKind,  ptrSize};
+    t[QStringLiteral("ssize_t")]   = {intpKind,  ptrSize};
 
     // Pointer type aliases
-    t[QStringLiteral("PCHAR")]  = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("LPSTR")]  = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("LPCSTR")] = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("PCSTR")]  = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("PWSTR")]  = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("LPWSTR")] = {NodeKind::Pointer64, 8};
-    t[QStringLiteral("LPCWSTR")]= {NodeKind::Pointer64, 8};
-    t[QStringLiteral("PCWSTR")] = {NodeKind::Pointer64, 8};
+    t[QStringLiteral("PCHAR")]  = {ptrKind, ptrSize};
+    t[QStringLiteral("LPSTR")]  = {ptrKind, ptrSize};
+    t[QStringLiteral("LPCSTR")] = {ptrKind, ptrSize};
+    t[QStringLiteral("PCSTR")]  = {ptrKind, ptrSize};
+    t[QStringLiteral("PWSTR")]  = {ptrKind, ptrSize};
+    t[QStringLiteral("LPWSTR")] = {ptrKind, ptrSize};
+    t[QStringLiteral("LPCWSTR")]= {ptrKind, ptrSize};
+    t[QStringLiteral("PCWSTR")] = {ptrKind, ptrSize};
 
     return t;
 }
@@ -940,6 +944,7 @@ struct BuildContext {
     QVector<PendingRef>& pendingRefs;
     bool useCommentOffsets;
     QSet<QString> enumNames;  // enum type names (emit as UInt32 + refId)
+    int ptrSize = 8;          // target pointer size (4 or 8)
 };
 
 static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
@@ -1018,7 +1023,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
         // Pointer field
         if (field.isPointer) {
             Node n;
-            n.kind = NodeKind::Pointer64;
+            n.kind = (ctx.ptrSize >= 8) ? NodeKind::Pointer64 : NodeKind::Pointer32;
             n.name = field.name;
             n.parentId = parentId;
             n.offset = fieldOffset;
@@ -1032,7 +1037,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
                 ctx.pendingRefs.append({nodeId, field.pointerTarget});
             }
 
-            computedOffset = fieldOffset + 8;
+            computedOffset = fieldOffset + ctx.ptrSize;
             continue;
         }
 
@@ -1217,7 +1222,7 @@ static bool hasAnyCommentOffset(const QVector<ParsedField>& fields) {
 
 // ── NodeTree builder ──
 
-NodeTree importFromSource(const QString& sourceCode, QString* errorMsg) {
+NodeTree importFromSource(const QString& sourceCode, QString* errorMsg, int pointerSize) {
     if (sourceCode.trimmed().isEmpty()) {
         if (errorMsg) *errorMsg = QStringLiteral("Empty source code");
         return {};
@@ -1236,8 +1241,8 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg) {
         return {};
     }
 
-    // Build type table
-    QHash<QString, TypeInfo> typeTable = buildTypeTable();
+    // Build type table (pointer-size types depend on target architecture)
+    QHash<QString, TypeInfo> typeTable = buildTypeTable(pointerSize);
 
     // Register typedefs into type table
     for (auto it = parser.typedefs.begin(); it != parser.typedefs.end(); ++it) {
@@ -1248,6 +1253,7 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg) {
 
     NodeTree tree;
     tree.baseAddress = 0x00400000;
+    tree.pointerSize = pointerSize;
 
     QHash<QString, uint64_t> classIds;
     QVector<PendingRef> pendingRefs;
@@ -1265,7 +1271,7 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg) {
             enumNames.insert(ps.name);
     }
 
-    BuildContext ctx{tree, typeTable, classIds, pendingRefs, useCommentOffsets, enumNames};
+    BuildContext ctx{tree, typeTable, classIds, pendingRefs, useCommentOffsets, enumNames, pointerSize};
 
     // Build nodes for each struct/enum
     for (const auto& ps : parser.structs) {

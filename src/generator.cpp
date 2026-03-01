@@ -132,16 +132,7 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
         return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF8), name).arg(node.strLen) + oc;
     case NodeKind::UTF16:
         return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF16), name).arg(node.strLen) + oc;
-    case NodeKind::Pointer32: {
-        if (node.refId != 0) {
-            int refIdx = tree.indexOfId(node.refId);
-            if (refIdx >= 0) {
-                QString target = ctx.structName(tree.nodes[refIdx]);
-                return ind + QStringLiteral("struct %1* %2;").arg(target, name) + oc;
-            }
-        }
-        return ind + QStringLiteral("%1 %2;").arg(ctx.cType(NodeKind::Pointer32), name) + oc;
-    }
+    case NodeKind::Pointer32:
     case NodeKind::Pointer64: {
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
@@ -150,7 +141,13 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
                 return ind + QStringLiteral("struct %1* %2;").arg(target, name) + oc;
             }
         }
-        return ind + QStringLiteral("void* %1;").arg(name) + oc;
+        // Native pointer: use void* when this is the target's natural pointer kind
+        bool isNativePtr = (node.kind == NodeKind::Pointer32 && ctx.tree.pointerSize <= 4)
+                        || (node.kind == NodeKind::Pointer64 && ctx.tree.pointerSize >= 8);
+        if (isNativePtr)
+            return ind + QStringLiteral("void* %1;").arg(name) + oc;
+        // Cross-size pointer: fall back to raw integer type
+        return ind + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name) + oc;
     }
     case NodeKind::FuncPtr32:
         return ind + QStringLiteral("void (*%1)();").arg(name) + oc;

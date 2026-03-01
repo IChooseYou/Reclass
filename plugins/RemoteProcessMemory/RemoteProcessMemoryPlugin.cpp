@@ -59,6 +59,10 @@ struct IpcClient {
     QMutex mutex;
     bool   connected  = false;
 
+    RcxRpcHeader* header() const {
+        return mappedView ? reinterpret_cast<RcxRpcHeader*>(mappedView) : nullptr;
+    }
+
     ~IpcClient() { disconnect(); }
 
     /* ── connect / disconnect ──────────────────────────────────────── */
@@ -285,8 +289,16 @@ RemoteProcessProvider::RemoteProcessProvider(
     , m_base(0)
     , m_ipc(std::move(ipc))
 {
-    if (m_connected)
+    if (m_connected) {
         cacheModules();
+        // Read pointer size from payload's SHM header (0 means not set → default 8)
+        auto* hdr = m_ipc ? m_ipc->header() : nullptr;
+        if (hdr) {
+            uint32_t ps = hdr->pointerSize;
+            if (ps == 4 || ps == 8)
+                m_pointerSize = (int)ps;
+        }
+    }
 }
 
 RemoteProcessProvider::~RemoteProcessProvider() = default;

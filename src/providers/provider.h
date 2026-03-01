@@ -43,6 +43,10 @@ public:
     // Examples: "File", "Process", "Socket"
     virtual QString kind() const { return QStringLiteral("File"); }
 
+    // Native pointer size of the target (4 for 32-bit, 8 for 64-bit).
+    // Providers should override this to report the target's architecture.
+    virtual int pointerSize() const { return 8; }
+
     // Initial base address discovered by the provider (e.g. main module base).
     // Used by the controller to set tree.baseAddress on first attach.
     // For file/buffer providers this is always 0.

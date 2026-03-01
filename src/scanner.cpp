@@ -521,7 +521,9 @@ done:
 }
 
 void ScanEngine::startRescan(std::shared_ptr<Provider> provider,
-                              QVector<ScanResult> results, int readSize) {
+                              QVector<ScanResult> results, int readSize,
+                              const QByteArray& filterPattern,
+                              const QByteArray& filterMask) {
     if (isRunning()) return;
 
     m_abort.store(false);
@@ -538,20 +540,26 @@ void ScanEngine::startRescan(std::shared_ptr<Provider> provider,
     });
 
     watcher->setFuture(QtConcurrent::run(
-        [this, provider, results = std::move(results), readSize]() mutable {
-            return runRescan(provider, std::move(results), readSize);
+        [this, provider, results = std::move(results), readSize,
+         filterPattern, filterMask]() mutable {
+            return runRescan(provider, std::move(results), readSize,
+                             filterPattern, filterMask);
         }));
 }
 
 QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
-                                           QVector<ScanResult> results, int readSize) {
+                                           QVector<ScanResult> results, int readSize,
+                                           const QByteArray& filterPattern,
+                                           const QByteArray& filterMask) {
     QElapsedTimer timer;
     timer.start();
 
     int total = results.size();
     if (total == 0 || !prov) return results;
 
-    qDebug() << "[rescan] start: " << total << "results, readSize:" << readSize;
+    bool hasFilter = !filterPattern.isEmpty();
+    qDebug() << "[rescan] start:" << total << "results, readSize:" << readSize
+             << "filter:" << (hasFilter ? "yes" : "no");
 
     // Save previous values
     for (auto& r : results)
@@ -571,6 +579,9 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
     uint64_t totalBytesRead = 0;
     int i = 0;
 
+    // Track which results matched the filter (by original index)
+    QVector<bool> matched(total, !hasFilter); // if no filter, all match
+
     while (i < total && !m_abort.load()) {
         uint64_t spanBase = results[order[i]].address;
         int spanEnd = i;
@@ -588,9 +599,28 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
         prov->read(spanBase, chunk.data(), chunkLen);
 
         for (int j = i; j <= spanEnd; j++) {
-            auto& r = results[order[j]];
+            int idx = order[j];
+            auto& r = results[idx];
             int off = (int)(r.address - spanBase);
             r.scanValue = chunk.mid(off, readSize);
+
+            // Apply filter: compare re-read bytes against the new pattern
+            if (hasFilter) {
+                int patLen = filterPattern.size();
+                if (r.scanValue.size() >= patLen) {
+                    bool ok = true;
+                    const char* data = r.scanValue.constData();
+                    const char* pat  = filterPattern.constData();
+                    const char* msk  = filterMask.constData();
+                    for (int k = 0; k < patLen; k++) {
+                        if ((data[k] & msk[k]) != (pat[k] & msk[k])) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    matched[idx] = ok;
+                }
+            }
         }
 
         chunks++;
@@ -604,6 +634,20 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
             QMetaObject::invokeMethod(this, "progress",
                 Qt::QueuedConnection, Q_ARG(int, pct));
         }
+    }
+
+    // Filter out non-matching results
+    if (hasFilter) {
+        QVector<ScanResult> filtered;
+        filtered.reserve(total);
+        for (int k = 0; k < total; k++) {
+            if (matched[k])
+                filtered.append(std::move(results[k]));
+        }
+        qDebug() << "[rescan] done:" << filtered.size() << "/" << total
+                 << "matched in" << timer.elapsed() << "ms |" << chunks
+                 << "chunks," << (totalBytesRead / 1024) << "KB read";
+        return filtered;
     }
 
     qDebug() << "[rescan] done:" << updated << "/" << total << "results in"

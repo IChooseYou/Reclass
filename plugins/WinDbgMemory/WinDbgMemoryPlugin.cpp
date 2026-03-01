@@ -201,6 +201,19 @@ void WinDbgMemoryProvider::querySessionInfo()
         }
     }
 
+    // Query effective processor type for pointer size detection
+    if (m_control) {
+        ULONG procType = 0;
+        hr = m_control->GetEffectiveProcessorType(&procType);
+        if (SUCCEEDED(hr)) {
+            // IMAGE_FILE_MACHINE_I386 = 0x014C
+            if (procType == 0x014C)
+                m_pointerSize = 4;
+            qDebug() << "[WinDbg] EffectiveProcessorType=" << Qt::hex << procType
+                     << "pointerSize=" << m_pointerSize;
+        }
+    }
+
     // WinDbg provides access to the entire virtual address space.
     // Do NOT auto-select a module as base — let the user set their
     // own base address.  m_base stays 0 so the controller won't

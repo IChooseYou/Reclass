@@ -66,7 +66,8 @@ struct RcxRpcModuleEntry {
  *    32     responseCount    (4)
  *    36     totalDataUsed    (4)
  *    40     imageBase        (8)  -- main module base from PEB / procfs
- *    48     _pad[4048]
+ *    48     pointerSize      (4)  -- 4 for 32-bit, 8 for 64-bit payload
+ *    52     _pad[4044]
  */
 struct RcxRpcHeader {
     uint32_t version;
@@ -79,7 +80,8 @@ struct RcxRpcHeader {
     uint32_t responseCount;
     uint32_t totalDataUsed;
     uint64_t imageBase;        /* main module base (PEB on Win, /proc on Linux) */
-    uint8_t  _pad[RCX_RPC_HEADER_SIZE - 48];
+    uint32_t pointerSize;      /* 4 for 32-bit, 8 for 64-bit payload           */
+    uint8_t  _pad[RCX_RPC_HEADER_SIZE - 52];
 };
 
 /* ── name formatting helpers (PID-only, no nonce) ─────────────────── */

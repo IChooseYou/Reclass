@@ -66,7 +66,9 @@ public:
 
     void start(std::shared_ptr<Provider> provider, const ScanRequest& req);
     void startRescan(std::shared_ptr<Provider> provider,
-                     QVector<ScanResult> results, int readSize);
+                     QVector<ScanResult> results, int readSize,
+                     const QByteArray& filterPattern = {},
+                     const QByteArray& filterMask = {});
     void abort();
     bool isRunning() const;
 
@@ -79,7 +81,9 @@ signals:
 private:
     QVector<ScanResult> runScan(std::shared_ptr<Provider> prov, const ScanRequest& req);
     QVector<ScanResult> runRescan(std::shared_ptr<Provider> prov,
-                                   QVector<ScanResult> results, int readSize);
+                                   QVector<ScanResult> results, int readSize,
+                                   const QByteArray& filterPattern,
+                                   const QByteArray& filterMask);
 
     std::atomic<bool> m_abort{false};
     QFutureWatcher<QVector<ScanResult>>* m_watcher = nullptr;

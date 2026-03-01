@@ -405,6 +405,8 @@ private:
 AddressParseResult AddressParser::evaluate(const QString& formula, int ptrSize,
                                            const AddressParserCallbacks* cb)
 {
+    // ptrSize is used by the caller to configure the readPointer callback;
+    // the parser itself doesn't need it directly.
     Q_UNUSED(ptrSize);
 
     // WinDbg displays 64-bit addresses with backtick separators for readability,

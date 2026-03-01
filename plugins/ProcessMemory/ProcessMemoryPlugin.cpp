@@ -56,8 +56,13 @@ ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& proces
         m_writable = false;
     }
 
-    if (m_handle)
+    if (m_handle) {
+        // Detect 32-bit (WoW64) process
+        BOOL isWow64 = FALSE;
+        if (IsWow64Process(m_handle, &isWow64) && isWow64)
+            m_pointerSize = 4;
         cacheModules();
+    }
 }
 
 bool ProcessMemoryProvider::read(uint64_t addr, void* buf, int len) const
@@ -192,9 +197,20 @@ ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& proces
         m_writable = false;
     }
 
-    if (m_fd >= 0)
+    if (m_fd >= 0) {
+        // Detect 32-bit ELF process
+        QString exePath = QStringLiteral("/proc/%1/exe").arg(pid);
+        QByteArray exePathUtf8 = exePath.toUtf8();
+        int exeFd = ::open(exePathUtf8.constData(), O_RDONLY);
+        if (exeFd >= 0) {
+            unsigned char elfClass = 0;
+            // ELF e_ident[EI_CLASS] is at offset 4
+            if (::pread(exeFd, &elfClass, 1, 4) == 1 && elfClass == 1) // ELFCLASS32
+                m_pointerSize = 4;
+            ::close(exeFd);
+        }
         cacheModules();
-
+    }
 }
 
 bool ProcessMemoryProvider::read(uint64_t addr, void* buf, int len) const
@@ -525,6 +541,7 @@ bool ProcessMemoryPlugin::selectTarget(QWidget* parent, QString* target)
         info.name = pinfo.name;
         info.path = pinfo.path;
         info.icon = pinfo.icon;
+        info.is32Bit = pinfo.is32Bit;
         processes.append(info);
     }
 
@@ -586,6 +603,11 @@ QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
                     }
                 }
 
+                // Detect 32-bit (WoW64) process
+                BOOL isWow64 = FALSE;
+                if (IsWow64Process(hProcess, &isWow64) && isWow64)
+                    info.is32Bit = true;
+
                 CloseHandle(hProcess);
             }
 
@@ -632,6 +654,16 @@ QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
         info.name = procName;
         info.path = resolvedPath;
         info.icon = defaultIcon;
+
+        // Detect 32-bit ELF process
+        int exeFd = ::open(exePath.toUtf8().constData(), O_RDONLY);
+        if (exeFd >= 0) {
+            unsigned char elfClass = 0;
+            if (::pread(exeFd, &elfClass, 1, 4) == 1 && elfClass == 1) // ELFCLASS32
+                info.is32Bit = true;
+            ::close(exeFd);
+        }
+
         processes.append(info);
     }
 #endif

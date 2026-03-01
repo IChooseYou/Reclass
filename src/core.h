@@ -332,6 +332,7 @@ struct NodeTree {
     QVector<Node> nodes;
     uint64_t      baseAddress = 0x00400000;
     QString       baseAddressFormula;  // e.g. "<ReClass.exe> + 0x100"
+    int           pointerSize = 8;    // 4 for 32-bit targets, 8 for 64-bit
     uint64_t      m_nextId    = 1;
     mutable QHash<uint64_t, int> m_idCache;
 
@@ -468,6 +469,8 @@ struct NodeTree {
         o["baseAddress"] = QString::number(baseAddress, 16);
         if (!baseAddressFormula.isEmpty())
             o["baseAddressFormula"] = baseAddressFormula;
+        if (pointerSize != 8)
+            o["pointerSize"] = pointerSize;
         o["nextId"]      = QString::number(m_nextId);
         QJsonArray arr;
         for (const auto& n : nodes) arr.append(n.toJson());
@@ -479,6 +482,7 @@ struct NodeTree {
         NodeTree t;
         t.baseAddress = o["baseAddress"].toString("400000").toULongLong(nullptr, 16);
         t.baseAddressFormula = o["baseAddressFormula"].toString();
+        t.pointerSize = o["pointerSize"].toInt(8);
         t.m_nextId    = o["nextId"].toString("1").toULongLong();
         QJsonArray arr = o["nodes"].toArray();
         for (const auto& v : arr) {

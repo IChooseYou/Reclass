@@ -244,6 +244,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_scanner PRIVATE ${QT}::Core ${QT}::Concurrent ${QT}::Test)
     add_test(NAME test_scanner COMMAND test_scanner)
 
+    add_executable(test_32bit_support tests/test_32bit_support.cpp
+        src/generator.cpp src/imports/import_source.cpp src/imports/import_reclass_xml.cpp
+        src/compose.cpp src/format.cpp src/addressparser.cpp)
+    target_include_directories(test_32bit_support PRIVATE src
+        ${CMAKE_SOURCE_DIR}/plugins/RemoteProcessMemory)
+    target_link_libraries(test_32bit_support PRIVATE ${QT}::Core ${QT}::Widgets ${QT}::Test)
+    add_test(NAME test_32bit_support COMMAND test_32bit_support)
+
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
             src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)

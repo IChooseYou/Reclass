@@ -104,6 +104,7 @@ private:
     int           m_lastScanMode = 0;   // 0=signature, 1=value
     ValueType     m_lastValueType = ValueType::Int32;
     QByteArray    m_lastPattern;        // serialized search value
+    int           m_preRescanCount = 0; // result count before last rescan
 
     QString formatValue(const QByteArray& bytes) const;
     int     valueSize() const;

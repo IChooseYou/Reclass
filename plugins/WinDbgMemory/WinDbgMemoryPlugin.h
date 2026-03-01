@@ -64,6 +64,7 @@ public:
 
     bool isLive() const override { return m_isLive; }
     uint64_t base() const override { return m_base; }
+    int pointerSize() const override { return m_pointerSize; }
 
 private:
     void initInterfaces();   // get IDebugDataSpaces/Control/Symbols from client
@@ -85,6 +86,7 @@ private:
     uint64_t m_base = 0;
     bool     m_isLive = false;
     bool     m_writable = false;
+    int      m_pointerSize = 8;
     bool     m_isRemote = false;   // true when connected via DebugConnect (tcp/npipe)
     mutable int  m_readFailCount = 0;
 

@@ -28,6 +28,7 @@ public:
 
     bool isLive() const override { return true; }
     uint64_t base() const override { return m_base; }
+    int pointerSize() const override { return m_pointerSize; }
     QVector<rcx::MemoryRegion> enumerateRegions() const override;
     bool isReadable(uint64_t, int len) const override {
 #ifdef _WIN32
@@ -54,6 +55,7 @@ private:
     QString m_processName;
     bool m_writable;
     uint64_t m_base;
+    int m_pointerSize = 8;
 
     struct ModuleInfo {
         QString  name;

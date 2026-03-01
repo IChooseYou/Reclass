@@ -80,15 +80,19 @@ static const struct { int xmlType; NodeKind kind; } kTypeMap2013[] = {
     { 30, NodeKind::Array },      // ClassPointerArray
 };
 
-static NodeKind lookupKind(int xmlType, XmlVersion ver) {
+static NodeKind lookupKind(int xmlType, XmlVersion ver, int ptrSize = 8) {
+    NodeKind k = NodeKind::Hex8;
     if (ver == XmlVersion::V2016) {
         for (const auto& e : kTypeMap2016)
-            if (e.xmlType == xmlType) return e.kind;
+            if (e.xmlType == xmlType) { k = e.kind; break; }
     } else {
         for (const auto& e : kTypeMap2013)
-            if (e.xmlType == xmlType) return e.kind;
+            if (e.xmlType == xmlType) { k = e.kind; break; }
     }
-    return NodeKind::Hex8; // fallback
+    // Remap pointer types for 32-bit targets
+    if (ptrSize < 8 && k == NodeKind::Pointer64)
+        k = NodeKind::Pointer32;
+    return k;
 }
 
 // Is this XML type a pointer-like type that uses the "Pointer" attribute?
@@ -135,7 +139,7 @@ struct PendingRef {
     QString  className;
 };
 
-NodeTree importReclassXml(const QString& filePath, QString* errorMsg) {
+NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointerSize) {
     qDebug() << "[ImportXML] Opening file:" << filePath;
 
     QFile file(filePath);
@@ -152,6 +156,7 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg) {
 
     NodeTree tree;
     tree.baseAddress = 0x00400000;
+    tree.pointerSize = pointerSize;
 
     // Class name → struct node ID (for pointer resolution)
     QHash<QString, uint64_t> classIds;
@@ -249,7 +254,7 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg) {
                     continue;
                 }
 
-                NodeKind kind = lookupKind(xmlType, version);
+                NodeKind kind = lookupKind(xmlType, version, pointerSize);
 
                 // Handle ClassInstanceArray: read child <Array> element
                 if (isClassInstanceArrayType(xmlType, version)) {

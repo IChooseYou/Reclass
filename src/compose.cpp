@@ -554,10 +554,12 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                     *ok = false;
                     return 0;
                 };
-                cbs.readPointer = [&prov](uint64_t addr, bool* ok) -> uint64_t {
-                    if (prov.isValid() && prov.isReadable(addr, 8)) {
+                int ps = tree.pointerSize;
+                cbs.readPointer = [&prov, ps](uint64_t addr, bool* ok) -> uint64_t {
+                    if (prov.isValid() && prov.isReadable(addr, ps)) {
                         *ok = true;
-                        return prov.readU64(addr);
+                        return (ps >= 8) ? prov.readU64(addr)
+                                         : (uint64_t)prov.readU32(addr);
                     }
                     *ok = false;
                     return 0;
@@ -574,7 +576,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 uint64_t staticAddr = 0;
                 bool exprOk = false;
                 if (!sf.offsetExpr.isEmpty()) {
-                    auto result = AddressParser::evaluate(sf.offsetExpr, 8, &cbs);
+                    auto result = AddressParser::evaluate(sf.offsetExpr, tree.pointerSize, &cbs);
                     exprOk = result.ok;
                     if (result.ok)
                         staticAddr = result.value;

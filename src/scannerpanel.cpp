@@ -425,13 +425,42 @@ void ScannerPanel::onUpdateClicked() {
 
     int readSize = (m_lastScanMode == 1) ? valueSize() : 16;
 
+    // Build filter from current input field
+    QByteArray filterPattern, filterMask;
+    if (m_lastScanMode == 0) {
+        // Signature mode
+        QString err;
+        if (!m_patternEdit->text().trimmed().isEmpty()) {
+            if (!parseSignature(m_patternEdit->text(), filterPattern, filterMask, &err)) {
+                m_statusLabel->setText(QStringLiteral("Pattern error: %1").arg(err));
+                return;
+            }
+        }
+    } else {
+        // Value mode
+        QString err;
+        if (!m_valueEdit->text().trimmed().isEmpty()) {
+            auto vt = (ValueType)m_typeCombo->currentData().toInt();
+            if (!serializeValue(vt, m_valueEdit->text(), filterPattern, filterMask, &err)) {
+                m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
+                return;
+            }
+            m_lastValueType = vt;
+        }
+    }
+
+    // Update last pattern so display uses the new value
+    if (!filterPattern.isEmpty())
+        m_lastPattern = filterPattern;
+
+    m_preRescanCount = m_results.size();
     m_updateBtn->setEnabled(false);
     m_scanBtn->setText(QStringLiteral("Cancel"));
     m_statusLabel->setText(QStringLiteral("Re-scanning..."));
     m_progressBar->setValue(0);
     m_progressBar->show();
 
-    m_engine->startRescan(prov, m_results, readSize);
+    m_engine->startRescan(prov, m_results, readSize, filterPattern, filterMask);
 }
 
 void ScannerPanel::onRescanFinished(QVector<ScanResult> results) {
@@ -449,8 +478,12 @@ void ScannerPanel::onRescanFinished(QVector<ScanResult> results) {
     }
 
     int n = m_results.size();
-    m_statusLabel->setText(QStringLiteral("Updated %1 result%2")
-        .arg(n).arg(n == 1 ? "" : "s"));
+    if (m_preRescanCount > 0 && n < m_preRescanCount)
+        m_statusLabel->setText(QStringLiteral("%1 of %2 results match")
+            .arg(n).arg(m_preRescanCount));
+    else
+        m_statusLabel->setText(QStringLiteral("Updated %1 result%2")
+            .arg(n).arg(n == 1 ? "" : "s"));
 }
 
 void ScannerPanel::onGoToAddress() {
@@ -497,13 +530,15 @@ void ScannerPanel::onCellEdited(int row, int col) {
                 *ok = (base != 0);
                 return base;
             };
-            cbs.readPointer = [p](uint64_t addr, bool* ok) -> uint64_t {
+            int ptrSz = p->pointerSize();
+            cbs.readPointer = [p, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
                 uint64_t val = 0;
-                *ok = p->read(addr, &val, 8);
+                *ok = p->read(addr, &val, ptrSz);
                 return val;
             };
         }
-        auto result = AddressParser::evaluate(text, 8, &cbs);
+        int evalPtrSize = prov ? prov->pointerSize() : 8;
+        auto result = AddressParser::evaluate(text, evalPtrSize, &cbs);
         if (result.ok) {
             m_results[row].address = result.value;
             emit goToAddress(result.value);

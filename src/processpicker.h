@@ -14,6 +14,7 @@ struct ProcessInfo {
     QString name;
     QString path;
     QIcon icon;
+    bool is32Bit = false;
 };
 
 class ProcessPicker : public QDialog

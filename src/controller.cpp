@@ -365,13 +365,14 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     *ok = (base != 0);
                     return base;
                 };
-                cbs.readPointer = [prov](uint64_t addr, bool* ok) -> uint64_t {
+                int ptrSz = m_doc->tree.pointerSize;
+                cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
                     uint64_t val = 0;
-                    *ok = prov->read(addr, &val, 8);
+                    *ok = prov->read(addr, &val, ptrSz);
                     return val;
                 };
             }
-            auto result = AddressParser::evaluate(s, 8, &cbs);
+            auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
             if (result.ok && result.value != m_doc->tree.baseAddress) {
                 uint64_t oldBase = m_doc->tree.baseAddress;
                 QString oldFormula = m_doc->tree.baseAddressFormula;
@@ -522,6 +523,14 @@ void RcxController::setTrackValues(bool on) {
             lm.heatLevel = 0;
         refresh();
     }
+}
+
+void RcxController::resetChangeTracking() {
+    m_changedOffsets.clear();
+    m_valueHistory.clear();
+    m_prevPages.clear();
+    for (auto& lm : m_lastResult.meta)
+        lm.heatLevel = 0;
 }
 
 void RcxController::refresh() {
@@ -1312,12 +1321,10 @@ void RcxController::convertToTypedPointer(uint64_t nodeId) {
     if (ni < 0) return;
     const Node& node = m_doc->tree.nodes[ni];
 
-    // Determine pointer kind from current node size
-    NodeKind ptrKind;
-    if (node.byteSize() >= 8 || node.kind == NodeKind::Pointer64)
-        ptrKind = NodeKind::Pointer64;
-    else
-        ptrKind = NodeKind::Pointer32;
+    // Determine pointer kind from document's target pointer size
+    NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
+        ? NodeKind::Pointer64
+        : NodeKind::Pointer32;
 
     // Generate unique struct name: "NewClass", "NewClass_2", "NewClass_3", ...
     QString baseName = QStringLiteral("NewClass");
@@ -1344,15 +1351,18 @@ void RcxController::convertToTypedPointer(uint64_t nodeId) {
     rootStruct.offset = 0;
     rootStruct.id = m_doc->tree.reserveId();
 
-    // Create child Hex64 fields for the new struct
+    // Create child hex fields for the new struct, sized to target arch
     constexpr int kDefaultFields = 16;
+    bool is32 = (m_doc->tree.pointerSize < 8);
+    NodeKind hexKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
+    int stride = is32 ? 4 : 8;
     QVector<Node> children;
     for (int i = 0; i < kDefaultFields; i++) {
         Node c;
-        c.kind = NodeKind::Hex64;
-        c.name = QStringLiteral("field_%1").arg(i * 8, 2, 16, QChar('0'));
+        c.kind = hexKind;
+        c.name = QStringLiteral("field_%1").arg(i * stride, 2, 16, QChar('0'));
         c.parentId = rootStruct.id;
-        c.offset = i * 8;
+        c.offset = i * stride;
         c.id = m_doc->tree.reserveId();
         children.append(c);
     }
@@ -2312,6 +2322,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
     if (preModId > 0)
         popup->setModifier(preModId, preArrayCount);
     popup->setCurrentNodeSize(nodeSize);
+    popup->setPointerSize(m_doc->tree.pointerSize);
 
     connect(popup, &TypeSelectorPopup::typeSelected,
             this, [this, mode, nodeIdx](const TypeEntry& entry, const QString& fullText) {
@@ -2794,6 +2805,9 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
     // Don't overwrite baseAddress — caller (e.g. selfTest) already set it.
     // User-initiated source switches go through selectSource() which does update it.
 
+    // Adopt the provider's pointer size for this document
+    m_doc->tree.pointerSize = m_doc->provider->pointerSize();
+
     // Re-evaluate stored formula against the new provider
     if (!m_doc->tree.baseAddressFormula.isEmpty()) {
         AddressParserCallbacks cbs;
@@ -2803,12 +2817,13 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
             *ok = (base != 0);
             return base;
         };
-        cbs.readPointer = [prov](uint64_t addr, bool* ok) -> uint64_t {
+        int ptrSz = m_doc->tree.pointerSize;
+        cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
             uint64_t val = 0;
-            *ok = prov->read(addr, &val, 8);
+            *ok = prov->read(addr, &val, ptrSz);
             return val;
         };
-        auto result = AddressParser::evaluate(m_doc->tree.baseAddressFormula, 8, &cbs);
+        auto result = AddressParser::evaluate(m_doc->tree.baseAddressFormula, ptrSz, &cbs);
         if (result.ok)
             m_doc->tree.baseAddress = result.value;
     }

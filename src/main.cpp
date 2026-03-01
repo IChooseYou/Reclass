@@ -2921,6 +2921,7 @@ void MainWindow::createScannerDock() {
         if (!ctrl) return;
         ctrl->document()->tree.baseAddress = addr;
         ctrl->document()->tree.baseAddressFormula.clear();
+        ctrl->resetChangeTracking();
         ctrl->refresh();
     });
 }
