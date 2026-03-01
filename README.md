@@ -101,7 +101,7 @@ cd Reclass
 
 The build script auto-detects your Qt install location.
 
-### Manual Build
+### Manual Build (MinGW)
 
 1. Clone with `--recurse-submodules` (or run `git submodule update --init --recursive` after cloning)
 2. Build QScintilla: `qmake` + `mingw32-make` in `third_party/qscintilla/src`
@@ -111,6 +111,10 @@ The build script auto-detects your Qt install location.
    cmake --build build
    ```
 4. Optionally run `windeployqt` on the output executable
+
+### Visual Studio 2022+
+
+The `msvc/` folder contains a ready-made solution (`Reclass.slnx`) with projects for the main application, all plugins, and third-party libraries. Requires the [Qt Visual Studio Tools](https://marketplace.visualstudio.com/items?itemName=TheQtCompany.QtVisualStudioTools2022) extension with a Qt 6 MSVC kit configured.
 
 ### Running Tests
 
