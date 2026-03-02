@@ -35,9 +35,11 @@ private slots:
     void filterProcesses(const QString& text);
 
 private:
+    void initUi();
     void enumerateProcesses();
     void populateTable(const QList<ProcessInfo>& processes);
     void applyFilter();
+    void selectPreferredProcess();
 
     Ui::ProcessPicker *ui;
     uint32_t m_selectedPid = 0;

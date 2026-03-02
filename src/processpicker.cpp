@@ -5,6 +5,10 @@
 #include <QMessageBox>
 #include <QFileInfo>
 #include <QPixmap>
+#include <QSettings>
+#include <QApplication>
+#include <QClipboard>
+#include <QMenu>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -27,22 +31,9 @@ ProcessPicker::ProcessPicker(QWidget *parent)
     , m_useCustomList(false)
 {
     ui->setupUi(this);
-    
-    // Configure table
-    ui->processTable->setColumnWidth(0, 80);   // PID column - fixed width
-    ui->processTable->setColumnWidth(1, 200);  // Name column - fixed width
-    ui->processTable->horizontalHeader()->setStretchLastSection(true);  // Path column - fills remaining space
-    ui->processTable->setWordWrap(false);  // Disable word wrap for single-line display
-    ui->processTable->setTextElideMode(Qt::ElideLeft);  // Elide from left (show end of path)
-    
-    // Connect signals
-    connect(ui->refreshButton, &QPushButton::clicked, this, &ProcessPicker::refreshProcessList);
-    connect(ui->processTable, &QTableWidget::itemDoubleClicked, this, &ProcessPicker::onProcessSelected);
-    connect(ui->filterEdit, &QLineEdit::textChanged, this, &ProcessPicker::filterProcesses);
-    connect(ui->attachButton, &QPushButton::clicked, this, &ProcessPicker::onProcessSelected);
-    
-    // Initial process enumeration
+    initUi();
     refreshProcessList();
+    selectPreferredProcess();
 }
 
 ProcessPicker::ProcessPicker(const QList<ProcessInfo>& customProcesses, QWidget *parent)
@@ -51,23 +42,102 @@ ProcessPicker::ProcessPicker(const QList<ProcessInfo>& customProcesses, QWidget 
     , m_useCustomList(true)
 {
     ui->setupUi(this);
-    
-    // Configure table
-    ui->processTable->setColumnWidth(0, 80);
-    ui->processTable->setColumnWidth(1, 200);
+    initUi();
+    ui->refreshButton->setVisible(false);
+    m_allProcesses = customProcesses;
+    applyFilter();
+    selectPreferredProcess();
+}
+
+void ProcessPicker::initUi()
+{
+    // Table configuration
+    ui->processTable->setColumnWidth(0, 80);   // PID column
+    ui->processTable->setColumnWidth(1, 200);  // Name column
     ui->processTable->horizontalHeader()->setStretchLastSection(true);
     ui->processTable->setWordWrap(false);
     ui->processTable->setTextElideMode(Qt::ElideLeft);
-    
-    // Connect signals (no refresh button for custom lists)
-    ui->refreshButton->setVisible(false);
+    ui->processTable->setShowGrid(false);
+    ui->processTable->verticalHeader()->setDefaultSectionSize(fontMetrics().height() + 6);
+
+    // Signal connections
+    connect(ui->refreshButton, &QPushButton::clicked, this, &ProcessPicker::refreshProcessList);
     connect(ui->processTable, &QTableWidget::itemDoubleClicked, this, &ProcessPicker::onProcessSelected);
     connect(ui->filterEdit, &QLineEdit::textChanged, this, &ProcessPicker::filterProcesses);
     connect(ui->attachButton, &QPushButton::clicked, this, &ProcessPicker::onProcessSelected);
-    
-    // Use custom process list
-    m_allProcesses = customProcesses;
-    applyFilter();
+
+    // Derive theme colors from the global palette (set by applyGlobalTheme)
+    QPalette pal = qApp->palette();
+    QString bg       = pal.color(QPalette::Base).name();
+    QString text     = pal.color(QPalette::Text).name();
+    QString hover    = pal.color(QPalette::Mid).name();
+    QString surface  = pal.color(QPalette::AlternateBase).name();
+    QString button   = pal.color(QPalette::Button).name();
+    QString highlight= pal.color(QPalette::Highlight).name();
+    QString border   = pal.color(QPalette::Mid).darker(120).name();
+    QString mutedText= pal.color(QPalette::Disabled, QPalette::WindowText).name();
+    QString hoverDk  = pal.color(QPalette::Mid).darker(130).name();
+
+    ui->processTable->setStyleSheet(QStringLiteral(
+        "QTableWidget { background: %1; color: %2; border: none; }"
+        "QTableWidget::item { padding: 2px 6px; border: none; }"
+        "QTableWidget::item:hover { background: %3; padding: 2px 6px; border: none; }"
+        "QTableWidget::item:selected { background: %3; color: %2; padding: 2px 6px; border: none; }")
+        .arg(bg, text, hover));
+
+    ui->processTable->horizontalHeader()->setStyleSheet(QStringLiteral(
+        "QHeaderView::section { background: %1; color: %2; border: none;"
+        "  padding: 4px 6px; text-align: left; }")
+        .arg(surface, text));
+    ui->processTable->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    ui->filterEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3; padding: 2px 4px; }"
+        "QLineEdit:focus { border-color: %4; }")
+        .arg(bg, text, border, highlight));
+
+    QString btnStyle = QStringLiteral(
+        "QPushButton { background: %1; color: %2; border: 1px solid %3; padding: 4px 12px; }"
+        "QPushButton:hover { background: %4; }"
+        "QPushButton:pressed { background: %5; }"
+        "QPushButton:disabled { color: %6; }")
+        .arg(button, text, border, hover, hoverDk, mutedText);
+    ui->refreshButton->setStyleSheet(btnStyle);
+    ui->attachButton->setStyleSheet(btnStyle);
+    ui->cancelButton->setStyleSheet(btnStyle);
+
+    // Right-click context menu
+    ui->processTable->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->processTable, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        int row = ui->processTable->rowAt(pos.y());
+        if (row < 0) return;
+        auto* pidItem  = ui->processTable->item(row, 0);
+        auto* nameItem = ui->processTable->item(row, 1);
+        auto* pathItem = ui->processTable->item(row, 2);
+        if (!pidItem || !nameItem) return;
+
+        QString pid  = QString::number(pidItem->data(Qt::EditRole).toUInt());
+        QString name = nameItem->data(Qt::UserRole).toString();
+        QString path = pathItem ? pathItem->text() : QString();
+
+        QMenu menu;
+        auto* copyPid  = menu.addAction(QStringLiteral("Copy PID"));
+        auto* copyName = menu.addAction(QStringLiteral("Copy Name"));
+        QAction* copyPath = nullptr;
+        if (!path.isEmpty())
+            copyPath = menu.addAction(QStringLiteral("Copy Path"));
+
+        auto* chosen = menu.exec(ui->processTable->viewport()->mapToGlobal(pos));
+        if (chosen == copyPid)
+            QApplication::clipboard()->setText(pid);
+        else if (chosen == copyName)
+            QApplication::clipboard()->setText(name);
+        else if (copyPath && chosen == copyPath)
+            QApplication::clipboard()->setText(path);
+    });
+
+    // Auto-focus filter for immediate typing
+    ui->filterEdit->setFocus();
 }
 
 ProcessPicker::~ProcessPicker()
@@ -97,31 +167,31 @@ void ProcessPicker::onProcessSelected()
 {
     auto* item = ui->processTable->currentItem();
     if (!item) return;
-    
+
     int row = item->row();
     m_selectedPid = ui->processTable->item(row, 0)->data(Qt::EditRole).toUInt();
     // Use original name stored in UserRole (without architecture suffix)
     QVariant origName = ui->processTable->item(row, 1)->data(Qt::UserRole);
     m_selectedName = origName.isValid() ? origName.toString()
                                         : ui->processTable->item(row, 1)->text();
-    
+
     accept();
 }
 
 void ProcessPicker::enumerateProcesses()
 {
     QList<ProcessInfo> processes;
-    
+
 #ifdef _WIN32
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
         QMessageBox::warning(this, "Error", "Failed to enumerate processes.");
         return;
     }
-    
+
     PROCESSENTRY32W pe32;
     pe32.dwSize = sizeof(PROCESSENTRY32W);
-    
+
     if (Process32FirstW(snapshot, &pe32))
     {
         do
@@ -129,10 +199,7 @@ void ProcessPicker::enumerateProcesses()
             ProcessInfo info;
             info.pid = pe32.th32ProcessID;
             info.name = QString::fromWCharArray(pe32.szExeFile);
-            
-            // Try to get full path and extract icon
-            // If we can't open a process with PROCESS_QUERY_LIMITED_INFORMATION then
-            // we for sure can't access their memory. - Skip in this case
+
             HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
             if (hProcess)
             {
@@ -143,7 +210,7 @@ void ProcessPicker::enumerateProcesses()
                     GetModuleFileNameExW(hProcess, nullptr, path, pathLen))
                 {
                     info.path = QString::fromWCharArray(path);
-                    
+
                     // Extract icon from executable
                     SHFILEINFOW sfi = {};
                     if (SHGetFileInfoW(path, 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON)) {
@@ -291,4 +358,23 @@ void ProcessPicker::applyFilter()
     }
     
     populateTable(filtered);
+}
+
+void ProcessPicker::selectPreferredProcess()
+{
+    // Try to select the last-attached process if it's in the list
+    QSettings s("Reclass", "Reclass");
+    QString lastProc = s.value("lastAttachedProcess").toString();
+    if (lastProc.isEmpty()) return;
+
+    for (int row = 0; row < ui->processTable->rowCount(); ++row) {
+        auto* nameItem = ui->processTable->item(row, 1);
+        if (!nameItem) continue;
+        QString name = nameItem->data(Qt::UserRole).toString();
+        if (name.compare(lastProc, Qt::CaseInsensitive) == 0) {
+            ui->processTable->selectRow(row);
+            ui->processTable->scrollToItem(nameItem);
+            break;
+        }
+    }
 }

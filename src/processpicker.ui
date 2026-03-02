@@ -128,22 +128,6 @@
  <resources/>
  <connections>
   <connection>
-   <sender>attachButton</sender>
-   <signal>clicked()</signal>
-   <receiver>ProcessPicker</receiver>
-   <slot>accept()</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>600</x>
-     <y>470</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>350</x>
-     <y>250</y>
-    </hint>
-   </hints>
-  </connection>
-  <connection>
    <sender>cancelButton</sender>
    <signal>clicked()</signal>
    <receiver>ProcessPicker</receiver>
