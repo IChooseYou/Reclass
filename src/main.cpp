@@ -2737,6 +2737,18 @@ void MainWindow::createWorkspaceDock() {
         }
     });
 
+    // Ctrl+F focuses the workspace search field
+    {
+        auto* findAction = new QAction(dockContainer);
+        findAction->setShortcut(QKeySequence::Find);
+        findAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        dockContainer->addAction(findAction);
+        connect(findAction, &QAction::triggered, this, [this]() {
+            m_workspaceSearch->setFocus();
+            m_workspaceSearch->selectAll();
+        });
+    }
+
     m_workspaceDock->setWidget(dockContainer);
     addDockWidget(Qt::LeftDockWidgetArea, m_workspaceDock);
     m_workspaceDock->hide();

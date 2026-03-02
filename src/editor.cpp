@@ -19,8 +19,10 @@
 #include <QClipboard>
 #include <QLabel>
 #include <QToolButton>
+#include <QLineEdit>
 #include <QScreen>
 #include <QScrollBar>
+#include <QDateTime>
 #include <functional>
 #include "themes/thememanager.h"
 
@@ -102,7 +104,8 @@ public:
         sep->setPalette(sp);
         vbox->addWidget(sep);
 
-        for (const QString& v : vals) {
+        qint64 now = QDateTime::currentMSecsSinceEpoch();
+        hist.forEachWithTime([&](const QString& v, qint64 msec) {
             auto* row = new QHBoxLayout;
             row->setContentsMargins(0, 1, 0, 1);
             row->setSpacing(8);
@@ -112,6 +115,24 @@ public:
             label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.syntaxNumber.name()));
             row->addWidget(label, 1);
             m_labels.append(label);
+
+            if (msec > 0) {
+                qint64 elapsed = now - msec;
+                QString timeStr;
+                if (elapsed < 1000)
+                    timeStr = QStringLiteral("now");
+                else if (elapsed < 60000)
+                    timeStr = QStringLiteral("%1s ago").arg(elapsed / 1000);
+                else if (elapsed < 3600000)
+                    timeStr = QStringLiteral("%1m ago").arg(elapsed / 60000);
+                else
+                    timeStr = QStringLiteral("%1h ago").arg(elapsed / 3600000);
+
+                auto* timeLabel = new QLabel(timeStr);
+                timeLabel->setFont(font);
+                timeLabel->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textDim.name()));
+                row->addWidget(timeLabel);
+            }
 
             if (showButtons) {
                 auto* setBtn = new QToolButton;
@@ -130,7 +151,7 @@ public:
                 row->addWidget(setBtn);
             }
             vbox->addLayout(row);
-        }
+        });
 
         adjustSize();
     }
@@ -380,6 +401,12 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     m_sci = new QsciScintilla(this);
     layout->addWidget(m_sci);
 
+    // Find bar (hidden by default, shown with Ctrl+F)
+    m_findBar = new QLineEdit(this);
+    m_findBar->setPlaceholderText(QStringLiteral("Find..."));
+    m_findBar->setVisible(false);
+    layout->addWidget(m_findBar);
+
     setupScintilla();
     setupLexer();
     setupMargins();
@@ -394,6 +421,27 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     m_sci->installEventFilter(this);
     m_sci->viewport()->installEventFilter(this);
     m_sci->viewport()->setMouseTracking(true);
+
+    // Find bar: live search on text change
+    connect(m_findBar, &QLineEdit::textChanged, this, [this](const QString& text) {
+        if (text.isEmpty()) return;
+        m_sci->findFirst(text, false, false, false, true, true, 0, 0);
+    });
+    // Find bar: Enter jumps to next match (wraps at end)
+    connect(m_findBar, &QLineEdit::returnPressed, this, [this]() {
+        QString text = m_findBar->text();
+        if (text.isEmpty()) return;
+        if (!m_sci->findNext())
+            m_sci->findFirst(text, false, false, false, true, true, 0, 0);
+    });
+    // Escape hides find bar
+    {
+        auto* escAction = new QAction(m_findBar);
+        escAction->setShortcut(QKeySequence(Qt::Key_Escape));
+        escAction->setShortcutContext(Qt::WidgetShortcut);
+        m_findBar->addAction(escAction);
+        connect(escAction, &QAction::triggered, this, [this]() { hideFindBar(); });
+    }
 
     // Recalculate hover when the viewport scrolls (scrollbar drag, wheel
     // deceleration, etc.) so the highlight tracks whatever is under the cursor.
@@ -781,6 +829,14 @@ void RcxEditor::applyTheme(const Theme& theme) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
                                  abs, theme.background);
         }
+    }
+
+    // Find bar
+    if (m_findBar) {
+        m_findBar->setStyleSheet(
+            QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+                            " padding: 4px 8px; font-size: 13px; }")
+                .arg(theme.backgroundAlt.name(), theme.text.name(), theme.border.name()));
     }
 }
 
@@ -1241,6 +1297,17 @@ int RcxEditor::currentNodeIndex() const {
     m_sci->getCursorPosition(&line, &col);
     auto* lm = metaForLine(line);
     return lm ? lm->nodeIdx : -1;
+}
+
+void RcxEditor::showFindBar() {
+    m_findBar->setVisible(true);
+    m_findBar->setFocus();
+    m_findBar->selectAll();
+}
+
+void RcxEditor::hideFindBar() {
+    m_findBar->setVisible(false);
+    m_sci->setFocus();
 }
 
 void RcxEditor::scrollToNodeId(uint64_t nodeId) {
@@ -1810,6 +1877,10 @@ static bool hitTestTarget(QsciScintilla* sci,
 bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
     if (obj == m_sci && event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
+        if (ke->matches(QKeySequence::Find)) {
+            showFindBar();
+            return true;
+        }
         bool handled = m_editState.active ? handleEditKey(ke) : handleNormalKey(ke);
         if (!handled && !m_editState.active) {
             // Clear hover on keyboard navigation (stale after scroll)

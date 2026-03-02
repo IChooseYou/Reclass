@@ -46,10 +46,17 @@ inline void buildProjectExplorer(QStandardItemModel* model,
     auto nameOf = [](const Node* n) {
         return n->structTypeName.isEmpty() ? n->name : n->structTypeName;
     };
+    // Sort structs by children count descending (most fields first)
+    auto cmpChildren = [&](const Entry& a, const Entry& b) {
+        int ca = a.tree->childrenOf(a.node->id).size();
+        int cb = b.tree->childrenOf(b.node->id).size();
+        if (ca != cb) return ca > cb;
+        return nameOf(a.node).compare(nameOf(b.node), Qt::CaseInsensitive) < 0;
+    };
+    std::sort(types.begin(), types.end(), cmpChildren);
     auto cmpName = [&](const Entry& a, const Entry& b) {
         return nameOf(a.node).compare(nameOf(b.node), Qt::CaseInsensitive) < 0;
     };
-    std::sort(types.begin(), types.end(), cmpName);
     std::sort(enums.begin(), enums.end(), cmpName);
 
     // Helper: type display string for a member node

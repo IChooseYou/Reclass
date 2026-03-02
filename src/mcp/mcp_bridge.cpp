@@ -256,7 +256,7 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                         "insert: {op:'insert', kind:'Hex64', name:'field', parentId:'ID', offset:0}. "
                         "change_kind: {op:'change_kind', nodeId:'ID', kind:'UInt32'}. "
                         "change_offset: {op:'change_offset', nodeId:'ID', offset:16}. "
-                        "change_base: {op:'change_base', baseAddress:'0x400000'}. "
+                        "change_base: {op:'change_base', baseAddress:'0x400000', formula:'[0x233CA80]'} — formula is optional, enables auto-resolve on provider attach. "
                         "change_struct_type: {op:'change_struct_type', nodeId:'ID', structTypeName:'Name'}. "
                         "change_class_keyword: {op:'change_class_keyword', nodeId:'ID', classKeyword:'class'}. "
                         "change_pointer_ref: {op:'change_pointer_ref', nodeId:'ID', refId:'targetID'}. "
@@ -396,6 +396,24 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // 9. node.history
+    tools.append(QJsonObject{
+        {"name", "node.history"},
+        {"description", "Returns timestamped value change history (up to 10 entries) "
+                        "for specified nodes. Requires live provider with value tracking enabled."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"nodeIds", QJsonObject{{"type", "array"},
+                    {"items", QJsonObject{{"type", "string"}}},
+                    {"description", "Array of node IDs to get history for."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index. Omit for active tab."}}}
+            }},
+            {"required", QJsonArray{"nodeIds"}}
+        }}
+    });
+
     return okReply(id, QJsonObject{{"tools", tools}});
 }
 
@@ -420,6 +438,7 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "status.set")     result = toolStatusSet(args);
     else if (toolName == "ui.action")      result = toolUiAction(args);
     else if (toolName == "tree.search")   result = toolTreeSearch(args);
+    else if (toolName == "node.history")  result = toolNodeHistory(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
     m_mainWindow->clearMcpStatus();
@@ -751,8 +770,10 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
         }
         else if (opType == "change_base") {
             uint64_t newBase = op.value("baseAddress").toString().toULongLong(nullptr, 16);
+            QString oldFormula = tree.baseAddressFormula;
+            QString newFormula = op.value("formula").toString();
             doc->undoStack.push(new RcxCommand(ctrl,
-                cmd::ChangeBase{tree.baseAddress, newBase}));
+                cmd::ChangeBase{tree.baseAddress, newBase, oldFormula, newFormula}));
             applied++;
         }
         else if (opType == "change_struct_type") {
@@ -1224,6 +1245,43 @@ QJsonObject McpBridge::toolTreeSearch(const QJsonObject& args) {
     if (!kindFilter.isEmpty()) out["kindFilter"] = kindFilter;
     return makeTextResult(QString::fromUtf8(
         QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Tool: node.history — return timestamped value history for nodes
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolNodeHistory(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab.", true);
+
+    const auto& histMap = tab->ctrl->valueHistory();
+    QJsonArray requestedIds = args.value("nodeIds").toArray();
+    if (requestedIds.isEmpty())
+        return makeTextResult("nodeIds array is required.", true);
+
+    QJsonObject result;
+    for (const auto& idVal : requestedIds) {
+        QString idStr = idVal.toString();
+        uint64_t nodeId = idStr.toULongLong();
+        auto it = histMap.find(nodeId);
+        QJsonArray entries;
+        if (it != histMap.end()) {
+            it->forEachWithTime([&](const QString& val, qint64 msec) {
+                QJsonObject entry;
+                entry.insert(QStringLiteral("value"), val);
+                entry.insert(QStringLiteral("timestamp"), msec);
+                entries.append(entry);
+            });
+        }
+        QJsonObject nodeResult;
+        nodeResult.insert(QStringLiteral("entries"), entries);
+        nodeResult.insert(QStringLiteral("heatLevel"), it != histMap.end() ? it->heatLevel() : 0);
+        nodeResult.insert(QStringLiteral("uniqueCount"), it != histMap.end() ? it->uniqueCount() : 0);
+        result.insert(idStr, nodeResult);
+    }
+    return makeTextResult(QString::fromUtf8(
+        QJsonDocument(result).toJson(QJsonDocument::Compact)));
 }
 
 // ════════════════════════════════════════════════════════════════════

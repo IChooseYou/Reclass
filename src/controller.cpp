@@ -1581,6 +1581,8 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             } else if (commonKind == NodeKind::Hex32) {
                 menu.addAction("Change to uint32_t", [this, collectIndices]() {
                     batchChangeKind(collectIndices(), NodeKind::UInt32); });
+                menu.addAction("Change to float", [this, collectIndices]() {
+                    batchChangeKind(collectIndices(), NodeKind::Float); });
                 addedQuickConvert = true;
             } else if (commonKind == NodeKind::Hex16) {
                 menu.addAction("Change to int16_t", [this, collectIndices]() {
@@ -1628,6 +1630,18 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             act->setCheckable(true);
             act->setChecked(m_trackValues);
             connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
+        }
+        {
+            auto* act = menu.addAction("Clear Value History");
+            act->setToolTip(QStringLiteral("Reset change tracking for selected nodes"));
+            connect(act, &QAction::triggered, this, [this, ids]() {
+                for (uint64_t id : ids) {
+                    m_valueHistory[id].clear();
+                    for (auto& lm : m_lastResult.meta)
+                        if (lm.nodeId == id) lm.heatLevel = 0;
+                }
+                refresh();
+            });
         }
         menu.addSeparator();
 
@@ -1723,6 +1737,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni >= 0) changeNodeKind(ni, NodeKind::UInt32);
             });
+            menu.addAction("Change to float", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) changeNodeKind(ni, NodeKind::Float);
+            });
             addedQuickConvert = true;
         } else if (node.kind == NodeKind::Hex16) {
             menu.addAction("Change to int16_t", [this, nodeId]() {
@@ -1811,6 +1829,17 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             act->setCheckable(true);
             act->setChecked(m_trackValues);
             connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
+        }
+        {
+            auto* act = menu.addAction("Clear Value History");
+            act->setToolTip(QStringLiteral("Reset change tracking for this node"));
+            act->setEnabled(m_valueHistory.contains(nodeId) && m_valueHistory[nodeId].uniqueCount() > 0);
+            connect(act, &QAction::triggered, this, [this, nodeId]() {
+                m_valueHistory[nodeId].clear();
+                for (auto& lm : m_lastResult.meta)
+                    if (lm.nodeId == nodeId) lm.heatLevel = 0;
+                refresh();
+            });
         }
         menu.addSeparator();
 
@@ -2934,7 +2963,32 @@ void RcxController::selectSource(const QString& text) {
                     m_doc->undoStack.clear();
                     m_doc->provider = std::move(provider);
                     m_doc->dataPath.clear();
-                    m_doc->tree.baseAddress = (newBase != 0) ? newBase : m_doc->tree.baseAddress;
+                    m_doc->tree.pointerSize = m_doc->provider->pointerSize();
+
+                    // Re-evaluate formula if present (mirrors attachViaPlugin)
+                    if (!m_doc->tree.baseAddressFormula.isEmpty()) {
+                        AddressParserCallbacks cbs;
+                        auto* prov = m_doc->provider.get();
+                        cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
+                            uint64_t base = prov->symbolToAddress(name);
+                            *ok = (base != 0);
+                            return base;
+                        };
+                        int ptrSz = m_doc->tree.pointerSize;
+                        cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
+                            uint64_t val = 0;
+                            *ok = prov->read(addr, &val, ptrSz);
+                            return val;
+                        };
+                        auto result = AddressParser::evaluate(
+                            m_doc->tree.baseAddressFormula, ptrSz, &cbs);
+                        if (result.ok)
+                            m_doc->tree.baseAddress = result.value;
+                    } else if (newBase != 0 && m_doc->tree.baseAddress == 0x00400000) {
+                        // Only apply provider base for fresh/default projects.
+                        // If user loaded an .rcx with a custom base, preserve it.
+                        m_doc->tree.baseAddress = newBase;
+                    }
                     resetSnapshot();
                     emit m_doc->documentChanged();
 

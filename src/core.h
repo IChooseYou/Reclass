@@ -11,6 +11,7 @@
 #include <array>
 #include <memory>
 #include <variant>
+#include <QDateTime>
 
 #include "providers/provider.h"
 #include "providers/buffer_provider.h"
@@ -500,6 +501,7 @@ struct NodeTree {
 struct ValueHistory {
     static constexpr int kCapacity = 10;
     std::array<QString, kCapacity> values;
+    std::array<qint64, kCapacity> timestamps{};  // msec since epoch
     int count = 0;   // total unique values recorded
     int head  = 0;   // next write position in ring
 
@@ -509,8 +511,14 @@ struct ValueHistory {
             if (values[last] == v) return;  // no change
         }
         values[head] = v;
+        timestamps[head] = QDateTime::currentMSecsSinceEpoch();
         head = (head + 1) % kCapacity;
         if (count < INT_MAX) count++;
+    }
+
+    void clear() {
+        count = 0;
+        head = 0;
     }
 
     int uniqueCount() const { return qMin(count, kCapacity); }
@@ -535,6 +543,17 @@ struct ValueHistory {
         int start = (head + kCapacity - n) % kCapacity;
         for (int i = 0; i < n; i++)
             fn(values[(start + i) % kCapacity]);
+    }
+
+    // Iterate with timestamps from oldest to newest
+    template<typename Fn>
+    void forEachWithTime(Fn&& fn) const {
+        int n = uniqueCount();
+        int start = (head + kCapacity - n) % kCapacity;
+        for (int i = 0; i < n; i++) {
+            int idx = (start + i) % kCapacity;
+            fn(values[idx], timestamps[idx]);
+        }
     }
 };
 

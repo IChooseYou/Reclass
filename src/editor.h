@@ -6,6 +6,7 @@
 #include <QPoint>
 #include <QHash>
 
+class QLineEdit;
 class QsciScintilla;
 class QsciLexerCPP;
 
@@ -153,6 +154,11 @@ private:
     const Provider* m_disasmProvider = nullptr;   // snapshot or real — for reading tree data
     const Provider* m_disasmRealProv = nullptr;   // real process provider — for reading code at arbitrary addresses
     const NodeTree* m_disasmTree = nullptr;
+
+    // ── Find bar ──
+    QLineEdit* m_findBar = nullptr;
+    void showFindBar();
+    void hideFindBar();
 
     // ── Reentrancy guards ──
     bool m_applyingDocument = false;
