@@ -545,13 +545,12 @@ struct ValueHistory {
             fn(values[(start + i) % kCapacity]);
     }
 
-    // Iterate with timestamps from oldest to newest
+    // Iterate with timestamps from newest to oldest
     template<typename Fn>
     void forEachWithTime(Fn&& fn) const {
         int n = uniqueCount();
-        int start = (head + kCapacity - n) % kCapacity;
         for (int i = 0; i < n; i++) {
-            int idx = (start + i) % kCapacity;
+            int idx = (head + kCapacity - 1 - i) % kCapacity;
             fn(values[idx], timestamps[idx]);
         }
     }

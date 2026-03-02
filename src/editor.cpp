@@ -385,6 +385,7 @@ static constexpr int IND_HINT_GREEN   = 15; // Green text for hint/comment text
 static constexpr int IND_LOCAL_OFF    = 16; // Dim text for inline local offset in relative mode
 static constexpr int IND_HEAT_WARM    = 17; // Heatmap level 2 (moderate changes)
 static constexpr int IND_HEAT_HOT     = 18; // Heatmap level 3 (frequent changes)
+static constexpr int IND_FIND         = 19; // Search match highlight
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -402,10 +403,27 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     layout->addWidget(m_sci);
 
     // Find bar (hidden by default, shown with Ctrl+F)
-    m_findBar = new QLineEdit(this);
+    m_findBarContainer = new QWidget(this);
+    auto* fbLayout = new QHBoxLayout(m_findBarContainer);
+    fbLayout->setContentsMargins(4, 0, 0, 0);
+    fbLayout->setSpacing(2);
+    auto* findPrevBtn = new QToolButton(m_findBarContainer);
+    findPrevBtn->setText(QStringLiteral("\u25C0"));
+    findPrevBtn->setFixedSize(24, 24);
+    auto* findNextBtn = new QToolButton(m_findBarContainer);
+    findNextBtn->setText(QStringLiteral("\u25B6"));
+    findNextBtn->setFixedSize(24, 24);
+    auto* findCloseBtn = new QToolButton(m_findBarContainer);
+    findCloseBtn->setText(QStringLiteral("\u2715"));
+    findCloseBtn->setFixedSize(24, 24);
+    m_findBar = new QLineEdit(m_findBarContainer);
     m_findBar->setPlaceholderText(QStringLiteral("Find..."));
-    m_findBar->setVisible(false);
-    layout->addWidget(m_findBar);
+    fbLayout->addWidget(findPrevBtn);
+    fbLayout->addWidget(findNextBtn);
+    fbLayout->addWidget(findCloseBtn);
+    fbLayout->addWidget(m_findBar);
+    m_findBarContainer->setVisible(false);
+    layout->addWidget(m_findBarContainer);
 
     setupScintilla();
     setupLexer();
@@ -422,18 +440,46 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     m_sci->viewport()->installEventFilter(this);
     m_sci->viewport()->setMouseTracking(true);
 
-    // Find bar: live search on text change
-    connect(m_findBar, &QLineEdit::textChanged, this, [this](const QString& text) {
-        if (text.isEmpty()) return;
-        m_sci->findFirst(text, false, false, false, true, true, 0, 0);
-    });
-    // Find bar: Enter jumps to next match (wraps at end)
-    connect(m_findBar, &QLineEdit::returnPressed, this, [this]() {
+    // Find bar: indicator-based search (selection is disabled in our Scintilla)
+    auto doFind = [this](bool forward) {
+        long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_FIND);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
+
         QString text = m_findBar->text();
         if (text.isEmpty()) return;
-        if (!m_sci->findNext())
-            m_sci->findFirst(text, false, false, false, true, true, 0, 0);
-    });
+        QByteArray needle = text.toUtf8();
+
+        long startPos = forward ? m_findPos : (m_findPos > 0 ? m_findPos - 1 : docLen);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, startPos);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND,
+                             forward ? docLen : (long)0);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEARCHFLAGS, (long)0);
+
+        long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_SEARCHINTARGET,
+                                         (uintptr_t)needle.size(), needle.constData());
+        if (pos == -1) {  // wrap
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART,
+                                 forward ? (long)0 : docLen);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND,
+                                 forward ? startPos : (long)0);
+            pos = m_sci->SendScintilla(QsciScintillaBase::SCI_SEARCHINTARGET,
+                                         (uintptr_t)needle.size(), needle.constData());
+        }
+        if (pos >= 0) {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_FIND);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, (long)needle.size());
+            int line = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_LINEFROMPOSITION, pos);
+            m_sci->ensureLineVisible(line);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, pos);
+            m_findPos = pos + (forward ? needle.size() : 0);
+        }
+    };
+    connect(m_findBar, &QLineEdit::textChanged, this, [doFind]() { doFind(true); });
+    connect(m_findBar, &QLineEdit::returnPressed, this, [doFind]() { doFind(true); });
+    connect(findNextBtn, &QToolButton::clicked, this, [doFind]() { doFind(true); });
+    connect(findPrevBtn, &QToolButton::clicked, this, [doFind]() { doFind(false); });
+    connect(findCloseBtn, &QToolButton::clicked, this, [this]() { hideFindBar(); });
     // Escape hides find bar
     {
         auto* escAction = new QAction(m_findBar);
@@ -646,6 +692,12 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_LOCAL_OFF, 17 /*INDIC_TEXTFORE*/);
 
+    // Find match highlight — thick underline (avoids box rendering artifacts)
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_FIND, 14 /*INDIC_COMPOSITIONTHICK*/);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
+                         IND_FIND, (long)1);
+
 }
 
 void RcxEditor::setupLexer() {
@@ -782,6 +834,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_HINT_GREEN, theme.indHintGreen);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_LOCAL_OFF, theme.textFaint);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_FIND, theme.borderFocused);
 
     // Lexer colors
     m_lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::Keyword);
@@ -832,11 +886,17 @@ void RcxEditor::applyTheme(const Theme& theme) {
     }
 
     // Find bar
-    if (m_findBar) {
+    if (m_findBarContainer) {
         m_findBar->setStyleSheet(
             QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
                             " padding: 4px 8px; font-size: 13px; }")
                 .arg(theme.backgroundAlt.name(), theme.text.name(), theme.border.name()));
+        m_findBarContainer->setStyleSheet(
+            QStringLiteral("QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
+                            "QToolButton:hover { background: %4; }"
+                            "QToolButton:pressed { background: %5; }")
+                .arg(theme.background.name(), theme.text.name(), theme.border.name(),
+                     theme.hover.name(), theme.backgroundAlt.name()));
     }
 }
 
@@ -919,6 +979,27 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     m_prevHoveredNodeId = 0;
     m_prevHoveredLine = -1;
     applyHoverHighlight();
+
+    // Re-apply find indicator (setText() clears all indicators)
+    if (m_findBarContainer && m_findBarContainer->isVisible()) {
+        QString needle = m_findBar->text();
+        if (!needle.isEmpty()) {
+            QByteArray nb = needle.toUtf8();
+            long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEARCHFLAGS, (long)0);
+            long pos = 0;
+            while (pos < docLen) {
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, pos);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, docLen);
+                long found = m_sci->SendScintilla(QsciScintillaBase::SCI_SEARCHINTARGET,
+                                                   (uintptr_t)nb.size(), nb.constData());
+                if (found < 0) break;
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_FIND);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, found, (long)nb.size());
+                pos = found + nb.size();
+            }
+        }
+    }
 }
 
 void RcxEditor::applyMarginText(const QVector<LineMeta>& meta) {
@@ -1300,13 +1381,18 @@ int RcxEditor::currentNodeIndex() const {
 }
 
 void RcxEditor::showFindBar() {
-    m_findBar->setVisible(true);
+    m_findBarContainer->setVisible(true);
     m_findBar->setFocus();
     m_findBar->selectAll();
+    m_findPos = 0;
 }
 
 void RcxEditor::hideFindBar() {
-    m_findBar->setVisible(false);
+    m_findBarContainer->setVisible(false);
+    long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_FIND);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
+    m_findPos = 0;
     m_sci->setFocus();
 }
 

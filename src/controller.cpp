@@ -1636,7 +1636,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             act->setToolTip(QStringLiteral("Reset change tracking for selected nodes"));
             connect(act, &QAction::triggered, this, [this, ids]() {
                 for (uint64_t id : ids) {
-                    m_valueHistory[id].clear();
+                    m_valueHistory.remove(id);
                     for (auto& lm : m_lastResult.meta)
                         if (lm.nodeId == id) lm.heatLevel = 0;
                 }
@@ -1835,7 +1835,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             act->setToolTip(QStringLiteral("Reset change tracking for this node"));
             act->setEnabled(m_valueHistory.contains(nodeId) && m_valueHistory[nodeId].uniqueCount() > 0);
             connect(act, &QAction::triggered, this, [this, nodeId]() {
-                m_valueHistory[nodeId].clear();
+                m_valueHistory.remove(nodeId);
                 for (auto& lm : m_lastResult.meta)
                     if (lm.nodeId == nodeId) lm.heatLevel = 0;
                 refresh();

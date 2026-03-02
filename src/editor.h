@@ -156,7 +156,9 @@ private:
     const NodeTree* m_disasmTree = nullptr;
 
     // ── Find bar ──
+    QWidget*   m_findBarContainer = nullptr;
     QLineEdit* m_findBar = nullptr;
+    long       m_findPos = 0;
     void showFindBar();
     void hideFindBar();
 

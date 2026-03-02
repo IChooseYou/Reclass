@@ -351,7 +351,7 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
     pal.setColor(QPalette::Text,            theme.text);
     pal.setColor(QPalette::Button,          theme.button);
     pal.setColor(QPalette::ButtonText,      theme.text);
-    pal.setColor(QPalette::Highlight,       theme.selection);
+    pal.setColor(QPalette::Highlight,       theme.hover);
     pal.setColor(QPalette::HighlightedText, theme.text);
     pal.setColor(QPalette::ToolTipBase,     theme.backgroundAlt);
     pal.setColor(QPalette::ToolTipText,     theme.text);
@@ -1072,28 +1072,53 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     setupRenderedSci(pane.rendered);
     rvLayout->addWidget(pane.rendered);
 
-    // Find bar (hidden by default)
+    // Find bar with prev/next buttons (hidden by default)
+    pane.findContainer = new QWidget;
+    auto* fcLayout = new QHBoxLayout(pane.findContainer);
+    fcLayout->setContentsMargins(4, 0, 0, 0);
+    fcLayout->setSpacing(2);
+    const auto& fbTheme = ThemeManager::instance().current();
+    auto* ccPrevBtn = new QToolButton;
+    ccPrevBtn->setText(QStringLiteral("\u25C0"));
+    ccPrevBtn->setFixedSize(24, 24);
+    auto* ccNextBtn = new QToolButton;
+    ccNextBtn->setText(QStringLiteral("\u25B6"));
+    ccNextBtn->setFixedSize(24, 24);
+    auto* ccCloseBtn = new QToolButton;
+    ccCloseBtn->setText(QStringLiteral("\u2715"));
+    ccCloseBtn->setFixedSize(24, 24);
+    QString btnCss = QStringLiteral(
+        "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
+        "QToolButton:hover { background: %4; }"
+        "QToolButton:pressed { background: %5; }")
+            .arg(fbTheme.background.name(), fbTheme.text.name(), fbTheme.border.name(),
+                 fbTheme.hover.name(), fbTheme.backgroundAlt.name());
+    ccPrevBtn->setStyleSheet(btnCss);
+    ccNextBtn->setStyleSheet(btnCss);
+    ccCloseBtn->setStyleSheet(btnCss);
     pane.findBar = new QLineEdit;
     pane.findBar->setPlaceholderText("Find...");
-    pane.findBar->setVisible(false);
-    const auto& fbTheme = ThemeManager::instance().current();
     pane.findBar->setStyleSheet(
         QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
                         " padding: 4px 8px; font-size: 13px; }")
-            .arg(fbTheme.backgroundAlt.name())
-            .arg(fbTheme.text.name())
-            .arg(fbTheme.border.name()));
-    rvLayout->addWidget(pane.findBar);
+            .arg(fbTheme.backgroundAlt.name(), fbTheme.text.name(), fbTheme.border.name()));
+    fcLayout->addWidget(ccPrevBtn);
+    fcLayout->addWidget(ccNextBtn);
+    fcLayout->addWidget(ccCloseBtn);
+    fcLayout->addWidget(pane.findBar);
+    pane.findContainer->setVisible(false);
+    rvLayout->addWidget(pane.findContainer);
 
     // Ctrl+F to show find bar
     QsciScintilla* sci = pane.rendered;
     QLineEdit* fb = pane.findBar;
+    QWidget* fc = pane.findContainer;
     auto* findAction = new QAction(pane.renderedContainer);
     findAction->setShortcut(QKeySequence::Find);
     findAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
     pane.renderedContainer->addAction(findAction);
-    connect(findAction, &QAction::triggered, fb, [fb, sci]() {
-        fb->setVisible(true);
+    connect(findAction, &QAction::triggered, fb, [fb, fc]() {
+        fc->setVisible(true);
         fb->setFocus();
         fb->selectAll();
     });
@@ -1103,8 +1128,8 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     escAction->setShortcut(QKeySequence(Qt::Key_Escape));
     escAction->setShortcutContext(Qt::WidgetShortcut);
     fb->addAction(escAction);
-    connect(escAction, &QAction::triggered, fb, [fb, sci]() {
-        fb->setVisible(false);
+    connect(escAction, &QAction::triggered, fb, [fc, sci]() {
+        fc->setVisible(false);
         sci->setFocus();
     });
 
@@ -1118,6 +1143,21 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         if (text.isEmpty()) return;
         if (!sci->findNext())
             sci->findFirst(text, false, false, false, true, true, 0, 0);
+    });
+    connect(ccNextBtn, &QToolButton::clicked, sci, [sci, fb]() {
+        if (!sci->findNext())
+            sci->findFirst(fb->text(), false, false, false, true, true, 0, 0);
+    });
+    connect(ccPrevBtn, &QToolButton::clicked, sci, [sci, fb]() {
+        QString text = fb->text();
+        if (text.isEmpty()) return;
+        int line, col;
+        sci->getCursorPosition(&line, &col);
+        sci->findFirst(text, false, false, false, true, false, line, col);
+    });
+    connect(ccCloseBtn, &QToolButton::clicked, sci, [fc, sci]() {
+        fc->setVisible(false);
+        sci->setFocus();
     });
 
     pane.tabWidget->addTab(pane.renderedContainer, "C/C++");     // index 1

@@ -101,6 +101,7 @@ private:
         RcxEditor*     editor    = nullptr;
         QsciScintilla* rendered  = nullptr;
         QLineEdit*     findBar   = nullptr;
+        QWidget*       findContainer = nullptr;
         QWidget*       renderedContainer = nullptr;
         ViewMode       viewMode  = VM_Reclass;
         uint64_t       lastRenderedRootId = 0;
