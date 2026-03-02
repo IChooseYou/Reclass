@@ -113,6 +113,8 @@ add_executable(Reclass
     src/optionsdialog.cpp
     src/titlebar.h
     src/titlebar.cpp
+    src/macos_titlebar.h
+    $<$<PLATFORM_ID:Darwin>:src/macos_titlebar.mm>
     src/mcp/mcp_bridge.h
     src/mcp/mcp_bridge.cpp
     src/addressparser.h
@@ -123,6 +125,16 @@ add_executable(Reclass
     third_party/fadec/format.c
     $<$<PLATFORM_ID:Windows>:src/app.rc>
 )
+
+if(APPLE)
+    set_target_properties(Reclass PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_ICON_FILE "class.icns"
+    )
+    target_sources(Reclass PRIVATE src/icons/class.icns)
+    set_source_files_properties(src/icons/class.icns
+        PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+endif()
 
 target_include_directories(Reclass PRIVATE src third_party/fadec)
 
@@ -150,6 +162,12 @@ foreach(_tf ${_theme_files})
     configure_file(${_tf} "${CMAKE_BINARY_DIR}/themes/${_name}" COPYONLY)
 endforeach()
 
+if(APPLE)
+    target_sources(Reclass PRIVATE ${_theme_files})
+    set_source_files_properties(${_theme_files}
+        PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/themes")
+endif()
+
 # Copy example .rcx files to build directory
 file(GLOB _example_files "${CMAKE_SOURCE_DIR}/src/examples/*.rcx")
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
@@ -157,6 +175,12 @@ foreach(_ef ${_example_files})
     get_filename_component(_name ${_ef} NAME)
     configure_file(${_ef} "${CMAKE_BINARY_DIR}/examples/${_name}" COPYONLY)
 endforeach()
+
+if(APPLE)
+    target_sources(Reclass PRIVATE ${_example_files})
+    set_source_files_properties(${_example_files}
+        PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/examples")
+endif()
 
 include(deploy)
 
@@ -298,178 +322,178 @@ if(BUILD_TESTING)
     option(BUILD_UI_TESTS "Build tests that require a display (Qt Widgets)" ON)
     if(BUILD_UI_TESTS)
 
-    add_executable(test_controller tests/test_controller.cpp
+        add_executable(test_controller tests/test_controller.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_controller PRIVATE src third_party/fadec)
-    target_link_libraries(test_controller PRIVATE
+        target_include_directories(test_controller PRIVATE src third_party/fadec)
+        target_link_libraries(test_controller PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_controller PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_controller COMMAND test_controller)
+        if(WIN32)
+            target_link_libraries(test_controller PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_controller COMMAND test_controller)
 
-    add_executable(test_validation tests/test_validation.cpp
+        add_executable(test_validation tests/test_validation.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_validation PRIVATE src third_party/fadec)
-    target_link_libraries(test_validation PRIVATE
+        target_include_directories(test_validation PRIVATE src third_party/fadec)
+        target_link_libraries(test_validation PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_validation PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_validation COMMAND test_validation)
+        if(WIN32)
+            target_link_libraries(test_validation PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_validation COMMAND test_validation)
 
-    add_executable(test_context_menu tests/test_context_menu.cpp
+        add_executable(test_context_menu tests/test_context_menu.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_context_menu PRIVATE src third_party/fadec)
-    target_link_libraries(test_context_menu PRIVATE
+        target_include_directories(test_context_menu PRIVATE src third_party/fadec)
+        target_link_libraries(test_context_menu PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_context_menu PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_context_menu COMMAND test_context_menu)
+        if(WIN32)
+            target_link_libraries(test_context_menu PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_context_menu COMMAND test_context_menu)
 
-    add_executable(test_source_management tests/test_source_management.cpp
+        add_executable(test_source_management tests/test_source_management.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_source_management PRIVATE src third_party/fadec)
-    target_link_libraries(test_source_management PRIVATE
+        target_include_directories(test_source_management PRIVATE src third_party/fadec)
+        target_link_libraries(test_source_management PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_source_management PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_source_management COMMAND test_source_management)
+        if(WIN32)
+            target_link_libraries(test_source_management PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_source_management COMMAND test_source_management)
 
-    add_executable(test_editor tests/test_editor.cpp
+        add_executable(test_editor tests/test_editor.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
         src/providerregistry.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_editor PRIVATE src third_party/fadec)
-    target_link_libraries(test_editor PRIVATE
+        target_include_directories(test_editor PRIVATE src third_party/fadec)
+        target_link_libraries(test_editor PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test
         QScintilla::QScintilla)
-    add_test(NAME test_editor COMMAND test_editor)
+        add_test(NAME test_editor COMMAND test_editor)
 
-    add_executable(test_rendered_view tests/test_rendered_view.cpp
+        add_executable(test_rendered_view tests/test_rendered_view.cpp
         src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp)
-    target_include_directories(test_rendered_view PRIVATE src)
-    target_link_libraries(test_rendered_view PRIVATE
+        target_include_directories(test_rendered_view PRIVATE src)
+        target_link_libraries(test_rendered_view PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test
         QScintilla::QScintilla)
-    add_test(NAME test_rendered_view COMMAND test_rendered_view)
+        add_test(NAME test_rendered_view COMMAND test_rendered_view)
 
-    add_executable(test_new_features tests/test_new_features.cpp
+        add_executable(test_new_features tests/test_new_features.cpp
         src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/editor.cpp src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_new_features PRIVATE src third_party/fadec)
-    target_link_libraries(test_new_features PRIVATE
+        target_include_directories(test_new_features PRIVATE src third_party/fadec)
+        target_link_libraries(test_new_features PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_new_features PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_new_features COMMAND test_new_features)
+        if(WIN32)
+            target_link_libraries(test_new_features PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_new_features COMMAND test_new_features)
 
-    add_executable(test_type_selector tests/test_type_selector.cpp
+        add_executable(test_type_selector tests/test_type_selector.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_type_selector PRIVATE src third_party/fadec)
-    target_link_libraries(test_type_selector PRIVATE
+        target_include_directories(test_type_selector PRIVATE src third_party/fadec)
+        target_link_libraries(test_type_selector PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_type_selector PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_type_selector COMMAND test_type_selector)
+        if(WIN32)
+            target_link_libraries(test_type_selector PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_type_selector COMMAND test_type_selector)
 
-    add_executable(test_type_visibility tests/test_type_visibility.cpp
+        add_executable(test_type_visibility tests/test_type_visibility.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(test_type_visibility PRIVATE src third_party/fadec)
-    target_link_libraries(test_type_visibility PRIVATE
+        target_include_directories(test_type_visibility PRIVATE src third_party/fadec)
+        target_link_libraries(test_type_visibility PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_type_visibility PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_type_visibility COMMAND test_type_visibility)
+        if(WIN32)
+            target_link_libraries(test_type_visibility PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_type_visibility COMMAND test_type_visibility)
 
-    add_executable(test_options_dialog tests/test_options_dialog.cpp
+        add_executable(test_options_dialog tests/test_options_dialog.cpp
         src/optionsdialog.cpp src/themes/theme.cpp src/themes/thememanager.cpp)
-    target_include_directories(test_options_dialog PRIVATE src)
-    target_link_libraries(test_options_dialog PRIVATE ${QT}::Widgets ${QT}::Test)
-    add_test(NAME test_options_dialog COMMAND test_options_dialog)
+        target_include_directories(test_options_dialog PRIVATE src)
+        target_link_libraries(test_options_dialog PRIVATE ${QT}::Widgets ${QT}::Test)
+        add_test(NAME test_options_dialog COMMAND test_options_dialog)
 
-    add_executable(test_source_provider tests/test_source_provider.cpp
+        add_executable(test_source_provider tests/test_source_provider.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
         src/resources.qrc)
-    target_include_directories(test_source_provider PRIVATE src third_party/fadec)
-    target_link_libraries(test_source_provider PRIVATE
+        target_include_directories(test_source_provider PRIVATE src third_party/fadec)
+        target_link_libraries(test_source_provider PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(test_source_provider PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME test_source_provider COMMAND test_source_provider)
+        if(WIN32)
+            target_link_libraries(test_source_provider PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_source_provider COMMAND test_source_provider)
 
-    add_executable(test_scanner_ui tests/test_scanner_ui.cpp
+        add_executable(test_scanner_ui tests/test_scanner_ui.cpp
         src/scanner.cpp src/scannerpanel.cpp src/addressparser.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp)
-    target_include_directories(test_scanner_ui PRIVATE src)
-    target_link_libraries(test_scanner_ui PRIVATE
+        target_include_directories(test_scanner_ui PRIVATE src)
+        target_link_libraries(test_scanner_ui PRIVATE
         ${QT}::Widgets ${QT}::Concurrent ${QT}::Test)
-    add_test(NAME test_scanner_ui COMMAND test_scanner_ui)
+        add_test(NAME test_scanner_ui COMMAND test_scanner_ui)
 
-    if(WIN32)
-        add_executable(test_windbg_provider tests/test_windbg_provider.cpp
+        if(WIN32)
+            add_executable(test_windbg_provider tests/test_windbg_provider.cpp
             plugins/WinDbgMemory/WinDbgMemoryPlugin.cpp
             src/scanner.cpp)
-        target_include_directories(test_windbg_provider PRIVATE src plugins/WinDbgMemory)
-        target_link_libraries(test_windbg_provider PRIVATE
+            target_include_directories(test_windbg_provider PRIVATE src plugins/WinDbgMemory)
+            target_link_libraries(test_windbg_provider PRIVATE
             ${QT}::Widgets ${QT}::Concurrent ${QT}::Test dbgeng ole32)
-        add_test(NAME test_windbg_provider COMMAND test_windbg_provider)
-    endif()
+            add_test(NAME test_windbg_provider COMMAND test_windbg_provider)
+        endif()
 
-    add_executable(bench_large_class tests/bench_large_class.cpp
+        add_executable(bench_large_class tests/bench_large_class.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
         src/providerregistry.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-    target_include_directories(bench_large_class PRIVATE src third_party/fadec)
-    target_link_libraries(bench_large_class PRIVATE
+        target_include_directories(bench_large_class PRIVATE src third_party/fadec)
+        target_link_libraries(bench_large_class PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
         QScintilla::QScintilla)
-    if(WIN32)
-        target_link_libraries(bench_large_class PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-    endif()
-    add_test(NAME bench_large_class COMMAND bench_large_class)
+        if(WIN32)
+            target_link_libraries(bench_large_class PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME bench_large_class COMMAND bench_large_class)
 
-    # Deploy Qt runtime DLLs for tests (run windeployqt on a representative test exe
-    # that links the broadest set of Qt modules; all test exes share the same output dir)
-    if(TARGET ${QT}::windeployqt)
-        add_custom_target(deploy_tests ALL
+        # Deploy Qt runtime DLLs for tests (run windeployqt on a representative test exe
+        # that links the broadest set of Qt modules; all test exes share the same output dir)
+        if(TARGET ${QT}::windeployqt)
+            add_custom_target(deploy_tests ALL
             COMMAND $<TARGET_FILE:${QT}::windeployqt>
                 --no-compiler-runtime --no-translations
                 --no-opengl-sw --no-system-d3d-compiler
@@ -477,12 +501,14 @@ if(BUILD_TESTING)
             DEPENDS test_controller
             COMMENT "Deploying Qt runtime DLLs for tests..."
         )
-    endif()
+        endif()
 
     endif() # BUILD_UI_TESTS
 endif()
-add_subdirectory(plugins/ProcessMemory)
-add_subdirectory(plugins/RemoteProcessMemory)
+if(NOT APPLE)
+    add_subdirectory(plugins/ProcessMemory)
+    add_subdirectory(plugins/RemoteProcessMemory)
+endif()
 if(WIN32)
     add_subdirectory(plugins/WinDbgMemory)
     add_subdirectory(plugins/RcNetPluginCompatLayer)

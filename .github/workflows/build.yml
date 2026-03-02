@@ -3,7 +3,7 @@ name: Build
 on:
   push:
     branches:
-      - '**'
+      - "**"
   pull_request:
     branches: [main]
 
@@ -22,9 +22,9 @@ jobs:
       - name: Install Qt6 and MinGW
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.8.1'
-          arch: 'win64_mingw'
-          tools: 'tools_mingw1310,qt.tools.win64_mingw1310'
+          version: "6.8.1"
+          arch: "win64_mingw"
+          tools: "tools_mingw1310,qt.tools.win64_mingw1310"
           cache: true
 
       - name: Configure
@@ -84,7 +84,7 @@ jobs:
       - name: Install Qt6
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.8.1'
+          version: "6.8.1"
           cache: true
 
       - name: Install dependencies
@@ -141,9 +141,66 @@ jobs:
           name: Reclass-linux64-qt6
           path: Reclass-linux64-qt6.AppImage
 
+  macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            qt_arch: clang_arm64
+            artifact_name: Reclass-macos-arm64-qt6
+            zip_name: Reclass-macos-arm64-qt6.zip
+          - os: macos-15-intel
+            qt_arch: clang_64
+            artifact_name: Reclass-macos-x86_64-qt6
+            zip_name: Reclass-macos-x86_64-qt6.zip
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install cmake ninja qt
+
+      - name: Configure Qt paths
+        run: |
+          QT_PREFIX="$(brew --prefix qt)"
+          echo "QT_PREFIX=$QT_PREFIX" >> "$GITHUB_ENV"
+          echo "PATH=$QT_PREFIX/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_UI_TESTS=OFF -DCMAKE_PREFIX_PATH="$QT_PREFIX"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package app zip
+        run: |
+          MACDEPLOYQT_BIN="$QT_PREFIX/bin/macdeployqt"
+          if [ ! -x "$MACDEPLOYQT_BIN" ]; then
+            MACDEPLOYQT_BIN=$(which macdeployqt 2>/dev/null || find "$RUNNER_WORKSPACE" -name macdeployqt -path "*/bin/*" | head -1)
+          fi
+          echo "Found macdeployqt at: $MACDEPLOYQT_BIN"
+          "$MACDEPLOYQT_BIN" build/Reclass.app -always-overwrite
+          codesign --force --deep --sign - build/Reclass.app
+          ditto -c -k --sequesterRsrc --keepParent build/Reclass.app "${{ matrix.zip_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.zip_name }}
+
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [windows, linux]
+    needs: [windows, linux, macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -168,5 +225,7 @@ jobs:
           files: |
             artifacts/Reclass-win64-qt6/Reclass-win64-qt6.zip
             artifacts/Reclass-linux64-qt6/Reclass-linux64-qt6.AppImage
+            artifacts/Reclass-macos-arm64-qt6/Reclass-macos-arm64-qt6.zip
+            artifacts/Reclass-macos-x86_64-qt6/Reclass-macos-x86_64-qt6.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
