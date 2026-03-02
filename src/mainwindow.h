@@ -92,7 +92,9 @@ private:
     PluginManager   m_pluginManager;
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
+    QAction*        m_removeSplitAction = nullptr;
     QMenu*          m_sourceMenu = nullptr;
+    QMenu*          m_recentFilesMenu = nullptr;
 
     struct SplitPane {
         QTabWidget*    tabWidget = nullptr;
@@ -119,6 +121,8 @@ private:
     void createStatusBar();
     void showPluginsDialog();
     void populateSourceMenu();
+    void addRecentFile(const QString& path);
+    void updateRecentFilesMenu();
     QIcon makeIcon(const QString& svgPath);
 
     RcxController* activeController() const;

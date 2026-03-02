@@ -514,6 +514,8 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(file, "New &Struct", QKeySequence(Qt::CTRL | Qt::Key_T), QIcon(), this, &MainWindow::newStruct);
     Qt5Qt6AddAction(file, "New &Enum",   QKeySequence(Qt::CTRL | Qt::Key_E), QIcon(), this, &MainWindow::newEnum);
     Qt5Qt6AddAction(file, "&Open...", QKeySequence::Open, makeIcon(":/vsicons/folder-opened.svg"), this, &MainWindow::openFile);
+    m_recentFilesMenu = file->addMenu("Recent &Files");
+    updateRecentFilesMenu();
     file->addSeparator();
     Qt5Qt6AddAction(file, "&Save", QKeySequence::Save, makeIcon(":/vsicons/save.svg"), this, &MainWindow::saveFile);
     Qt5Qt6AddAction(file, "Save &As...", QKeySequence::SaveAs, makeIcon(":/vsicons/save-as.svg"), this, &MainWindow::saveFileAs);
@@ -550,8 +552,13 @@ void MainWindow::createMenus() {
     // View
     auto* view = m_titleBar->menuBar()->addMenu("&View");
     Qt5Qt6AddAction(view, "Split &Horizontal", QKeySequence::UnknownKey, makeIcon(":/vsicons/split-horizontal.svg"), this, &MainWindow::splitView);
-    Qt5Qt6AddAction(view, "&Remove Split", QKeySequence::UnknownKey, makeIcon(":/vsicons/chrome-close.svg"), this, &MainWindow::unsplitView);
+    m_removeSplitAction = Qt5Qt6AddAction(view, "&Remove Split", QKeySequence::UnknownKey, makeIcon(":/vsicons/chrome-close.svg"), this, &MainWindow::unsplitView);
+    m_removeSplitAction->setVisible(false);
     view->addSeparator();
+    connect(view, &QMenu::aboutToShow, this, [this]() {
+        auto* tab = activeTab();
+        m_removeSplitAction->setVisible(tab && tab->panes.size() > 1);
+    });
     m_sourceMenu = view->addMenu("&Data Source");
     connect(m_sourceMenu, &QMenu::aboutToShow, this, &MainWindow::populateSourceMenu);
     view->addSeparator();
@@ -1342,52 +1349,6 @@ static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QStri
             tree.addNode(e);
         }
 
-        // ── Example class with a union: _SAMPLE_OBJECT ──
-        {
-            Node cls;
-            cls.kind = NodeKind::Struct;
-            cls.name = QStringLiteral("sample");
-            cls.structTypeName = QStringLiteral("_SAMPLE_OBJECT");
-            cls.classKeyword = QStringLiteral("class");
-            cls.parentId = 0;
-            cls.offset = 0;
-            int ci = tree.addNode(cls);
-            uint64_t clsId = tree.nodes[ci].id;
-
-            // Field: uint32_t Type at offset 0
-            { Node n; n.kind = NodeKind::UInt32; n.name = QStringLiteral("Type");
-              n.parentId = clsId; n.offset = 0; tree.addNode(n); }
-            // Field: uint32_t Size at offset 4
-            { Node n; n.kind = NodeKind::UInt32; n.name = QStringLiteral("Size");
-              n.parentId = clsId; n.offset = 4; tree.addNode(n); }
-
-            // Union at offset 8
-            {
-                Node u;
-                u.kind = NodeKind::Struct;
-                u.name = QStringLiteral("Data");
-                u.structTypeName = QStringLiteral("Data");
-                u.classKeyword = QStringLiteral("union");
-                u.parentId = clsId;
-                u.offset = 8;
-                int ui = tree.addNode(u);
-                uint64_t uId = tree.nodes[ui].id;
-
-                // Union member: uint64_t AsLong
-                { Node n; n.kind = NodeKind::UInt64; n.name = QStringLiteral("AsLong");
-                  n.parentId = uId; n.offset = 0; tree.addNode(n); }
-                // Union member: void* AsPointer
-                { Node n; n.kind = NodeKind::Pointer64; n.name = QStringLiteral("AsPointer");
-                  n.parentId = uId; n.offset = 0; n.collapsed = true; tree.addNode(n); }
-                // Union member: float[2] AsFloat2
-                { Node n; n.kind = NodeKind::Vec2; n.name = QStringLiteral("AsFloat2");
-                  n.parentId = uId; n.offset = 0; tree.addNode(n); }
-            }
-
-            // Field: void* Next at offset 16
-            { Node n; n.kind = NodeKind::Pointer64; n.name = QStringLiteral("Next");
-              n.parentId = clsId; n.offset = 16; n.collapsed = true; tree.addNode(n); }
-        }
     }
 }
 
@@ -1516,57 +1477,11 @@ static void buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
         tree.addNode(e);
     }
 
-    // ── Example class with a union: _SAMPLE_OBJECT ──
-    {
-        Node cls;
-        cls.kind = NodeKind::Struct;
-        cls.name = QStringLiteral("sample");
-        cls.structTypeName = QStringLiteral("_SAMPLE_OBJECT");
-        cls.classKeyword = QStringLiteral("class");
-        cls.parentId = 0;
-        cls.offset = 0;
-        int ci = tree.addNode(cls);
-        uint64_t clsId = tree.nodes[ci].id;
-
-        // Field: uint32_t Type at offset 0
-        { Node n; n.kind = NodeKind::UInt32; n.name = QStringLiteral("Type");
-          n.parentId = clsId; n.offset = 0; tree.addNode(n); }
-        // Field: uint32_t Size at offset 4
-        { Node n; n.kind = NodeKind::UInt32; n.name = QStringLiteral("Size");
-          n.parentId = clsId; n.offset = 4; tree.addNode(n); }
-
-        // Union at offset 8
-        {
-            Node u;
-            u.kind = NodeKind::Struct;
-            u.name = QStringLiteral("Data");
-            u.structTypeName = QStringLiteral("Data");
-            u.classKeyword = QStringLiteral("union");
-            u.parentId = clsId;
-            u.offset = 8;
-            int ui = tree.addNode(u);
-            uint64_t uId = tree.nodes[ui].id;
-
-            // Union member: uint64_t AsLong
-            { Node n; n.kind = NodeKind::UInt64; n.name = QStringLiteral("AsLong");
-              n.parentId = uId; n.offset = 0; tree.addNode(n); }
-            // Union member: void* AsPointer
-            { Node n; n.kind = NodeKind::Pointer64; n.name = QStringLiteral("AsPointer");
-              n.parentId = uId; n.offset = 0; n.collapsed = true; tree.addNode(n); }
-            // Union member: float[2] AsFloat2
-            { Node n; n.kind = NodeKind::Vec2; n.name = QStringLiteral("AsFloat2");
-              n.parentId = uId; n.offset = 0; tree.addNode(n); }
-        }
-
-        // Field: void* Next at offset 16
-        { Node n; n.kind = NodeKind::Pointer64; n.name = QStringLiteral("Next");
-          n.parentId = clsId; n.offset = 16; n.collapsed = true; tree.addNode(n); }
-    }
 }
 
 void MainWindow::selfTest() {
 #ifdef Q_OS_WIN
-    // Create a new project, then point it at the live editor object
+    // Tab 2: Editor demo with live process memory (created first)
     project_new();
 
     auto* ctrl = activeController();
@@ -1583,8 +1498,14 @@ void MainWindow::selfTest() {
     QString target = QString("%1:Reclass.exe").arg(pid);
 
     ctrl->attachViaPlugin(QStringLiteral("processmemory"), target);
+
+    // Tab 1: Empty class for user work (created second, becomes active)
+    auto* userTab = project_new(QStringLiteral("class"));
+    m_mdiArea->setActiveSubWindow(userTab);
 #else
     project_new();
+    auto* userTab = project_new(QStringLiteral("class"));
+    m_mdiArea->setActiveSubWindow(userTab);
 #endif
 }
 
@@ -2566,6 +2487,7 @@ QMdiSubWindow* MainWindow::project_open(const QString& path) {
             if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
         setAppStatus(QStringLiteral("Imported %1 classes from %2")
             .arg(classCount).arg(QFileInfo(filePath).fileName()));
+        addRecentFile(filePath);
         return sub;
     }
 
@@ -2582,6 +2504,7 @@ QMdiSubWindow* MainWindow::project_open(const QString& path) {
     auto* sub = createTab(doc);
     rebuildWorkspaceModel();
     m_workspaceDock->show();
+    addRecentFile(filePath);
     return sub;
 }
 
@@ -2595,8 +2518,10 @@ bool MainWindow::project_save(QMdiSubWindow* sub, bool saveAs) {
             "Save Definition", {}, "Reclass (*.rcx);;JSON (*.json)");
         if (path.isEmpty()) return false;
         tab.doc->save(path);
+        addRecentFile(path);
     } else {
         tab.doc->save(tab.doc->filePath);
+        addRecentFile(tab.doc->filePath);
     }
     updateWindowTitle();
     return true;
@@ -2965,6 +2890,43 @@ void MainWindow::rebuildWorkspaceModel() {
     }
     rcx::buildProjectExplorer(m_workspaceModel, tabs);
     m_workspaceTree->expandToDepth(0);
+}
+
+void MainWindow::addRecentFile(const QString& path) {
+    if (path.isEmpty()) return;
+    QString absPath = QFileInfo(path).absoluteFilePath();
+
+    QSettings s("Reclass", "Reclass");
+    QStringList recent = s.value("recentFiles").toStringList();
+    recent.removeAll(absPath);
+    recent.prepend(absPath);
+    while (recent.size() > 10)
+        recent.removeLast();
+    s.setValue("recentFiles", recent);
+
+    updateRecentFilesMenu();
+}
+
+void MainWindow::updateRecentFilesMenu() {
+    if (!m_recentFilesMenu) return;
+    m_recentFilesMenu->clear();
+
+    QSettings s("Reclass", "Reclass");
+    QStringList recent = s.value("recentFiles").toStringList();
+
+    int added = 0;
+    for (const QString& path : recent) {
+        if (!QFile::exists(path)) continue;
+        QString label = QStringLiteral("&%1  %2").arg(added + 1).arg(QFileInfo(path).fileName());
+        m_recentFilesMenu->addAction(label, this, [this, path]() {
+            project_open(path);
+        })->setToolTip(path);
+        if (++added >= 10) break;
+    }
+    if (added == 0) {
+        auto* empty = m_recentFilesMenu->addAction(QStringLiteral("(empty)"));
+        empty->setEnabled(false);
+    }
 }
 
 void MainWindow::populateSourceMenu() {
