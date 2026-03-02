@@ -1637,9 +1637,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             connect(act, &QAction::triggered, this, [this, ids]() {
                 for (uint64_t id : ids) {
                     m_valueHistory.remove(id);
-                    for (auto& lm : m_lastResult.meta)
-                        if (lm.nodeId == id) lm.heatLevel = 0;
+                    for (int ci : m_doc->tree.subtreeIndices(id))
+                        m_valueHistory.remove(m_doc->tree.nodes[ci].id);
                 }
+                for (auto& lm : m_lastResult.meta)
+                    if (!m_valueHistory.contains(lm.nodeId)) lm.heatLevel = 0;
                 refresh();
             });
         }
@@ -1833,11 +1835,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         {
             auto* act = menu.addAction("Clear Value History");
             act->setToolTip(QStringLiteral("Reset change tracking for this node"));
-            act->setEnabled(m_valueHistory.contains(nodeId) && m_valueHistory[nodeId].uniqueCount() > 0);
             connect(act, &QAction::triggered, this, [this, nodeId]() {
                 m_valueHistory.remove(nodeId);
+                for (int ci : m_doc->tree.subtreeIndices(nodeId))
+                    m_valueHistory.remove(m_doc->tree.nodes[ci].id);
                 for (auto& lm : m_lastResult.meta)
-                    if (lm.nodeId == nodeId) lm.heatLevel = 0;
+                    if (!m_valueHistory.contains(lm.nodeId)) lm.heatLevel = 0;
                 refresh();
             });
         }
@@ -2090,6 +2093,23 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
     menu.addAction(icon("clippy.svg"), "Copy All as Text", [editor]() {
         QApplication::clipboard()->setText(editor->textWithMargins());
+    });
+    menu.addAction(icon("clippy.svg"), "Copy Line", [editor, line]() {
+        auto* sci = editor->scintilla();
+        int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
+        if (len > 0) {
+            QByteArray buf(len + 1, '\0');
+            sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)line, (void*)buf.data());
+            QString text = QString::fromUtf8(buf.data(), len).trimmed();
+            if (!text.isEmpty())
+                QApplication::clipboard()->setText(text);
+        }
+    });
+
+    menu.addSeparator();
+
+    menu.addAction(icon("search.svg"), "Search...", [editor]() {
+        editor->showFindBar();
     });
 
     menu.exec(globalPos);

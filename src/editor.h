@@ -33,6 +33,7 @@ public:
     const LineMeta* metaForLine(int line) const;
     int currentNodeIndex() const;
     void scrollToNodeId(uint64_t nodeId);
+    void showFindBar();
 
     // ── Column span computation ──
     static ColumnSpan typeSpan(const LineMeta& lm, int typeW = kColType);
@@ -159,7 +160,6 @@ private:
     QWidget*   m_findBarContainer = nullptr;
     QLineEdit* m_findBar = nullptr;
     long       m_findPos = 0;
-    void showFindBar();
     void hideFindBar();
 
     // ── Reentrancy guards ──
