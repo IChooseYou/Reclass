@@ -3202,6 +3202,9 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(crashHandler);
 #endif
+#ifdef Q_OS_MACOS
+    QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+#endif
 
     DarkApp app(argc, argv);
     app.setApplicationName("Reclass");
