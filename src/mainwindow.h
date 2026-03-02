@@ -88,6 +88,8 @@ private:
     QPushButton*    m_btnReclass   = nullptr;
     QPushButton*    m_btnRendered  = nullptr;
     TitleBarWidget* m_titleBar = nullptr;
+    QMenuBar*       m_menuBar = nullptr;
+    bool            m_menuBarTitleCase = false;
     QWidget*        m_borderOverlay = nullptr;
     PluginManager   m_pluginManager;
     McpBridge*      m_mcp       = nullptr;
@@ -118,6 +120,7 @@ private:
     void rebuildAllDocs();
 
     void createMenus();
+    void applyMenuBarTitleCase(bool titleCase);
     void createStatusBar();
     void showPluginsDialog();
     void populateSourceMenu();

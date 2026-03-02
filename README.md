@@ -49,7 +49,7 @@ Built with C++17, Qt 6 (Qt 5 also supported), and QScintilla. The entire editor 
 - [ ] Safe mode
 - [ ] File import for other Reclass instances
 - [ ] Expose UI functionality to plugins
-- [ ] iOS/macOS support
+- [ ] iOS support
 - [ ] Display RTTI information
 
 ## Data Sources
@@ -92,7 +92,7 @@ Built-in [Model Context Protocol](https://modelcontextprotocol.io/) bridge via `
 
 ### Quick Build
 
-```bash
+```/dev/null/commands.sh#L1-4
 git clone --recurse-submodules https://github.com/IChooseYou/Reclass.git
 cd Reclass
 .\scripts\build_qscintilla.ps1
@@ -100,6 +100,16 @@ cd Reclass
 ```
 
 The build script auto-detects your Qt install location.
+
+### macOS Build
+
+```/dev/null/commands.sh#L1-2
+./scripts/build_macos.sh --qt-dir /opt/homebrew/opt/qt --build-type Release --package
+```
+
+If you installed Qt via Homebrew, `--qt-dir /opt/homebrew/opt/qt` is typical on Apple Silicon. You can also set `QTDIR` or `Qt6_DIR` instead of passing `--qt-dir`.
+
+Note: macOS Gatekeeper may block unsigned apps. If the app won’t open, go to **System Settings → Privacy & Security** and click **Open Anyway**.
 
 ### Manual Build (MinGW)
 

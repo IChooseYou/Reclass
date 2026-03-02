@@ -33,7 +33,12 @@ ThemeManager::ThemeManager() {
 // ── Load built-in themes from JSON files next to the executable ──
 
 QString ThemeManager::builtInDir() const {
+#ifdef Q_OS_MACOS
+    // In a macOS .app bundle, resources live in Contents/Resources, not Contents/MacOS
+    return QCoreApplication::applicationDirPath() + "/../Resources/themes";
+#else
     return QCoreApplication::applicationDirPath() + "/themes";
+#endif
 }
 
 void ThemeManager::loadBuiltInThemes() {

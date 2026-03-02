@@ -53,7 +53,6 @@
 #include "themes/thememanager.h"
 #include "themes/themeeditor.h"
 #include "optionsdialog.h"
-
 #ifdef _WIN32
 #include <windows.h>
 #include <windowsx.h>
@@ -389,13 +388,18 @@ public:
 
 namespace rcx {
 
+#ifdef __APPLE__
+void applyMacTitleBarTheme(QWidget* window, const Theme& theme);
+#endif
+
 // MainWindow class declaration is in mainwindow.h
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Reclass");
     resize(1200, 800);
 
-    // Frameless window with system menu (Alt+Space) and min/max/close support
+#ifndef __APPLE__
+    // Frameless window with system menu (Alt+Space) and min/max/close support.
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowSystemMenuHint
                    | Qt::WindowMinMaxButtonsHint);
 
@@ -403,6 +407,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_titleBar = new TitleBarWidget(this);
     m_titleBar->applyTheme(ThemeManager::instance().current());
     setMenuWidget(m_titleBar);
+    m_menuBar = m_titleBar->menuBar();
+#else
+    setWindowTitle(QStringLiteral("Reclass"));
+    setUnifiedTitleAndToolBarOnMac(true);
+    m_menuBar = menuBar();
+    m_menuBar->setNativeMenuBar(true);
+    applyMacTitleBarTheme(this, ThemeManager::instance().current());
+#endif
 
 #ifdef _WIN32
     // 1px top margin preserves DWM drop shadow on the frameless window
@@ -454,8 +466,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Restore menu bar title case setting (after menus are created)
     {
         QSettings s("Reclass", "Reclass");
-        m_titleBar->setMenuBarTitleCase(s.value("menuBarTitleCase", false).toBool());
-        if (s.value("showIcon", false).toBool())
+        m_menuBarTitleCase = s.value("menuBarTitleCase", false).toBool();
+        applyMenuBarTitleCase(m_menuBarTitleCase);
+        if (m_titleBar && s.value("showIcon", false).toBool())
             m_titleBar->setShowIcon(true);
     }
 
@@ -507,9 +520,42 @@ inline QAction* Qt5Qt6AddAction(QMenu* menu, const QString &text, const QKeySequ
     return result;
 }
 
+void MainWindow::applyMenuBarTitleCase(bool titleCase) {
+    m_menuBarTitleCase = titleCase;
+    if (m_titleBar) {
+        m_titleBar->setMenuBarTitleCase(titleCase);
+        return;
+    }
+    if (!m_menuBar) return;
+
+    for (QAction* action : m_menuBar->actions()) {
+        QString text = action->text();
+        QString clean = text;
+        clean.remove('&');
+
+        if (titleCase) {
+            action->setText("&" + clean.toUpper());
+        } else {
+            QString result;
+            bool capitalizeNext = true;
+            for (int i = 0; i < clean.length(); ++i) {
+                QChar ch = clean[i];
+                if (ch.isLetter()) {
+                    result += capitalizeNext ? ch.toUpper() : ch.toLower();
+                    capitalizeNext = false;
+                } else {
+                    result += ch;
+                    if (ch.isSpace()) capitalizeNext = true;
+                }
+            }
+            action->setText("&" + result);
+        }
+    }
+}
+
 void MainWindow::createMenus() {
     // File
-    auto* file = m_titleBar->menuBar()->addMenu("&File");
+    auto* file = m_menuBar->addMenu("&File");
     Qt5Qt6AddAction(file, "New &Class",  QKeySequence::New, QIcon(), this, &MainWindow::newClass);
     Qt5Qt6AddAction(file, "New &Struct", QKeySequence(Qt::CTRL | Qt::Key_T), QIcon(), this, &MainWindow::newStruct);
     Qt5Qt6AddAction(file, "New &Enum",   QKeySequence(Qt::CTRL | Qt::Key_E), QIcon(), this, &MainWindow::newEnum);
@@ -529,7 +575,11 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(exportMenu, "ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportReclassXmlAction);
     // Examples submenu — scan once at init
     {
+#ifdef __APPLE__
+        QDir exDir(QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../Resources/examples"));
+#else
         QDir exDir(QCoreApplication::applicationDirPath() + "/examples");
+#endif
         QStringList rcxFiles = exDir.entryList({"*.rcx"}, QDir::Files, QDir::Name);
         if (!rcxFiles.isEmpty()) {
             auto* examples = file->addMenu("E&xamples");
@@ -545,12 +595,12 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(file, "E&xit", QKeySequence(Qt::Key_Close), makeIcon(":/vsicons/close.svg"), this, &QMainWindow::close);
 
     // Edit
-    auto* edit = m_titleBar->menuBar()->addMenu("&Edit");
+    auto* edit = m_menuBar->addMenu("&Edit");
     Qt5Qt6AddAction(edit, "&Undo", QKeySequence::Undo, makeIcon(":/vsicons/arrow-left.svg"), this, &MainWindow::undo);
     Qt5Qt6AddAction(edit, "&Redo", QKeySequence::Redo, makeIcon(":/vsicons/arrow-right.svg"), this, &MainWindow::redo);
 
     // View
-    auto* view = m_titleBar->menuBar()->addMenu("&View");
+    auto* view = m_menuBar->addMenu("&View");
     Qt5Qt6AddAction(view, "Split &Horizontal", QKeySequence::UnknownKey, makeIcon(":/vsicons/split-horizontal.svg"), this, &MainWindow::splitView);
     m_removeSplitAction = Qt5Qt6AddAction(view, "&Remove Split", QKeySequence::UnknownKey, makeIcon(":/vsicons/chrome-close.svg"), this, &MainWindow::unsplitView);
     m_removeSplitAction->setVisible(false);
@@ -626,7 +676,7 @@ void MainWindow::createMenus() {
     }
 
     // Tools
-    auto* tools = m_titleBar->menuBar()->addMenu("&Tools");
+    auto* tools = m_menuBar->addMenu("&Tools");
     Qt5Qt6AddAction(tools, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
     tools->addSeparator();
     const auto mcpName = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
@@ -635,11 +685,11 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(tools, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this, &MainWindow::showOptionsDialog);
 
     // Plugins
-    auto* plugins = m_titleBar->menuBar()->addMenu("&Plugins");
+    auto* plugins = m_menuBar->addMenu("&Plugins");
     Qt5Qt6AddAction(plugins, "&Manage Plugins...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showPluginsDialog);
 
     // Help
-    auto* help = m_titleBar->menuBar()->addMenu("&Help");
+    auto* help = m_menuBar->addMenu("&Help");
     Qt5Qt6AddAction(help, "&About Reclass", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
 }
 
@@ -1671,10 +1721,15 @@ void MainWindow::toggleMcp() {
 void MainWindow::applyTheme(const Theme& theme) {
     applyGlobalTheme(theme);
 
+#ifdef __APPLE__
+    applyMacTitleBarTheme(this, theme);
+#endif
+
     // Dock separator is 1px via PM_DockWidgetSeparatorExtent in MenuBarStyle
 
     // Custom title bar
-    m_titleBar->applyTheme(theme);
+    if (m_titleBar)
+        m_titleBar->applyTheme(theme);
 
     // Update border overlay color
     updateBorderColor(isActiveWindow() ? theme.borderFocused : theme.border);
@@ -1831,8 +1886,10 @@ void MainWindow::showOptionsDialog() {
     OptionsResult current;
     current.themeIndex = tm.currentIndex();
     current.fontName = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
-    current.menuBarTitleCase = m_titleBar->menuBarTitleCase();
-    current.showIcon = QSettings("Reclass", "Reclass").value("showIcon", false).toBool();
+    current.menuBarTitleCase = m_menuBarTitleCase;
+    current.showIcon = m_titleBar
+        ? QSettings("Reclass", "Reclass").value("showIcon", false).toBool()
+        : false;
     current.safeMode = QSettings("Reclass", "Reclass").value("safeMode", false).toBool();
     current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
     current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
@@ -1850,12 +1907,13 @@ void MainWindow::showOptionsDialog() {
         setEditorFont(r.fontName);
 
     if (r.menuBarTitleCase != current.menuBarTitleCase) {
-        m_titleBar->setMenuBarTitleCase(r.menuBarTitleCase);
+        applyMenuBarTitleCase(r.menuBarTitleCase);
         QSettings("Reclass", "Reclass").setValue("menuBarTitleCase", r.menuBarTitleCase);
     }
 
     if (r.showIcon != current.showIcon) {
-        m_titleBar->setShowIcon(r.showIcon);
+        if (m_titleBar)
+            m_titleBar->setShowIcon(r.showIcon);
         QSettings("Reclass", "Reclass").setValue("showIcon", r.showIcon);
     }
 
@@ -1932,6 +1990,9 @@ MainWindow::TabState* MainWindow::tabByIndex(int index) {
 }
 
 void MainWindow::updateWindowTitle() {
+#ifdef __APPLE__
+    setWindowTitle(QStringLiteral("Reclass"));
+#else
     QString title;
     auto* sub = m_mdiArea->activeSubWindow();
     if (sub && m_tabs.contains(sub)) {
@@ -1945,6 +2006,7 @@ void MainWindow::updateWindowTitle() {
         title = "Reclass";
     }
     setWindowTitle(title);
+#endif
 }
 
 // ── Rendered view setup ──
@@ -3110,7 +3172,7 @@ void MainWindow::changeEvent(QEvent* event) {
         const auto& t = ThemeManager::instance().current();
         updateBorderColor(isActiveWindow() ? t.borderFocused : t.border);
     }
-    if (event->type() == QEvent::WindowStateChange)
+    if (event->type() == QEvent::WindowStateChange && m_titleBar)
         m_titleBar->updateMaximizeIcon();
 }
 
