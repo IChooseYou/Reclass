@@ -405,7 +405,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     // Find bar (hidden by default, shown with Ctrl+F)
     m_findBarContainer = new QWidget(this);
     auto* fbLayout = new QHBoxLayout(m_findBarContainer);
-    fbLayout->setContentsMargins(4, 0, 0, 0);
+    fbLayout->setContentsMargins(4, 1, 4, 1);
     fbLayout->setSpacing(2);
     auto* findPrevBtn = new QToolButton(m_findBarContainer);
     findPrevBtn->setText(QStringLiteral("\u25C0"));
@@ -418,6 +418,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     findCloseBtn->setFixedSize(24, 24);
     m_findBar = new QLineEdit(m_findBarContainer);
     m_findBar->setPlaceholderText(QStringLiteral("Find..."));
+    m_findBar->setFixedHeight(24);
     fbLayout->addWidget(findPrevBtn);
     fbLayout->addWidget(findNextBtn);
     fbLayout->addWidget(findCloseBtn);
@@ -889,7 +890,7 @@ void RcxEditor::applyTheme(const Theme& theme) {
     if (m_findBarContainer) {
         m_findBar->setStyleSheet(
             QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
-                            " padding: 4px 8px; font-size: 13px; }")
+                            " padding: 2px 6px; font-size: 13px; }")
                 .arg(theme.backgroundAlt.name(), theme.text.name(), theme.border.name()));
         m_findBarContainer->setStyleSheet(
             QStringLiteral("QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"

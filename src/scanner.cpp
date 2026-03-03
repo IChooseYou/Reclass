@@ -347,6 +347,64 @@ int naturalAlignment(ValueType type) {
     return 1;
 }
 
+int valueSizeForType(ValueType type) {
+    switch (type) {
+    case ValueType::Int8:  case ValueType::UInt8:  return 1;
+    case ValueType::Int16: case ValueType::UInt16: return 2;
+    case ValueType::Int32: case ValueType::UInt32: case ValueType::Float: return 4;
+    case ValueType::Int64: case ValueType::UInt64: case ValueType::Double: return 8;
+    case ValueType::Vec2: return 8;
+    case ValueType::Vec3: return 12;
+    case ValueType::Vec4: return 16;
+    default: return 4;
+    }
+}
+
+// ── Typed comparison for rescan conditions ──
+
+static int compareTyped(const QByteArray& a, const QByteArray& b, ValueType vt) {
+    const char* da = a.constData();
+    const char* db = b.constData();
+    int sz = qMin(a.size(), b.size());
+
+    switch (vt) {
+    case ValueType::Int8:
+        if (sz >= 1) { int8_t va, vb; memcpy(&va, da, 1); memcpy(&vb, db, 1); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::UInt8:
+        if (sz >= 1) { uint8_t va, vb; memcpy(&va, da, 1); memcpy(&vb, db, 1); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::Int16:
+        if (sz >= 2) { int16_t va, vb; memcpy(&va, da, 2); memcpy(&vb, db, 2); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::UInt16:
+        if (sz >= 2) { uint16_t va, vb; memcpy(&va, da, 2); memcpy(&vb, db, 2); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::Int32:
+        if (sz >= 4) { int32_t va, vb; memcpy(&va, da, 4); memcpy(&vb, db, 4); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::UInt32:
+        if (sz >= 4) { uint32_t va, vb; memcpy(&va, da, 4); memcpy(&vb, db, 4); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::Int64:
+        if (sz >= 8) { int64_t va, vb; memcpy(&va, da, 8); memcpy(&vb, db, 8); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::UInt64:
+        if (sz >= 8) { uint64_t va, vb; memcpy(&va, da, 8); memcpy(&vb, db, 8); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::Float:
+        if (sz >= 4) { float va, vb; memcpy(&va, da, 4); memcpy(&vb, db, 4); return (va > vb) - (va < vb); }
+        break;
+    case ValueType::Double:
+        if (sz >= 8) { double va, vb; memcpy(&va, da, 8); memcpy(&vb, db, 8); return (va > vb) - (va < vb); }
+        break;
+    default:
+        break;
+    }
+    // Fallback: byte comparison
+    return memcmp(da, db, sz);
+}
+
 // ── Scan engine ──
 
 ScanEngine::ScanEngine(QObject* parent)
@@ -366,13 +424,15 @@ void ScanEngine::abort() {
 void ScanEngine::start(std::shared_ptr<Provider> provider, const ScanRequest& req) {
     if (isRunning()) return;
 
-    if (req.pattern.isEmpty()) {
-        emit error(QStringLiteral("Empty pattern"));
-        return;
-    }
-    if (req.pattern.size() != req.mask.size()) {
-        emit error(QStringLiteral("Pattern and mask size mismatch"));
-        return;
+    if (req.condition != ScanCondition::UnknownValue) {
+        if (req.pattern.isEmpty()) {
+            emit error(QStringLiteral("Empty pattern"));
+            return;
+        }
+        if (req.pattern.size() != req.mask.size()) {
+            emit error(QStringLiteral("Pattern and mask size mismatch"));
+            return;
+        }
     }
 
     m_abort.store(false);
@@ -400,14 +460,16 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
     timer.start();
 
     QVector<ScanResult> results;
+    const bool isUnknown = (req.condition == ScanCondition::UnknownValue);
 
-    if (!prov || req.pattern.isEmpty())
+    if (!prov || (!isUnknown && req.pattern.isEmpty()))
         return results;
 
     auto regions = prov->enumerateRegions();
     qDebug() << "[scan] regions:" << regions.size()
              << " pattern:" << req.pattern.size() << "bytes"
              << " align:" << req.alignment
+             << " condition:" << (int)req.condition
              << " filterExec:" << req.filterExecutable
              << " filterWrite:" << req.filterWritable;
 
@@ -422,10 +484,11 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
         regions.append(fallback);
     }
 
-    const int patternLen = req.pattern.size();
-    const char* pat = req.pattern.constData();
-    const char* msk = req.mask.constData();
+    const int patternLen = isUnknown ? req.valueSize : req.pattern.size();
+    const char* pat = isUnknown ? nullptr : req.pattern.constData();
+    const char* msk = isUnknown ? nullptr : req.mask.constData();
     const int alignment = qMax(1, req.alignment);
+    const int valSize = isUnknown ? req.valueSize : patternLen;
 
     // Pre-compute total bytes for progress
     uint64_t totalBytes = 0;
@@ -474,23 +537,37 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             int scanEnd = readLen - patternLen;
             const char* data = chunk.constData();
 
-            for (int i = 0; i <= scanEnd; i += alignment) {
-                bool match = true;
-                for (int j = 0; j < patternLen; j++) {
-                    if ((data[i + j] & msk[j]) != (pat[j] & msk[j])) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) {
+            if (isUnknown) {
+                // Unknown value: capture every aligned address
+                for (int i = 0; i <= scanEnd; i += alignment) {
                     ScanResult r;
                     r.address = region.base + off + (uint64_t)i;
-                    r.regionModule = region.moduleName;
-                    r.scanValue = QByteArray(data + i, qMin(16, readLen - i));
+                    r.scanValue = QByteArray(data + i, valSize);
                     results.append(r);
 
                     if (results.size() >= req.maxResults)
                         goto done;
+                }
+            } else {
+                // Exact pattern match
+                for (int i = 0; i <= scanEnd; i += alignment) {
+                    bool match = true;
+                    for (int j = 0; j < patternLen; j++) {
+                        if ((data[i + j] & msk[j]) != (pat[j] & msk[j])) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        ScanResult r;
+                        r.address = region.base + off + (uint64_t)i;
+                        r.regionModule = region.moduleName;
+                        r.scanValue = QByteArray(data + i, qMin(16, readLen - i));
+                        results.append(r);
+
+                        if (results.size() >= req.maxResults)
+                            goto done;
+                    }
                 }
             }
 
@@ -522,6 +599,7 @@ done:
 
 void ScanEngine::startRescan(std::shared_ptr<Provider> provider,
                               QVector<ScanResult> results, int readSize,
+                              ScanCondition condition, ValueType valueType,
                               const QByteArray& filterPattern,
                               const QByteArray& filterMask) {
     if (isRunning()) return;
@@ -541,14 +619,15 @@ void ScanEngine::startRescan(std::shared_ptr<Provider> provider,
 
     watcher->setFuture(QtConcurrent::run(
         [this, provider, results = std::move(results), readSize,
-         filterPattern, filterMask]() mutable {
+         condition, valueType, filterPattern, filterMask]() mutable {
             return runRescan(provider, std::move(results), readSize,
-                             filterPattern, filterMask);
+                             condition, valueType, filterPattern, filterMask);
         }));
 }
 
 QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
                                            QVector<ScanResult> results, int readSize,
+                                           ScanCondition condition, ValueType valueType,
                                            const QByteArray& filterPattern,
                                            const QByteArray& filterMask) {
     QElapsedTimer timer;
@@ -557,9 +636,17 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
     int total = results.size();
     if (total == 0 || !prov) return results;
 
-    bool hasFilter = !filterPattern.isEmpty();
+    bool hasExactFilter = !filterPattern.isEmpty() && condition == ScanCondition::ExactValue;
+    bool hasComparison = (condition == ScanCondition::Changed ||
+                          condition == ScanCondition::Unchanged ||
+                          condition == ScanCondition::Increased ||
+                          condition == ScanCondition::Decreased);
+    bool needsFilter = hasExactFilter || hasComparison;
+
     qDebug() << "[rescan] start:" << total << "results, readSize:" << readSize
-             << "filter:" << (hasFilter ? "yes" : "no");
+             << "condition:" << (int)condition
+             << "exactFilter:" << (hasExactFilter ? "yes" : "no")
+             << "comparison:" << (hasComparison ? "yes" : "no");
 
     // Save previous values
     for (auto& r : results)
@@ -579,8 +666,8 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
     uint64_t totalBytesRead = 0;
     int i = 0;
 
-    // Track which results matched the filter (by original index)
-    QVector<bool> matched(total, !hasFilter); // if no filter, all match
+    // Track which results matched (by original index)
+    QVector<bool> matched(total, !needsFilter); // if no filter, all match
 
     while (i < total && !m_abort.load()) {
         uint64_t spanBase = results[order[i]].address;
@@ -604,8 +691,8 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
             int off = (int)(r.address - spanBase);
             r.scanValue = chunk.mid(off, readSize);
 
-            // Apply filter: compare re-read bytes against the new pattern
-            if (hasFilter) {
+            // Apply exact-value filter
+            if (hasExactFilter) {
                 int patLen = filterPattern.size();
                 if (r.scanValue.size() >= patLen) {
                     bool ok = true;
@@ -619,6 +706,18 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
                         }
                     }
                     matched[idx] = ok;
+                }
+            }
+
+            // Apply comparison-based filter
+            if (hasComparison && !r.previousValue.isEmpty()) {
+                int cmp = compareTyped(r.scanValue, r.previousValue, valueType);
+                switch (condition) {
+                case ScanCondition::Changed:   matched[idx] = (cmp != 0); break;
+                case ScanCondition::Unchanged: matched[idx] = (cmp == 0); break;
+                case ScanCondition::Increased: matched[idx] = (cmp > 0);  break;
+                case ScanCondition::Decreased: matched[idx] = (cmp < 0);  break;
+                default: break;
                 }
             }
         }
@@ -637,7 +736,7 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
     }
 
     // Filter out non-matching results
-    if (hasFilter) {
+    if (needsFilter) {
         QVector<ScanResult> filtered;
         filtered.reserve(total);
         for (int k = 0; k < total; k++) {

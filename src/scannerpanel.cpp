@@ -93,6 +93,18 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_typeCombo->setCurrentIndex(2); // default: int32
     inputRow->addWidget(m_typeCombo);
 
+    m_condLabel = new QLabel(QStringLiteral("Scan:"), this);
+    inputRow->addWidget(m_condLabel);
+
+    m_condCombo = new QComboBox(this);
+    m_condCombo->addItem(QStringLiteral("Exact Value"),    (int)ScanCondition::ExactValue);
+    m_condCombo->addItem(QStringLiteral("Unknown Value"),  (int)ScanCondition::UnknownValue);
+    m_condCombo->addItem(QStringLiteral("Changed"),        (int)ScanCondition::Changed);
+    m_condCombo->addItem(QStringLiteral("Unchanged"),      (int)ScanCondition::Unchanged);
+    m_condCombo->addItem(QStringLiteral("Increased"),      (int)ScanCondition::Increased);
+    m_condCombo->addItem(QStringLiteral("Decreased"),      (int)ScanCondition::Decreased);
+    inputRow->addWidget(m_condCombo);
+
     m_valueLabel = new QLabel(QStringLiteral("Value:"), this);
     inputRow->addWidget(m_valueLabel);
 
@@ -174,6 +186,8 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     // ── Initial state: signature mode ──
     m_typeLabel->hide();
     m_typeCombo->hide();
+    m_condLabel->hide();
+    m_condCombo->hide();
     m_valueLabel->hide();
     m_valueEdit->hide();
     m_execCheck->setChecked(true);
@@ -181,6 +195,8 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     // ── Connections ──
     connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ScannerPanel::onModeChanged);
+    connect(m_condCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &ScannerPanel::onConditionChanged);
     connect(m_scanBtn, &QPushButton::clicked,
             this, &ScannerPanel::onScanClicked);
     connect(m_updateBtn, &QPushButton::clicked,
@@ -251,12 +267,14 @@ void ScannerPanel::setEditorFont(const QFont& font) {
     m_valueEdit->setFont(font);
     m_modeCombo->setFont(font);
     m_typeCombo->setFont(font);
+    m_condCombo->setFont(font);
     m_statusLabel->setFont(font);
     m_scanBtn->setFont(font);
     m_gotoBtn->setFont(font);
     m_copyBtn->setFont(font);
     m_patternLabel->setFont(font);
     m_typeLabel->setFont(font);
+    m_condLabel->setFont(font);
     m_valueLabel->setFont(font);
     m_execCheck->setFont(font);
     m_writeCheck->setFont(font);
@@ -280,12 +298,25 @@ void ScannerPanel::onModeChanged(int index) {
 
     m_typeLabel->setVisible(!isSig);
     m_typeCombo->setVisible(!isSig);
-    m_valueLabel->setVisible(!isSig);
-    m_valueEdit->setVisible(!isSig);
+    m_condLabel->setVisible(!isSig);
+    m_condCombo->setVisible(!isSig);
+
+    // Show/hide value input based on condition
+    auto cond = (ScanCondition)m_condCombo->currentData().toInt();
+    bool needsValue = !isSig && (cond == ScanCondition::ExactValue);
+    m_valueLabel->setVisible(needsValue);
+    m_valueEdit->setVisible(needsValue);
 
     // Auto-toggle filters: signatures → executable code, values → writable data
     m_execCheck->setChecked(isSig);
     m_writeCheck->setChecked(!isSig);
+}
+
+void ScannerPanel::onConditionChanged(int /*index*/) {
+    auto cond = (ScanCondition)m_condCombo->currentData().toInt();
+    bool needsValue = (cond == ScanCondition::ExactValue);
+    m_valueLabel->setVisible(needsValue);
+    m_valueEdit->setVisible(needsValue);
 }
 
 void ScannerPanel::onScanClicked() {
@@ -306,12 +337,14 @@ void ScannerPanel::onScanClicked() {
 
     // Build request
     ScanRequest req = buildRequest();
-    if (req.pattern.isEmpty())
+    if (req.condition != ScanCondition::UnknownValue && req.pattern.isEmpty())
         return; // error already shown by buildRequest
 
     m_lastScanMode = m_modeCombo->currentIndex();
-    if (m_lastScanMode == 1)
+    if (m_lastScanMode == 1) {
         m_lastValueType = (ValueType)m_typeCombo->currentData().toInt();
+        m_lastCondition = req.condition;
+    }
     m_lastPattern = req.pattern;
 
     m_scanBtn->setText(QStringLiteral("Cancel"));
@@ -336,11 +369,28 @@ ScanRequest ScannerPanel::buildRequest() {
     } else {
         // Value mode
         auto vt = (ValueType)m_typeCombo->currentData().toInt();
-        if (!serializeValue(vt, m_valueEdit->text(), req.pattern, req.mask, &err)) {
-            m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
-            return {};
+        auto cond = (ScanCondition)m_condCombo->currentData().toInt();
+
+        // Comparison conditions on fresh scan → treat as unknown
+        if (cond == ScanCondition::Changed || cond == ScanCondition::Unchanged ||
+            cond == ScanCondition::Increased || cond == ScanCondition::Decreased) {
+            cond = ScanCondition::UnknownValue;
         }
+
+        req.condition = cond;
         req.alignment = naturalAlignment(vt);
+        req.valueSize = valueSizeForType(vt);
+
+        if (cond == ScanCondition::UnknownValue) {
+            // No pattern needed — capture all aligned addresses
+            req.maxResults = 500000;
+        } else {
+            // Exact value mode
+            if (!serializeValue(vt, m_valueEdit->text(), req.pattern, req.mask, &err)) {
+                m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
+                return {};
+            }
+        }
     }
 
     req.filterExecutable = m_execCheck->isChecked();
@@ -355,10 +405,11 @@ void ScannerPanel::onScanFinished(QVector<ScanResult> results) {
     m_results = std::move(results);
 
     // Bytes are cached by the engine during scan.
-    // Value mode: override with exact search pattern (engine caches raw chunk bytes).
+    // Value mode (exact): override with exact search pattern (engine caches raw chunk bytes).
+    // Unknown mode: keep engine-captured bytes as-is (they're the baseline).
     for (auto& r : m_results) {
         r.previousValue.clear();
-        if (m_lastScanMode == 1)
+        if (m_lastScanMode == 1 && m_lastCondition == ScanCondition::ExactValue)
             r.scanValue = m_lastPattern;
     }
 
@@ -425,29 +476,41 @@ void ScannerPanel::onUpdateClicked() {
 
     int readSize = (m_lastScanMode == 1) ? valueSize() : 16;
 
-    // Build filter from current input field
+    // Determine rescan condition
+    ScanCondition cond = ScanCondition::ExactValue;
+    if (m_lastScanMode == 1)
+        cond = (ScanCondition)m_condCombo->currentData().toInt();
+
+    // For UnknownValue on rescan, just re-read all (update only, no filter)
+    if (cond == ScanCondition::UnknownValue)
+        cond = ScanCondition::ExactValue; // with empty filter = update only
+
+    // Build filter from current input field (only for ExactValue condition)
     QByteArray filterPattern, filterMask;
-    if (m_lastScanMode == 0) {
-        // Signature mode
-        QString err;
-        if (!m_patternEdit->text().trimmed().isEmpty()) {
-            if (!parseSignature(m_patternEdit->text(), filterPattern, filterMask, &err)) {
-                m_statusLabel->setText(QStringLiteral("Pattern error: %1").arg(err));
-                return;
+    if (cond == ScanCondition::ExactValue) {
+        if (m_lastScanMode == 0) {
+            // Signature mode
+            QString err;
+            if (!m_patternEdit->text().trimmed().isEmpty()) {
+                if (!parseSignature(m_patternEdit->text(), filterPattern, filterMask, &err)) {
+                    m_statusLabel->setText(QStringLiteral("Pattern error: %1").arg(err));
+                    return;
+                }
             }
-        }
-    } else {
-        // Value mode
-        QString err;
-        if (!m_valueEdit->text().trimmed().isEmpty()) {
-            auto vt = (ValueType)m_typeCombo->currentData().toInt();
-            if (!serializeValue(vt, m_valueEdit->text(), filterPattern, filterMask, &err)) {
-                m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
-                return;
+        } else {
+            // Value mode — exact value filter
+            QString err;
+            if (!m_valueEdit->text().trimmed().isEmpty()) {
+                auto vt = (ValueType)m_typeCombo->currentData().toInt();
+                if (!serializeValue(vt, m_valueEdit->text(), filterPattern, filterMask, &err)) {
+                    m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
+                    return;
+                }
+                m_lastValueType = vt;
             }
-            m_lastValueType = vt;
         }
     }
+    // Comparison conditions (Changed/Unchanged/Increased/Decreased) don't need a filter pattern
 
     // Update last pattern so display uses the new value
     if (!filterPattern.isEmpty())
@@ -460,7 +523,8 @@ void ScannerPanel::onUpdateClicked() {
     m_progressBar->setValue(0);
     m_progressBar->show();
 
-    m_engine->startRescan(prov, m_results, readSize, filterPattern, filterMask);
+    m_engine->startRescan(prov, m_results, readSize, cond, m_lastValueType,
+                          filterPattern, filterMask);
 }
 
 void ScannerPanel::onRescanFinished(QVector<ScanResult> results) {
@@ -666,12 +730,14 @@ void ScannerPanel::applyTheme(const Theme& theme) {
              theme.border.name(), theme.hover.name());
     m_modeCombo->setStyleSheet(comboStyle);
     m_typeCombo->setStyleSheet(comboStyle);
+    m_condCombo->setStyleSheet(comboStyle);
 
     // Labels
     QPalette lp;
     lp.setColor(QPalette::WindowText, theme.textDim);
     m_patternLabel->setPalette(lp);
     m_typeLabel->setPalette(lp);
+    m_condLabel->setPalette(lp);
     m_valueLabel->setPalette(lp);
     m_statusLabel->setPalette(lp);
 

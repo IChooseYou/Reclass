@@ -52,6 +52,8 @@ public:
     QPushButton*  gotoButton()   const { return m_gotoBtn; }
     QPushButton*  copyButton()   const { return m_copyBtn; }
     ScanEngine*   engine()       const { return m_engine; }
+    QComboBox*    condCombo()    const { return m_condCombo; }
+    QLabel*       condLabel()    const { return m_condLabel; }
 
 signals:
     void goToAddress(uint64_t address);
@@ -72,13 +74,17 @@ private:
     void populateTable(bool showPrevious);
     void updateComboWidth();
 
+    void onConditionChanged(int index);
+
     // Input widgets
     QComboBox*    m_modeCombo;      // Signature / Value
     QLineEdit*    m_patternEdit;    // Signature pattern input
     QComboBox*    m_typeCombo;      // Value type dropdown
+    QComboBox*    m_condCombo;      // Scan condition (Exact/Unknown/Changed/...)
     QLineEdit*    m_valueEdit;      // Value input
     QLabel*       m_patternLabel;
     QLabel*       m_typeLabel;
+    QLabel*       m_condLabel;
     QLabel*       m_valueLabel;
 
     // Filters
@@ -103,6 +109,7 @@ private:
     QVector<ScanResult> m_results;
     int           m_lastScanMode = 0;   // 0=signature, 1=value
     ValueType     m_lastValueType = ValueType::Int32;
+    ScanCondition m_lastCondition = ScanCondition::ExactValue;
     QByteArray    m_lastPattern;        // serialized search value
     int           m_preRescanCount = 0; // result count before last rescan
 

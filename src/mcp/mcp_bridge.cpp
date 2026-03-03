@@ -203,7 +203,28 @@ QJsonObject McpBridge::handleInitialize(const QJsonValue& id, const QJsonObject&
         {"serverInfo", QJsonObject{
             {"name", "reclass-mcp"},
             {"version", "1.0.0"}
-        }}
+        }},
+        {"instructions",
+            "You are connected to ReClass, a live memory structure editor for reverse engineering. "
+            "You have two types of data available:\n"
+            "1. STRUCTURE: The node tree defines typed fields (project.state, tree.search, tree.apply). "
+            "Each node has a kind (the data type: UInt32, Float, Hex64, etc.) and a name.\n"
+            "2. LIVE DATA: The provider reads real memory from an attached process (hex.read, hex.write). "
+            "node.history returns timestamped value changes with heat levels (0=static, 1=cold, 2=warm, 3=hot).\n\n"
+            "CRITICAL RULES:\n"
+            "- When labeling/identifying a field, ALWAYS change BOTH name AND kind in one tree.apply call. "
+            "Example: [{op:'rename',nodeId:'X',name:'health'},{op:'change_kind',nodeId:'X',kind:'Int32'}]. "
+            "A node named 'health' with kind Hex64 is WRONG — the kind must match the actual data type.\n"
+            "- To detect what changed after an in-game event: call ui.action with action:'reset_tracking', "
+            "then have the user perform the action, then call node.history on the relevant nodes "
+            "to see which ones have new timestamped entries.\n"
+            "- hex.read offset is relative to the struct base address by default. "
+            "Use baseRelative=true for absolute virtual addresses in the process.\n"
+            "- tree.apply operations are atomic (undo macro). Batch related changes into one call.\n"
+            "- Use tree.search to quickly find nodes by name instead of paging through project.state.\n"
+            "- project.state returns structure metadata only (kinds, names, offsets), NOT live values. "
+            "Use hex.read for actual memory values and node.history for tracking changes over time."
+        }
     };
     return okReply(id, result);
 }
@@ -219,6 +240,8 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     tools.append(QJsonObject{
         {"name", "project.state"},
         {"description", "Returns project state with paginated node tree. "
+                        "NOTE: This returns structure metadata only (kinds, names, offsets), NOT live memory values. "
+                        "Use hex.read to read actual values and node.history to track value changes over time. "
                         "Responses return max 'limit' nodes (default 50). "
                         "Use depth:1 first, then parentId to drill into a struct. "
                         "Enum/bitfield member arrays are omitted by default (counts shown instead); "
@@ -249,6 +272,10 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     tools.append(QJsonObject{
         {"name", "tree.apply"},
         {"description", "Apply batch of tree operations atomically (undo macro). "
+                        "IMPORTANT: When identifying/labeling a field, you MUST use BOTH rename AND change_kind "
+                        "in the same batch. A renamed node still has its original kind (e.g. Hex64) unless you "
+                        "explicitly change it. Example: "
+                        "[{op:'rename',nodeId:'ID',name:'health'},{op:'change_kind',nodeId:'ID',kind:'Int32'}]. "
                         "Each op is a JSON object with an 'op' field for the operation type and 'nodeId' (string) for the target node. "
                         "Operations: "
                         "remove: {op:'remove', nodeId:'ID'}. "
@@ -301,10 +328,11 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     // 4. hex.read
     tools.append(QJsonObject{
         {"name", "hex.read"},
-        {"description", "Read raw bytes from provider. Returns hex dump, ASCII, and multi-type "
+        {"description", "Read raw bytes from provider (live process memory). Returns hex dump, ASCII, and multi-type "
                         "interpretations (u8/u16/u32/u64/i32/f32/f64/ptr/string heuristics). "
+                        "Use this to see what actual values are in memory at any offset. "
                         "Offset is tree-relative (0-based, baseAddress added automatically) "
-                        "unless baseRelative=true (offset is absolute)."},
+                        "unless baseRelative=true (offset is absolute virtual address in the process)."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
@@ -359,8 +387,10 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         {"description", "Trigger a UI action. Fallback for operations without dedicated tools. "
                         "Actions: undo, redo, new_file, open_file, save_file, save_file_as, "
                         "export_cpp, set_view_root, scroll_to_node, collapse_node, expand_node, "
-                        "select_node, refresh. "
-                        "export_cpp accepts optional nodeId to export a single struct (recommended for large projects)."},
+                        "select_node, refresh, reset_tracking. "
+                        "export_cpp accepts optional nodeId to export a single struct (recommended for large projects). "
+                        "reset_tracking clears all value change histories — use before an in-game event, "
+                        "then check node.history afterward to see what changed."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
@@ -399,8 +429,11 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     // 9. node.history
     tools.append(QJsonObject{
         {"name", "node.history"},
-        {"description", "Returns timestamped value change history (up to 10 entries) "
-                        "for specified nodes. Requires live provider with value tracking enabled."},
+        {"description", "Returns timestamped value change history (up to 10 entries) for specified nodes. "
+                        "Use this to detect what changed after an in-game event — no need to manually snapshot memory. "
+                        "Each node returns: entries[] with {value, timestamp}, heatLevel (0=static to 3=hot), "
+                        "and uniqueCount. Heat level 3 means the field is actively changing. "
+                        "Requires live provider with value tracking enabled."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
@@ -1178,6 +1211,12 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
         if (editor)
             ctrl->handleNodeClick(editor, -1, nid, Qt::NoModifier);
         return makeTextResult("Selected node " + nodeIdStr);
+    }
+
+    if (action == "reset_tracking") {
+        if (!ctrl) return makeTextResult("No active tab", true);
+        ctrl->resetChangeTracking();
+        return makeTextResult("Value tracking reset. All histories cleared.");
     }
 
     return makeTextResult("Unknown action: " + action, true);

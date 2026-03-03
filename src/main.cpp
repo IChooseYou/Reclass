@@ -1125,7 +1125,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Find bar with prev/next buttons (hidden by default)
     pane.findContainer = new QWidget;
     auto* fcLayout = new QHBoxLayout(pane.findContainer);
-    fcLayout->setContentsMargins(4, 0, 0, 0);
+    fcLayout->setContentsMargins(4, 1, 4, 1);
     fcLayout->setSpacing(2);
     const auto& fbTheme = ThemeManager::instance().current();
     auto* ccPrevBtn = new QToolButton;
@@ -1148,9 +1148,10 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     ccCloseBtn->setStyleSheet(btnCss);
     pane.findBar = new QLineEdit;
     pane.findBar->setPlaceholderText("Find...");
+    pane.findBar->setFixedHeight(24);
     pane.findBar->setStyleSheet(
         QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
-                        " padding: 4px 8px; font-size: 13px; }")
+                        " padding: 2px 6px; font-size: 13px; }")
             .arg(fbTheme.backgroundAlt.name(), fbTheme.text.name(), fbTheme.border.name()));
     fcLayout->addWidget(ccPrevBtn);
     fcLayout->addWidget(ccNextBtn);
