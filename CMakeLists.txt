@@ -153,6 +153,14 @@ endif()
 
 add_executable(ReclassMcpBridge tools/rcx-mcp-stdio.cpp)
 target_link_libraries(ReclassMcpBridge PRIVATE ${QT}::Core ${QT}::Network)
+if(APPLE)
+    add_custom_command(TARGET ReclassMcpBridge POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_FILE:ReclassMcpBridge>
+            $<TARGET_FILE_DIR:Reclass>/ReclassMcpBridge
+        COMMENT "Bundling ReclassMcpBridge into Reclass.app"
+    )
+endif()
 
 # Copy built-in theme JSON files to build directory
 file(GLOB _theme_files "${CMAKE_SOURCE_DIR}/src/themes/defaults/*.json")
