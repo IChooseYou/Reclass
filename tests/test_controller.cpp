@@ -815,6 +815,68 @@ private slots:
         QCOMPARE(m_doc->tree.nodes[idx].isStatic, true);
     }
 
+    // ── Test: clearing value history actually resets heat to 0 ──
+    void testClearValueHistoryResetsHeat() {
+        // Use a live provider so value tracking runs during refresh()
+        m_doc->provider = std::make_unique<BaseAwareProvider>(makeSmallBuffer(), 0);
+        m_ctrl->setTrackValues(true);
+
+        // Do initial refresh to populate m_lastResult.meta
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        // Find field_u32 nodeId
+        uint64_t targetId = 0;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "field_u32") { targetId = n.id; break; }
+        }
+        QVERIFY(targetId != 0);
+
+        // Seed value history with multiple changes to get heat > 0
+        auto& history = const_cast<QHash<uint64_t, ValueHistory>&>(m_ctrl->valueHistory());
+        history[targetId].record("val_1");
+        history[targetId].record("val_2");
+        history[targetId].record("val_3");
+        QVERIFY2(history[targetId].heatLevel() >= 2,
+                 "Pre-clear: should have heat >= 2 (warm)");
+
+        // Refresh so heatLevel propagates to LineMeta
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        // Verify heat is visible in meta
+        bool foundHot = false;
+        for (const auto& lm : m_ctrl->lastResult().meta) {
+            if (lm.nodeId == targetId && lm.heatLevel > 0) {
+                foundHot = true;
+                break;
+            }
+        }
+        QVERIFY2(foundHot, "Pre-clear: LineMeta should show heat > 0");
+
+        // Now simulate what the "Clear Value History" context menu does:
+        // remove from history map + clear subtree + refresh
+        history.remove(targetId);
+        for (int ci : m_doc->tree.subtreeIndices(targetId))
+            history.remove(m_doc->tree.nodes[ci].id);
+
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        // After clear + refresh, heatLevel must be 0 for this node
+        for (const auto& lm : m_ctrl->lastResult().meta) {
+            if (lm.nodeId == targetId) {
+                QCOMPARE(lm.heatLevel, 0);
+            }
+        }
+
+        // The history entry should exist again (re-recorded by refresh)
+        // but with only 1 unique value → heatLevel 0
+        QVERIFY(history.contains(targetId));
+        QCOMPARE(history[targetId].heatLevel(), 0);
+        QCOMPARE(history[targetId].uniqueCount(), 1);
+    }
+
     void testStaticFieldTypeChangePreservesFlags() {
         uint64_t rootId = m_doc->tree.nodes[0].id;
 

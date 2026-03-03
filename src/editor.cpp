@@ -1471,7 +1471,12 @@ void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta) {
         int typeW = lm.effectiveTypeW;
         int nameW = lm.effectiveNameW;
 
-        if (heat <= 0) continue;
+        if (heat <= 0) {
+            // Clear any stale heat indicators from a previous frame
+            for (int hi : heatIndicators)
+                clearIndicatorLine(hi, i);
+            continue;
+        }
 
         // Pick the right indicator for this heat level (1→cold, 2→warm, 3→hot)
         int activeInd = heatIndicators[qBound(0, heat - 1, 2)];
@@ -2242,6 +2247,12 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     case Qt::Key_Return:
     case Qt::Key_Enter:
         return beginInlineEdit(EditTarget::Value);
+    case Qt::Key_Insert:
+        if (ke->modifiers() & Qt::ShiftModifier)
+            emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex32);
+        else
+            emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex64);
+        return true;
     case Qt::Key_Tab: {
         EditTarget order[] = {EditTarget::Name, EditTarget::Type, EditTarget::Value,
                               EditTarget::ArrayElementType, EditTarget::ArrayElementCount,

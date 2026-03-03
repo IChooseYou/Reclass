@@ -80,6 +80,7 @@ signals:
     void inlineEditCancelled();
     void typeSelectorRequested();
     void typePickerRequested(EditTarget target, int nodeIdx, QPoint globalPos);
+    void insertAboveRequested(int nodeIdx, NodeKind kind);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;

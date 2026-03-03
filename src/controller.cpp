@@ -244,6 +244,17 @@ void RcxController::connectEditor(RcxEditor* editor) {
         showTypePopup(editor, mode, nodeIdx, globalPos);
     });
 
+    // Insert key shortcut
+    connect(editor, &RcxEditor::insertAboveRequested,
+            this, [this](int nodeIdx, NodeKind kind) {
+        if (nodeIdx >= 0)
+            insertNodeAbove(nodeIdx, kind, QStringLiteral("field"));
+        else {
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            insertNode(target, -1, kind, QStringLiteral("field"));
+        }
+    });
+
     // Inline editing signals
     connect(editor, &RcxEditor::inlineEditCommitted,
             this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text,
@@ -591,7 +602,8 @@ void RcxController::refresh() {
         else if (m_doc->provider && m_doc->provider->isValid() && m_doc->provider->isLive())
             prov = m_doc->provider.get();
 
-        if (m_trackValues && prov) {
+        if (m_valueTrackCooldown > 0) --m_valueTrackCooldown;
+        if (m_trackValues && prov && m_valueTrackCooldown <= 0) {
             for (auto& lm : m_lastResult.meta) {
                 if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
                 if (isSyntheticLine(lm) || lm.isContinuation) continue;
@@ -708,6 +720,15 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeKind{node.id, node.kind, newKind, {}}));
 
+        // Hex nodes don't display names (ASCII preview instead), so the stored
+        // name may be empty or stale.  Give it a sensible default.
+        if (isHexNode(node.kind) && !isHexNode(newKind)) {
+            QString autoName = QStringLiteral("field_%1")
+                .arg(node.offset, 4, 16, QChar('0'));
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::Rename{node.id, node.name, autoName}));
+        }
+
         // Insert hex nodes to fill the gap (largest first for alignment)
         int padOffset = baseOffset;
         while (gap > 0) {
@@ -741,8 +762,19 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
                     adjs.append({sib.id, sib.offset, sib.offset + delta});
             }
         }
+        bool needsRename = isHexNode(node.kind) && !isHexNode(newKind);
+        if (needsRename) {
+            m_doc->undoStack.beginMacro(QStringLiteral("Change type"));
+        }
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeKind{node.id, node.kind, newKind, adjs}));
+        if (needsRename) {
+            QString autoName = QStringLiteral("field_%1")
+                .arg(node.offset, 4, 16, QChar('0'));
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::Rename{node.id, node.name, autoName}));
+            m_doc->undoStack.endMacro();
+        }
     }
 }
 
@@ -780,6 +812,31 @@ void RcxController::insertNode(uint64_t parentId, int offset, NodeKind kind, con
     n.id = m_doc->tree.reserveId();
 
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
+}
+
+void RcxController::insertNodeAbove(int beforeIdx, NodeKind kind, const QString& name) {
+    if (beforeIdx < 0 || beforeIdx >= m_doc->tree.nodes.size()) return;
+    const Node& before = m_doc->tree.nodes[beforeIdx];
+
+    Node n;
+    n.kind     = kind;
+    n.name     = name;
+    n.parentId = before.parentId;
+    n.offset   = before.offset;
+    n.id       = m_doc->tree.reserveId();
+
+    int insertSize = sizeForKind(kind);
+
+    // Shift siblings at or after the insertion offset down
+    QVector<cmd::OffsetAdj> adjs;
+    auto siblings = m_doc->tree.childrenOf(before.parentId);
+    for (int si : siblings) {
+        auto& sib = m_doc->tree.nodes[si];
+        if (sib.offset >= before.offset)
+            adjs.append({sib.id, sib.offset, sib.offset + insertSize});
+    }
+
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, adjs}));
 }
 
 void RcxController::removeNode(int nodeIdx) {
@@ -1558,6 +1615,17 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             return indices;
         };
 
+        // ── Insert shortcuts (always available) ──
+        menu.addAction(icon("diff-added.svg"), "Insert 4", [this]() {
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            insertNode(target, -1, NodeKind::Hex32, QStringLiteral("field"));
+        });
+        menu.addAction(icon("diff-added.svg"), "Insert 8", [this]() {
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            insertNode(target, -1, NodeKind::Hex64, QStringLiteral("field"));
+        });
+        menu.addSeparator();
+
         // Quick-convert shortcuts when all selected nodes share the same kind
         NodeKind commonKind = NodeKind::Hex64;
         bool allSame = true;
@@ -1640,8 +1708,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     for (int ci : m_doc->tree.subtreeIndices(id))
                         m_valueHistory.remove(m_doc->tree.nodes[ci].id);
                 }
-                for (auto& lm : m_lastResult.meta)
-                    if (!m_valueHistory.contains(lm.nodeId)) lm.heatLevel = 0;
+                m_refreshGen++;           // discard in-flight async reads
+                m_prevPages.clear();      // clean baseline for next read cycle
+                m_changedOffsets.clear();  // no phantom change indicators
+                m_valueTrackCooldown = 5; // suppress tracking for ~1s
                 refresh();
             });
         }
@@ -1674,7 +1744,8 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addSeparator();
 
-        menu.addAction(icon("link.svg"), "Copy &Address", [this, ids]() {
+        QMenu* copyMenu = menu.addMenu(icon("clippy.svg"), "Copy");
+        copyMenu->addAction(icon("link.svg"), "Copy &Address", [this, ids]() {
             QStringList addrs;
             for (uint64_t id : ids) {
                 int ni = m_doc->tree.indexOfId(id);
@@ -1690,6 +1761,28 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     }
 
     QMenu menu;
+
+    // ── Insert shortcuts (at very top) ──
+    if (hasNode) {
+        menu.addAction(icon("diff-added.svg"), "Insert 4 Above\tShift+Ins",
+            [this, nodeIdx]() {
+            insertNodeAbove(nodeIdx, NodeKind::Hex32, QStringLiteral("field"));
+        });
+        menu.addAction(icon("diff-added.svg"), "Insert 8 Above\tIns",
+            [this, nodeIdx]() {
+            insertNodeAbove(nodeIdx, NodeKind::Hex64, QStringLiteral("field"));
+        });
+    } else {
+        menu.addAction(icon("diff-added.svg"), "Insert 4", [this]() {
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            insertNode(target, -1, NodeKind::Hex32, QStringLiteral("field"));
+        });
+        menu.addAction(icon("diff-added.svg"), "Insert 8", [this]() {
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            insertNode(target, -1, NodeKind::Hex64, QStringLiteral("field"));
+        });
+    }
+    menu.addSeparator();
 
     // ── Node-specific actions (only when clicking on a node) ──
     if (hasNode) {
@@ -1839,8 +1932,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 m_valueHistory.remove(nodeId);
                 for (int ci : m_doc->tree.subtreeIndices(nodeId))
                     m_valueHistory.remove(m_doc->tree.nodes[ci].id);
-                for (auto& lm : m_lastResult.meta)
-                    if (!m_valueHistory.contains(lm.nodeId)) lm.heatLevel = 0;
+                m_refreshGen++;           // discard in-flight async reads
+                m_prevPages.clear();      // clean baseline for next read cycle
+                m_changedOffsets.clear();  // no phantom change indicators
+                m_valueTrackCooldown = 5; // suppress tracking for ~1s
                 refresh();
             });
         }
@@ -1994,24 +2089,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
 
         menu.addSeparator();
-
-        menu.addAction(icon("link.svg"), "Copy &Address", [this, nodeId]() {
-            int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni < 0) return;
-            uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
-            QApplication::clipboard()->setText(
-                QStringLiteral("0x") + QString::number(addr, 16).toUpper());
-        });
-
-        menu.addAction(icon("whole-word.svg"), "Copy &Offset", [this, nodeId]() {
-            int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni < 0) return;
-            int off = m_doc->tree.nodes[ni].offset;
-            QApplication::clipboard()->setText(
-                QStringLiteral("+0x") + QString::number(off, 16).toUpper().rightJustified(4, '0'));
-        });
-
-        menu.addSeparator();
         } // else (non-member node actions)
     }
 
@@ -2091,10 +2168,26 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
     menu.addSeparator();
 
-    menu.addAction(icon("clippy.svg"), "Copy All as Text", [editor]() {
-        QApplication::clipboard()->setText(editor->textWithMargins());
-    });
-    menu.addAction(icon("clippy.svg"), "Copy Line", [editor, line]() {
+    QMenu* copyMenu = menu.addMenu(icon("clippy.svg"), "Copy");
+    if (hasNode) {
+        uint64_t copyNodeId = m_doc->tree.nodes[nodeIdx].id;
+        copyMenu->addAction(icon("link.svg"), "Copy &Address", [this, copyNodeId]() {
+            int ni = m_doc->tree.indexOfId(copyNodeId);
+            if (ni < 0) return;
+            uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
+            QApplication::clipboard()->setText(
+                QStringLiteral("0x") + QString::number(addr, 16).toUpper());
+        });
+        copyMenu->addAction(icon("whole-word.svg"), "Copy &Offset", [this, copyNodeId]() {
+            int ni = m_doc->tree.indexOfId(copyNodeId);
+            if (ni < 0) return;
+            int off = m_doc->tree.nodes[ni].offset;
+            QApplication::clipboard()->setText(
+                QStringLiteral("+0x") + QString::number(off, 16).toUpper().rightJustified(4, '0'));
+        });
+        copyMenu->addSeparator();
+    }
+    copyMenu->addAction("Copy Line", [editor, line]() {
         auto* sci = editor->scintilla();
         int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
         if (len > 0) {
@@ -2105,11 +2198,14 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 QApplication::clipboard()->setText(text);
         }
     });
+    copyMenu->addAction("Copy All as Text", [editor]() {
+        QApplication::clipboard()->setText(editor->textWithMargins());
+    });
 
     menu.addSeparator();
 
-    menu.addAction(icon("search.svg"), "Search...", [editor]() {
-        editor->showFindBar();
+    menu.addAction(icon("search.svg"), "Search...\tCtrl+F", [editor]() {
+        QTimer::singleShot(0, editor, &RcxEditor::showFindBar);
     });
 
     menu.exec(globalPos);

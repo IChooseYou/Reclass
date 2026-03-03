@@ -90,6 +90,7 @@ public:
     void changeNodeKind(int nodeIdx, NodeKind newKind);
     void renameNode(int nodeIdx, const QString& newName);
     void insertNode(uint64_t parentId, int offset, NodeKind kind, const QString& name);
+    void insertNodeAbove(int beforeIdx, NodeKind kind, const QString& name);
     void removeNode(int nodeIdx);
     void toggleCollapse(int nodeIdx);
     void materializeRefChildren(int nodeIdx);
@@ -147,8 +148,9 @@ public:
     // Cross-tab type visibility: point at the project's full document list
     void setProjectDocuments(QVector<RcxDocument*>* docs) { m_projectDocs = docs; }
 
-    // Test accessor
+    // Test accessors
     const QHash<uint64_t, ValueHistory>& valueHistory() const { return m_valueHistory; }
+    const ComposeResult& lastResult() const { return m_lastResult; }
 
 signals:
     void nodeSelected(int nodeIdx);
@@ -181,6 +183,7 @@ private:
     QSet<int64_t>   m_changedOffsets;
     QHash<uint64_t, ValueHistory> m_valueHistory;
     bool            m_trackValues = true;
+    int             m_valueTrackCooldown = 0;
     uint64_t        m_refreshGen = 0;
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;
