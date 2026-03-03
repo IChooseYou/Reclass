@@ -301,11 +301,13 @@ void ScannerPanel::onModeChanged(int index) {
     m_condLabel->setVisible(!isSig);
     m_condCombo->setVisible(!isSig);
 
-    // Show/hide value input based on condition
+    // Enable/disable value input based on condition
     auto cond = (ScanCondition)m_condCombo->currentData().toInt();
     bool needsValue = !isSig && (cond == ScanCondition::ExactValue);
-    m_valueLabel->setVisible(needsValue);
-    m_valueEdit->setVisible(needsValue);
+    m_valueLabel->setVisible(!isSig);
+    m_valueEdit->setVisible(!isSig);
+    m_valueEdit->setEnabled(needsValue);
+    m_valueLabel->setEnabled(needsValue);
 
     // Auto-toggle filters: signatures → executable code, values → writable data
     m_execCheck->setChecked(isSig);
@@ -315,8 +317,8 @@ void ScannerPanel::onModeChanged(int index) {
 void ScannerPanel::onConditionChanged(int /*index*/) {
     auto cond = (ScanCondition)m_condCombo->currentData().toInt();
     bool needsValue = (cond == ScanCondition::ExactValue);
-    m_valueLabel->setVisible(needsValue);
-    m_valueEdit->setVisible(needsValue);
+    m_valueEdit->setEnabled(needsValue);
+    m_valueLabel->setEnabled(needsValue);
 }
 
 void ScannerPanel::onScanClicked() {
@@ -383,7 +385,7 @@ ScanRequest ScannerPanel::buildRequest() {
 
         if (cond == ScanCondition::UnknownValue) {
             // No pattern needed — capture all aligned addresses
-            req.maxResults = 500000;
+            req.maxResults = 10000000;
         } else {
             // Exact value mode
             if (!serializeValue(vt, m_valueEdit->text(), req.pattern, req.mask, &err)) {
@@ -423,8 +425,10 @@ void ScannerPanel::onScanFinished(QVector<ScanResult> results) {
     }
 
     int n = m_results.size();
-    m_statusLabel->setText(QStringLiteral("%1 result%2")
-        .arg(n).arg(n == 1 ? "" : "s"));
+    if (m_lastCondition == ScanCondition::UnknownValue && n >= 10000000)
+        m_statusLabel->setText(QStringLiteral("%1 results (capped — narrow with Re-scan)").arg(n));
+    else
+        m_statusLabel->setText(QStringLiteral("%1 result%2").arg(n).arg(n == 1 ? "" : "s"));
 }
 
 void ScannerPanel::populateTable(bool showPrevious) {
