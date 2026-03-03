@@ -602,8 +602,7 @@ void RcxController::refresh() {
         else if (m_doc->provider && m_doc->provider->isValid() && m_doc->provider->isLive())
             prov = m_doc->provider.get();
 
-        if (m_valueTrackCooldown > 0) --m_valueTrackCooldown;
-        if (m_trackValues && prov && m_valueTrackCooldown <= 0) {
+        if (m_trackValues && prov) {
             for (auto& lm : m_lastResult.meta) {
                 if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
                 if (isSyntheticLine(lm) || lm.isContinuation) continue;
@@ -1711,8 +1710,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 m_refreshGen++;           // discard in-flight async reads
                 m_prevPages.clear();      // clean baseline for next read cycle
                 m_changedOffsets.clear();  // no phantom change indicators
-                m_valueTrackCooldown = 5; // suppress tracking for ~1s
                 refresh();
+                for (auto* editor : m_editors)
+                    editor->dismissHistoryPopup();
             });
         }
         menu.addSeparator();
@@ -1935,8 +1935,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 m_refreshGen++;           // discard in-flight async reads
                 m_prevPages.clear();      // clean baseline for next read cycle
                 m_changedOffsets.clear();  // no phantom change indicators
-                m_valueTrackCooldown = 5; // suppress tracking for ~1s
                 refresh();
+                for (auto* editor : m_editors)
+                    editor->dismissHistoryPopup();
             });
         }
         menu.addSeparator();

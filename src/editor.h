@@ -34,6 +34,7 @@ public:
     int currentNodeIndex() const;
     void scrollToNodeId(uint64_t nodeId);
     void showFindBar();
+    void dismissHistoryPopup();
 
     // ── Column span computation ──
     static ColumnSpan typeSpan(const LineMeta& lm, int typeW = kColType);

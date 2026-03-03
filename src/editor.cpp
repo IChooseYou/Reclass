@@ -1387,6 +1387,11 @@ void RcxEditor::showFindBar() {
     m_findPos = 0;
 }
 
+void RcxEditor::dismissHistoryPopup() {
+    if (m_historyPopup)
+        static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
+}
+
 void RcxEditor::hideFindBar() {
     m_findBarContainer->setVisible(false);
     long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);

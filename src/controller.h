@@ -183,7 +183,6 @@ private:
     QSet<int64_t>   m_changedOffsets;
     QHash<uint64_t, ValueHistory> m_valueHistory;
     bool            m_trackValues = true;
-    int             m_valueTrackCooldown = 0;
     uint64_t        m_refreshGen = 0;
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;
