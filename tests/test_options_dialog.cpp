@@ -59,7 +59,6 @@ private slots:
         defaults.themeIndex = 0;
         defaults.fontName = "JetBrains Mono";
         defaults.menuBarTitleCase = true;
-        defaults.safeMode = false;
         defaults.autoStartMcp = false;
 
         OptionsDialog dlg(defaults);
@@ -93,7 +92,6 @@ private slots:
         input.themeIndex = 1;
         input.fontName = "Consolas";
         input.menuBarTitleCase = false;
-        input.safeMode = true;
         input.autoStartMcp = true;
 
         OptionsDialog dlg(input);
@@ -102,7 +100,6 @@ private slots:
         QCOMPARE(r.themeIndex, 1);
         QCOMPARE(r.fontName, QString("Consolas"));
         QCOMPARE(r.menuBarTitleCase, false);
-        QCOMPARE(r.safeMode, true);
         QCOMPARE(r.autoStartMcp, true);
     }
 

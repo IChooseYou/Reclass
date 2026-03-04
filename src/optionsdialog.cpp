@@ -40,9 +40,21 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     m_tree->setHeaderHidden(true);
     m_tree->setRootIsDecorated(true);
     m_tree->setFixedWidth(200);
+    m_tree->setMouseTracking(true);
+    m_tree->setIconSize(QSize(16, 16));
+    {
+        const auto& t = ThemeManager::instance().current();
+        QPalette tp = m_tree->palette();
+        tp.setColor(QPalette::Text, t.textDim);
+        tp.setColor(QPalette::Highlight, t.hover);
+        tp.setColor(QPalette::HighlightedText, t.text);
+        m_tree->setPalette(tp);
+    }
 
     auto* envItem = new QTreeWidgetItem(m_tree, {"Environment"});
+    envItem->setIcon(0, QIcon(":/vsicons/folder.svg"));
     auto* generalItem = new QTreeWidgetItem(envItem, {"General"});
+    generalItem->setIcon(0, QIcon(":/vsicons/settings-gear.svg"));
     m_tree->expandAll();
     m_tree->setCurrentItem(generalItem);
     leftColumn->addWidget(m_tree, 1);
@@ -102,7 +114,7 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     m_fontCombo->setObjectName("fontCombo");
     visualLayout->addRow("Editor Font:", m_fontCombo);
 
-    m_titleCaseCheck = new QCheckBox("Apply title case styling to menu bar");
+    m_titleCaseCheck = new QCheckBox("Uppercase menu items");
     m_titleCaseCheck->setChecked(current.menuBarTitleCase);
     visualLayout->addRow(m_titleCaseCheck);
 
@@ -111,24 +123,6 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     visualLayout->addRow(m_showIconCheck);
 
     generalLayout->addWidget(visualGroup);
-
-    // Safe Mode group box
-    auto* safeModeGroup = new QGroupBox("Preview Features");
-    auto* safeModeLayout = new QVBoxLayout(safeModeGroup);
-    safeModeLayout->setSpacing(4);
-
-    m_safeModeCheck = new QCheckBox("Safe Mode");
-    m_safeModeCheck->setChecked(current.safeMode);
-    safeModeLayout->addWidget(m_safeModeCheck);
-
-    auto* safeModeDesc = new QLabel(
-        "Enable to use the default OS icon for this application and "
-        "create the window with the name of the executable file.");
-    safeModeDesc->setWordWrap(true);
-    safeModeDesc->setContentsMargins(20, 0, 0, 0);  // indent under checkbox
-    safeModeLayout->addWidget(safeModeDesc);
-
-    generalLayout->addWidget(safeModeGroup);
     generalLayout->addStretch();
 
     m_pages->addWidget(generalPage);                     // index 0
@@ -136,6 +130,7 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
 
     // -- AI Features page --
     auto* aiItem = new QTreeWidgetItem(envItem, {"AI Features"});
+    aiItem->setIcon(0, QIcon(":/vsicons/remote.svg"));
 
     auto* aiPage = new QWidget;
     auto* aiLayout = new QVBoxLayout(aiPage);
@@ -165,6 +160,7 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
 
     // -- Generator page --
     auto* generatorItem = new QTreeWidgetItem(envItem, {"Generator"});
+    generatorItem->setIcon(0, QIcon(":/vsicons/code.svg"));
 
     auto* generatorPage = new QWidget;
     auto* generatorLayout = new QVBoxLayout(generatorPage);
@@ -213,7 +209,6 @@ OptionsResult OptionsDialog::result() const {
     r.fontName = m_fontCombo->currentText();
     r.menuBarTitleCase = m_titleCaseCheck->isChecked();
     r.showIcon = m_showIconCheck->isChecked();
-    r.safeMode = m_safeModeCheck->isChecked();
     r.autoStartMcp = m_autoMcpCheck->isChecked();
     r.refreshMs = m_refreshSpin->value();
     r.generatorAsserts = m_assertCheck->isChecked();

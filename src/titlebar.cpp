@@ -107,12 +107,14 @@ void TitleBarWidget::setShowIcon(bool show) {
     if (show) {
         m_appLabel->setText(QString());
         m_appLabel->setPixmap(QIcon(":/icons/class.png").pixmap(24, 24));
+        setFixedHeight(34);
     } else {
         m_appLabel->setPixmap(QPixmap());
         m_appLabel->setText(QStringLiteral("Reclass"));
         m_appLabel->setStyleSheet(
             QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; }")
                 .arg(m_theme.text.name()));
+        setFixedHeight(32);
     }
 }
 

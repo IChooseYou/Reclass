@@ -15,7 +15,6 @@ struct OptionsResult {
     QString fontName;
     bool    menuBarTitleCase = true;
     bool    showIcon = false;
-    bool    safeMode = false;
     bool    autoStartMcp = true;
     int     refreshMs = 660;
     bool    generatorAsserts = false;
@@ -39,7 +38,6 @@ private:
     QComboBox*      m_fontCombo      = nullptr;
     QCheckBox*      m_titleCaseCheck = nullptr;
     QCheckBox*      m_showIconCheck  = nullptr;
-    QCheckBox*      m_safeModeCheck  = nullptr;
     QCheckBox*      m_autoMcpCheck   = nullptr;
     QSpinBox*       m_refreshSpin    = nullptr;
     QCheckBox*      m_assertCheck    = nullptr;

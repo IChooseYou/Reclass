@@ -251,6 +251,8 @@ public:
             s.setHeight(s.height() + qRound(s.height() * 0.5));
         if (type == CT_MenuItem)
             s = QSize(s.width() + 24, s.height() + 4);
+        if (type == CT_ItemViewItem)
+            s.setHeight(s.height() + 4);
         return s;
     }
     int pixelMetric(PixelMetric metric, const QStyleOption* opt,
@@ -268,8 +270,9 @@ public:
     }
     void drawPrimitive(PrimitiveElement elem, const QStyleOption* opt,
                        QPainter* p, const QWidget* w) const override {
-        // Clean 1px border on QMenu (replaces Fusion's 3D bevel + OS shadow)
+        // Opaque background + clean 1px border on QMenu
         if (elem == PE_FrameMenu) {
+            p->fillRect(opt->rect, opt->palette.color(QPalette::Window));
             p->setPen(opt->palette.color(QPalette::Dark));
             p->setBrush(Qt::NoBrush);
             p->drawRect(opt->rect.adjusted(0, 0, -1, -1));
@@ -309,9 +312,9 @@ public:
                 // Only fill background for hover/pressed — non-hovered stays
                 // transparent so the parent's border line shows through.
                 if (sunken)
-                    p->fillRect(area, mi->palette.color(QPalette::Mid).darker(130));
+                    p->fillRect(area, mi->palette.color(QPalette::Highlight).darker(130));
                 else if (selected)
-                    p->fillRect(area, mi->palette.color(QPalette::Mid));
+                    p->fillRect(area, mi->palette.color(QPalette::Highlight));
 
                 QColor fg = (selected || sunken)
                     ? mi->palette.color(QPalette::Link)
@@ -321,15 +324,23 @@ public:
                 return; // never delegate to Fusion
             }
         }
-        // Popup menu items — palette patch then delegate to Fusion
+        // Popup menu items
         if (element == CE_MenuItem) {
             if (auto* mi = qstyleoption_cast<const QStyleOptionMenuItem*>(opt)) {
-                if ((mi->state & State_Selected)
-                    && mi->menuItemType != QStyleOptionMenuItem::Separator) {
+                // Subtle separator — single line using surface color
+                if (mi->menuItemType == QStyleOptionMenuItem::Separator) {
+                    int y = mi->rect.center().y();
+                    p->setPen(mi->palette.color(QPalette::AlternateBase));
+                    p->drawLine(mi->rect.left() + 4, y, mi->rect.right() - 4, y);
+                    return;
+                }
+                // Hover highlight — flat fill (no Fusion border) then delegate
+                // for text/icon/arrow with Selected cleared
+                if ((mi->state & State_Selected)) {
+                    p->fillRect(mi->rect, mi->palette.color(QPalette::Highlight));
                     QStyleOptionMenuItem patched = *mi;
-                    patched.palette.setColor(QPalette::Highlight,
-                        mi->palette.color(QPalette::Mid));           // theme.hover
-                    patched.palette.setColor(QPalette::HighlightedText,
+                    patched.state &= ~State_Selected;
+                    patched.palette.setColor(QPalette::Text,
                         mi->palette.color(QPalette::Link));          // theme.indHoverSpan
                     QProxyStyle::drawControl(element, &patched, p, w);
                     return;
@@ -365,7 +376,7 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
     pal.setColor(QPalette::Text,            theme.text);
     pal.setColor(QPalette::Button,          theme.button);
     pal.setColor(QPalette::ButtonText,      theme.text);
-    pal.setColor(QPalette::Highlight,       theme.hover);
+    pal.setColor(QPalette::Highlight,       theme.selected);
     pal.setColor(QPalette::HighlightedText, theme.text);
     pal.setColor(QPalette::ToolTipBase,     theme.backgroundAlt);
     pal.setColor(QPalette::ToolTipText,     theme.text);
@@ -764,6 +775,34 @@ protected:
         if (e->button() == Qt::LeftButton) {
             window()->windowHandle()->startSystemResize(Qt::BottomEdge | Qt::RightEdge);
             e->accept();
+        }
+    }
+private:
+    QColor m_color;
+};
+
+// ── Dock title-bar grip (VS2022-style dot pattern) ──
+class DockGripWidget : public QWidget {
+public:
+    explicit DockGripWidget(QWidget* parent) : QWidget(parent) {
+        setFixedWidth(6);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        m_color = rcx::ThemeManager::instance().current().textFaint;
+    }
+    void setGripColor(const QColor& c) { m_color = c; update(); }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_color);
+        const double r = 0.75, s = 3.0;
+        double cx = width() / 2.0;
+        double cy = height() / 2.0;
+        // 2 columns x 3 rows, centered
+        for (int row = -1; row <= 1; row++) {
+            p.drawEllipse(QPointF(cx - s * 0.5, cy + row * s), r, r);
+            p.drawEllipse(QPointF(cx + s * 0.5, cy + row * s), r, r);
         }
     }
 private:
@@ -1882,6 +1921,8 @@ void MainWindow::applyTheme(const Theme& theme) {
             "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
             "QToolButton:hover { color: %2; }")
             .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+    if (m_dockGrip)
+        m_dockGrip->setGripColor(theme.textFaint);
 
     // Scanner dock
     if (m_scannerPanel)
@@ -1901,6 +1942,8 @@ void MainWindow::applyTheme(const Theme& theme) {
             "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
             "QToolButton:hover { color: %2; }")
             .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+    if (m_scanDockGrip)
+        m_scanDockGrip->setGripColor(theme.textFaint);
 
     // Rendered C/C++ views: update lexer colors, paper, margins
     for (auto& tab : m_tabs) {
@@ -1956,7 +1999,6 @@ void MainWindow::showOptionsDialog() {
     current.showIcon = m_titleBar
         ? QSettings("Reclass", "Reclass").value("showIcon", false).toBool()
         : false;
-    current.safeMode = QSettings("Reclass", "Reclass").value("safeMode", false).toBool();
     current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
     current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
     current.generatorAsserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
@@ -1982,9 +2024,6 @@ void MainWindow::showOptionsDialog() {
             m_titleBar->setShowIcon(r.showIcon);
         QSettings("Reclass", "Reclass").setValue("showIcon", r.showIcon);
     }
-
-    if (r.safeMode != current.safeMode)
-        QSettings("Reclass", "Reclass").setValue("safeMode", r.safeMode);
 
     if (r.autoStartMcp != current.autoStartMcp)
         QSettings("Reclass", "Reclass").setValue("autoStartMcp", r.autoStartMcp);
@@ -2683,8 +2722,11 @@ void MainWindow::createWorkspaceDock() {
             titleBar->setPalette(tbPal);
         }
         auto* layout = new QHBoxLayout(titleBar);
-        layout->setContentsMargins(6, 2, 2, 2);
-        layout->setSpacing(0);
+        layout->setContentsMargins(4, 2, 2, 2);
+        layout->setSpacing(4);
+
+        m_dockGrip = new DockGripWidget(titleBar);
+        layout->addWidget(m_dockGrip);
 
         m_dockTitleLabel = new QLabel("Project", titleBar);
         {
@@ -2955,8 +2997,11 @@ void MainWindow::createScannerDock() {
             titleBar->setPalette(tbPal);
         }
         auto* layout = new QHBoxLayout(titleBar);
-        layout->setContentsMargins(6, 2, 2, 2);
-        layout->setSpacing(0);
+        layout->setContentsMargins(4, 2, 2, 2);
+        layout->setSpacing(4);
+
+        m_scanDockGrip = new DockGripWidget(titleBar);
+        layout->addWidget(m_scanDockGrip);
 
         m_scanDockTitle = new QLabel("Scanner", titleBar);
         {
