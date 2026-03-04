@@ -2715,7 +2715,7 @@ private slots:
             // Also show hex of first 15 chars to see tree chars
             QString hexChars;
             for (int c = 0; c < qMin(15, lines[i].size()); c++)
-                hexChars += QString("U+%1 ").arg(lines[i][c].unicode(), 4, 16, QChar('0'));
+                hexChars += QString("U+%1 ").arg(static_cast<uint>(lines[i][c].unicode()), 4, 16, QChar('0'));
             qDebug().noquote() << QString("[%1] d=%2 k=%3: %4")
                 .arg(i, 2).arg(result.meta[i].depth).arg((int)result.meta[i].lineKind).arg(lines[i]);
             qDebug().noquote() << QString("     hex: %1").arg(hexChars);
