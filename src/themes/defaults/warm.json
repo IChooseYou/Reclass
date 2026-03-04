@@ -15,8 +15,8 @@
     "selection": "#21213A",
     "syntaxKeyword": "#AA9565",
     "syntaxNumber": "#AAA98C",
-    "syntaxString": "#6B3B21",
-    "syntaxComment": "#464646",
+    "syntaxString": "#C0825A",
+    "syntaxComment": "#8A8878",
     "syntaxPreproc": "#AA9565",
     "syntaxType": "#6B959F",
     "indHoverSpan": "#AA9565",
@@ -25,8 +25,8 @@
     "indHeatCold": "#C4A44A",
     "indHeatWarm": "#AA9565",
     "indHeatHot": "#A05040",
-    "indHintGreen": "#464646",
-    "markerPtr": "#6B3B21",
+    "indHintGreen": "#688A58",
+    "markerPtr": "#B85A42",
     "markerCycle": "#AA9565",
     "markerError": "#3C2121"
 }

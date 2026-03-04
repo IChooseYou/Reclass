@@ -124,6 +124,9 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_writeCheck = new QCheckBox(QStringLiteral("Writable"), this);
     filterRow->addWidget(m_writeCheck);
 
+    m_structOnlyCheck = new QCheckBox(QStringLiteral("Current Struct"), this);
+    filterRow->addWidget(m_structOnlyCheck);
+
     filterRow->addStretch();
 
     m_scanBtn = new QPushButton(QIcon(QStringLiteral(":/vsicons/search.svg")),
@@ -257,6 +260,10 @@ void ScannerPanel::setProviderGetter(ProviderGetter getter) {
     m_providerGetter = std::move(getter);
 }
 
+void ScannerPanel::setBoundsGetter(BoundsGetter getter) {
+    m_boundsGetter = std::move(getter);
+}
+
 void ScannerPanel::setEditorFont(const QFont& font) {
     m_resultTable->setFont(font);
     QFontMetrics fm(font);
@@ -278,6 +285,7 @@ void ScannerPanel::setEditorFont(const QFont& font) {
     m_valueLabel->setFont(font);
     m_execCheck->setFont(font);
     m_writeCheck->setFont(font);
+    m_structOnlyCheck->setFont(font);
     m_updateBtn->setFont(font);
     updateComboWidth();
 }
@@ -397,6 +405,14 @@ ScanRequest ScannerPanel::buildRequest() {
 
     req.filterExecutable = m_execCheck->isChecked();
     req.filterWritable = m_writeCheck->isChecked();
+
+    if (m_structOnlyCheck->isChecked() && m_boundsGetter) {
+        auto bounds = m_boundsGetter();
+        if (bounds.size > 0) {
+            req.startAddress = bounds.start;
+            req.endAddress   = bounds.start + bounds.size;
+        }
+    }
 
     return req;
 }
@@ -750,6 +766,7 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     cp.setColor(QPalette::WindowText, theme.textDim);
     m_execCheck->setPalette(cp);
     m_writeCheck->setPalette(cp);
+    m_structOnlyCheck->setPalette(cp);
 
     // Buttons
     QString btnStyle = QStringLiteral(

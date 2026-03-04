@@ -489,13 +489,21 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
     const char* msk = isUnknown ? nullptr : req.mask.constData();
     const int alignment = qMax(1, req.alignment);
     const int valSize = isUnknown ? req.valueSize : patternLen;
+    const bool hasRange = (req.startAddress != 0 || req.endAddress != 0) &&
+                           req.endAddress > req.startAddress;
 
     // Pre-compute total bytes for progress
     uint64_t totalBytes = 0;
     for (const auto& r : regions) {
         if (req.filterExecutable && !r.executable) continue;
         if (req.filterWritable && !r.writable) continue;
-        totalBytes += r.size;
+        uint64_t rStart = r.base, rEnd = r.base + r.size;
+        if (hasRange) {
+            if (rEnd <= req.startAddress || rStart >= req.endAddress) continue;
+            rStart = qMax(rStart, req.startAddress);
+            rEnd   = qMin(rEnd, req.endAddress);
+        }
+        totalBytes += rEnd - rStart;
     }
 
     qDebug() << "[scan] total scannable:" << (totalBytes / 1024) << "KB across filtered regions";
@@ -513,21 +521,35 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
         if (req.filterExecutable && !region.executable) continue;
         if (req.filterWritable && !region.writable) continue;
 
-        if ((uint64_t)patternLen > region.size) {
-            scannedBytes += region.size;
+        // Clip region to requested address range
+        uint64_t regStart = region.base;
+        uint64_t regEnd   = region.base + region.size;
+        if (hasRange) {
+            if (regEnd <= req.startAddress || regStart >= req.endAddress) {
+                // Entirely outside range — skip
+                continue;
+            }
+            regStart = qMax(regStart, req.startAddress);
+            regEnd   = qMin(regEnd, req.endAddress);
+        }
+        uint64_t regSize = regEnd - regStart;
+
+        if ((uint64_t)patternLen > regSize) {
+            scannedBytes += regSize;
             continue;
         }
 
         const int overlap = patternLen - 1;
-        QByteArray chunk(qMin((uint64_t)kChunk, region.size), Qt::Uninitialized);
+        QByteArray chunk(qMin((uint64_t)kChunk, regSize), Qt::Uninitialized);
+        uint64_t regOffset = regStart - region.base; // offset within provider region
 
-        for (uint64_t off = 0; off < region.size; ) {
+        for (uint64_t off = 0; off < regSize; ) {
             if (m_abort.load()) break;
 
-            uint64_t remaining = region.size - off;
+            uint64_t remaining = regSize - off;
             int readLen = (int)qMin((uint64_t)chunk.size(), remaining);
 
-            if (!prov->read(region.base + off, chunk.data(), readLen)) {
+            if (!prov->read(regStart + off, chunk.data(), readLen)) {
                 // Skip unreadable chunk
                 off += readLen;
                 scannedBytes += readLen;
@@ -541,7 +563,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                 // Unknown value: capture every aligned address
                 for (int i = 0; i <= scanEnd; i += alignment) {
                     ScanResult r;
-                    r.address = region.base + off + (uint64_t)i;
+                    r.address = regStart + off + (uint64_t)i;
                     r.scanValue = QByteArray(data + i, valSize);
                     results.append(r);
 
@@ -560,7 +582,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                     }
                     if (match) {
                         ScanResult r;
-                        r.address = region.base + off + (uint64_t)i;
+                        r.address = regStart + off + (uint64_t)i;
                         r.regionModule = region.moduleName;
                         r.scanValue = QByteArray(data + i, qMin(16, readLen - i));
                         results.append(r);

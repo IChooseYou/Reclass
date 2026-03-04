@@ -156,7 +156,7 @@ public:
         adjustSize();
     }
 
-    void showAt(const QPoint& globalPos) {
+    void showAt(const QPoint& globalPos, int lineHeight = 0) {
         QSize sz = sizeHint();
         QRect screen = QApplication::screenAt(globalPos)
             ? QApplication::screenAt(globalPos)->availableGeometry()
@@ -164,7 +164,7 @@ public:
         int x = qMin(globalPos.x(), screen.right() - sz.width());
         int y = globalPos.y();
         if (y + sz.height() > screen.bottom())
-            y = globalPos.y() - sz.height() - 4;
+            y = globalPos.y() - sz.height() - lineHeight - 4;
         move(x, y);
         if (!isVisible()) show();
     }
@@ -257,7 +257,7 @@ public:
         adjustSize();
     }
 
-    void showAt(const QPoint& globalPos) {
+    void showAt(const QPoint& globalPos, int lineHeight = 0) {
         QSize sz = sizeHint();
         QRect screen = QApplication::screenAt(globalPos)
             ? QApplication::screenAt(globalPos)->availableGeometry()
@@ -265,7 +265,7 @@ public:
         int x = qMin(globalPos.x(), screen.right() - sz.width());
         int y = globalPos.y();
         if (y + sz.height() > screen.bottom())
-            y = globalPos.y() - sz.height() - 4;
+            y = globalPos.y() - sz.height() - lineHeight - 4;
         move(x, y);
         if (!isVisible()) show();
     }
@@ -354,7 +354,7 @@ public:
         adjustSize();
     }
 
-    void showAt(const QPoint& globalPos) {
+    void showAt(const QPoint& globalPos, int lineHeight = 0) {
         QSize sz = sizeHint();
         QRect screen = QApplication::screenAt(globalPos)
             ? QApplication::screenAt(globalPos)->availableGeometry()
@@ -362,7 +362,7 @@ public:
         int x = qMin(globalPos.x(), screen.right() - sz.width());
         int y = globalPos.y();
         if (y + sz.height() > screen.bottom())
-            y = globalPos.y() - sz.height() - 4;
+            y = globalPos.y() - sz.height() - lineHeight - 4;
         move(x, y);
         if (!isVisible()) show();
     }
@@ -866,7 +866,7 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->setMarkerBackgroundColor(theme.background, M_CYCLE);
     m_sci->setMarkerForegroundColor(theme.background, M_CYCLE);
     m_sci->setMarkerBackgroundColor(theme.markerError, M_ERR);
-    m_sci->setMarkerForegroundColor(QColor("#ffffff"), M_ERR);
+    m_sci->setMarkerForegroundColor(theme.text, M_ERR);
     m_sci->setMarkerBackgroundColor(theme.background, M_STRUCT_BG);
     m_sci->setMarkerForegroundColor(theme.text, M_STRUCT_BG);
     m_sci->setMarkerBackgroundColor(theme.hover, M_HOVER);
@@ -1061,6 +1061,11 @@ void RcxEditor::reformatMargins() {
     }
 
     // ── Pass 2: inline local offsets in the text indent area ──
+    // Skip when tree lines are active — the compose step already placed
+    // Unicode tree connectors in the indent area; overwriting with spaces
+    // or offsets would destroy them.
+    if (m_layout.treeLines)
+        return;
     m_sci->setReadOnly(false);
     for (int i = 0; i < m_meta.size(); i++) {
         const auto& lm = m_meta[i];
@@ -2204,11 +2209,25 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_lastHoverPos = static_cast<QMouseEvent*>(event)->pos();
             m_hoverInside = true;
         } else if (event->type() == QEvent::Leave) {
-            m_hoverInside = false;
-            if (!m_editState.active) {
-                m_hoveredNodeId = 0;
-                m_hoveredLine = -1;
-                applyHoverHighlight();
+            // Don't dismiss if cursor moved onto one of our own popups
+            QPoint globalCursor = QCursor::pos();
+            bool onPopup = false;
+            if (m_historyPopup && m_historyPopup->isVisible()
+                && m_historyPopup->geometry().contains(globalCursor))
+                onPopup = true;
+            if (m_disasmPopup && m_disasmPopup->isVisible()
+                && m_disasmPopup->geometry().contains(globalCursor))
+                onPopup = true;
+            if (m_structPreviewPopup && m_structPreviewPopup->isVisible()
+                && m_structPreviewPopup->geometry().contains(globalCursor))
+                onPopup = true;
+            if (!onPopup) {
+                m_hoverInside = false;
+                if (!m_editState.active) {
+                    m_hoveredNodeId = 0;
+                    m_hoveredLine = -1;
+                    applyHoverHighlight();
+                }
             }
         } else if (event->type() == QEvent::Wheel) {
             m_lastHoverPos = m_sci->viewport()->mapFromGlobal(QCursor::pos());
@@ -2992,7 +3011,7 @@ void RcxEditor::applyHoverCursor() {
                         int lh = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT,
                                                            (unsigned long)m_editState.line);
                         QPoint anchor = m_sci->viewport()->mapToGlobal(QPoint(px, py + lh));
-                        popup->showAt(anchor);
+                        popup->showAt(anchor, lh);
                         showPopup = true;
                     }
                 }
@@ -3147,7 +3166,7 @@ void RcxEditor::applyHoverCursor() {
                         int lh = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT,
                                                            (unsigned long)h.line);
                         QPoint anchor = m_sci->viewport()->mapToGlobal(QPoint(px, py + lh));
-                        popup->showAt(anchor);
+                        popup->showAt(anchor, lh);
                         showPopup = true;
                     }
                 }
@@ -3240,7 +3259,7 @@ void RcxEditor::applyHoverCursor() {
                                         (unsigned long)h.line);
                                     QPoint anchor = m_sci->viewport()->mapToGlobal(
                                         QPoint(px, py + lh));
-                                    popup->showAt(anchor);
+                                    popup->showAt(anchor, lh);
                                     showDisasm = true;
                                     // Dismiss value history popup to avoid fighting
                                     if (m_historyPopup && m_historyPopup->isVisible())
@@ -3307,7 +3326,7 @@ void RcxEditor::applyHoverCursor() {
                                 (unsigned long)h.line);
                             QPoint anchor = m_sci->viewport()->mapToGlobal(
                                 QPoint(px, py + lh));
-                            popup->showAt(anchor);
+                            popup->showAt(anchor, lh);
                             showPreview = true;
                             if (m_historyPopup && m_historyPopup->isVisible())
                                 static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();

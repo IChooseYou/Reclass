@@ -86,8 +86,8 @@ inline constexpr KindMeta kKindMeta[] = {
     {NodeKind::Vec3,      "Vec3",      "vec3",       12,  1,  4, KF_Vector},
     {NodeKind::Vec4,      "Vec4",      "vec4",       16,  1,  4, KF_Vector},
     {NodeKind::Mat4x4,    "Mat4x4",    "mat4x4",     64,  4,  4, KF_None},
-    {NodeKind::UTF8,      "UTF8",      "char[]",      1,  1,  1, KF_String},
-    {NodeKind::UTF16,     "UTF16",     "wchar_t[]",   2,  1,  2, KF_String},
+    {NodeKind::UTF8,      "UTF8",      "str",         1,  1,  1, KF_String},
+    {NodeKind::UTF16,     "UTF16",     "wstr",        2,  1,  2, KF_String},
     {NodeKind::Struct,    "Struct",    "struct",      0,  1,  1, KF_Container},
     {NodeKind::Array,     "Array",     "array",       0,  1,  1, KF_Container},
 };
@@ -153,14 +153,11 @@ inline constexpr bool isValidPrimitivePtrTarget(NodeKind k) {
     return true;
 }
 
-inline QStringList allTypeNamesForUI(bool stripBrackets = false) {
+inline QStringList allTypeNamesForUI(bool /*stripBrackets*/ = false) {
     QStringList out;
     out.reserve(std::size(kKindMeta));
-    for (const auto& m : kKindMeta) {
-        QString t = QString::fromLatin1(m.typeName);
-        if (stripBrackets) t.remove(QStringLiteral("[]"));
-        out << t;
-    }
+    for (const auto& m : kKindMeta)
+        out << QString::fromLatin1(m.typeName);
     out.sort(Qt::CaseInsensitive);
     out.removeDuplicates();
     return out;
@@ -636,6 +633,7 @@ struct LayoutInfo {
     int nameW = 22;  // Effective name column width (default = kColName)
     int offsetHexDigits = 8;  // Hex digits for offset margin (4/8/12/16)
     uint64_t baseAddress = 0; // Base address for relative offset computation
+    bool treeLines = false;   // Whether tree line connectors are embedded in the text
 };
 
 // ── ComposeResult ──
@@ -1033,6 +1031,6 @@ namespace fmt {
 // ── Compose function forward declaration ──
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId = 0,
-                      bool compactColumns = false);
+                      bool compactColumns = false, bool treeLines = false);
 
 } // namespace rcx

@@ -236,6 +236,14 @@ public:
 class MenuBarStyle : public QProxyStyle {
 public:
     using QProxyStyle::QProxyStyle;
+    void polish(QWidget* w) override {
+        // Strip OS window border/shadow from QMenu popups — we draw our own
+        // 1px border in PE_FrameMenu.  Same pattern as TypeSelectorPopup.
+        if (qobject_cast<QMenu*>(w))
+            w->setWindowFlag(Qt::FramelessWindowHint, true);
+        QProxyStyle::polish(w);
+    }
+    using QProxyStyle::polish;
     QSize sizeFromContents(ContentsType type, const QStyleOption* opt,
                            const QSize& sz, const QWidget* w) const override {
         QSize s = QProxyStyle::sizeFromContents(type, opt, sz, w);
@@ -247,9 +255,12 @@ public:
     }
     int pixelMetric(PixelMetric metric, const QStyleOption* opt,
                     const QWidget* w) const override {
-        // Kill the 1px frame margin Fusion reserves around QMenu contents
+        // Reserve 1px for our own menu border (drawn in PE_FrameMenu)
         if (metric == PM_MenuPanelWidth)
-            return 0;
+            return 1;
+        // Inset menu items from border so hover rect doesn't touch edges
+        if (metric == PM_MenuHMargin)
+            return 3;
         // Thin draggable separator between dock widgets / central widget
         if (metric == PM_DockWidgetSeparatorExtent)
             return 1;
@@ -257,9 +268,13 @@ public:
     }
     void drawPrimitive(PrimitiveElement elem, const QStyleOption* opt,
                        QPainter* p, const QWidget* w) const override {
-        // Kill Fusion's 3D bevel on QMenu — the OS drop shadow is enough
-        if (elem == PE_FrameMenu)
+        // Clean 1px border on QMenu (replaces Fusion's 3D bevel + OS shadow)
+        if (elem == PE_FrameMenu) {
+            p->setPen(opt->palette.color(QPalette::Dark));
+            p->setBrush(Qt::NoBrush);
+            p->drawRect(opt->rect.adjusted(0, 0, -1, -1));
             return;
+        }
         // Kill the status bar item frame and panel border
         if (elem == PE_FrameStatusBarItem || elem == PE_PanelStatusBar)
             return;
@@ -355,7 +370,7 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
     pal.setColor(QPalette::ToolTipBase,     theme.backgroundAlt);
     pal.setColor(QPalette::ToolTipText,     theme.text);
     pal.setColor(QPalette::Mid,             theme.hover);
-    pal.setColor(QPalette::Dark,            theme.background);
+    pal.setColor(QPalette::Dark,            theme.border);
     pal.setColor(QPalette::Light,           theme.textFaint);
     pal.setColor(QPalette::Link,            theme.indHoverSpan);
 
@@ -655,6 +670,15 @@ void MainWindow::createMenus() {
         QSettings("Reclass", "Reclass").setValue("compactColumns", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setCompactColumns(checked);
+    });
+
+    auto* actTreeLines = view->addAction("&Tree Lines");
+    actTreeLines->setCheckable(true);
+    actTreeLines->setChecked(settings.value("treeLines", false).toBool());
+    connect(actTreeLines, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("treeLines", checked);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setTreeLines(checked);
     });
 
     auto* actRelOfs = view->addAction("R&elative Offsets");
@@ -1307,6 +1331,7 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
 
     // Apply global compact columns setting to new tab
     ctrl->setCompactColumns(QSettings("Reclass", "Reclass").value("compactColumns", true).toBool());
+    ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", false).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
@@ -2975,6 +3000,30 @@ void MainWindow::createScannerDock() {
     m_scannerPanel->setProviderGetter([this]() -> std::shared_ptr<rcx::Provider> {
         auto* ctrl = activeController();
         return ctrl ? ctrl->document()->provider : nullptr;
+    });
+
+    // Wire bounds getter: struct base + size for "Current Struct" filter
+    m_scannerPanel->setBoundsGetter([this]() -> rcx::ScannerPanel::StructBounds {
+        auto* ctrl = activeController();
+        if (!ctrl) return {};
+        auto& tree = ctrl->document()->tree;
+        uint64_t base = tree.baseAddress;
+        uint64_t viewRoot = ctrl->viewRootId();
+        int span = 0;
+        if (viewRoot != 0) {
+            span = tree.structSpan(viewRoot);
+        } else {
+            // Compute extent from all top-level nodes
+            for (int i = 0; i < tree.nodes.size(); i++) {
+                const auto& n = tree.nodes[i];
+                int64_t off = tree.computeOffset(i);
+                int sz = (n.kind == rcx::NodeKind::Struct || n.kind == rcx::NodeKind::Array)
+                    ? tree.structSpan(n.id) : n.byteSize();
+                int64_t end = off + sz;
+                if (end > span) span = static_cast<int>(end);
+            }
+        }
+        return { base, static_cast<uint64_t>(span) };
     });
 
     // Wire "Go to Address" to rebase the active tab

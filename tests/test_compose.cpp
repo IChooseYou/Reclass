@@ -2627,6 +2627,122 @@ private slots:
         QVERIFY2(result.text.contains(QStringLiteral("\u2192")),
                  qPrintable("Expected arrow (\u2192) in text:\n" + result.text));
     }
+    void testTreeLinesDepth2() {
+        // Diagnostic test: verify tree chars at depth 2+ with hex64 nodes
+        // (matches user's actual scenario — Hex64 inside pointer expansion)
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        // Root struct "Unnamed"
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Unnamed";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // First child: hex64 at depth 1
+        Node f1;
+        f1.kind = NodeKind::Hex64;
+        f1.name = "";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+
+        // Ref struct "NewClass" (separate root-level definition)
+        Node inner;
+        inner.kind = NodeKind::Struct;
+        inner.name = "NewClass";
+        inner.parentId = 0;
+        inner.offset = 200;
+        int ii = tree.addNode(inner);
+        uint64_t innerId = tree.nodes[ii].id;
+
+        // hex64 children of NewClass
+        Node if1;
+        if1.kind = NodeKind::Hex64;
+        if1.name = "";
+        if1.parentId = innerId;
+        if1.offset = 0;
+        tree.addNode(if1);
+
+        Node if2;
+        if2.kind = NodeKind::Hex64;
+        if2.name = "";
+        if2.parentId = innerId;
+        if2.offset = 8;
+        tree.addNode(if2);
+
+        Node if3;
+        if3.kind = NodeKind::Hex64;
+        if3.name = "";
+        if3.parentId = innerId;
+        if3.offset = 16;
+        tree.addNode(if3);
+
+        // Pointer in root referencing NewClass
+        Node ptr;
+        ptr.kind = NodeKind::Pointer64;
+        ptr.name = "field_0008";
+        ptr.parentId = rootId;
+        ptr.offset = 8;
+        ptr.refId = innerId;
+        tree.addNode(ptr);
+
+        // Last child: hex64 at depth 1
+        Node f2;
+        f2.kind = NodeKind::Hex64;
+        f2.name = "";
+        f2.parentId = rootId;
+        f2.offset = 16;
+        tree.addNode(f2);
+
+        // Provider with pointer value
+        QByteArray data(256, '\0');
+        uint64_t ptrVal = 100;
+        memcpy(data.data() + 8, &ptrVal, 8);
+        BufferProvider prov(data);
+
+        // Compose WITH tree lines
+        ComposeResult result = compose(tree, prov, 0, false, true);
+
+        QStringList lines = result.text.split('\n');
+
+        // Print output with char codes for debugging
+        qDebug() << "=== Tree lines compose output (hex64 scenario) ===";
+        for (int i = 0; i < lines.size(); i++) {
+            // Also show hex of first 15 chars to see tree chars
+            QString hexChars;
+            for (int c = 0; c < qMin(15, lines[i].size()); c++)
+                hexChars += QString("U+%1 ").arg(lines[i][c].unicode(), 4, 16, QChar('0'));
+            qDebug().noquote() << QString("[%1] d=%2 k=%3: %4")
+                .arg(i, 2).arg(result.meta[i].depth).arg((int)result.meta[i].lineKind).arg(lines[i]);
+            qDebug().noquote() << QString("     hex: %1").arg(hexChars);
+        }
+        qDebug() << "=== end ===";
+
+        // Verify depth-2 lines contain tree chars
+        QChar vertLine(0x2502);  // │
+        QChar tee(0x251C);       // ├
+        QChar corner(0x2514);    // └
+
+        bool foundDepth2TreeChar = false;
+        for (int i = 0; i < result.meta.size(); i++) {
+            if (result.meta[i].depth == 2
+                && result.meta[i].lineKind != LineKind::Footer) {
+                bool has = lines[i].contains(vertLine)
+                        || lines[i].contains(tee)
+                        || lines[i].contains(corner);
+                if (has) foundDepth2TreeChar = true;
+                QVERIFY2(has,
+                    qPrintable(QString("Depth-2 line %1 missing tree chars: %2")
+                        .arg(i).arg(lines[i])));
+            }
+        }
+        QVERIFY2(foundDepth2TreeChar,
+                 qPrintable("No depth-2 lines with tree chars found:\n" + result.text));
+    }
 };
 
 QTEST_MAIN(TestCompose)

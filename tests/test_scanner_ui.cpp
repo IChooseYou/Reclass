@@ -1103,6 +1103,89 @@ private slots:
     // Provider getter is lazy (captures at scan time)
     // ═══════════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════════
+    // "Current Struct" checkbox
+    // ═══════════════════════════════════════════════════════════════════
+
+    void structOnly_checkboxExists() {
+        QVERIFY(m_panel->structOnlyCheck() != nullptr);
+        QCOMPARE(m_panel->structOnlyCheck()->isChecked(), false);
+        QCOMPARE(m_panel->structOnlyCheck()->text(), QStringLiteral("Current Struct"));
+    }
+
+    void structOnly_setsAddressRange() {
+        // Set up a bounds getter that returns a known range
+        m_panel->setBoundsGetter([]() -> ScannerPanel::StructBounds {
+            return { 0x1000, 0x200 };
+        });
+
+        // Set up a simple buffer provider
+        QByteArray data(0x2000, '\x00');
+        data[0x1000] = '\xCC';
+        data[0x1100] = '\xCC';
+        data[0x1500] = '\xCC'; // outside bounds (0x1000 + 0x200 = 0x1200)
+        auto prov = std::make_shared<BufferProvider>(data);
+        m_panel->setProviderGetter([prov]() { return prov; });
+
+        // Enable struct-only mode
+        m_panel->structOnlyCheck()->setChecked(true);
+
+        // Scan for \xCC
+        m_panel->patternEdit()->setText("CC");
+        QSignalSpy finSpy(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(finSpy.wait(5000));
+        QApplication::processEvents();
+
+        // Should only find results within [0x1000, 0x1200)
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+    }
+
+    void structOnly_uncheckedScansAll() {
+        // Same setup but with checkbox unchecked — should find all 3
+        m_panel->setBoundsGetter([]() -> ScannerPanel::StructBounds {
+            return { 0x1000, 0x200 };
+        });
+
+        QByteArray data(0x2000, '\x00');
+        data[0x1000] = '\xCC';
+        data[0x1100] = '\xCC';
+        data[0x1500] = '\xCC';
+        auto prov = std::make_shared<BufferProvider>(data);
+        m_panel->setProviderGetter([prov]() { return prov; });
+
+        m_panel->structOnlyCheck()->setChecked(false); // unchecked
+
+        m_panel->patternEdit()->setText("CC");
+        QSignalSpy finSpy(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(finSpy.wait(5000));
+        QApplication::processEvents();
+
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 3);
+    }
+
+    void structOnly_noBoundsGetterIgnored() {
+        // No bounds getter set — checkbox checked but no effect
+        QByteArray data(16, '\xDD');
+        auto prov = std::make_shared<BufferProvider>(data);
+        m_panel->setProviderGetter([prov]() { return prov; });
+
+        m_panel->structOnlyCheck()->setChecked(true);
+        // Don't set bounds getter
+
+        m_panel->patternEdit()->setText("DD");
+        QSignalSpy finSpy(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(finSpy.wait(5000));
+        QApplication::processEvents();
+
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 16); // all 16 bytes match
+    }
+
     void providerGetter_lazy() {
         auto prov1 = std::make_shared<BufferProvider>(QByteArray(16, '\xAA'));
         auto prov2 = std::make_shared<BufferProvider>(QByteArray(16, '\xBB'));

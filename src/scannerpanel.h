@@ -34,6 +34,10 @@ public:
     using ProviderGetter = std::function<std::shared_ptr<Provider>()>;
     void setProviderGetter(ProviderGetter getter);
 
+    struct StructBounds { uint64_t start = 0; uint64_t size = 0; };
+    using BoundsGetter = std::function<StructBounds()>;
+    void setBoundsGetter(BoundsGetter getter);
+
     void setEditorFont(const QFont& font);
     void applyTheme(const Theme& theme);
 
@@ -54,6 +58,7 @@ public:
     ScanEngine*   engine()       const { return m_engine; }
     QComboBox*    condCombo()    const { return m_condCombo; }
     QLabel*       condLabel()    const { return m_condLabel; }
+    QCheckBox*    structOnlyCheck() const { return m_structOnlyCheck; }
 
 signals:
     void goToAddress(uint64_t address);
@@ -90,6 +95,7 @@ private:
     // Filters
     QCheckBox*    m_execCheck;
     QCheckBox*    m_writeCheck;
+    QCheckBox*    m_structOnlyCheck;
 
     // Actions
     QPushButton*  m_scanBtn;
@@ -106,6 +112,7 @@ private:
     // Engine
     ScanEngine*   m_engine;
     ProviderGetter m_providerGetter;
+    BoundsGetter   m_boundsGetter;
     QVector<ScanResult> m_results;
     int           m_lastScanMode = 0;   // 0=signature, 1=value
     ValueType     m_lastValueType = ValueType::Int32;

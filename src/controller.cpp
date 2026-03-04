@@ -72,8 +72,9 @@ RcxDocument::RcxDocument(QObject* parent)
     });
 }
 
-ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns) const {
-    return rcx::compose(tree, *provider, viewRootId, compactColumns);
+ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
+                                   bool treeLines) const {
+    return rcx::compose(tree, *provider, viewRootId, compactColumns, treeLines);
 }
 
 bool RcxDocument::save(const QString& path) {
@@ -319,7 +320,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 // Regular type change
                 bool ok;
                 NodeKind k = kindFromTypeName(text, &ok);
-                if (ok) {
+                if (ok && k != NodeKind::Struct && k != NodeKind::Array) {
                     changeNodeKind(nodeIdx, k);
                 } else if (nodeIdx < m_doc->tree.nodes.size()) {
                     // Check if it's a defined struct type name
@@ -546,6 +547,7 @@ void RcxController::resetChangeTracking() {
     m_changedOffsets.clear();
     m_valueHistory.clear();
     m_prevPages.clear();
+    m_valueTrackCooldown = 5; // suppress tracking for ~1s
     for (auto& lm : m_lastResult.meta)
         lm.heatLevel = 0;
 }
@@ -556,9 +558,9 @@ void RcxController::refresh() {
 
     // Compose against snapshot provider if active, otherwise real provider
     if (m_snapshotProv)
-        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns);
+        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines);
     else
-        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns);
+        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines);
 
     s_composeDoc = nullptr;
 
@@ -602,7 +604,8 @@ void RcxController::refresh() {
         else if (m_doc->provider && m_doc->provider->isValid() && m_doc->provider->isLive())
             prov = m_doc->provider.get();
 
-        if (m_trackValues && prov) {
+        if (m_valueTrackCooldown > 0) --m_valueTrackCooldown;
+        if (m_trackValues && prov && m_valueTrackCooldown <= 0) {
             for (auto& lm : m_lastResult.meta) {
                 if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
                 if (isSyntheticLine(lm) || lm.isContinuation) continue;
@@ -1710,6 +1713,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 m_refreshGen++;           // discard in-flight async reads
                 m_prevPages.clear();      // clean baseline for next read cycle
                 m_changedOffsets.clear();  // no phantom change indicators
+                m_valueTrackCooldown = 5; // suppress tracking for ~1s
                 refresh();
                 for (auto* editor : m_editors)
                     editor->dismissHistoryPopup();
@@ -1935,6 +1939,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 m_refreshGen++;           // discard in-flight async reads
                 m_prevPages.clear();      // clean baseline for next read cycle
                 m_changedOffsets.clear();  // no phantom change indicators
+                m_valueTrackCooldown = 5; // suppress tracking for ~1s
                 refresh();
                 for (auto* editor : m_editors)
                     editor->dismissHistoryPopup();
@@ -2608,7 +2613,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
             break;
 
         case TypePopupMode::FieldType: {
-            addPrimitives(/*enabled=*/true, /*excludeStructArrayPad=*/false);
+            addPrimitives(/*enabled=*/true, /*excludeStructArrayPad=*/true);
             bool isPtr = node
                 && (node->kind == NodeKind::Pointer32 || node->kind == NodeKind::Pointer64);
             bool isTypedPtr = isPtr && node->refId != 0;
@@ -3178,6 +3183,11 @@ void RcxController::setRefreshInterval(int ms) {
 
 void RcxController::setCompactColumns(bool v) {
     m_compactColumns = v;
+    refresh();
+}
+
+void RcxController::setTreeLines(bool v) {
+    m_treeLines = v;
     refresh();
 }
 

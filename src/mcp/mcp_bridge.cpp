@@ -1214,9 +1214,13 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
     }
 
     if (action == "reset_tracking") {
-        if (!ctrl) return makeTextResult("No active tab", true);
-        ctrl->resetChangeTracking();
-        return makeTextResult("Value tracking reset. All histories cleared.");
+        int count = m_mainWindow->tabCount();
+        for (int i = 0; i < count; ++i) {
+            auto* t = m_mainWindow->tabByIndex(i);
+            if (t && t->ctrl)
+                t->ctrl->resetChangeTracking();
+        }
+        return makeTextResult(QStringLiteral("Value tracking reset on all %1 tabs.").arg(count));
     }
 
     return makeTextResult("Unknown action: " + action, true);

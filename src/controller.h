@@ -40,7 +40,8 @@ public:
         return m ? QString::fromLatin1(m->typeName) : QStringLiteral("???");
     }
 
-    ComposeResult compose(uint64_t viewRootId = 0, bool compactColumns = false) const;
+    ComposeResult compose(uint64_t viewRootId = 0, bool compactColumns = false,
+                          bool treeLines = false) const;
     bool save(const QString& path);
     bool load(const QString& path);
     void loadData(const QString& binaryPath);
@@ -128,6 +129,7 @@ public:
     void setEditorFont(const QString& fontName);
     void setRefreshInterval(int ms);
     void setCompactColumns(bool v);
+    void setTreeLines(bool v);
     void resetProvider();
 
     // MCP bridge accessors
@@ -151,6 +153,7 @@ public:
     // Test accessors
     const QHash<uint64_t, ValueHistory>& valueHistory() const { return m_valueHistory; }
     const ComposeResult& lastResult() const { return m_lastResult; }
+    int  dataExtent() const { return computeDataExtent(); }
 
 signals:
     void nodeSelected(int nodeIdx);
@@ -164,6 +167,7 @@ private:
     int                m_anchorLine = -1;
     bool               m_suppressRefresh = false;
     bool               m_compactColumns = false;
+    bool               m_treeLines = false;
     uint64_t           m_viewRootId = 0;
 
     // ── Saved sources for quick-switch ──
@@ -183,6 +187,7 @@ private:
     QSet<int64_t>   m_changedOffsets;
     QHash<uint64_t, ValueHistory> m_valueHistory;
     bool            m_trackValues = true;
+    int             m_valueTrackCooldown = 0; // suppress value recording for N refresh cycles after clear
     uint64_t        m_refreshGen = 0;
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;

@@ -24,6 +24,8 @@ struct ComposeState {
     int                offsetHexDigits = 8;     // hex digit tier for offset margin
     bool               baseEmitted = false;     // only first root struct shows base address
     bool               compactColumns = false;  // compact column mode: cap type width, overflow long types
+    bool               treeLines      = false;  // draw Unicode tree connectors in indentation
+    QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
 
     // Precomputed for O(1) lookups
@@ -41,6 +43,15 @@ struct ComposeState {
         return scopeNameW.value(scopeId, nameW);
     }
 
+    // Set sibling-continuation flag for children at the given depth.
+    // childDepth is the depth of the children being iterated.
+    void setTreeSibling(int childDepth, bool hasMoreSiblings) {
+        if (!treeLines) return;
+        int d = childDepth - 1;
+        while (siblingStack.size() <= d) siblingStack.append(false);
+        siblingStack[d] = hasMoreSiblings;
+    }
+
     void emitLine(const QString& lineText, LineMeta lm) {
         if (currentLine > 0) text += '\n';
         // 3-char fold indicator column: " - " expanded, " + " collapsed, "   " other
@@ -52,7 +63,29 @@ struct ComposeState {
             text += lm.foldCollapsed ? QStringLiteral(" \u25B8 ") : QStringLiteral(" \u25BE ");
         else
             text += QStringLiteral("   ");
-        text += lineText;
+
+        // Replace leading indent spaces with Unicode tree connectors
+        if (treeLines && lm.depth > 0) {
+            QString treeIndent;
+            int D = lm.depth;
+            bool isFooter = (lm.lineKind == LineKind::Footer);
+            for (int d = 0; d < D; d++) {
+                bool active = (d < siblingStack.size() && siblingStack[d]);
+                if (isFooter || d < D - 1) {
+                    // Ancestor continuation or footer's own level
+                    treeIndent += active ? QStringLiteral("\u2502  ")
+                                        : QStringLiteral("   ");
+                } else {
+                    // This node's own connector (non-footer only)
+                    treeIndent += active ? QStringLiteral("\u251C\u2500 ")
+                                        : QStringLiteral("\u2514\u2500 ");
+                }
+            }
+            text += treeIndent + lineText.mid(D * 3);
+        } else {
+            text += lineText;
+        }
+
         meta.append(lm);
         currentLine++;
     }
@@ -305,6 +338,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             });
 
             for (int oi = 0; oi < order.size(); oi++) {
+                state.setTreeSibling(childDepth, oi < order.size() - 1);
                 int mi = order[oi];
                 const auto& m = node.enumMembers[mi];
                 LineMeta lm;
@@ -353,6 +387,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 maxNameLen = qMax(maxNameLen, (int)m.name.size());
 
             for (int mi = 0; mi < node.bitfieldMembers.size(); mi++) {
+                state.setTreeSibling(childDepth, mi < node.bitfieldMembers.size() - 1);
                 const auto& m = node.bitfieldMembers[mi];
                 uint64_t bitVal = fmt::extractBits(prov, absAddr, node.elementKind,
                                                    m.bitOffset, m.bitWidth);
@@ -415,6 +450,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             int eTW = state.effectiveTypeW(node.id);
             int eNW = state.effectiveNameW(node.id);
             for (int i = 0; i < node.arrayLen; i++) {
+                state.setTreeSibling(childDepth, i < node.arrayLen - 1);
                 uint64_t elemAddr = absAddr + i * elemSize;
 
                 // Type override: "float[0]", "uint32_t[1]", etc.
@@ -460,6 +496,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 int elemSize = tree.structSpan(node.refId, &state.childMap);
                 if (elemSize <= 0) elemSize = 1;
                 for (int i = 0; i < node.arrayLen; i++) {
+                    state.setTreeSibling(childDepth, i < node.arrayLen - 1);
                     uint64_t elemBase = absAddr + (uint64_t)i * elemSize;
                     // Use base offset that maps refStruct's children to the right provider address
                     composeParent(state, tree, prov, refIdx, childDepth, elemBase, node.refId,
@@ -476,7 +513,9 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 const QVector<int>& refChildren = childIndices(state, node.refId);
                 // Use the referenced struct's scope widths (children come from there)
                 uint64_t refScopeId = node.refId;
-                for (int childIdx : refChildren) {
+                for (int rci = 0; rci < refChildren.size(); rci++) {
+                    int childIdx = refChildren[rci];
+                    state.setTreeSibling(childDepth, rci < refChildren.size() - 1);
                     const Node& child = tree.nodes[childIdx];
                     // Self-referential child → show as collapsed struct (non-expandable)
                     if (state.visiting.contains(child.id)) {
@@ -514,7 +553,13 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         // For arrays, render children as condensed (no header/footer for struct elements)
         bool childrenAreArrayElements = (node.kind == NodeKind::Array);
         int elementIdx = 0;
-        for (int childIdx : regular) {
+        for (int ri = 0; ri < regular.size(); ri++) {
+            int childIdx = regular[ri];
+            // A regular child has more siblings if there are more regular children
+            // or if static fields follow after all regular children
+            bool hasMore = (ri < regular.size() - 1)
+                           || (!staticIdxs.isEmpty() && !node.collapsed);
+            state.setTreeSibling(childDepth, hasMore);
             // Pass this container's id as the scope for children (for per-scope widths)
             // For array elements, also pass the element index for [N] separator
             composeNode(state, tree, prov, childIdx, childDepth, base, rootId,
@@ -569,7 +614,9 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
             auto cbs = makeResolver(absAddr);
 
-            for (int si : staticIdxs) {
+            for (int sii = 0; sii < staticIdxs.size(); sii++) {
+                int si = staticIdxs[sii];
+                state.setTreeSibling(childDepth, sii < staticIdxs.size() - 1);
                 const Node& sf = tree.nodes[si];
 
                 // Evaluate expression → absolute address
@@ -639,8 +686,18 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
                 // ── Body + children (only when expanded) ──
                 if (!isCollapsed) {
+                    // Determine if struct children follow the body line
+                    bool hasStructKids = exprOk
+                        && (sf.kind == NodeKind::Struct || sf.kind == NodeKind::Array);
+                    const QVector<int> staticKids = hasStructKids
+                        ? childIndices(state, sf.id) : QVector<int>();
+                    hasStructKids = hasStructKids && !staticKids.isEmpty();
+
                     // Body line: "   return <expr>    → 0xADDR"
                     {
+                        // Body has more siblings if struct children follow
+                        state.setTreeSibling(childDepth + 1, hasStructKids);
+
                         QString bodyLine;
                         if (!sf.offsetExpr.isEmpty()) {
                             if (exprOk)
@@ -676,10 +733,10 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                     }
 
                     // If struct/array, compose children at evaluated address
-                    if (exprOk && (sf.kind == NodeKind::Struct || sf.kind == NodeKind::Array)) {
-                        const QVector<int>& staticKids = childIndices(state, sf.id);
-                        for (int sci : staticKids) {
-                            composeNode(state, tree, prov, sci, childDepth + 1,
+                    if (hasStructKids) {
+                        for (int ski = 0; ski < staticKids.size(); ski++) {
+                            state.setTreeSibling(childDepth + 1, ski < staticKids.size() - 1);
+                            composeNode(state, tree, prov, staticKids[ski], childDepth + 1,
                                         staticAddr, sf.id, false, sf.id);
                         }
                     }
@@ -818,8 +875,9 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 // Render materialized children at the pointer target address.
                 // These are real tree nodes with independent state — use rootId
                 // so resolveAddr computes offsets relative to the pointer target.
-                for (int childIdx : ptrChildren) {
-                    composeNode(state, tree, childProv, childIdx, depth + 1,
+                for (int pci = 0; pci < ptrChildren.size(); pci++) {
+                    state.setTreeSibling(depth + 1, pci < ptrChildren.size() - 1);
+                    composeNode(state, tree, childProv, ptrChildren[pci], depth + 1,
                                 pBase, node.id, false, node.id);
                 }
             } else {
@@ -878,9 +936,10 @@ void composeNode(ComposeState& state, const NodeTree& tree,
 } // anonymous namespace
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId,
-                      bool compactColumns) {
+                      bool compactColumns, bool treeLines) {
     ComposeState state;
     state.compactColumns = compactColumns;
+    state.treeLines = treeLines;
 
     // Precompute parent→children map
     for (int i = 0; i < tree.nodes.size(); i++)
@@ -1026,7 +1085,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         composeNode(state, tree, prov, idx, 0);
     }
 
-    return { state.text, state.meta, LayoutInfo{state.typeW, state.nameW, state.offsetHexDigits, tree.baseAddress} };
+    return { state.text, state.meta, LayoutInfo{state.typeW, state.nameW, state.offsetHexDigits, tree.baseAddress, treeLines} };
 }
 
 QSet<uint64_t> NodeTree::normalizePreferAncestors(const QSet<uint64_t>& ids) const {

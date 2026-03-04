@@ -46,6 +46,9 @@ struct ScanRequest {
 
     ScanCondition condition = ScanCondition::ExactValue;
     int valueSize = 4;              // bytes per value (for unknown scans)
+
+    uint64_t startAddress = 0;      // 0 = no limit (scan all regions)
+    uint64_t endAddress   = 0;      // 0 = no limit (scan all regions)
 };
 
 struct ScanResult {

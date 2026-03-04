@@ -1072,6 +1072,120 @@ private slots:
         auto results = finSpy.first().first().value<QVector<ScanResult>>();
         QCOMPARE(results.size(), 7); // 8 - 2 + 1 = 7 positions
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Address range filtering — "Current Struct" support
+    // ═══════════════════════════════════════════════════════════════════
+
+    void scan_addressRangeNoLimit() {
+        // startAddress=0, endAddress=0 → scan all (default behavior unchanged)
+        QByteArray data(32, '\x00');
+        data[8] = '\xAA'; data[16] = '\xAA'; data[24] = '\xAA';
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+
+        ScanRequest req;
+        req.pattern = QByteArray("\xAA", 1);
+        req.mask    = QByteArray("\xFF", 1);
+
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 3); // all 3 found
+    }
+
+    void scan_addressRangeClipsResults() {
+        // Only scan addresses [8, 20) — should find match at offset 8 and 16 but not 24
+        QByteArray data(32, '\x00');
+        data[8] = '\xAA'; data[16] = '\xAA'; data[24] = '\xAA';
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+
+        ScanRequest req;
+        req.pattern = QByteArray("\xAA", 1);
+        req.mask    = QByteArray("\xFF", 1);
+        req.startAddress = 8;
+        req.endAddress   = 20;
+
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)8);
+        QCOMPARE(results[1].address, (uint64_t)16);
+    }
+
+    void scan_addressRangeOutsideData() {
+        // Range entirely outside data → no results
+        QByteArray data(16, '\xAA');
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+
+        ScanRequest req;
+        req.pattern = QByteArray("\xAA", 1);
+        req.mask    = QByteArray("\xFF", 1);
+        req.startAddress = 100;
+        req.endAddress   = 200;
+
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 0);
+    }
+
+    void scan_addressRangeWithRegions() {
+        // Two regions: [1000, 1016) and [2000, 2016). Range [1000, 1020) clips to first region only.
+        QByteArray data(4096, '\x00');
+        // Place \xBB at offset 1000 and 2000
+        data[1000] = '\xBB';
+        data[2000] = '\xBB';
+
+        QVector<MemoryRegion> regions;
+        { MemoryRegion r; r.base = 1000; r.size = 16; r.readable = true; r.writable = true; regions.append(r); }
+        { MemoryRegion r; r.base = 2000; r.size = 16; r.readable = true; r.writable = true; regions.append(r); }
+
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+
+        ScanRequest req;
+        req.pattern = QByteArray("\xBB", 1);
+        req.mask    = QByteArray("\xFF", 1);
+        req.startAddress = 1000;
+        req.endAddress   = 1020;
+
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)1000);
+    }
+
+    void scan_unknownWithAddressRange() {
+        // Unknown scan with address range should only capture within range
+        QByteArray data(32, '\x42');
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+
+        ScanRequest req;
+        req.condition = ScanCondition::UnknownValue;
+        req.valueSize = 4;
+        req.alignment = 4;
+        req.startAddress = 8;
+        req.endAddress   = 24;
+
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        // Range [8, 24) = 16 bytes, alignment 4, valueSize 4 → offsets 8, 12, 16, 20 = 4 results
+        QCOMPARE(results.size(), 4);
+        QCOMPARE(results[0].address, (uint64_t)8);
+        QCOMPARE(results[3].address, (uint64_t)20);
+    }
 };
 
 QTEST_MAIN(TestScanner)
