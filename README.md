@@ -20,20 +20,15 @@ Reclass helps you inspect raw bytes and interpret them as types (structs, arrays
 
 Built with C++17, Qt 6 (Qt 5 also supported), and QScintilla. The entire editor surface is rendered as formatted plain text with inline editing, fold markers, and hex/ASCII previews.
 
+## Screenshots
+
+![Windows — VTable with value history popup](docs/README_PIC1.png)
+
+![macOS — project tree with kernel struct inspection](docs/README_PIC2.png)
+
+![Memory scanner](docs/README_PIC3.png)
+
 ## Features
-
-### Type System — 25 Data Types
-
-| Category | Types |
-|----------|-------|
-| **Hex preview** | Hex8, Hex16, Hex32, Hex64 |
-| **Integers** | Int8/16/32/64, UInt8/16/32/64 |
-| **Floating point** | Float, Double |
-| **Boolean** | Bool |
-| **Pointers** | Pointer32, Pointer64, FuncPtr32, FuncPtr64 |
-| **Vectors & matrices** | Vec2, Vec3, Vec4, Mat4x4 |
-| **Strings** | UTF8, UTF16 (length-aware) |
-| **Containers** | Struct (class/struct/union/enum keywords), Array (typed elements with viewport scrolling) |
 
 ### Editor
 
@@ -47,16 +42,6 @@ Built with C++17, Qt 6 (Qt 5 also supported), and QScintilla. The entire editor 
 - **Fold/collapse** — expand and collapse structs, arrays, and pointer expansions with embedded fold indicators
 - **Hex + ASCII columns** — raw byte previews alongside the structured view with per-byte change highlighting
 
-### Struct & Container Support
-
-- **Struct nesting** — define nested structs and arrays with collapsible fold regions
-- **Enums** — define enums with named value members, inline editing, and auto-sort
-- **Bitfields** — named bit-range members within structs, per-bit toggle, masked extraction
-- **Unions** — group nodes into unions, dissolve unions back to flat fields
-- **Pointer virtual expansion** — pointer nodes auto-dereference and inline-expand the target struct's fields, with cycle detection to prevent infinite recursion
-- **Cross-document type resolution** — pointer targets resolve across all open tabs
-- **Static fields** — C/C++ expression-evaluated offsets for globals, vtable entries, and computed addresses
-
 ### Live Memory Analysis
 
 - **Auto-refresh** — configurable interval (default 660ms) with async page-based reads for non-blocking UI
@@ -66,27 +51,9 @@ Built with C++17, Qt 6 (Qt 5 also supported), and QScintilla. The entire editor 
 - **Pointer chasing** — automatic reads of dereferenced memory regions across pointer chains
 - **Address parser** — formula expressions like `<module.exe>+0x1A0`, pointer dereference chains, symbol resolution
 
-### Visualization
-
-- **Tree line connectors** — Unicode box-drawing characters (│ ├─ └─) at arbitrary nesting depth
-- **Compact column mode** — caps type column width, overflows long type names
-- **Relative / absolute offsets** — toggle inline offset display in the indent area
-- **Disassembly preview** — hover over code pointers to see decoded x86 instructions (32/64-bit via Fadec)
-- **Themes** — 5 built-in themes (ReClass Dark, VS Light, Warm, Midtone, Tailwind), live theme editor with 25-color customization, JSON import/export
-
 ### Undo / Redo
 
 Full command stack with 15 undoable operations: ChangeKind, Rename, Collapse, Insert, Remove, ChangeBase, WriteBytes, ChangeArrayMeta, ChangePointerRef, ChangeStructTypeName, ChangeClassKeyword, ChangeOffset, ChangeEnumMembers, ChangeOffsetExpr, ToggleStatic. Batch macro support for multi-node operations.
-
-### Scanner / Memory Search
-
-- **Signature scanning** — IDA-style pattern matching (`48 8B ?? 05`)
-- **Typed value search** — Int8-64, UInt8-64, Float, Double, Vec2/3/4, UTF8, UTF16, HexBytes
-- **Scan conditions** — ExactValue, UnknownValue, Changed, Unchanged, Increased, Decreased
-- **Region filtering** — filter by executable, writable, or struct-only regions
-- **Alignment control** — 1, 4, or 8-byte alignment
-- **Async multi-threaded** — progress bar, abort capability, up to 50K results
-- **Rescan** — refine results with condition-based filtering
 
 ### Import / Export
 
@@ -95,8 +62,7 @@ Full command stack with 15 undoable operations: ChangeKind, Rename, Collapse, In
 | **Native JSON (.rcx)** | Full tree + metadata | Full tree + metadata |
 | **C/C++ source** | Struct/class/union/enum parsing with offset comments | Header generation with optional static asserts |
 | **ReClass XML** | Full compatibility with ReClass Classic | Full compatibility |
-| **PDB symbols (Windows)** | UDT enumeration with selective recursive import via raw_pdb — no DIA SDK dependency | — |
-| **Binary files** | Raw file loading as memory buffer | — |
+| **PDB symbols (Windows)** | UDT enumeration with selective recursive import via raw_pdb — no DIA SDK dependency | |
 
 ### Workspace & Navigation
 
@@ -160,20 +126,6 @@ A standalone stdio-to-pipe bridge binary is built alongside the main application
   }
 }
 ```
-
-## Screenshots
-
-![Windows — VTable with value history popup](docs/README_PIC1.png)
-
-![macOS — project tree with kernel struct inspection](docs/README_PIC2.png)
-
-![Memory scanner](docs/README_PIC3.png)
-
-## Roadmap
-
-- [ ] iOS support
-- [ ] Display RTTI information
-- [ ] Expose UI functionality to plugins
 
 ## Build
 
