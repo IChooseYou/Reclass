@@ -163,9 +163,9 @@ A standalone stdio-to-pipe bridge binary is built alongside the main application
 
 ## Screenshots
 
-![macOS — project tree with kernel struct inspection](docs/README_PIC1.png)
+![Windows — VTable with value history popup](docs/README_PIC1.png)
 
-![Windows — VTable with value history popup](docs/README_PIC2.png)
+![macOS — project tree with kernel struct inspection](docs/README_PIC2.png)
 
 ![Memory scanner](docs/README_PIC3.png)
 
