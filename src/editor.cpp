@@ -966,11 +966,19 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // Reset hint line - applySelectionOverlay will repaint indicators
     m_hintLine = -1;
 
-    // Restore hover state
+    // Restore hover state — but clear if the node was deleted
     m_hoveredNodeId = savedHoverId;
     m_hoveredLine = savedHoverLine;
     m_hoverInside = savedHoverInside;
     m_applyingDocument = false;
+
+    if (m_hoveredNodeId != 0 && !m_nodeLineIndex.contains(m_hoveredNodeId)) {
+        m_hoveredNodeId = 0;
+        m_hoveredLine = -1;
+        dismissHistoryPopup();
+        if (m_disasmPopup) m_disasmPopup->hide();
+        if (m_structPreviewPopup) m_structPreviewPopup->hide();
+    }
 
     // Re-apply hover markers (setText() clears all Scintilla markers).
     // Reset m_prevHoveredNodeId so the incremental logic re-adds markers.

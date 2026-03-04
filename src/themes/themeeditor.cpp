@@ -64,7 +64,8 @@ ThemeEditor::ThemeEditor(int themeIndex, QWidget* parent)
 
     // ── File info ──
     m_fileInfoLabel = new QLabel;
-    m_fileInfoLabel->setStyleSheet(QStringLiteral("color: #666; font-size: 10px; padding: 0 0 4px 0;"));
+    m_fileInfoLabel->setStyleSheet(QStringLiteral("color: %1; font-size: 10px; padding: 0 0 4px 0;")
+        .arg(tm.current().textDim.name()));
     QString path = tm.themeFilePath(themeIndex);
     m_fileInfoLabel->setText(path.isEmpty()
         ? QStringLiteral("Built-in theme (edits save as user copy)")
@@ -109,7 +110,8 @@ ThemeEditor::ThemeEditor(int themeIndex, QWidget* parent)
 
         auto* hexLbl = new QLabel;
         hexLbl->setFixedWidth(60);
-        hexLbl->setStyleSheet(QStringLiteral("color: #aaa; font-size: 10px;"));
+        hexLbl->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;")
+            .arg(tm.current().textMuted.name()));
         row->addWidget(hexLbl);
 
         row->addStretch();

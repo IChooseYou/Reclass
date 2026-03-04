@@ -95,10 +95,10 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     m_btnMin->setStyleSheet(btnStyle);
     m_btnMax->setStyleSheet(btnStyle);
 
-    // Close button: red hover
+    // Close button: themed red hover
     m_btnClose->setStyleSheet(QStringLiteral(
         "QToolButton { background: transparent; border: none; }"
-        "QToolButton:hover { background: #c42b1c; }"));
+        "QToolButton:hover { background: %1; }").arg(theme.indHeatHot.name()));
 
     update();
 }

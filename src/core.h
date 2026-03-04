@@ -303,7 +303,7 @@ struct Node {
                 QJsonObject bm = v.toObject();
                 BitfieldMember m;
                 m.name = bm["name"].toString();
-                m.bitOffset = (uint8_t)bm["bitOffset"].toInt(0);
+                m.bitOffset = (uint8_t)qBound(0, bm["bitOffset"].toInt(0), 255);
                 m.bitWidth = (uint8_t)qBound(1, bm["bitWidth"].toInt(1), 64);
                 n.bitfieldMembers.append(m);
             }

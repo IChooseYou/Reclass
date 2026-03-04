@@ -533,6 +533,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             regEnd   = qMin(regEnd, req.endAddress);
         }
         uint64_t regSize = regEnd - regStart;
+        if (regSize == 0) continue;
 
         if ((uint64_t)patternLen > regSize) {
             scannedBytes += regSize;

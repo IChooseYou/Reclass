@@ -55,6 +55,7 @@ void ProcessPicker::initUi()
     ui->processTable->setColumnWidth(0, 80);   // PID column
     ui->processTable->setColumnWidth(1, 200);  // Name column
     ui->processTable->horizontalHeader()->setStretchLastSection(true);
+    ui->processTable->setSortingEnabled(true);
     ui->processTable->setWordWrap(false);
     ui->processTable->setTextElideMode(Qt::ElideLeft);
     ui->processTable->setShowGrid(false);
@@ -329,6 +330,9 @@ void ProcessPicker::populateTable(const QList<ProcessInfo>& processes)
         pathItem->setToolTip(proc.path);  // Show full path on hover
         ui->processTable->setItem(i, 2, pathItem);
     }
+
+    // Default sort: highest PID first (most recently launched processes on top)
+    ui->processTable->sortItems(0, Qt::DescendingOrder);
 }
 
 void ProcessPicker::filterProcesses(const QString& text)
