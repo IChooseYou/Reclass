@@ -1668,10 +1668,11 @@ MainWindow::~MainWindow() {
      * 
      */
 
-    // Disconnect all dock destroyed signals before members are torn down,
+    // Disconnect all signals before members are torn down,
     // so the lambdas capturing 'this' never fire on a half-destroyed object.
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         disconnect(it.key(), &QObject::destroyed, this, nullptr);
+        disconnect(&it->doc->undoStack, nullptr, this, nullptr);
         // Release providers now while plugin DLLs are still loaded;
         // if deferred to Qt child cleanup the DLL code may already be unloaded.
         it->doc->provider.reset();
