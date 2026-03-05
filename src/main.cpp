@@ -1106,7 +1106,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         pane.tabWidget->setStyleSheet(QStringLiteral(
             "QTabBar { border: none; }"
             "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none; height: 24px;"
+            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
             "}"
             "QTabBar::tab:selected { color: %3; background: %4;"
             "  border-top: 3px solid %6; padding-top: -3px; }"
@@ -1483,8 +1483,15 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     connect(dock, &QObject::destroyed, this, [this, dock]() {
         auto it = m_tabs.find(dock);
         if (it != m_tabs.end()) {
-            it->doc->deleteLater();
+            RcxDocument* doc = it->doc;
             m_tabs.erase(it);
+            // Only delete the doc if no other tab references it
+            bool docStillUsed = false;
+            for (auto jt = m_tabs.begin(); jt != m_tabs.end(); ++jt) {
+                if (jt->doc == doc) { docStillUsed = true; break; }
+            }
+            if (!docStillUsed)
+                doc->deleteLater();
         }
         m_docDocks.removeOne(dock);
         if (m_activeDocDock == dock)
@@ -2011,7 +2018,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             tabBar->setStyleSheet(QStringLiteral(
                 "QTabBar { border: none; }"
                 "QTabBar::tab {"
-                "  background: %1; padding: 0px 16px; border: none;"
+                "  background: %1; padding: 0px 16px; border: none; border-radius: 0px;"
                 "}"
                 "QTabBar::tab:selected { background: %2; }"
                 "QTabBar::tab:hover { background: %3; }")
@@ -2027,7 +2034,7 @@ void MainWindow::applyTheme(const Theme& theme) {
         QString paneTabStyle = QStringLiteral(
             "QTabBar { border: none; }"
             "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none; height: 24px;"
+            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
             "}"
             "QTabBar::tab:selected { color: %3; background: %4;"
             "  border-top: 3px solid %6; padding-top: -3px; }"
@@ -3182,43 +3189,57 @@ void MainWindow::createWorkspaceDock() {
 
         auto subVar = index.data(Qt::UserRole);
         if (!subVar.isValid()) return;
-        auto* dock = static_cast<QDockWidget*>(subVar.value<void*>());
-        if (!dock || !m_tabs.contains(dock)) return;
+        auto* ownerDock = static_cast<QDockWidget*>(subVar.value<void*>());
+        if (!ownerDock || !m_tabs.contains(ownerDock)) return;
 
-        dock->raise();
-        dock->show();
-        m_activeDocDock = dock;
-
-        auto& tree = m_tabs[dock].doc->tree;
+        RcxDocument* doc = m_tabs[ownerDock].doc;
+        auto& tree = doc->tree;
         int ni = tree.indexOfId(structId);
         if (ni < 0) return;
 
-        auto& tab = m_tabs[dock];
-
-        // Child member item: navigate to parent struct, then scroll to this member
+        // For child members: navigate within the owner tab and scroll
         uint64_t parentId = tree.nodes[ni].parentId;
         if (parentId != 0) {
+            ownerDock->raise();
+            ownerDock->show();
+            m_activeDocDock = ownerDock;
+            auto& tab = m_tabs[ownerDock];
             int pi = tree.indexOfId(parentId);
             if (pi >= 0) tree.nodes[pi].collapsed = false;
             tab.ctrl->setViewRootId(parentId);
             tab.ctrl->scrollToNodeId(structId);
-        } else {
-            // Root type/enum: navigate directly
-            tree.nodes[ni].collapsed = false;
-            tab.ctrl->setViewRootId(structId);
-            tab.ctrl->scrollToNodeId(structId);
+            QTimer::singleShot(0, this, [this, ownerDock]() {
+                if (!m_tabs.contains(ownerDock)) return;
+                auto& t = m_tabs[ownerDock];
+                if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
+                    auto& p = t.panes[t.activePaneIdx];
+                    if (p.viewMode == VM_Rendered) updateRenderedView(t, p);
+                }
+            });
+            return;
         }
 
-        // If active pane is in C/C++ mode, refresh after navigation settles
-        QTimer::singleShot(0, this, [this, dock]() {
-            if (!m_tabs.contains(dock)) return;
-            auto& t = m_tabs[dock];
-            if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
-                auto& p = t.panes[t.activePaneIdx];
-                if (p.viewMode == VM_Rendered)
-                    updateRenderedView(t, p);
+        // Root struct/enum: check if any existing tab already views this struct
+        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+            if (it->doc == doc && it->ctrl->viewRootId() == structId) {
+                it.key()->raise();
+                it.key()->show();
+                m_activeDocDock = it.key();
+                return;
             }
-        });
+        }
+
+        // Open in a new tab sharing the same document
+        tree.nodes[ni].collapsed = false;
+        auto* newDock = createTab(doc);
+        m_tabs[newDock].ctrl->setViewRootId(structId);
+        m_tabs[newDock].ctrl->refresh();
+        // Set tab title to struct name
+        QString structName = tree.nodes[ni].structTypeName.isEmpty()
+            ? tree.nodes[ni].name : tree.nodes[ni].structTypeName;
+        if (!structName.isEmpty())
+            newDock->setWindowTitle(structName);
+        rebuildWorkspaceModel();
     });
 }
 
@@ -3358,14 +3379,19 @@ void MainWindow::createScannerDock() {
 
 void MainWindow::rebuildAllDocs() {
     m_allDocs.clear();
-    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
-        m_allDocs.append(it.value().doc);
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+        if (!m_allDocs.contains(it.value().doc))
+            m_allDocs.append(it.value().doc);
+    }
 }
 
 void MainWindow::rebuildWorkspaceModel() {
     QVector<rcx::TabInfo> tabs;
+    QSet<RcxDocument*> seenDocs;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         TabState& tab = it.value();
+        if (seenDocs.contains(tab.doc)) continue;  // skip duplicate doc views
+        seenDocs.insert(tab.doc);
         QString name = tab.doc->filePath.isEmpty()
             ? rootName(tab.doc->tree, tab.ctrl->viewRootId())
             : QFileInfo(tab.doc->filePath).fileName();
