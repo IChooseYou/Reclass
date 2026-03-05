@@ -1617,17 +1617,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             return indices;
         };
 
-        // ── Insert shortcuts (always available) ──
-        menu.addAction(icon("diff-added.svg"), "Insert 4", [this]() {
-            uint64_t target = m_viewRootId ? m_viewRootId : 0;
-            insertNode(target, -1, NodeKind::Hex32, QStringLiteral("field"));
-        });
-        menu.addAction(icon("diff-added.svg"), "Insert 8", [this]() {
-            uint64_t target = m_viewRootId ? m_viewRootId : 0;
-            insertNode(target, -1, NodeKind::Hex64, QStringLiteral("field"));
-        });
-        menu.addSeparator();
-
         // Quick-convert shortcuts when all selected nodes share the same kind
         NodeKind commonKind = NodeKind::Hex64;
         bool allSame = true;
@@ -1695,31 +1684,19 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
 
         menu.addSeparator();
+
+        // ── Insert ► submenu ──
         {
-            auto* act = menu.addAction("Track Value Changes");
-            act->setCheckable(true);
-            act->setChecked(m_trackValues);
-            connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
-        }
-        {
-            auto* act = menu.addAction("Clear Value History");
-            act->setToolTip(QStringLiteral("Reset change tracking for selected nodes"));
-            connect(act, &QAction::triggered, this, [this, ids]() {
-                for (uint64_t id : ids) {
-                    m_valueHistory.remove(id);
-                    for (int ci : m_doc->tree.subtreeIndices(id))
-                        m_valueHistory.remove(m_doc->tree.nodes[ci].id);
-                }
-                m_refreshGen++;           // discard in-flight async reads
-                m_prevPages.clear();      // clean baseline for next read cycle
-                m_changedOffsets.clear();  // no phantom change indicators
-                m_valueTrackCooldown = 5; // suppress tracking for ~1s
-                refresh();
-                for (auto* editor : m_editors)
-                    editor->dismissHistoryPopup();
+            auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
+            insertMenu->addAction("Insert 4", [this]() {
+                uint64_t target = m_viewRootId ? m_viewRootId : 0;
+                insertNode(target, -1, NodeKind::Hex32, QStringLiteral("field"));
+            });
+            insertMenu->addAction("Insert 8", [this]() {
+                uint64_t target = m_viewRootId ? m_viewRootId : 0;
+                insertNode(target, -1, NodeKind::Hex64, QStringLiteral("field"));
             });
         }
-        menu.addSeparator();
 
         // Check if all selected nodes share the same parent (required for grouping)
         {
@@ -1736,6 +1713,8 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 menu.addAction("Group into Union", [this, ids]() { groupIntoUnion(ids); });
         }
 
+        menu.addSeparator();
+
         menu.addAction(icon("files.svg"), QString("Duplicate %1 nodes").arg(count), [this, ids]() {
             for (uint64_t id : ids) {
                 int idx = m_doc->tree.indexOfId(id);
@@ -1745,6 +1724,33 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         menu.addAction(icon("trash.svg"), QString("Delete %1 nodes").arg(count), [this, collectIndices]() {
             batchRemoveNodes(collectIndices());
         });
+
+        menu.addSeparator();
+
+        {
+            auto* act = menu.addAction("Track Value Changes");
+            act->setCheckable(true);
+            act->setChecked(m_trackValues);
+            connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
+        }
+        {
+            auto* act = menu.addAction("Clear Value History");
+            act->setToolTip(QStringLiteral("Reset change tracking for selected nodes"));
+            connect(act, &QAction::triggered, this, [this, ids]() {
+                for (uint64_t id : ids) {
+                    m_valueHistory.remove(id);
+                    for (int ci : m_doc->tree.subtreeIndices(id))
+                        m_valueHistory.remove(m_doc->tree.nodes[ci].id);
+                }
+                m_refreshGen++;
+                m_prevPages.clear();
+                m_changedOffsets.clear();
+                m_valueTrackCooldown = 5;
+                refresh();
+                for (auto* editor : m_editors)
+                    editor->dismissHistoryPopup();
+            });
+        }
 
         menu.addSeparator();
 
@@ -1765,28 +1771,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     }
 
     QMenu menu;
-
-    // ── Insert shortcuts (at very top) ──
-    if (hasNode) {
-        menu.addAction(icon("diff-added.svg"), "Insert 4 Above\tShift+Ins",
-            [this, nodeIdx]() {
-            insertNodeAbove(nodeIdx, NodeKind::Hex32, QStringLiteral("field"));
-        });
-        menu.addAction(icon("diff-added.svg"), "Insert 8 Above\tIns",
-            [this, nodeIdx]() {
-            insertNodeAbove(nodeIdx, NodeKind::Hex64, QStringLiteral("field"));
-        });
-    } else {
-        menu.addAction(icon("diff-added.svg"), "Insert 4", [this]() {
-            uint64_t target = m_viewRootId ? m_viewRootId : 0;
-            insertNode(target, -1, NodeKind::Hex32, QStringLiteral("field"));
-        });
-        menu.addAction(icon("diff-added.svg"), "Insert 8", [this]() {
-            uint64_t target = m_viewRootId ? m_viewRootId : 0;
-            insertNode(target, -1, NodeKind::Hex64, QStringLiteral("field"));
-        });
-    }
-    menu.addSeparator();
 
     // ── Node-specific actions (only when clicking on a node) ──
     if (hasNode) {
@@ -1819,7 +1803,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             // Fall through to always-available actions
         } else {
 
-        // Quick-convert suggestions for Hex nodes
+        // ── Quick-convert suggestions (top-level for fast access) ──
         bool addedQuickConvert = false;
         if (node.kind == NodeKind::Hex64) {
             menu.addAction("Change to uint64_t", [this, nodeId]() {
@@ -1876,35 +1860,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             });
             addedQuickConvert = true;
         }
-        // "Change to ptr*" — convert hex/void-ptr to typed pointer with auto-created class
-        if (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Hex32
-            || ((node.kind == NodeKind::Pointer64 || node.kind == NodeKind::Pointer32)
-                && node.refId == 0)) {
-            menu.addAction("Change to ptr*", [this, nodeId]() {
-                convertToTypedPointer(nodeId);
-            });
-            addedQuickConvert = true;
-        }
-        // Split hex node into two half-sized hex nodes
-        if (node.kind == NodeKind::Hex64) {
-            menu.addAction("Change to hex32+hex32", [this, nodeId]() {
-                splitHexNode(nodeId);
-            });
-            addedQuickConvert = true;
-        } else if (node.kind == NodeKind::Hex32) {
-            menu.addAction("Change to hex16+hex16", [this, nodeId]() {
-                splitHexNode(nodeId);
-            });
-            addedQuickConvert = true;
-        } else if (node.kind == NodeKind::Hex16) {
-            menu.addAction("Change to hex8+hex8", [this, nodeId]() {
-                splitHexNode(nodeId);
-            });
-            addedQuickConvert = true;
-        }
         if (addedQuickConvert)
             menu.addSeparator();
 
+        // ── Edit Value / Rename / Change Type ──
         bool isEditable = node.kind != NodeKind::Struct && node.kind != NodeKind::Array
                           && !isHexNode(node.kind)
                           && m_doc->provider->isWritable();
@@ -1923,6 +1882,251 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
 
         menu.addSeparator();
+
+        // ── Insert ► submenu ──
+        {
+            auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
+            insertMenu->addAction("Insert 4 Above\tShift+Ins",
+                [this, nodeIdx]() {
+                insertNodeAbove(nodeIdx, NodeKind::Hex32, QStringLiteral("field"));
+            });
+            insertMenu->addAction("Insert 8 Above\tIns",
+                [this, nodeIdx]() {
+                insertNodeAbove(nodeIdx, NodeKind::Hex64, QStringLiteral("field"));
+            });
+            insertMenu->addSeparator();
+            insertMenu->addAction("Append bytes...", [this, &menu]() {
+                bool ok;
+                QString input = QInputDialog::getText(menu.parentWidget(),
+                    QStringLiteral("Append bytes"),
+                    QStringLiteral("Byte count (decimal or 0x hex):"),
+                    QLineEdit::Normal, QStringLiteral("128"), &ok);
+                if (!ok || input.trimmed().isEmpty()) return;
+
+                QString trimmed = input.trimmed();
+                int byteCount = 0;
+                if (trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+                    byteCount = trimmed.mid(2).toInt(&ok, 16);
+                else
+                    byteCount = trimmed.toInt(&ok, 10);
+                if (!ok || byteCount <= 0) return;
+
+                uint64_t target = m_viewRootId ? m_viewRootId : 0;
+                int hex64Count = byteCount / 8;
+                int remainBytes = byteCount % 8;
+
+                m_suppressRefresh = true;
+                m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
+                int idx = 0;
+                for (int i = 0; i < hex64Count; i++, idx++)
+                    insertNode(target, -1, NodeKind::Hex64,
+                               QStringLiteral("field_%1").arg(idx));
+                for (int i = 0; i < remainBytes; i++, idx++)
+                    insertNode(target, -1, NodeKind::Hex8,
+                               QStringLiteral("field_%1").arg(idx));
+                m_doc->undoStack.endMacro();
+                m_suppressRefresh = false;
+                refresh();
+            });
+        }
+
+        // ── Convert ► submenu ──
+        {
+            auto* convertMenu = menu.addMenu(icon("symbol-structure.svg"), "Convert");
+            bool hasConvert = false;
+
+            // "Change to ptr*" — convert hex/void-ptr to typed pointer
+            if (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Hex32
+                || ((node.kind == NodeKind::Pointer64 || node.kind == NodeKind::Pointer32)
+                    && node.refId == 0)) {
+                convertMenu->addAction("Change to ptr*", [this, nodeId]() {
+                    convertToTypedPointer(nodeId);
+                });
+                hasConvert = true;
+            }
+
+            // Split hex node into two half-sized hex nodes
+            if (node.kind == NodeKind::Hex64) {
+                convertMenu->addAction("Split to hex32+hex32", [this, nodeId]() {
+                    splitHexNode(nodeId);
+                });
+                hasConvert = true;
+            } else if (node.kind == NodeKind::Hex32) {
+                convertMenu->addAction("Split to hex16+hex16", [this, nodeId]() {
+                    splitHexNode(nodeId);
+                });
+                hasConvert = true;
+            } else if (node.kind == NodeKind::Hex16) {
+                convertMenu->addAction("Split to hex8+hex8", [this, nodeId]() {
+                    splitHexNode(nodeId);
+                });
+                hasConvert = true;
+            }
+
+            // Convert to Hex nodes (decompose non-hex types)
+            if (!isHexNode(node.kind) && node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
+                convertMenu->addAction("Convert to &Hex", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni < 0) return;
+                    const Node& n = m_doc->tree.nodes[ni];
+                    int totalSize = n.byteSize();
+                    if (totalSize <= 0) return;
+
+                    uint64_t parentId = n.parentId;
+                    int baseOffset = n.offset;
+
+                    bool wasSuppressed = m_suppressRefresh;
+                    m_suppressRefresh = true;
+                    m_doc->undoStack.beginMacro(QStringLiteral("Convert to Hex"));
+
+                    QVector<Node> subtree;
+                    subtree.append(n);
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::Remove{nodeId, subtree, {}}));
+
+                    int padOffset = baseOffset;
+                    int gap = totalSize;
+                    while (gap > 0) {
+                        NodeKind padKind;
+                        int padSize;
+                        if (gap >= 8)      { padKind = NodeKind::Hex64; padSize = 8; }
+                        else if (gap >= 4) { padKind = NodeKind::Hex32; padSize = 4; }
+                        else if (gap >= 2) { padKind = NodeKind::Hex16; padSize = 2; }
+                        else               { padKind = NodeKind::Hex8;  padSize = 1; }
+
+                        insertNode(parentId, padOffset, padKind,
+                                   QString("pad_%1").arg(padOffset, 2, 16, QChar('0')));
+                        padOffset += padSize;
+                        gap -= padSize;
+                    }
+
+                    m_doc->undoStack.endMacro();
+                    m_suppressRefresh = wasSuppressed;
+                    if (!m_suppressRefresh) refresh();
+                });
+                hasConvert = true;
+            }
+
+            if (!hasConvert)
+                convertMenu->setEnabled(false);
+        }
+
+        // ── Structure ► submenu (only when relevant) ──
+        {
+            auto* structMenu = menu.addMenu("Static");
+            bool hasStructAction = false;
+
+            if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) {
+                structMenu->addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
+                    insertNode(nodeId, 0, NodeKind::Hex64, "newField");
+                });
+                structMenu->addAction("Add Static Method (WIP)", [this, nodeId]() {
+                    Node sf;
+                    sf.id = m_doc->tree.m_nextId++;
+                    sf.kind = NodeKind::Hex64;
+                    sf.name = QStringLiteral("static_field");
+                    sf.parentId = nodeId;
+                    sf.offset = 0;
+                    sf.isStatic = true;
+                    sf.offsetExpr = QStringLiteral("base");
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::Insert{sf, {}}));
+                });
+                if (node.collapsed) {
+                    structMenu->addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
+                        int ni = m_doc->tree.indexOfId(nodeId);
+                        if (ni >= 0) toggleCollapse(ni);
+                    });
+                } else {
+                    structMenu->addAction(icon("collapse-all.svg"), "&Collapse", [this, nodeId]() {
+                        int ni = m_doc->tree.indexOfId(nodeId);
+                        if (ni >= 0) toggleCollapse(ni);
+                    });
+                }
+                hasStructAction = true;
+            }
+
+            // Add Static Field as sibling (for child nodes of a struct)
+            if (node.parentId != 0 && node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
+                uint64_t pid = node.parentId;
+                int pi = m_doc->tree.indexOfId(pid);
+                if (pi >= 0 && (m_doc->tree.nodes[pi].kind == NodeKind::Struct
+                             || m_doc->tree.nodes[pi].kind == NodeKind::Array)) {
+                    structMenu->addAction("Add Static Method (WIP)", [this, pid]() {
+                        Node sf;
+                        sf.id = m_doc->tree.m_nextId++;
+                        sf.kind = NodeKind::Hex64;
+                        sf.name = QStringLiteral("static_field");
+                        sf.parentId = pid;
+                        sf.offset = 0;
+                        sf.isStatic = true;
+                        sf.offsetExpr = QStringLiteral("base");
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::Insert{sf, {}}));
+                    });
+                    hasStructAction = true;
+                }
+            }
+
+            // Static field: Edit Expression
+            if (node.isStatic) {
+                structMenu->addAction("Edit E&xpression", [this, editor, line, nodeId]() {
+                    QStringList completions;
+                    completions << QStringLiteral("base");
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni >= 0) {
+                        uint64_t pid = m_doc->tree.nodes[ni].parentId;
+                        for (const Node& sib : m_doc->tree.nodes) {
+                            if (sib.parentId == pid && !sib.isStatic && !sib.name.isEmpty())
+                                completions << sib.name;
+                        }
+                    }
+                    editor->setStaticCompletions(completions);
+                    editor->beginInlineEdit(EditTarget::StaticExpr, line);
+                });
+                hasStructAction = true;
+            }
+
+            // Dissolve Union
+            {
+                uint64_t targetUnionId = 0;
+                if (node.kind == NodeKind::Struct
+                    && node.resolvedClassKeyword() == QStringLiteral("union")) {
+                    targetUnionId = nodeId;
+                } else if (node.parentId != 0) {
+                    int pi = m_doc->tree.indexOfId(node.parentId);
+                    if (pi >= 0 && m_doc->tree.nodes[pi].kind == NodeKind::Struct
+                        && m_doc->tree.nodes[pi].resolvedClassKeyword() == QStringLiteral("union")) {
+                        targetUnionId = node.parentId;
+                    }
+                }
+                if (targetUnionId != 0) {
+                    structMenu->addAction("Dissolve Union", [this, targetUnionId]() {
+                        dissolveUnion(targetUnionId);
+                    });
+                    hasStructAction = true;
+                }
+            }
+
+            if (!hasStructAction)
+                structMenu->setEnabled(false);
+        }
+
+        menu.addSeparator();
+
+        // ── Duplicate / Delete ──
+        menu.addAction(icon("files.svg"), "D&uplicate\tCtrl+D", [this, nodeId]() {
+            int ni = m_doc->tree.indexOfId(nodeId);
+            if (ni >= 0) duplicateNode(ni);
+        });
+        menu.addAction(icon("trash.svg"), "&Delete\tDelete", [this, nodeId]() {
+            int ni = m_doc->tree.indexOfId(nodeId);
+            if (ni >= 0) removeNode(ni);
+        });
+
+        menu.addSeparator();
+
+        // ── Tracking ──
         {
             auto* act = menu.addAction("Track Value Changes");
             act->setCheckable(true);
@@ -1936,107 +2140,80 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 m_valueHistory.remove(nodeId);
                 for (int ci : m_doc->tree.subtreeIndices(nodeId))
                     m_valueHistory.remove(m_doc->tree.nodes[ci].id);
-                m_refreshGen++;           // discard in-flight async reads
-                m_prevPages.clear();      // clean baseline for next read cycle
-                m_changedOffsets.clear();  // no phantom change indicators
-                m_valueTrackCooldown = 5; // suppress tracking for ~1s
+                m_refreshGen++;
+                m_prevPages.clear();
+                m_changedOffsets.clear();
+                m_valueTrackCooldown = 5;
                 refresh();
                 for (auto* editor : m_editors)
                     editor->dismissHistoryPopup();
             });
         }
-        menu.addSeparator();
-
-        // Convert to Hex nodes (decompose non-hex types into Hex64/32/16/8)
-        if (!isHexNode(node.kind) && node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
-            menu.addAction("Convert to &Hex", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni < 0) return;
-                const Node& n = m_doc->tree.nodes[ni];
-                int totalSize = n.byteSize();
-                if (totalSize <= 0) return;
-
-                uint64_t parentId = n.parentId;
-                int baseOffset = n.offset;
-
-                bool wasSuppressed = m_suppressRefresh;
-                m_suppressRefresh = true;
-                m_doc->undoStack.beginMacro(QStringLiteral("Convert to Hex"));
-
-                // Remove the original node
-                QVector<Node> subtree;
-                subtree.append(n);
-                m_doc->undoStack.push(new RcxCommand(this,
-                    cmd::Remove{nodeId, subtree, {}}));
-
-                // Insert hex nodes to fill the space (largest first)
-                int padOffset = baseOffset;
-                int gap = totalSize;
-                while (gap > 0) {
-                    NodeKind padKind;
-                    int padSize;
-                    if (gap >= 8)      { padKind = NodeKind::Hex64; padSize = 8; }
-                    else if (gap >= 4) { padKind = NodeKind::Hex32; padSize = 4; }
-                    else if (gap >= 2) { padKind = NodeKind::Hex16; padSize = 2; }
-                    else               { padKind = NodeKind::Hex8;  padSize = 1; }
-
-                    insertNode(parentId, padOffset, padKind,
-                               QString("pad_%1").arg(padOffset, 2, 16, QChar('0')));
-                    padOffset += padSize;
-                    gap -= padSize;
-                }
-
-                m_doc->undoStack.endMacro();
-                m_suppressRefresh = wasSuppressed;
-                if (!m_suppressRefresh) refresh();
-            });
-        }
 
         menu.addSeparator();
+        } // else (non-member node actions)
+    }
 
-        if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) {
-            menu.addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
-                insertNode(nodeId, 0, NodeKind::Hex64, "newField");
-            });
-            // Add Static Field — inserts a static field child
-            menu.addAction("Add Static Field", [this, nodeId]() {
-                Node sf;
-                sf.id = m_doc->tree.m_nextId++;
-                sf.kind = NodeKind::Hex64;
-                sf.name = QStringLiteral("static_field");
-                sf.parentId = nodeId;
-                sf.offset = 0;
-                sf.isStatic = true;
-                sf.offsetExpr = QStringLiteral("base");
-                m_doc->undoStack.push(new RcxCommand(this,
-                    cmd::Insert{sf, {}}));
-            });
-            if (node.collapsed) {
-                menu.addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
-                    int ni = m_doc->tree.indexOfId(nodeId);
-                    if (ni >= 0) toggleCollapse(ni);
-                });
-            } else {
-                menu.addAction(icon("collapse-all.svg"), "&Collapse", [this, nodeId]() {
-                    int ni = m_doc->tree.indexOfId(nodeId);
-                    if (ni >= 0) toggleCollapse(ni);
-                });
-            }
+    // ── Always-available actions ──
 
-        }
+    if (!hasNode) {
+        // Insert submenu for empty area
+        auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
+        insertMenu->addAction("Insert 4", [this]() {
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            insertNode(target, -1, NodeKind::Hex32, QStringLiteral("field"));
+        });
+        insertMenu->addAction("Insert 8", [this]() {
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            insertNode(target, -1, NodeKind::Hex64, QStringLiteral("field"));
+        });
+        insertMenu->addSeparator();
+        insertMenu->addAction("Append bytes...", [this, &menu]() {
+            bool ok;
+            QString input = QInputDialog::getText(menu.parentWidget(),
+                QStringLiteral("Append bytes"),
+                QStringLiteral("Byte count (decimal or 0x hex):"),
+                QLineEdit::Normal, QStringLiteral("128"), &ok);
+            if (!ok || input.trimmed().isEmpty()) return;
 
-        // Add Static Field as sibling (for child nodes of a struct)
-        if (node.parentId != 0 && node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
-            uint64_t parentId = node.parentId;
-            int pi = m_doc->tree.indexOfId(parentId);
-            if (pi >= 0 && (m_doc->tree.nodes[pi].kind == NodeKind::Struct
-                         || m_doc->tree.nodes[pi].kind == NodeKind::Array)) {
-                menu.addAction("Add Static Field", [this, parentId]() {
+            QString trimmed = input.trimmed();
+            int byteCount = 0;
+            if (trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+                byteCount = trimmed.mid(2).toInt(&ok, 16);
+            else
+                byteCount = trimmed.toInt(&ok, 10);
+            if (!ok || byteCount <= 0) return;
+
+            uint64_t target = m_viewRootId ? m_viewRootId : 0;
+            int hex64Count = byteCount / 8;
+            int remainBytes = byteCount % 8;
+
+            m_suppressRefresh = true;
+            m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
+            int idx = 0;
+            for (int i = 0; i < hex64Count; i++, idx++)
+                insertNode(target, -1, NodeKind::Hex64,
+                           QStringLiteral("field_%1").arg(idx));
+            for (int i = 0; i < remainBytes; i++, idx++)
+                insertNode(target, -1, NodeKind::Hex8,
+                           QStringLiteral("field_%1").arg(idx));
+            m_doc->undoStack.endMacro();
+            m_suppressRefresh = false;
+            refresh();
+        });
+
+        // Add Static Field to current view root
+        if (m_viewRootId != 0) {
+            int ri = m_doc->tree.indexOfId(m_viewRootId);
+            if (ri >= 0 && (m_doc->tree.nodes[ri].kind == NodeKind::Struct
+                         || m_doc->tree.nodes[ri].kind == NodeKind::Array)) {
+                uint64_t rootId = m_viewRootId;
+                menu.addAction("Add Static Method (WIP)", [this, rootId]() {
                     Node sf;
                     sf.id = m_doc->tree.m_nextId++;
                     sf.kind = NodeKind::Hex64;
                     sf.name = QStringLiteral("static_field");
-                    sf.parentId = parentId;
+                    sf.parentId = rootId;
                     sf.offset = 0;
                     sf.isStatic = true;
                     sf.offsetExpr = QStringLiteral("base");
@@ -2046,122 +2223,13 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             }
         }
 
-        // Static field: Edit Expression inline
-        if (node.isStatic) {
-            menu.addAction("Edit E&xpression", [this, editor, line, nodeId]() {
-                // Build completions list: "base" + sibling field names
-                QStringList completions;
-                completions << QStringLiteral("base");
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) {
-                    uint64_t parentId = m_doc->tree.nodes[ni].parentId;
-                    for (const Node& sib : m_doc->tree.nodes) {
-                        if (sib.parentId == parentId && !sib.isStatic && !sib.name.isEmpty())
-                            completions << sib.name;
-                    }
-                }
-                editor->setStaticCompletions(completions);
-                editor->beginInlineEdit(EditTarget::StaticExpr, line);
-            });
-        }
-
-        // Dissolve Union: available on union itself or any of its children
-        {
-            uint64_t targetUnionId = 0;
-            if (node.kind == NodeKind::Struct
-                && node.resolvedClassKeyword() == QStringLiteral("union")) {
-                targetUnionId = nodeId;
-            } else if (node.parentId != 0) {
-                int pi = m_doc->tree.indexOfId(node.parentId);
-                if (pi >= 0 && m_doc->tree.nodes[pi].kind == NodeKind::Struct
-                    && m_doc->tree.nodes[pi].resolvedClassKeyword() == QStringLiteral("union")) {
-                    targetUnionId = node.parentId;
-                }
-            }
-            if (targetUnionId != 0) {
-                menu.addAction("Dissolve Union", [this, targetUnionId]() {
-                    dissolveUnion(targetUnionId);
-                });
-            }
-        }
-
-        menu.addAction(icon("files.svg"), "D&uplicate\tCtrl+D", [this, nodeId]() {
-            int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni >= 0) duplicateNode(ni);
-        });
-        menu.addAction(icon("trash.svg"), "&Delete\tDelete", [this, nodeId]() {
-            int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni >= 0) removeNode(ni);
-        });
-
         menu.addSeparator();
-        } // else (non-member node actions)
-    }
 
-    // ── Always-available actions ──
-
-    // Add Static Field to current view root (struct)
-    if (m_viewRootId != 0) {
-        int ri = m_doc->tree.indexOfId(m_viewRootId);
-        if (ri >= 0 && (m_doc->tree.nodes[ri].kind == NodeKind::Struct
-                     || m_doc->tree.nodes[ri].kind == NodeKind::Array)) {
-            uint64_t rootId = m_viewRootId;
-            menu.addAction("Add Static Field", [this, rootId]() {
-                Node sf;
-                sf.id = m_doc->tree.m_nextId++;
-                sf.kind = NodeKind::Hex64;
-                sf.name = QStringLiteral("static_field");
-                sf.parentId = rootId;
-                sf.offset = 0;
-                sf.isStatic = true;
-                sf.offsetExpr = QStringLiteral("base");
-                m_doc->undoStack.push(new RcxCommand(this,
-                    cmd::Insert{sf, {}}));
-            });
-        }
-    }
-
-    menu.addAction(icon("diff-added.svg"), "Append bytes...", [this, &menu]() {
-        bool ok;
-        QString input = QInputDialog::getText(menu.parentWidget(),
-            QStringLiteral("Append bytes"),
-            QStringLiteral("Byte count (decimal or 0x hex):"),
-            QLineEdit::Normal, QStringLiteral("128"), &ok);
-        if (!ok || input.trimmed().isEmpty()) return;
-
-        QString trimmed = input.trimmed();
-        int byteCount = 0;
-        if (trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
-            byteCount = trimmed.mid(2).toInt(&ok, 16);
-        else
-            byteCount = trimmed.toInt(&ok, 10);
-        if (!ok || byteCount <= 0) return;
-
-        uint64_t target = m_viewRootId ? m_viewRootId : 0;
-        int hex64Count = byteCount / 8;
-        int remainBytes = byteCount % 8;
-
-        m_suppressRefresh = true;
-        m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
-        int idx = 0;
-        for (int i = 0; i < hex64Count; i++, idx++)
-            insertNode(target, -1, NodeKind::Hex64,
-                       QStringLiteral("field_%1").arg(idx));
-        for (int i = 0; i < remainBytes; i++, idx++)
-            insertNode(target, -1, NodeKind::Hex8,
-                       QStringLiteral("field_%1").arg(idx));
-        m_doc->undoStack.endMacro();
-        m_suppressRefresh = false;
-        refresh();
-    });
-
-    menu.addSeparator();
-    // Only add Track Value Changes here if not already added in node-specific section
-    if (!hasNode) {
         auto* act = menu.addAction("Track Value Changes");
         act->setCheckable(true);
         act->setChecked(m_trackValues);
         connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
+
         menu.addSeparator();
     }
 

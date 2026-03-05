@@ -237,10 +237,14 @@ class MenuBarStyle : public QProxyStyle {
 public:
     using QProxyStyle::QProxyStyle;
     void polish(QWidget* w) override {
-        // Strip OS window border/shadow from QMenu popups — we draw our own
-        // 1px border in PE_FrameMenu.  Same pattern as TypeSelectorPopup.
-        if (qobject_cast<QMenu*>(w))
+        if (qobject_cast<QMenu*>(w)) {
             w->setWindowFlag(Qt::FramelessWindowHint, true);
+            // Layered window — gives full pixel control; DWM won't clip edges.
+            // (The DwmSetWindowAttribute conflict noted in RcxTooltip doesn't
+            //  apply here: DarkApp::notify only fires on WindowActivate, which
+            //  popups never receive.)
+            w->setAttribute(Qt::WA_TranslucentBackground);
+        }
         QProxyStyle::polish(w);
     }
     using QProxyStyle::polish;
@@ -257,7 +261,7 @@ public:
     }
     int pixelMetric(PixelMetric metric, const QStyleOption* opt,
                     const QWidget* w) const override {
-        // Reserve 1px for our own menu border (drawn in PE_FrameMenu)
+        // 1px border drawn in PE_FrameMenu
         if (metric == PM_MenuPanelWidth)
             return 1;
         // Inset menu items from border so hover rect doesn't touch edges
@@ -270,12 +274,18 @@ public:
     }
     void drawPrimitive(PrimitiveElement elem, const QStyleOption* opt,
                        QPainter* p, const QWidget* w) const override {
-        // Opaque background + clean 1px border on QMenu
+        // Opaque fill + 1px border at the true widget edge.
+        // WA_TranslucentBackground (set in polish) makes this a layered window,
+        // so DWM doesn't clip any edges.
         if (elem == PE_FrameMenu) {
-            p->fillRect(opt->rect, opt->palette.color(QPalette::Window));
+            QRect r = opt->rect;
+            p->fillRect(r, opt->palette.color(QPalette::Window));
             p->setPen(opt->palette.color(QPalette::Dark));
-            p->setBrush(Qt::NoBrush);
-            p->drawRect(opt->rect.adjusted(0, 0, -1, -1));
+            int x2 = r.right(), y2 = r.bottom();
+            p->drawLine(r.left(), r.top(), x2, r.top());     // top
+            p->drawLine(r.left(), y2,      x2, y2);           // bottom
+            p->drawLine(r.left(), r.top(), r.left(), y2);     // left
+            p->drawLine(x2,       r.top(), x2, y2);           // right
             return;
         }
         // Kill the status bar item frame and panel border
