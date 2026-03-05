@@ -46,6 +46,8 @@
 #include <Qsci/qscilexercpp.h>
 #include <QProxyStyle>
 #include <QDesktopServices>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QWindow>
 #include <QMouseEvent>
 #include "themes/thememanager.h"
@@ -255,6 +257,14 @@ public:
             s = QSize(s.width() + 24, s.height() + 4);
         if (type == CT_ItemViewItem)
             s.setHeight(s.height() + 4);
+        // Dock tab bar: fixed height, reasonable padding
+        if (type == CT_TabBarTab) {
+            if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
+                if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
+                    s.setHeight(28);
+                }
+            }
+        }
         return s;
     }
     int pixelMetric(PixelMetric metric, const QStyleOption* opt,
@@ -371,7 +381,161 @@ public:
                 return;
             }
         }
+        // Dock tab bar shape — background, accent line, hover, borders
+        // (No stylesheet on dock tab bars — we handle it all here)
+        if (element == CE_TabBarTabShape) {
+            if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt)) {
+                auto* tabBar = qobject_cast<const QTabBar*>(w);
+                if (tabBar && tabBar->parent() && qobject_cast<QMainWindow*>(tabBar->parent())) {
+                    bool selected = tab->state & State_Selected;
+                    bool hovered  = tab->state & State_MouseOver;
+                    // Background
+                    QColor bg = tab->palette.color(QPalette::Window);      // theme.background
+                    if (hovered && !selected)
+                        bg = tab->palette.color(QPalette::Mid);            // theme.hover
+                    p->fillRect(tab->rect, bg);
+                    // Selected accent line on top (2px)
+                    if (selected) {
+                        p->fillRect(QRect(tab->rect.left(), tab->rect.top(),
+                                          tab->rect.width(), 2),
+                                    tab->palette.color(QPalette::Link));   // theme.indHoverSpan
+                    }
+                    // Bottom border (1px separator between tabs and content)
+                    p->setPen(tab->palette.color(QPalette::Dark));         // theme.border
+                    p->drawLine(tab->rect.bottomLeft(), tab->rect.bottomRight());
+                    return;
+                }
+            }
+        }
+        // Dock tab bar label — middle-elide long names and use editor font
+        if (element == CE_TabBarTabLabel) {
+            if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt)) {
+                // Only apply to dock tab bars (parent is QMainWindow)
+                auto* tabBar = qobject_cast<const QTabBar*>(w);
+                if (tabBar && tabBar->parent() && qobject_cast<QMainWindow*>(tabBar->parent())) {
+                    // Find tab index for this rect
+                    int tabIdx = -1;
+                    for (int i = 0; i < tabBar->count(); ++i) {
+                        if (tabBar->tabRect(i).contains(tab->rect.center())) {
+                            tabIdx = i;
+                            break;
+                        }
+                    }
+                    // Leave space for pin+close buttons on right
+                    int btnWidth = 0;
+                    if (tabIdx >= 0) {
+                        auto* btn = tabBar->tabButton(tabIdx, QTabBar::RightSide);
+                        if (btn) btnWidth = btn->sizeHint().width() + 4;
+                    }
+                    QRect textRect = tab->rect.adjusted(8, 0, -(8 + btnWidth), 0);
+
+                    // Use editor font from settings
+                    QSettings s("Reclass", "Reclass");
+                    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+                    f.setFixedPitch(true);
+                    p->setFont(f);
+
+                    QFontMetrics fm(f);
+                    // Get original (un-elided) text from the tab bar
+                    QString text = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
+                    int maxW = textRect.width();
+
+                    // Middle-elide if too long
+                    if (fm.horizontalAdvance(text) > maxW) {
+                        int ellipsisW = fm.horizontalAdvance(QStringLiteral("\u2026"));
+                        int avail = maxW - ellipsisW;
+                        if (avail > 0) {
+                            int half = avail / 2;
+                            QString left, right;
+                            for (int i = 0; i < text.size(); ++i) {
+                                if (fm.horizontalAdvance(text.left(i + 1)) > half) {
+                                    left = text.left(i);
+                                    break;
+                                }
+                            }
+                            if (left.isEmpty()) left = text.left(1);
+                            for (int i = text.size() - 1; i >= 0; --i) {
+                                if (fm.horizontalAdvance(text.mid(i)) > half) {
+                                    right = text.mid(i + 1);
+                                    break;
+                                }
+                            }
+                            if (right.isEmpty()) right = text.right(1);
+                            text = left + QStringLiteral("\u2026") + right;
+                        } else {
+                            text = QStringLiteral("\u2026");
+                        }
+                    }
+
+                    bool selected = tab->state & State_Selected;
+                    QColor fg = selected ? tab->palette.color(QPalette::Text)
+                                         : tab->palette.color(QPalette::WindowText);
+                    p->setPen(fg);
+                    p->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, text);
+                    return;
+                }
+            }
+        }
         QProxyStyle::drawControl(element, opt, p, w);
+    }
+};
+
+// ── Dock tab button widget (pin + close) ──
+// Placed on the right side of each dock tab via QTabBar::setTabButton.
+class DockTabButtons : public QWidget {
+    Q_OBJECT
+public:
+    QToolButton* pinBtn;
+    QToolButton* closeBtn;
+    bool pinned = false;
+
+    explicit DockTabButtons(QWidget* parent = nullptr) : QWidget(parent) {
+        auto* hl = new QHBoxLayout(this);
+        hl->setContentsMargins(0, 0, 0, 0);
+        hl->setSpacing(0);
+
+        pinBtn = new QToolButton(this);
+        pinBtn->setAutoRaise(true);
+        pinBtn->setCursor(Qt::PointingHandCursor);
+        pinBtn->setFixedSize(16, 16);
+        pinBtn->setToolTip("Pin tab");
+        updatePinIcon();
+        hl->addWidget(pinBtn);
+
+        closeBtn = new QToolButton(this);
+        closeBtn->setAutoRaise(true);
+        closeBtn->setCursor(Qt::PointingHandCursor);
+        closeBtn->setFixedSize(16, 16);
+        closeBtn->setToolTip("Close tab");
+        closeBtn->setIcon(QIcon(":/vsicons/close.svg"));
+        closeBtn->setIconSize(QSize(12, 12));
+        hl->addWidget(closeBtn);
+
+        connect(pinBtn, &QToolButton::clicked, this, [this]() {
+            pinned = !pinned;
+            updatePinIcon();
+            emit pinToggled(pinned);
+        });
+    }
+
+    void applyTheme(const QColor& hover) {
+        QString style = QStringLiteral(
+            "QToolButton { border: none; padding: 1px; border-radius: 0px; }"
+            "QToolButton:hover { background: %1; }").arg(hover.name());
+        pinBtn->setStyleSheet(style);
+        closeBtn->setStyleSheet(style);
+    }
+
+    void setPinned(bool p) { pinned = p; updatePinIcon(); emit pinToggled(pinned); }
+
+signals:
+    void pinToggled(bool pinned);
+
+private:
+    void updatePinIcon() {
+        pinBtn->setIcon(QIcon(pinned ? ":/vsicons/pinned.svg" : ":/vsicons/pin.svg"));
+        pinBtn->setIconSize(QSize(12, 12));
+        pinBtn->setToolTip(pinned ? "Unpin tab" : "Pin tab");
     }
 };
 
@@ -633,14 +797,18 @@ void MainWindow::createMenus() {
 
     // View
     auto* view = m_menuBar->addMenu("&View");
-    Qt5Qt6AddAction(view, "Split &Horizontal", QKeySequence::UnknownKey, makeIcon(":/vsicons/split-horizontal.svg"), this, &MainWindow::splitView);
-    m_removeSplitAction = Qt5Qt6AddAction(view, "&Remove Split", QKeySequence::UnknownKey, makeIcon(":/vsicons/chrome-close.svg"), this, &MainWindow::unsplitView);
-    m_removeSplitAction->setVisible(false);
-    view->addSeparator();
-    connect(view, &QMenu::aboutToShow, this, [this]() {
-        auto* tab = activeTab();
-        m_removeSplitAction->setVisible(tab && tab->panes.size() > 1);
+    Qt5Qt6AddAction(view, "&Reset Windows", QKeySequence::UnknownKey, QIcon(), this, [this](bool) {
+        // Re-tabify all doc docks into a single group
+        if (m_docDocks.size() < 2) return;
+        auto* first = m_docDocks.first();
+        for (int i = 1; i < m_docDocks.size(); ++i) {
+            tabifyDockWidget(first, m_docDocks[i]);
+            m_docDocks[i]->show();
+        }
+        if (m_activeDocDock) m_activeDocDock->raise();
+        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
     });
+    view->addSeparator();
     m_sourceMenu = view->addMenu("&Data Source");
     connect(m_sourceMenu, &QMenu::aboutToShow, this, &MainWindow::populateSourceMenu);
     view->addSeparator();
@@ -1540,31 +1708,37 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     });
 
     // Update rendered panes and workspace on document changes and undo/redo
+    // Use QPointer to guard against dock being destroyed before deferred timer fires
+    QPointer<QDockWidget> dockGuard = dock;
     connect(doc, &RcxDocument::documentChanged,
-            this, [this, dock]() {
-        auto it = m_tabs.find(dock);
+            this, [this, dockGuard]() {
+        if (!dockGuard) return;
+        auto it = m_tabs.find(dockGuard);
         if (it != m_tabs.end())
-            QTimer::singleShot(0, this, [this, dock]() {
-                auto it2 = m_tabs.find(dock);
+            QTimer::singleShot(0, this, [this, dockGuard]() {
+                if (!dockGuard) return;
+                auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
                     if (it2->doc->filePath.isEmpty())
-                        dock->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                        dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
                 }
                 rebuildWorkspaceModel();
                 updateWindowTitle();
             });
     });
     connect(&doc->undoStack, &QUndoStack::indexChanged,
-            this, [this, dock](int) {
-        auto it = m_tabs.find(dock);
+            this, [this, dockGuard](int) {
+        if (!dockGuard) return;
+        auto it = m_tabs.find(dockGuard);
         if (it != m_tabs.end())
-            QTimer::singleShot(0, this, [this, dock]() {
-                auto it2 = m_tabs.find(dock);
+            QTimer::singleShot(0, this, [this, dockGuard]() {
+                if (!dockGuard) return;
+                auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
                     if (it2->doc->filePath.isEmpty())
-                        dock->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                        dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
                 }
                 updateWindowTitle();
                 rebuildWorkspaceModel();
@@ -1594,33 +1768,207 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         }
     }
 
-    // Install context menu on dock tab bars (deferred — tab bar created after tabification)
-    QTimer::singleShot(0, this, [this]() {
-        for (auto* tabBar : findChildren<QTabBar*>()) {
-            if (tabBar->parent() != this) continue;
-            if (tabBar->contextMenuPolicy() == Qt::CustomContextMenu) continue;
-            tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
-            connect(tabBar, &QTabBar::customContextMenuRequested,
-                    this, [this, tabBar](const QPoint& pos) {
-                int idx = tabBar->tabAt(pos);
-                if (idx < 0) return;
-                // Match tab to dock by title (tab bar only shows docked tabs)
-                QString tabTitle = tabBar->tabText(idx);
-                QDockWidget* target = nullptr;
-                for (auto* d : m_docDocks) {
-                    if (d->windowTitle() == tabTitle) { target = d; break; }
-                }
-                if (!target) return;
-                QMenu menu;
-                menu.addAction("Float", [target]() { target->setFloating(true); });
-                menu.addSeparator();
-                menu.addAction("Close", [target]() { target->close(); });
-                menu.exec(tabBar->mapToGlobal(pos));
-            });
-        }
-    });
+    // Install context menu + pin/close buttons on dock tab bars
+    // (deferred — tab bar created after tabification)
+    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
 
     return dock;
+}
+
+// ── Setup dock tab bars ──
+// Installs pin/close buttons, context menu, font, and style on all
+// dock tab bars owned by this QMainWindow. Safe to call repeatedly —
+// skips tabs that already have buttons and tab bars that already have
+// a context menu.
+void MainWindow::setupDockTabBars() {
+    const auto& theme = ThemeManager::instance().current();
+    for (auto* tabBar : findChildren<QTabBar*>()) {
+        if (tabBar->parent() != this) continue;
+
+        // No stylesheet — painting handled by MenuBarStyle
+        tabBar->setStyleSheet(QString());
+        tabBar->setElideMode(Qt::ElideNone);
+        tabBar->setExpanding(false);
+        // Set editor font so tab width sizing matches our label painting
+        {
+            QSettings s("Reclass", "Reclass");
+            QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
+            tabFont.setFixedPitch(true);
+            tabBar->setFont(tabFont);
+        }
+        QPalette tp = tabBar->palette();
+        tp.setColor(QPalette::WindowText, theme.textDim);
+        tp.setColor(QPalette::Text, theme.text);
+        tp.setColor(QPalette::Window, theme.background);
+        tp.setColor(QPalette::Mid, theme.hover);
+        tp.setColor(QPalette::Dark, theme.border);
+        tp.setColor(QPalette::Link, theme.indHoverSpan);
+        tabBar->setPalette(tp);
+
+        // Install tab buttons for any tab that doesn't have them yet
+        for (int i = 0; i < tabBar->count(); ++i) {
+            auto* existing = qobject_cast<DockTabButtons*>(
+                tabBar->tabButton(i, QTabBar::RightSide));
+            if (existing) continue;
+
+            auto* btns = new DockTabButtons(tabBar);
+            btns->applyTheme(theme.hover);
+
+            // Find dock by matching tab title
+            QString title = tabBar->tabText(i);
+            QDockWidget* target = nullptr;
+            for (auto* d : m_docDocks) {
+                if (d->windowTitle() == title) { target = d; break; }
+            }
+            if (target) {
+                connect(btns->closeBtn, &QToolButton::clicked,
+                        target, &QDockWidget::close);
+            }
+            tabBar->setTabButton(i, QTabBar::RightSide, btns);
+        }
+
+        // Context menu (install only once)
+        if (tabBar->contextMenuPolicy() == Qt::CustomContextMenu) continue;
+        tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(tabBar, &QTabBar::customContextMenuRequested,
+                this, [this, tabBar](const QPoint& pos) {
+            int idx = tabBar->tabAt(pos);
+            if (idx < 0) return;
+
+            // Find target dock
+            QString tabTitle = tabBar->tabText(idx);
+            QDockWidget* target = nullptr;
+            for (auto* d : m_docDocks)
+                if (d->windowTitle() == tabTitle) { target = d; break; }
+            if (!target) return;
+
+            auto tabIt = m_tabs.find(target);
+            auto* btns = qobject_cast<DockTabButtons*>(
+                tabBar->tabButton(idx, QTabBar::RightSide));
+            bool isPinned = btns && btns->pinned;
+
+            QMenu menu;
+
+            // Close
+            menu.addAction(makeIcon(":/vsicons/close.svg"), "Close",
+                           QKeySequence(Qt::CTRL | Qt::Key_W),
+                           [target]() { target->close(); });
+
+            menu.addSeparator();
+
+            // Close All Tabs
+            menu.addAction(makeIcon(":/vsicons/close-all.svg"), "Close All Tabs",
+                           [this]() { closeAllDocDocks(); });
+
+            // Close All But This
+            if (m_docDocks.size() > 1) {
+                menu.addAction("Close All But This", [this, target]() {
+                    auto docks = m_docDocks;
+                    for (auto* d : docks)
+                        if (d != target) d->close();
+                });
+            }
+
+            // Close All But Pinned (only if any tab is pinned)
+            bool anyPinned = false;
+            for (int i = 0; i < tabBar->count(); ++i) {
+                auto* b = qobject_cast<DockTabButtons*>(
+                    tabBar->tabButton(i, QTabBar::RightSide));
+                if (b && b->pinned) { anyPinned = true; break; }
+            }
+            if (anyPinned) {
+                menu.addAction("Close All But Pinned", [this, tabBar]() {
+                    QVector<QDockWidget*> toClose;
+                    for (int i = 0; i < tabBar->count(); ++i) {
+                        auto* b = qobject_cast<DockTabButtons*>(
+                            tabBar->tabButton(i, QTabBar::RightSide));
+                        if (b && b->pinned) continue;
+                        QString title = tabBar->tabText(i);
+                        for (auto* d : m_docDocks)
+                            if (d->windowTitle() == title) { toClose.append(d); break; }
+                    }
+                    for (auto* d : toClose) d->close();
+                });
+            }
+
+            menu.addSeparator();
+
+            // Copy Full Path / Open Containing Folder (only if saved)
+            if (tabIt != m_tabs.end() && !tabIt->doc->filePath.isEmpty()) {
+                QString path = tabIt->doc->filePath;
+                menu.addAction(makeIcon(":/vsicons/clippy.svg"), "Copy Full Path",
+                               [path]() { QGuiApplication::clipboard()->setText(path); });
+                menu.addAction(makeIcon(":/vsicons/folder-opened.svg"),
+                               "Open Containing Folder", [path]() {
+                    QDesktopServices::openUrl(
+                        QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+                });
+            }
+
+            // Float / Dock
+            menu.addAction(target->isFloating() ? "Dock" : "Float", [target]() {
+                target->setFloating(!target->isFloating());
+            });
+
+            menu.addSeparator();
+
+            // Pin / Unpin
+            if (btns) {
+                QIcon pinIcon = makeIcon(isPinned ? ":/vsicons/pinned.svg"
+                                                  : ":/vsicons/pin.svg");
+                menu.addAction(pinIcon, isPinned ? "Unpin Tab" : "Pin Tab",
+                               [btns, isPinned]() { btns->setPinned(!isPinned); });
+            }
+
+            menu.addSeparator();
+
+            // New Document Groups (only if >1 tab)
+            if (tabBar->count() > 1) {
+                menu.addAction(makeIcon(":/vsicons/split-horizontal.svg"),
+                               "New Horizontal Document Group",
+                               [this, target]() {
+                    Qt::DockWidgetArea area = dockWidgetArea(target);
+                    if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
+                    removeDockWidget(target);
+                    addDockWidget(area, target, Qt::Horizontal);
+                    target->show();
+                    QList<QDockWidget*> docks;
+                    QList<int> sizes;
+                    for (auto* d : m_docDocks) {
+                        if (!d->isFloating() && d->isVisible() && dockWidgetArea(d) == area) {
+                            docks.append(d);
+                            sizes.append(width() / 2);
+                        }
+                    }
+                    if (docks.size() >= 2)
+                        resizeDocks(docks, sizes, Qt::Horizontal);
+                    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                });
+                menu.addAction(makeIcon(":/vsicons/split-vertical.svg"),
+                               "New Vertical Document Group",
+                               [this, target]() {
+                    Qt::DockWidgetArea area = dockWidgetArea(target);
+                    if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
+                    removeDockWidget(target);
+                    addDockWidget(area, target, Qt::Vertical);
+                    target->show();
+                    QList<QDockWidget*> docks;
+                    QList<int> sizes;
+                    for (auto* d : m_docDocks) {
+                        if (!d->isFloating() && d->isVisible() && dockWidgetArea(d) == area) {
+                            docks.append(d);
+                            sizes.append(height() / 2);
+                        }
+                    }
+                    if (docks.size() >= 2)
+                        resizeDocks(docks, sizes, Qt::Vertical);
+                    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                });
+            }
+
+            menu.exec(tabBar->mapToGlobal(pos));
+        });
+    }
 }
 
 // Build a minimal empty struct for new documents
@@ -2006,7 +2354,7 @@ void MainWindow::applyTheme(const Theme& theme) {
 
     // Style doc dock tab bars and remove dock borders
     setStyleSheet(QStringLiteral(
-        "QMainWindow::separator { width: 1px; height: 1px; background: %4; }"
+        "QMainWindow::separator { width: 1px; height: 1px; background: transparent; }"
         "QDockWidget { border: none; }"
         "QDockWidget > QWidget { border: none; }")
         .arg(theme.border.name()));
@@ -2015,17 +2363,31 @@ void MainWindow::applyTheme(const Theme& theme) {
         // Only style tab bars owned directly by this QMainWindow (dock tabs),
         // skip ones inside SplitPane QTabWidgets etc.
         if (tabBar->parent() == this) {
-            tabBar->setStyleSheet(QStringLiteral(
-                "QTabBar { border: none; }"
-                "QTabBar::tab {"
-                "  background: %1; padding: 0px 16px; border: none; border-radius: 0px;"
-                "}"
-                "QTabBar::tab:selected { background: %2; }"
-                "QTabBar::tab:hover { background: %3; }")
-                .arg(theme.background.name(), theme.backgroundAlt.name(), theme.hover.name()));
+            // No stylesheet — painting handled by MenuBarStyle (CE_TabBarTabShape/Label)
+            tabBar->setStyleSheet(QString());
+            tabBar->setElideMode(Qt::ElideNone);
+            tabBar->setExpanding(false);
+            // Set editor font so tab width sizing matches our label painting
+            {
+                QSettings s("Reclass", "Reclass");
+                QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
+                tabFont.setFixedPitch(true);
+                tabBar->setFont(tabFont);
+            }
             QPalette tp = tabBar->palette();
             tp.setColor(QPalette::WindowText, theme.textDim);
+            tp.setColor(QPalette::Text, theme.text);
+            tp.setColor(QPalette::Window, theme.background);
+            tp.setColor(QPalette::Mid, theme.hover);
+            tp.setColor(QPalette::Dark, theme.border);
+            tp.setColor(QPalette::Link, theme.indHoverSpan);
             tabBar->setPalette(tp);
+            // Update DockTabButtons theme
+            for (int i = 0; i < tabBar->count(); ++i) {
+                auto* btns = qobject_cast<DockTabButtons*>(
+                    tabBar->tabButton(i, QTabBar::RightSide));
+                if (btns) btns->applyTheme(theme.hover);
+            }
         }
     }
 
@@ -2283,6 +2645,17 @@ void MainWindow::setEditorFont(const QString& fontName) {
     for (auto* dock : m_docDocks) {
         if (auto* lbl = dock->findChild<QLabel*>("dockFloatTitle"))
             lbl->setFont(f);
+    }
+    // Update dock tab bar font so tab sizing matches label painting
+    {
+        QFont tabFont(fontName, 10);
+        tabFont.setFixedPitch(true);
+        for (auto* tabBar : findChildren<QTabBar*>()) {
+            if (tabBar->parent() == this) {
+                tabBar->setFont(tabFont);
+                tabBar->update();
+            }
+        }
     }
 }
 
@@ -3676,4 +4049,5 @@ int main(int argc, char* argv[]) {
     return app.exec();
 }
 
-// MainWindow Q_OBJECT is now in mainwindow.h; AUTOMOC handles moc generation.
+// DockTabButtons has Q_OBJECT in main.cpp — need the moc include
+#include "main.moc"

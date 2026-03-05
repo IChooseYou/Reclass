@@ -60,5 +60,9 @@
         <file alias="search.svg">vsicons/search.svg</file>
         <file alias="regex.svg">vsicons/regex.svg</file>
         <file alias="refresh.svg">vsicons/refresh.svg</file>
+        <file alias="pin.svg">vsicons/pin.svg</file>
+        <file alias="pinned.svg">vsicons/pinned.svg</file>
+        <file alias="close-all.svg">vsicons/close-all.svg</file>
+        <file alias="split-vertical.svg">vsicons/split-vertical.svg</file>
     </qresource>
 </RCC>

@@ -90,7 +90,6 @@ private:
     PluginManager   m_pluginManager;
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
-    QAction*        m_removeSplitAction = nullptr;
     QMenu*          m_sourceMenu = nullptr;
     QMenu*          m_recentFilesMenu = nullptr;
 
@@ -132,6 +131,7 @@ private:
     TabState* tabByIndex(int index);
     int tabCount() const { return m_tabs.size(); }
     QDockWidget* createTab(RcxDocument* doc);
+    void setupDockTabBars();
     void updateWindowTitle();
     void closeAllDocDocks();
 
