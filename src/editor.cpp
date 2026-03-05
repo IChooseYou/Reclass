@@ -2548,8 +2548,10 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         m_editState.commentCol = -1;
     }
 
-    // Disable Scintilla undo during inline edit
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, (long)0);
+    // Keep undo collection enabled during inline edit so CellBuffer::DeleteChars
+    // returns valid text pointers (collectingUndo=false returns nullptr, which
+    // crashes QsciAccessibleBase::textDeleted). We clear the buffer on edit end.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, (long)1);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETWIDTH, 1);
     m_sci->setReadOnly(false);
 
@@ -3461,13 +3463,7 @@ void RcxEditor::setCommandRowText(const QString& line) {
     long savedPos    = m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS);
     long savedAnchor = m_sci->SendScintilla(QsciScintillaBase::SCI_GETANCHOR);
 
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, 0);
     m_sci->setReadOnly(false);
-
-    // Suppress modification notifications during replace to avoid
-    // QScintilla accessibility crash (textDeleted called with null text).
-    long savedMask = m_sci->SendScintilla(QsciScintillaBase::SCI_GETMODEVENTMASK);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMODEVENTMASK, 0);
 
     long start = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, 0);
     long end   = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION, 0);
@@ -3477,15 +3473,12 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, end);
     m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET, (uintptr_t)utf8.size(), utf8.constData());
 
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMODEVENTMASK, savedMask);
-
     // Adjust saved cursor/anchor for length change in line 0
     long delta = (long)utf8.size() - oldLen;
     if (savedPos > end)    savedPos    += delta;
     if (savedAnchor > end) savedAnchor += delta;
 
     if (wasReadOnly) m_sci->setReadOnly(true);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETUNDOCOLLECTION, 1);
     if (!wasModified) m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCURRENTPOS, savedPos);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETANCHOR, savedAnchor);
