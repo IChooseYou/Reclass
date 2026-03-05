@@ -1572,6 +1572,16 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     dock->raise();
     dock->show();
+    // Ensure the new dock's tab is activated in the tab bar
+    for (auto* tabBar : findChildren<QTabBar*>()) {
+        if (tabBar->parent() != this) continue;
+        for (int i = 0; i < tabBar->count(); i++) {
+            if (tabBar->tabText(i) == dock->windowTitle()) {
+                tabBar->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
 
     // Install context menu on dock tab bars (deferred — tab bar created after tabification)
     QTimer::singleShot(0, this, [this]() {
