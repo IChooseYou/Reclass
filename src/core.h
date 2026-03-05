@@ -1031,6 +1031,7 @@ namespace fmt {
 // ── Compose function forward declaration ──
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId = 0,
-                      bool compactColumns = false, bool treeLines = false);
+                      bool compactColumns = false, bool treeLines = false,
+                      bool braceWrap = false);
 
 } // namespace rcx

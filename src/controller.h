@@ -41,7 +41,7 @@ public:
     }
 
     ComposeResult compose(uint64_t viewRootId = 0, bool compactColumns = false,
-                          bool treeLines = false) const;
+                          bool treeLines = false, bool braceWrap = false) const;
     bool save(const QString& path);
     bool load(const QString& path);
     void loadData(const QString& binaryPath);
@@ -130,6 +130,7 @@ public:
     void setRefreshInterval(int ms);
     void setCompactColumns(bool v);
     void setTreeLines(bool v);
+    void setBraceWrap(bool v);
     void resetProvider();
 
     // MCP bridge accessors
@@ -158,6 +159,7 @@ public:
 signals:
     void nodeSelected(int nodeIdx);
     void selectionChanged(int count);
+    void contextMenuAboutToShow(QMenu* menu, int line);
 
 private:
     RcxDocument*       m_doc;
@@ -168,6 +170,7 @@ private:
     bool               m_suppressRefresh = false;
     bool               m_compactColumns = false;
     bool               m_treeLines = false;
+    bool               m_braceWrap = false;
     uint64_t           m_viewRootId = 0;
 
     // ── Saved sources for quick-switch ──

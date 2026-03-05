@@ -9,8 +9,6 @@
 #include "mcp/mcp_bridge.h"
 #include <QApplication>
 #include <QMainWindow>
-#include <QMdiArea>
-#include <QMdiSubWindow>
 #include <QMenuBar>
 #include <QToolBar>
 #include <QStatusBar>
@@ -469,23 +467,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     overlay->raise();
     overlay->show();
 
-    m_mdiArea = new QMdiArea(this);
-    m_mdiArea->setFrameShape(QFrame::NoFrame);
-    m_mdiArea->setViewMode(QMdiArea::TabbedView);
-    m_mdiArea->setTabsClosable(true);
-    m_mdiArea->setTabsMovable(true);
-    {
-        const auto& t = ThemeManager::instance().current();
-        m_mdiArea->setStyleSheet(QStringLiteral(
-            "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none; height: 24px;"
-            "}"
-            "QTabBar::tab:selected { color: %3; background: %4; }"
-            "QTabBar::tab:hover { color: %3; background: %5; }")
-            .arg(t.background.name(), t.textMuted.name(), t.text.name(),
-                 t.backgroundAlt.name(), t.hover.name()));
-    }
-    setCentralWidget(m_mdiArea);
+    m_centralPlaceholder = new QWidget(this);
+    m_centralPlaceholder->setFixedSize(0, 0);
+    m_centralPlaceholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    setCentralWidget(m_centralPlaceholder);
+    setDockNestingEnabled(true);
+    setTabPosition(Qt::TopDockWidgetArea, QTabWidget::North);
 
     createWorkspaceDock();
     createScannerDock();
@@ -521,10 +508,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     if (QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool())
         m_mcp->start();
 
-    connect(m_mdiArea, &QMdiArea::subWindowActivated,
-            this, [this](QMdiSubWindow*) {
-        updateWindowTitle();
-        rebuildWorkspaceModel();
+    // Active doc tracking is handled per dock in createTab() via visibilityChanged
+
+    // Ensure border overlay is on top after initial layout settles
+    QTimer::singleShot(0, this, [this]() {
+        if (m_borderOverlay) {
+            m_borderOverlay->setGeometry(rect());
+            m_borderOverlay->raise();
+        }
     });
 
     // Track which split pane has focus (for menu-driven view switching)
@@ -1006,31 +997,21 @@ private:
     int m_divX = -1;
 
     void manualLayout() {
-        if (!tabRow || !label) return;
-        const int h      = height();
-        const int tw     = tabRow->sizeHint().width();
+        if (!label) return;
+        const int h = height();
         const int gutter = 6;
-        tabRow->setGeometry(0, 0, tw, h);
-        m_divX = tw;
-        label->setGeometry(tw + 1 + gutter, 0,
-                           qMax(0, width() - (tw + 1 + gutter)), h);
-
-        // Shared baseline so tab text and status text align.
-        // Nudge up by half the accent-line height so text centres
-        // in the visible area below the accent bar, not in the full bar.
-        QFontMetrics fm(font());
-        int by = (h + fm.ascent()) / 2 - (ViewTabButton::kAccentH + 1) / 2;
-
-        // Push baseline to buttons
-        auto* lay = tabRow->layout();
-        if (lay) {
-            for (int i = 0; i < lay->count(); i++)
-                static_cast<ViewTabButton*>(lay->itemAt(i)->widget())->baselineY = by;
+        if (tabRow) {
+            const int tw = tabRow->sizeHint().width();
+            tabRow->setGeometry(0, 0, tw, h);
+            m_divX = tw;
+            label->setGeometry(tw + 1 + gutter, 0,
+                               qMax(0, width() - (tw + 1 + gutter)), h);
+        } else {
+            m_divX = -1;
+            label->setGeometry(gutter, 0, qMax(0, width() - gutter), h);
         }
-        // Align label: set top margin so text baseline matches
-        int labelTop = by - fm.ascent();
-        label->setContentsMargins(0, labelTop, 0, 0);
-        label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        label->setContentsMargins(0, 0, 0, 0);
+        label->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
     }
 };
 
@@ -1045,35 +1026,11 @@ void MainWindow::createStatusBar() {
     m_statusLabel->setContentsMargins(0, 0, 0, 0);
     m_statusLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
 
-    // View toggle buttons (Reclass / C/C++) — custom painted, no CSS
-    m_viewBtnGroup = new QButtonGroup(this);
-    m_viewBtnGroup->setExclusive(true);
-
-    m_btnReclass = new ViewTabButton("Reclass");
-    m_btnReclass->setChecked(true);
-
-    m_btnRendered = new ViewTabButton("C/C++");
-
-    m_viewBtnGroup->addButton(m_btnReclass, 0);
-    m_viewBtnGroup->addButton(m_btnRendered, 1);
-
-    // Wrap buttons in a plain container — FlatStatusBar paints the chrome
-    auto* tabRow = new QWidget(sb);
-    auto* tabLay = new QHBoxLayout(tabRow);
-    tabLay->setContentsMargins(0, 0, 0, 0);
-    tabLay->setSpacing(0);
-    tabLay->addWidget(m_btnReclass);
-    tabLay->addWidget(m_btnRendered);
-
-    sb->tabRow = tabRow;
+    // View toggle is now per-pane via QTabWidget tab bar (Reclass / C/C++ tabs)
+    sb->tabRow = nullptr;
     sb->label  = m_statusLabel;
 
-    sb->setMinimumHeight(qMax(m_btnReclass->sizeHint().height(),
-                              sb->fontMetrics().height() + 6));
-
-    connect(m_viewBtnGroup, &QButtonGroup::idClicked, this, [this](int id) {
-        setViewMode(id == 1 ? VM_Rendered : VM_Reclass);
-    });
+    sb->setMinimumHeight(sb->fontMetrics().height() + 6);
 
     // Grip is a direct child of the main window, NOT in the status bar layout.
     // Positioned via reposition() in resizeEvent — immune to font/margin changes.
@@ -1091,19 +1048,6 @@ void MainWindow::createStatusBar() {
 
         sb->setTopLineColor(t.border);
         sb->setDividerColor(t.border);
-
-        auto applyViewTabColors = [&](ViewTabButton* btn) {
-            btn->colBg        = t.background;
-            btn->colBgChecked = t.backgroundAlt;
-            btn->colBgHover   = t.hover;
-            btn->colBgPressed = t.hover.darker(130);
-            btn->colText      = t.text;
-            btn->colTextMuted = t.textMuted;
-            btn->colAccent    = t.indHoverSpan;
-            btn->colBorder    = t.border;
-        };
-        applyViewTabColors(static_cast<ViewTabButton*>(m_btnReclass));
-        applyViewTabColors(static_cast<ViewTabButton*>(m_btnRendered));
 
         m_statusLabel->colBase   = t.textDim;
         m_statusLabel->colBright = t.indHoverSpan;
@@ -1141,44 +1085,30 @@ void MainWindow::clearMcpStatus() {
     m_mcpClearTimer->start(750);
 }
 
-void MainWindow::styleTabCloseButtons() {
-    auto* tabBar = m_mdiArea->findChild<QTabBar*>();
-    if (!tabBar) return;
 
-    const auto& t = ThemeManager::instance().current();
-    QString style = QStringLiteral(
-        "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
-        "QToolButton:hover { color: %2; }")
-        .arg(t.textDim.name(), t.indHoverSpan.name());
-
-    auto subs = m_mdiArea->subWindowList();
-    for (int i = 0; i < tabBar->count() && i < subs.size(); i++) {
-        auto* existing = qobject_cast<QToolButton*>(
-            tabBar->tabButton(i, QTabBar::RightSide));
-        if (existing && existing->text() == QStringLiteral("\u2715")) {
-            // Already our button, just restyle
-            existing->setStyleSheet(style);
-            continue;
-        }
-        // Replace with ✕ text button
-        auto* btn = new QToolButton(tabBar);
-        btn->setText(QStringLiteral("\u2715"));
-        btn->setAutoRaise(true);
-        btn->setCursor(Qt::PointingHandCursor);
-        btn->setStyleSheet(style);
-        QMdiSubWindow* sub = subs[i];
-        connect(btn, &QToolButton::clicked, sub, &QMdiSubWindow::close);
-        tabBar->setTabButton(i, QTabBar::RightSide, btn);
-    }
-}
 
 MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     SplitPane pane;
 
     pane.tabWidget = new QTabWidget;
     pane.tabWidget->setTabPosition(QTabWidget::South);
-    pane.tabWidget->tabBar()->setVisible(false);
+    pane.tabWidget->tabBar()->setVisible(true);
     pane.tabWidget->setDocumentMode(true);  // kill QTabWidget frame border
+
+    // Style to match the top dock tab bar, with accent line on selected tab
+    {
+        const auto& t = ThemeManager::instance().current();
+        pane.tabWidget->setStyleSheet(QStringLiteral(
+            "QTabBar { border: none; }"
+            "QTabBar::tab {"
+            "  background: %1; color: %2; padding: 0px 16px; border: none; height: 24px;"
+            "}"
+            "QTabBar::tab:selected { color: %3; background: %4;"
+            "  border-top: 3px solid %6; padding-top: -3px; }"
+            "QTabBar::tab:hover { color: %3; background: %5; }")
+            .arg(t.background.name(), t.textMuted.name(), t.text.name(),
+                 t.backgroundAlt.name(), t.hover.name(), t.indHoverSpan.name()));
+    }
 
     // Create editor via controller (parent = tabWidget for ownership)
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
@@ -1342,6 +1272,32 @@ RcxEditor* MainWindow::activePaneEditor() {
     return pane ? pane->editor : nullptr;
 }
 
+// Event filter to manage border overlay + resize grip on floating dock widgets
+class DockBorderFilter : public QObject {
+public:
+    BorderOverlay* border;
+    ResizeGrip* grip;
+    DockBorderFilter(BorderOverlay* b, ResizeGrip* g, QObject* parent)
+        : QObject(parent), border(b), grip(g) {}
+    bool eventFilter(QObject* obj, QEvent* ev) override {
+        auto* dock = qobject_cast<QDockWidget*>(obj);
+        if (!dock || !dock->isFloating()) return false;
+        if (ev->type() == QEvent::Resize) {
+            border->setGeometry(0, 0, dock->width(), dock->height());
+            border->raise();
+            grip->reposition();
+            grip->raise();
+        } else if (ev->type() == QEvent::WindowActivate) {
+            border->color = ThemeManager::instance().current().borderFocused;
+            border->update();
+        } else if (ev->type() == QEvent::WindowDeactivate) {
+            border->color = ThemeManager::instance().current().border;
+            border->update();
+        }
+        return false;
+    }
+};
+
 static QString rootName(const NodeTree& tree, uint64_t viewRootId = 0) {
     if (viewRootId != 0) {
         int idx = tree.indexOfId(viewRootId);
@@ -1360,20 +1316,133 @@ static QString rootName(const NodeTree& tree, uint64_t viewRootId = 0) {
     return QStringLiteral("Untitled");
 }
 
-QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
+QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     auto* splitter = new QSplitter(Qt::Horizontal);
     splitter->setHandleWidth(1);
     auto* ctrl = new RcxController(doc, splitter);
 
-    auto* sub = m_mdiArea->addSubWindow(splitter);
-    sub->setWindowIcon(QIcon());  // suppress app icon in MDI tabs
-    sub->setWindowTitle(doc->filePath.isEmpty()
-                        ? rootName(doc->tree) : QFileInfo(doc->filePath).fileName());
-    sub->setAttribute(Qt::WA_DeleteOnClose);
-    sub->showMaximized();
+    QString title = doc->filePath.isEmpty()
+                    ? rootName(doc->tree) : QFileInfo(doc->filePath).fileName();
+    auto* dock = new QDockWidget(title, this);
+    dock->setObjectName(QStringLiteral("DocDock_%1").arg(quintptr(dock), 0, 16));
+    dock->setFeatures(QDockWidget::DockWidgetClosable |
+                      QDockWidget::DockWidgetMovable |
+                      QDockWidget::DockWidgetFloatable);
+    // Two title bar widgets: a hidden one (docked) and a draggable one (floating)
+    auto* emptyTitleBar = new QWidget(dock);
+    emptyTitleBar->setFixedHeight(0);
 
-    m_tabs[sub] = { doc, ctrl, splitter, {}, 0 };
-    auto& tab = m_tabs[sub];
+    auto* floatTitleBar = new QWidget(dock);
+    {
+        const auto& t = ThemeManager::instance().current();
+        floatTitleBar->setFixedHeight(24);
+        floatTitleBar->setAutoFillBackground(true);
+        {
+            QPalette tbPal = floatTitleBar->palette();
+            tbPal.setColor(QPalette::Window, t.backgroundAlt);
+            floatTitleBar->setPalette(tbPal);
+        }
+        auto* hl = new QHBoxLayout(floatTitleBar);
+        hl->setContentsMargins(4, 2, 2, 2);
+        hl->setSpacing(4);
+
+        auto* grip = new DockGripWidget(floatTitleBar);
+        grip->setObjectName("dockFloatGrip");
+        hl->addWidget(grip);
+
+        auto* lbl = new QLabel(title, floatTitleBar);
+        lbl->setObjectName("dockFloatTitle");
+        {
+            QPalette lp = lbl->palette();
+            lp.setColor(QPalette::WindowText, t.textDim);
+            lbl->setPalette(lp);
+        }
+        {
+            QSettings settings("Reclass", "Reclass");
+            QFont f(settings.value("font", "JetBrains Mono").toString(), 12);
+            f.setFixedPitch(true);
+            lbl->setFont(f);
+        }
+        hl->addWidget(lbl);
+        hl->addStretch();
+        auto* closeBtn = new QToolButton(floatTitleBar);
+        closeBtn->setObjectName("dockFloatClose");
+        closeBtn->setText(QStringLiteral("\u2715"));
+        closeBtn->setAutoRaise(true);
+        closeBtn->setCursor(Qt::PointingHandCursor);
+        closeBtn->setStyleSheet(QStringLiteral(
+            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
+            "QToolButton:hover { color: %2; }")
+            .arg(t.textDim.name(), t.indHoverSpan.name()));
+        connect(closeBtn, &QToolButton::clicked, dock, &QDockWidget::close);
+        hl->addWidget(closeBtn);
+    }
+    floatTitleBar->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(floatTitleBar, &QWidget::customContextMenuRequested,
+            this, [this, dock, floatTitleBar](const QPoint& pos) {
+        QMenu menu;
+        menu.addAction("Dock", [dock]() { dock->setFloating(false); });
+        menu.addSeparator();
+        auto* alwaysFloat = menu.addAction("Always Floating");
+        alwaysFloat->setCheckable(true);
+        bool locked = !(dock->features() & QDockWidget::DockWidgetMovable);
+        alwaysFloat->setChecked(locked);
+        connect(alwaysFloat, &QAction::toggled, dock, [dock](bool checked) {
+            auto features = dock->features();
+            if (checked)
+                features &= ~QDockWidget::DockWidgetMovable;
+            else
+                features |= QDockWidget::DockWidgetMovable;
+            dock->setFeatures(features);
+        });
+        menu.addSeparator();
+        menu.addAction("Close", [dock]() { dock->close(); });
+        menu.exec(floatTitleBar->mapToGlobal(pos));
+    });
+
+    dock->setTitleBarWidget(emptyTitleBar);
+    dock->setWidget(splitter);
+
+    // Border overlay and resize grip for floating state
+    auto* dockBorder = new BorderOverlay(dock);
+    dockBorder->color = ThemeManager::instance().current().borderFocused;
+    dockBorder->hide();
+
+    auto* dockGrip = new ResizeGrip(dock);
+    dockGrip->hide();
+
+    // Swap title bar when floating/docking, show/hide border + grip
+    connect(dock, &QDockWidget::topLevelChanged, this, [dock, emptyTitleBar, floatTitleBar, dockBorder, dockGrip](bool floating) {
+        dock->setTitleBarWidget(floating ? floatTitleBar : emptyTitleBar);
+        if (floating) {
+            dockBorder->setGeometry(0, 0, dock->width(), dock->height());
+            dockBorder->raise();
+            dockBorder->show();
+            dockGrip->reposition();
+            dockGrip->raise();
+            dockGrip->show();
+        } else {
+            dockBorder->hide();
+            dockGrip->hide();
+        }
+    });
+    dock->installEventFilter(new DockBorderFilter(dockBorder, dockGrip, dock));
+    // Keep float title bar label in sync with dock title
+    connect(dock, &QDockWidget::windowTitleChanged, floatTitleBar, [floatTitleBar](const QString& t) {
+        if (auto* lbl = floatTitleBar->findChild<QLabel*>("dockFloatTitle"))
+            lbl->setText(t);
+    });
+
+    // Tabify with existing doc docks, or add to top area
+    if (!m_docDocks.isEmpty())
+        tabifyDockWidget(m_docDocks.last(), dock);
+    else
+        addDockWidget(Qt::TopDockWidgetArea, dock);
+
+    m_docDocks.append(dock);
+    m_tabs[dock] = { doc, ctrl, splitter, {}, 0 };
+    m_activeDocDock = dock;
+    auto& tab = m_tabs[dock];
 
     // Create the initial split pane
     tab.panes.append(createSplitPane(tab));
@@ -1381,23 +1450,46 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
     // Apply global compact columns setting to new tab
     ctrl->setCompactColumns(QSettings("Reclass", "Reclass").value("compactColumns", true).toBool());
     ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", false).toBool());
+    ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
     rebuildAllDocs();
 
-    connect(sub, &QObject::destroyed, this, [this, sub]() {
-        auto it = m_tabs.find(sub);
+    // Track active tab via visibility
+    connect(dock, &QDockWidget::visibilityChanged, this, [this, dock](bool visible) {
+        if (visible) {
+            m_activeDocDock = dock;
+            updateWindowTitle();
+            rebuildWorkspaceModel();
+            // Sync view toggle buttons to this tab's active pane
+            auto it = m_tabs.find(dock);
+            if (it != m_tabs.end()) {
+                auto& tab = *it;
+                if (tab.activePaneIdx >= 0 && tab.activePaneIdx < tab.panes.size())
+                    syncViewButtons(tab.panes[tab.activePaneIdx].viewMode);
+            }
+        }
+        // Keep border overlay on top after dock rearrangements
+        if (m_borderOverlay) m_borderOverlay->raise();
+    });
+
+    // Cleanup on close
+    connect(dock, &QObject::destroyed, this, [this, dock]() {
+        auto it = m_tabs.find(dock);
         if (it != m_tabs.end()) {
             it->doc->deleteLater();
             m_tabs.erase(it);
         }
+        m_docDocks.removeOne(dock);
+        if (m_activeDocDock == dock)
+            m_activeDocDock = m_docDocks.isEmpty() ? nullptr : m_docDocks.last();
         rebuildAllDocs();
         rebuildWorkspaceModel();
     });
 
     connect(ctrl, &RcxController::nodeSelected,
-            this, [this, ctrl, sub](int nodeIdx) {
+            this, [this, ctrl, dock](int nodeIdx) {
         if (nodeIdx >= 0 && nodeIdx < ctrl->document()->tree.nodes.size()) {
             auto& node = ctrl->document()->tree.nodes[nodeIdx];
             auto* ap = findActiveSplitPane();
@@ -1415,7 +1507,7 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
                         .arg(node.byteSize()));
         }
         // Update all rendered panes on selection change
-        auto it = m_tabs.find(sub);
+        auto it = m_tabs.find(dock);
         if (it != m_tabs.end())
             updateAllRenderedPanes(*it);
     });
@@ -1425,32 +1517,42 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
             setAppStatus(QString("%1 nodes selected").arg(count));
     });
 
+    // Append Float/Close actions to any editor context menu
+    connect(ctrl, &RcxController::contextMenuAboutToShow,
+            this, [this, dock](QMenu* menu, int /*line*/) {
+        menu->addSeparator();
+        menu->addAction(dock->isFloating() ? "Dock" : "Float", [dock]() {
+            dock->setFloating(!dock->isFloating());
+        });
+        menu->addAction("Close Tab", [dock]() { dock->close(); });
+    });
+
     // Update rendered panes and workspace on document changes and undo/redo
     connect(doc, &RcxDocument::documentChanged,
-            this, [this, sub]() {
-        auto it = m_tabs.find(sub);
+            this, [this, dock]() {
+        auto it = m_tabs.find(dock);
         if (it != m_tabs.end())
-            QTimer::singleShot(0, this, [this, sub]() {
-                auto it2 = m_tabs.find(sub);
+            QTimer::singleShot(0, this, [this, dock]() {
+                auto it2 = m_tabs.find(dock);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
                     if (it2->doc->filePath.isEmpty())
-                        sub->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                        dock->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
                 }
                 rebuildWorkspaceModel();
                 updateWindowTitle();
             });
     });
     connect(&doc->undoStack, &QUndoStack::indexChanged,
-            this, [this, sub](int) {
-        auto it = m_tabs.find(sub);
+            this, [this, dock](int) {
+        auto it = m_tabs.find(dock);
         if (it != m_tabs.end())
-            QTimer::singleShot(0, this, [this, sub]() {
-                auto it2 = m_tabs.find(sub);
+            QTimer::singleShot(0, this, [this, dock]() {
+                auto it2 = m_tabs.find(dock);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
                     if (it2->doc->filePath.isEmpty())
-                        sub->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                        dock->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
                 }
                 updateWindowTitle();
                 rebuildWorkspaceModel();
@@ -1467,8 +1569,37 @@ QMdiSubWindow* MainWindow::createTab(RcxDocument* doc) {
 
     ctrl->refresh();
     rebuildWorkspaceModel();
-    styleTabCloseButtons();
-    return sub;
+
+    dock->raise();
+    dock->show();
+
+    // Install context menu on dock tab bars (deferred — tab bar created after tabification)
+    QTimer::singleShot(0, this, [this]() {
+        for (auto* tabBar : findChildren<QTabBar*>()) {
+            if (tabBar->parent() != this) continue;
+            if (tabBar->contextMenuPolicy() == Qt::CustomContextMenu) continue;
+            tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(tabBar, &QTabBar::customContextMenuRequested,
+                    this, [this, tabBar](const QPoint& pos) {
+                int idx = tabBar->tabAt(pos);
+                if (idx < 0) return;
+                // Match tab to dock by title (tab bar only shows docked tabs)
+                QString tabTitle = tabBar->tabText(idx);
+                QDockWidget* target = nullptr;
+                for (auto* d : m_docDocks) {
+                    if (d->windowTitle() == tabTitle) { target = d; break; }
+                }
+                if (!target) return;
+                QMenu menu;
+                menu.addAction("Float", [target]() { target->setFloating(true); });
+                menu.addSeparator();
+                menu.addAction("Close", [target]() { target->close(); });
+                menu.exec(tabBar->mapToGlobal(pos));
+            });
+        }
+    });
+
+    return dock;
 }
 
 // Build a minimal empty struct for new documents
@@ -1527,7 +1658,7 @@ MainWindow::~MainWindow() {
      * 
      */
 
-    // Disconnect all subwindow destroyed signals before members are torn down,
+    // Disconnect all dock destroyed signals before members are torn down,
     // so the lambdas capturing 'this' never fire on a half-destroyed object.
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         disconnect(it.key(), &QObject::destroyed, this, nullptr);
@@ -1666,11 +1797,13 @@ void MainWindow::selfTest() {
 
     // Tab 1: Empty class for user work (created second, becomes active)
     auto* userTab = project_new(QStringLiteral("class"));
-    m_mdiArea->setActiveSubWindow(userTab);
+    userTab->raise();
+    userTab->show();
 #else
     project_new();
     auto* userTab = project_new(QStringLiteral("class"));
-    m_mdiArea->setActiveSubWindow(userTab);
+    userTab->raise();
+    userTab->show();
 #endif
 }
 
@@ -1849,24 +1982,50 @@ void MainWindow::applyTheme(const Theme& theme) {
     // Update border overlay color
     updateBorderColor(isActiveWindow() ? theme.borderFocused : theme.border);
 
-    // MDI area tabs — text color + height handled by MenuBarStyle QProxyStyle
-    m_mdiArea->setStyleSheet(QStringLiteral(
-        "QTabBar::tab {"
-        "  background: %1; padding: 0px 16px; border: none;"
-        "}"
-        "QTabBar::tab:selected { background: %2; }"
-        "QTabBar::tab:hover { background: %3; }")
-        .arg(theme.background.name(), theme.backgroundAlt.name(), theme.hover.name()));
+    // Style doc dock tab bars and remove dock borders
+    setStyleSheet(QStringLiteral(
+        "QMainWindow::separator { width: 1px; height: 1px; background: %4; }"
+        "QDockWidget { border: none; }"
+        "QDockWidget > QWidget { border: none; }")
+        .arg(theme.border.name()));
 
-    // Dim MDI tab text via palette (Fusion reads WindowText, not CSS color:)
-    if (auto* tabBar = m_mdiArea->findChild<QTabBar*>()) {
-        QPalette tp = tabBar->palette();
-        tp.setColor(QPalette::WindowText, theme.textDim);
-        tabBar->setPalette(tp);
+    for (auto* tabBar : findChildren<QTabBar*>()) {
+        // Only style tab bars owned directly by this QMainWindow (dock tabs),
+        // skip ones inside SplitPane QTabWidgets etc.
+        if (tabBar->parent() == this) {
+            tabBar->setStyleSheet(QStringLiteral(
+                "QTabBar { border: none; }"
+                "QTabBar::tab {"
+                "  background: %1; padding: 0px 16px; border: none;"
+                "}"
+                "QTabBar::tab:selected { background: %2; }"
+                "QTabBar::tab:hover { background: %3; }")
+                .arg(theme.background.name(), theme.backgroundAlt.name(), theme.hover.name()));
+            QPalette tp = tabBar->palette();
+            tp.setColor(QPalette::WindowText, theme.textDim);
+            tabBar->setPalette(tp);
+        }
     }
 
-    // Re-style ✕ close buttons on MDI tabs
-    styleTabCloseButtons();
+    // Restyle per-pane view tab bars (Reclass / C++)
+    {
+        QString paneTabStyle = QStringLiteral(
+            "QTabBar { border: none; }"
+            "QTabBar::tab {"
+            "  background: %1; color: %2; padding: 0px 16px; border: none; height: 24px;"
+            "}"
+            "QTabBar::tab:selected { color: %3; background: %4;"
+            "  border-top: 3px solid %6; padding-top: -3px; }"
+            "QTabBar::tab:hover { color: %3; background: %5; }")
+            .arg(theme.background.name(), theme.textMuted.name(), theme.text.name(),
+                 theme.backgroundAlt.name(), theme.hover.name(), theme.indHoverSpan.name());
+        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+            for (auto& pane : it->panes) {
+                if (pane.tabWidget)
+                    pane.tabWidget->setStyleSheet(paneTabStyle);
+            }
+        }
+    }
 
     // Status bar
     {
@@ -1875,26 +2034,11 @@ void MainWindow::applyTheme(const Theme& theme) {
         sbPal.setColor(QPalette::WindowText, theme.textDim);
         statusBar()->setPalette(sbPal);
     }
-    // View toggle buttons + status bar chrome
+    // Status bar chrome
     {
-        auto applyColors = [&](ViewTabButton* btn) {
-            btn->colBg        = theme.background;
-            btn->colBgChecked = theme.backgroundAlt;
-            btn->colBgHover   = theme.hover;
-            btn->colBgPressed = theme.hover.darker(130);
-            btn->colText      = theme.text;
-            btn->colTextMuted = theme.textMuted;
-            btn->colAccent    = theme.indHoverSpan;
-            btn->colBorder    = theme.border;
-            btn->update();
-        };
-        applyColors(static_cast<ViewTabButton*>(m_btnReclass));
-        applyColors(static_cast<ViewTabButton*>(m_btnRendered));
-
-        {   auto* fsb = static_cast<FlatStatusBar*>(statusBar());
-            fsb->setTopLineColor(theme.border);
-            fsb->setDividerColor(theme.border);
-        }
+        auto* fsb = static_cast<FlatStatusBar*>(statusBar());
+        fsb->setTopLineColor(theme.border);
+        fsb->setDividerColor(theme.border);
     }
     // Resize grip (direct child of main window, not in status bar)
     if (auto* w = findChild<QWidget*>("resizeGrip"))
@@ -1955,6 +2099,33 @@ void MainWindow::applyTheme(const Theme& theme) {
     if (m_scanDockGrip)
         m_scanDockGrip->setGripColor(theme.textFaint);
 
+    // Doc dock floating title bars
+    for (auto* dock : m_docDocks) {
+        // The float title bar is stored alongside the empty one; find by object name
+        for (auto* child : dock->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+            if (auto* lbl = child->findChild<QLabel*>("dockFloatTitle")) {
+                // Restyle the float title bar background
+                QPalette tbPal = child->palette();
+                tbPal.setColor(QPalette::Window, theme.backgroundAlt);
+                child->setPalette(tbPal);
+                // Label color
+                QPalette lp = lbl->palette();
+                lp.setColor(QPalette::WindowText, theme.textDim);
+                lbl->setPalette(lp);
+            }
+            if (auto* closeBtn = child->findChild<QToolButton*>("dockFloatClose")) {
+                closeBtn->setStyleSheet(QStringLiteral(
+                    "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
+                    "QToolButton:hover { color: %2; }")
+                    .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+            }
+            if (auto* gripW = child->findChild<QWidget*>("dockFloatGrip")) {
+                if (auto* grip = dynamic_cast<DockGripWidget*>(gripW))
+                    grip->setGripColor(theme.textFaint);
+            }
+        }
+    }
+
     // Rendered C/C++ views: update lexer colors, paper, margins
     for (auto& tab : m_tabs) {
         for (auto& pane : tab.panes) {
@@ -2012,6 +2183,7 @@ void MainWindow::showOptionsDialog() {
     current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
     current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
     current.generatorAsserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    current.braceWrap = QSettings("Reclass", "Reclass").value("braceWrap", false).toBool();
 
     OptionsDialog dlg(current, this);
     if (dlg.exec() != QDialog::Accepted) return; // OptionsDialog doesn't apply anything. Only apply on OK
@@ -2046,6 +2218,12 @@ void MainWindow::showOptionsDialog() {
 
     if (r.generatorAsserts != current.generatorAsserts)
         QSettings("Reclass", "Reclass").setValue("generatorAsserts", r.generatorAsserts);
+
+    if (r.braceWrap != current.braceWrap) {
+        QSettings("Reclass", "Reclass").setValue("braceWrap", r.braceWrap);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setBraceWrap(r.braceWrap);
+    }
 }
 
 void MainWindow::setEditorFont(const QString& fontName) {
@@ -2079,28 +2257,30 @@ void MainWindow::setEditorFont(const QString& fontName) {
         m_scannerPanel->setEditorFont(f);
     if (m_scanDockTitle)
         m_scanDockTitle->setFont(f);
+    // Sync doc dock float title fonts
+    for (auto* dock : m_docDocks) {
+        if (auto* lbl = dock->findChild<QLabel*>("dockFloatTitle"))
+            lbl->setFont(f);
+    }
 }
 
 RcxController* MainWindow::activeController() const {
-    auto* sub = m_mdiArea->activeSubWindow();
-    if (sub && m_tabs.contains(sub))
-        return m_tabs[sub].ctrl;
+    if (m_activeDocDock && m_tabs.contains(m_activeDocDock))
+        return m_tabs[m_activeDocDock].ctrl;
     return nullptr;
 }
 
 MainWindow::TabState* MainWindow::activeTab() {
-    auto* sub = m_mdiArea->activeSubWindow();
-    if (sub && m_tabs.contains(sub))
-        return &m_tabs[sub];
+    if (m_activeDocDock && m_tabs.contains(m_activeDocDock))
+        return &m_tabs[m_activeDocDock];
     return nullptr;
 }
 
 MainWindow::TabState* MainWindow::tabByIndex(int index) {
-    auto subs = m_mdiArea->subWindowList();
-    if (index < 0 || index >= subs.size()) return nullptr;
-    auto* sub = subs[index];
-    if (m_tabs.contains(sub))
-        return &m_tabs[sub];
+    if (index < 0 || index >= m_docDocks.size()) return nullptr;
+    auto* dock = m_docDocks[index];
+    if (m_tabs.contains(dock))
+        return &m_tabs[dock];
     return nullptr;
 }
 
@@ -2109,9 +2289,9 @@ void MainWindow::updateWindowTitle() {
     setWindowTitle(QStringLiteral("Reclass"));
 #else
     QString title;
-    auto* sub = m_mdiArea->activeSubWindow();
-    if (sub && m_tabs.contains(sub)) {
-        auto& tab = m_tabs[sub];
+    auto* activeDock = m_activeDocDock;
+    if (activeDock && m_tabs.contains(activeDock)) {
+        auto& tab = m_tabs[activeDock];
         QString name = tab.doc->filePath.isEmpty()
                        ? rootName(tab.doc->tree, tab.ctrl->viewRootId())
                        : QFileInfo(tab.doc->filePath).fileName();
@@ -2196,10 +2376,8 @@ void MainWindow::setViewMode(ViewMode mode) {
     syncViewButtons(mode);
 }
 
-void MainWindow::syncViewButtons(ViewMode mode) {
-    QSignalBlocker block(m_viewBtnGroup);
-    if (mode == VM_Rendered) m_btnRendered->setChecked(true);
-    else                     m_btnReclass->setChecked(true);
+void MainWindow::syncViewButtons(ViewMode /*mode*/) {
+    // View toggle is now per-pane via QTabWidget tab bar — nothing to sync globally
 }
 
 // ── Find the root-level struct ancestor for a node ──
@@ -2380,7 +2558,7 @@ void MainWindow::importReclassXml() {
     auto* doc = new RcxDocument(this);
     doc->tree = std::move(tree);
 
-    m_mdiArea->closeAllSubWindows();
+    closeAllDocDocks();
     createTab(doc);
     rebuildWorkspaceModel();
     setAppStatus(QStringLiteral("Imported %1 classes from %2")
@@ -2429,7 +2607,7 @@ void MainWindow::importFromSource() {
     auto* doc = new RcxDocument(this);
     doc->tree = std::move(tree);
 
-    m_mdiArea->closeAllSubWindows();
+    closeAllDocDocks();
     createTab(doc);
     rebuildWorkspaceModel();
     m_workspaceDock->show();
@@ -2479,7 +2657,7 @@ void MainWindow::importPdb() {
     auto* doc = new rcx::RcxDocument(this);
     doc->tree = std::move(tree);
 
-    m_mdiArea->closeAllSubWindows();
+    closeAllDocDocks();
     createTab(doc);
     rebuildWorkspaceModel();
     m_workspaceDock->show();
@@ -2607,7 +2785,7 @@ void MainWindow::showTypeAliasesDialog() {
 
 // ── Project Lifecycle API ──
 
-QMdiSubWindow* MainWindow::project_new(const QString& classKeyword) {
+QDockWidget* MainWindow::project_new(const QString& classKeyword) {
     auto* doc = new RcxDocument(this);
 
     QByteArray data(256, '\0');
@@ -2623,20 +2801,20 @@ QMdiSubWindow* MainWindow::project_new(const QString& classKeyword) {
         doc->provider = currentCtrl->document()->provider;
     }
 
-    auto* sub = createTab(doc);
+    auto* dock = createTab(doc);
 
     // Copy saved sources to new tab's controller
     if (currentCtrl && !currentCtrl->savedSources().isEmpty()) {
-        auto& newTab = m_tabs[sub];
+        auto& newTab = m_tabs[dock];
         newTab.ctrl->copySavedSources(currentCtrl->savedSources(),
                                        currentCtrl->activeSourceIndex());
     }
 
     rebuildWorkspaceModel();
-    return sub;
+    return dock;
 }
 
-QMdiSubWindow* MainWindow::project_open(const QString& path) {
+QDockWidget* MainWindow::project_open(const QString& path) {
     QString filePath = path;
     if (filePath.isEmpty()) {
         filePath = QFileDialog::getOpenFileName(this,
@@ -2670,8 +2848,8 @@ QMdiSubWindow* MainWindow::project_open(const QString& path) {
         }
         auto* doc = new RcxDocument(this);
         doc->tree = std::move(tree);
-        m_mdiArea->closeAllSubWindows();
-        auto* sub = createTab(doc);
+        closeAllDocDocks();
+        auto* dock = createTab(doc);
         rebuildWorkspaceModel();
         m_workspaceDock->show();
         int classCount = 0;
@@ -2680,7 +2858,7 @@ QMdiSubWindow* MainWindow::project_open(const QString& path) {
         setAppStatus(QStringLiteral("Imported %1 classes from %2")
             .arg(classCount).arg(QFileInfo(filePath).fileName()));
         addRecentFile(filePath);
-        return sub;
+        return dock;
     }
 
     auto* doc = new RcxDocument(this);
@@ -2691,19 +2869,19 @@ QMdiSubWindow* MainWindow::project_open(const QString& path) {
     }
 
     // Close all existing tabs so the project replaces the current state
-    m_mdiArea->closeAllSubWindows();
+    closeAllDocDocks();
 
-    auto* sub = createTab(doc);
+    auto* dock = createTab(doc);
     rebuildWorkspaceModel();
     m_workspaceDock->show();
     addRecentFile(filePath);
-    return sub;
+    return dock;
 }
 
-bool MainWindow::project_save(QMdiSubWindow* sub, bool saveAs) {
-    if (!sub) sub = m_mdiArea->activeSubWindow();
-    if (!sub || !m_tabs.contains(sub)) return false;
-    auto& tab = m_tabs[sub];
+bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
+    if (!dock) dock = m_activeDocDock;
+    if (!dock || !m_tabs.contains(dock)) return false;
+    auto& tab = m_tabs[dock];
 
     if (saveAs || tab.doc->filePath.isEmpty()) {
         QString path = QFileDialog::getSaveFileName(this,
@@ -2719,12 +2897,22 @@ bool MainWindow::project_save(QMdiSubWindow* sub, bool saveAs) {
     return true;
 }
 
-void MainWindow::project_close(QMdiSubWindow* sub) {
-    if (!sub) sub = m_mdiArea->activeSubWindow();
-    if (!sub) return;
-    sub->close();
+void MainWindow::project_close(QDockWidget* dock) {
+    if (!dock) dock = m_activeDocDock;
+    if (!dock) return;
+    dock->close();
     rebuildWorkspaceModel();
 }
+
+void MainWindow::closeAllDocDocks() {
+    // Take a copy since closing modifies m_docDocks via destroyed signal
+    auto docks = m_docDocks;
+    for (auto* dock : docks) {
+        dock->setAttribute(Qt::WA_DeleteOnClose);
+        dock->close();
+    }
+}
+
 
 // ── Workspace Dock ──
 
@@ -2855,10 +3043,10 @@ void MainWindow::createWorkspaceDock() {
 
         auto subVar = index.data(Qt::UserRole);
         if (!subVar.isValid()) return;
-        auto* sub = static_cast<QMdiSubWindow*>(subVar.value<void*>());
-        if (!sub || !m_tabs.contains(sub)) return;
+        auto* dock = static_cast<QDockWidget*>(subVar.value<void*>());
+        if (!dock || !m_tabs.contains(dock)) return;
 
-        auto& tab = m_tabs[sub];
+        auto& tab = m_tabs[dock];
         int ni = tab.doc->tree.indexOfId(structId);
         if (ni < 0) return;
         QString kw = tab.doc->tree.nodes[ni].resolvedClassKeyword();
@@ -2960,16 +3148,18 @@ void MainWindow::createWorkspaceDock() {
 
         auto subVar = index.data(Qt::UserRole);
         if (!subVar.isValid()) return;
-        auto* sub = static_cast<QMdiSubWindow*>(subVar.value<void*>());
-        if (!sub || !m_tabs.contains(sub)) return;
+        auto* dock = static_cast<QDockWidget*>(subVar.value<void*>());
+        if (!dock || !m_tabs.contains(dock)) return;
 
-        m_mdiArea->setActiveSubWindow(sub);
+        dock->raise();
+        dock->show();
+        m_activeDocDock = dock;
 
-        auto& tree = m_tabs[sub].doc->tree;
+        auto& tree = m_tabs[dock].doc->tree;
         int ni = tree.indexOfId(structId);
         if (ni < 0) return;
 
-        auto& tab = m_tabs[sub];
+        auto& tab = m_tabs[dock];
 
         // Child member item: navigate to parent struct, then scroll to this member
         uint64_t parentId = tree.nodes[ni].parentId;
@@ -2986,9 +3176,9 @@ void MainWindow::createWorkspaceDock() {
         }
 
         // If active pane is in C/C++ mode, refresh after navigation settles
-        QTimer::singleShot(0, this, [this, sub]() {
-            if (!m_tabs.contains(sub)) return;
-            auto& t = m_tabs[sub];
+        QTimer::singleShot(0, this, [this, dock]() {
+            if (!m_tabs.contains(dock)) return;
+            auto& t = m_tabs[dock];
             if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
                 auto& p = t.panes[t.activePaneIdx];
                 if (p.viewMode == VM_Rendered)
@@ -3065,6 +3255,31 @@ void MainWindow::createScannerDock() {
     m_scannerDock->setWidget(m_scannerPanel);
     addDockWidget(Qt::BottomDockWidgetArea, m_scannerDock);
     m_scannerDock->hide();
+
+    // Border overlay and resize grip for floating state
+    {
+        auto* border = new BorderOverlay(m_scannerDock);
+        border->color = ThemeManager::instance().current().borderFocused;
+        border->hide();
+        auto* grip = new ResizeGrip(m_scannerDock);
+        grip->hide();
+
+        connect(m_scannerDock, &QDockWidget::topLevelChanged,
+                this, [this, border, grip](bool floating) {
+            if (floating) {
+                border->setGeometry(0, 0, m_scannerDock->width(), m_scannerDock->height());
+                border->raise();
+                border->show();
+                grip->reposition();
+                grip->raise();
+                grip->show();
+            } else {
+                border->hide();
+                grip->hide();
+            }
+        });
+        m_scannerDock->installEventFilter(new DockBorderFilter(border, grip, m_scannerDock));
+    }
 
     // Wire provider getter: lazily captures the active tab's provider at scan time
     m_scannerPanel->setProviderGetter([this]() -> std::shared_ptr<rcx::Provider> {
@@ -3334,6 +3549,11 @@ void MainWindow::changeEvent(QEvent* event) {
     }
     if (event->type() == QEvent::WindowStateChange && m_titleBar)
         m_titleBar->updateMaximizeIcon();
+    // Keep border overlay on top after any state change
+    if (m_borderOverlay) {
+        m_borderOverlay->setGeometry(rect());
+        m_borderOverlay->raise();
+    }
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event) {

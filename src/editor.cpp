@@ -23,6 +23,7 @@
 #include <QScreen>
 #include <QScrollBar>
 #include <QDateTime>
+#include <algorithm>
 #include <functional>
 #include "themes/thememanager.h"
 
@@ -938,9 +939,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         int maxLen = 0;
         const QStringList lines = result.text.split(QChar('\n'));
         for (const auto& line : lines) {
-            int len = line.size();
+            int len = (int)line.size();
             while (len > 0 && line[len - 1] == QChar(' ')) --len;
-            if (len > maxLen) maxLen = len;
+            maxLen = std::max(len, maxLen);
         }
         QFontMetrics fm(editorFont());
         int pixelWidth = fm.horizontalAdvance(QString(maxLen, QChar('0')));

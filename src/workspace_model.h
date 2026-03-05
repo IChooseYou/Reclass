@@ -10,7 +10,7 @@ namespace rcx {
 struct TabInfo {
     const NodeTree* tree;
     QString         name;
-    void*           subPtr;   // QMdiSubWindow* as void*
+    void*           subPtr;   // QDockWidget* as void*
 };
 
 // Sentinel value stored in UserRole+1 to mark the Project group node.
