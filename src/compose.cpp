@@ -1014,6 +1014,9 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
 
         for (int childIdx : state.childMap.value(container.id)) {
             const Node& child = tree.nodes[childIdx];
+            // Skip struct/array children — pointer headers shouldn't inflate sibling widths
+            if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
+                continue;
             scopeMaxType = qMax(scopeMaxType, (int)nodeTypeName(child).size());
 
             // Name width (skip hex, but include containers)
@@ -1046,6 +1049,9 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         int rootMaxName = kMinNameW;
         for (int childIdx : state.childMap.value(0)) {
             const Node& child = tree.nodes[childIdx];
+            // Skip struct/array children — pointer headers shouldn't inflate sibling widths
+            if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
+                continue;
             rootMaxType = qMax(rootMaxType, (int)nodeTypeName(child).size());
 
             // Name width (skip hex, include containers)
