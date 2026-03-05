@@ -34,6 +34,11 @@ enum class ScanCondition {
 
 // ── Scan request / result ──
 
+struct AddressRange {
+    uint64_t start = 0;
+    uint64_t end   = 0;   // exclusive
+};
+
 struct ScanRequest {
     QByteArray pattern;             // literal bytes to match (empty for UnknownValue)
     QByteArray mask;                // 0xFF = must match, 0x00 = wildcard
@@ -49,6 +54,9 @@ struct ScanRequest {
 
     uint64_t startAddress = 0;      // 0 = no limit (scan all regions)
     uint64_t endAddress   = 0;      // 0 = no limit (scan all regions)
+
+    // If non-empty, only scan within these address ranges (intersected with provider regions).
+    QVector<AddressRange> constrainRegions;
 };
 
 struct ScanResult {

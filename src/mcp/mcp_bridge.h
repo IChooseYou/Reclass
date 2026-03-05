@@ -54,13 +54,16 @@ private:
     QJsonObject toolProjectState(const QJsonObject& args);
     QJsonObject toolTreeApply(const QJsonObject& args);
     QJsonObject toolSourceSwitch(const QJsonObject& args);
+    QJsonObject toolSourceModules(const QJsonObject& args);
     QJsonObject toolHexRead(const QJsonObject& args);
     QJsonObject toolHexWrite(const QJsonObject& args);
     QJsonObject toolStatusSet(const QJsonObject& args);
     QJsonObject toolUiAction(const QJsonObject& args);
     QJsonObject toolTreeSearch(const QJsonObject& args);
     QJsonObject toolNodeHistory(const QJsonObject& args);
-    QJsonObject toolProcessInfo(const QJsonObject& args);
+    QJsonObject toolScannerScan(const QJsonObject& args);
+    QJsonObject toolScannerScanPattern(const QJsonObject& args);
+    QJsonObject toolReconnect(const QJsonObject& args);
 
     // Helpers
     QJsonObject makeTextResult(const QString& text, bool isError = false);

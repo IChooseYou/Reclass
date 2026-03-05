@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QMenu>
 #include <QPainter>
+#include <QEventLoop>
 
 namespace rcx {
 
@@ -416,6 +417,98 @@ ScanRequest ScannerPanel::buildRequest() {
     }
 
     return req;
+}
+
+QVector<ScanResult> ScannerPanel::runValueScanAndWait(ValueType valueType, const QString& value,
+                                                      bool filterExecutable, bool filterWritable,
+                                                      const QVector<AddressRange>& constrainRegions) {
+    QVector<ScanResult> results;
+    QString err;
+    ScanRequest req;
+    if (!serializeValue(valueType, value, req.pattern, req.mask, &err)) {
+        m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
+        return results;
+    }
+    req.alignment = naturalAlignment(valueType);
+    req.filterExecutable = filterExecutable;
+    req.filterWritable = filterWritable;
+    req.constrainRegions = constrainRegions;
+
+    auto provider = m_providerGetter ? m_providerGetter() : nullptr;
+    if (!provider) {
+        m_statusLabel->setText(QStringLiteral("No provider (attach to a process or open a file first)"));
+        return results;
+    }
+    if (m_engine->isRunning()) {
+        m_statusLabel->setText(QStringLiteral("Scan already in progress"));
+        return results;
+    }
+
+    m_lastScanMode = 1;
+    m_lastValueType = valueType;
+    m_lastPattern = req.pattern;
+    m_progressBar->setValue(0);
+    m_progressBar->show();
+    m_statusLabel->setText(QStringLiteral("Scanning..."));
+
+    QEventLoop loop;
+    connect(m_engine, &ScanEngine::finished, this, [&results, &loop](const QVector<ScanResult>& r) {
+        results = r;
+        loop.quit();
+    }, Qt::SingleShotConnection);
+    m_engine->start(provider, req);
+    loop.exec();
+
+    return results;
+}
+
+QVector<ScanResult> ScannerPanel::runPatternScanAndWait(const QString& pattern,
+                                                        bool filterExecutable, bool filterWritable,
+                                                        const QVector<AddressRange>& constrainRegions) {
+    auto provider = m_providerGetter ? m_providerGetter() : nullptr;
+    return runPatternScanAndWait(provider, pattern, filterExecutable, filterWritable, constrainRegions);
+}
+
+QVector<ScanResult> ScannerPanel::runPatternScanAndWait(std::shared_ptr<Provider> provider,
+                                                        const QString& pattern,
+                                                        bool filterExecutable, bool filterWritable,
+                                                        const QVector<AddressRange>& constrainRegions) {
+    QVector<ScanResult> results;
+    QString err;
+    ScanRequest req;
+    if (!parseSignature(pattern, req.pattern, req.mask, &err)) {
+        m_statusLabel->setText(QStringLiteral("Pattern error: %1").arg(err));
+        return results;
+    }
+    req.alignment = 1;
+    req.filterExecutable = filterExecutable;
+    req.filterWritable = filterWritable;
+    req.constrainRegions = constrainRegions;
+
+    if (!provider) {
+        m_statusLabel->setText(QStringLiteral("No provider (attach to a process or open a file first)"));
+        return results;
+    }
+    if (m_engine->isRunning()) {
+        m_statusLabel->setText(QStringLiteral("Scan already in progress"));
+        return results;
+    }
+
+    m_lastScanMode = 0;
+    m_lastPattern = req.pattern;
+    m_progressBar->setValue(0);
+    m_progressBar->show();
+    m_statusLabel->setText(QStringLiteral("Scanning..."));
+
+    QEventLoop loop;
+    connect(m_engine, &ScanEngine::finished, this, [&results, &loop](const QVector<ScanResult>& r) {
+        results = r;
+        loop.quit();
+    }, Qt::SingleShotConnection);
+    m_engine->start(provider, req);
+    loop.exec();
+
+    return results;
 }
 
 void ScannerPanel::onScanFinished(QVector<ScanResult> results) {

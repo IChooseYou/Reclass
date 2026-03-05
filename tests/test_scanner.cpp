@@ -1186,6 +1186,813 @@ private slots:
         QCOMPARE(results[0].address, (uint64_t)8);
         QCOMPARE(results[3].address, (uint64_t)20);
     }
+
+    // -- constrainRegions (multi-range intersection) --
+
+    void scan_constrainRegions_multipleRanges() {
+        QByteArray data(32, 0);
+        data[4]  = char(0xBB);
+        data[12] = char(0xBB);
+        data[20] = char(0xBB);
+        data[28] = char(0xBB);
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\xBB", 1);
+        req.mask    = QByteArray("\xFF", 1);
+        req.constrainRegions = {{0, 8}, {16, 24}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)4);
+        QCOMPARE(results[1].address, (uint64_t)20);
+    }
+
+    void scan_constrainRegions_intersectsProviderRegions() {
+        QByteArray data(256, 0);
+        data[160] = char(0xCC);
+        data[210] = char(0xCC);
+        QVector<MemoryRegion> regions;
+        regions.append({100, 100, true, false, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\xCC", 1);
+        req.mask    = QByteArray("\xFF", 1);
+        req.constrainRegions = {{150, 250}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)160);
+    }
+
+    void scan_constrainRegions_noOverlap() {
+        QByteArray data(32, char(0xEE));
+        QVector<MemoryRegion> regions;
+        regions.append({0, 16, true, false, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\xEE", 1);
+        req.mask    = QByteArray("\xFF", 1);
+        req.constrainRegions = {{100, 200}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 0);
+    }
+
+    // -- constrainRegions edge cases --
+
+    void scan_constrainRegions_gapBetweenRegions() {
+        // Provider has two regions with a gap: [0,16) and [32,48).
+        // Constraint spans the gap: [8, 40). Should find matches in both.
+        QByteArray data(64, 0);
+        data[10] = char(0xDD);
+        data[35] = char(0xDD);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 16, true, true, false, {}});
+        regions.append({32, 16, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xDD));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{8, 40}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)10);
+        QCOMPARE(results[1].address, (uint64_t)35);
+    }
+
+    void scan_constrainRegions_partialRegionOverlap() {
+        // Provider region [100, 200). Constraint [150, 250) clips to [150, 200).
+        QByteArray data(256, 0);
+        data[120] = char(0xAB);
+        data[160] = char(0xAB);
+        QVector<MemoryRegion> regions;
+        regions.append({100, 100, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xAB));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{150, 250}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)160);
+    }
+
+    void scan_constrainRegions_mixedModuleAndAnonymous() {
+        // Module region + anonymous heap region. Constraint covers both.
+        QByteArray data(0x10000, 0);
+        data[0x1500] = char(0xCC);
+        data[0x5500] = char(0xCC);
+        QVector<MemoryRegion> regions;
+        regions.append({0x1000, 0x1000, true, false, true, QString("game.exe")});
+        regions.append({0x5000, 0x1000, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xCC));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{0x0, 0x10000}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)0x1500);
+        QCOMPARE(results[1].address, (uint64_t)0x5500);
+    }
+
+    void scan_constrainRegions_fallbackProvider() {
+        // BufferProvider returns no regions -> fallback [0, size).
+        // constrainRegions should still work against the fallback.
+        QByteArray data(64, 0);
+        data[10] = char(0xAA);
+        data[30] = char(0xAA);
+        data[50] = char(0xAA);
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xAA));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{5, 35}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)10);
+        QCOMPARE(results[1].address, (uint64_t)30);
+    }
+
+    void scan_constrainRegions_adjacentRegions() {
+        // Two adjacent regions [0,16) and [16,32). Constraint [8,24) spans both.
+        QByteArray data(32, 0);
+        data[12] = char(0xEF);
+        data[20] = char(0xEF);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 16, true, true, false, {}});
+        regions.append({16, 16, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xEF));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{8, 24}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)12);
+        QCOMPARE(results[1].address, (uint64_t)20);
+    }
+
+    void scan_constrainRegions_writableFilterPreserved() {
+        // filterWritable=true should still exclude non-writable clipped regions.
+        QByteArray data(0x4000, 0);
+        data[0x1100] = char(0xBB);
+        data[0x2100] = char(0xBB);
+        QVector<MemoryRegion> regions;
+        regions.append({0x1000, 0x1000, true, false, true, {}});
+        regions.append({0x2000, 0x1000, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xBB));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.filterWritable = true;
+        req.constrainRegions = {{0x1000, 0x3000}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)0x2100);
+    }
+
+
+    void scan_constrainRegions_constraintExtendsBeforeAndAfter() {
+        // Region [10, 20). Constraint [0, 30) extends before and after.
+        // Should only scan [10, 20) — the intersection.
+        QByteArray data(32, 0);
+        data[5]  = char(0xAA);  // outside region, should NOT be found
+        data[15] = char(0xAA);  // inside region, should be found
+        data[25] = char(0xAA);  // outside region, should NOT be found
+        QVector<MemoryRegion> regions;
+        regions.append({10, 10, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xAA));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{0, 30}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)15);
+    }
+
+    void scan_constrainRegions_emptyConstraintScansAll() {
+        // Empty constrainRegions should scan everything (no restriction).
+        QByteArray data(32, 0);
+        data[5]  = char(0xBB);
+        data[15] = char(0xBB);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 32, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xBB));
+        req.mask    = QByteArray(1, char(0xFF));
+        // constrainRegions left empty
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+    }
+
+    void scan_constrainRegions_singleAddressRange() {
+        // Equivalent to startAddress/endAddress: single constraint range.
+        QByteArray data(32, 0);
+        data[8]  = char(0xAA);
+        data[16] = char(0xAA);
+        data[24] = char(0xAA);
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xAA));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{8, 20}};  // same as startAddress=8, endAddress=20
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)8);
+        QCOMPARE(results[1].address, (uint64_t)16);
+    }
+
+
+    void scan_constrainRegions_withStartEndAddress() {
+        // Both constrainRegions and startAddress/endAddress set.
+        // constrainRegions: [0, 16) and [24, 32). startAddress/endAddress: [8, 28).
+        // Effective scan should be intersection of both: [8, 16) and [24, 28).
+        // Match at 4 (outside both), 12 (in both), 20 (in startEnd but not constrain),
+        // 26 (in both), 30 (in constrain but not startEnd).
+        QByteArray data(32, 0);
+        data[4]  = char(0xDD);
+        data[12] = char(0xDD);
+        data[20] = char(0xDD);
+        data[26] = char(0xDD);
+        data[30] = char(0xDD);
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xDD));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{0, 16}, {24, 32}};
+        req.startAddress = 8;
+        req.endAddress   = 28;
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);  // only 12 and 26
+        QCOMPARE(results[0].address, (uint64_t)12);
+        QCOMPARE(results[1].address, (uint64_t)26);
+    }
+
+    void scan_constrainRegions_unknownValueScan() {
+        // Unknown value scan with constrainRegions should only capture within ranges.
+        QByteArray data(32, char(0x42));
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.condition = ScanCondition::UnknownValue;
+        req.valueSize = 4;
+        req.alignment = 4;
+        req.constrainRegions = {{8, 24}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        // Range [8, 24) = 16 bytes, alignment 4, valueSize 4 -> offsets 8, 12, 16, 20 = 4 results
+        QCOMPARE(results.size(), 4);
+        QCOMPARE(results[0].address, (uint64_t)8);
+        QCOMPARE(results[3].address, (uint64_t)20);
+    }
+
+
+    void scan_constrainRegions_nonZeroBase() {
+        // Region with non-zero base; constraint matches exactly.
+        QByteArray data(0x10000, 0);
+        data[0x8100] = char(0xFF);
+        QVector<MemoryRegion> regions;
+        regions.append({0x8000, 0x1000, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data2, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xFF));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{0x8000, 0x9000}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)0x8100);
+    }
+
+    void scan_constrainRegions_zeroSizeConstraint() {
+        // Degenerate: constraint with start == end (zero size). Should scan nothing.
+        QByteArray data(32, char(0xAA));
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xAA));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{10, 10}};  // zero-size
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 0);
+    }
+
+    void scan_constrainRegions_invertedRange() {
+        // Degenerate: constraint with start > end. Should be treated as empty/invalid.
+        QByteArray data(32, char(0xAA));
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xAA));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{20, 10}};  // inverted
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 0);
+    }
+
+    void scan_constrainRegions_overlappingConstraints() {
+        // Two overlapping constraints: [4, 20) and [12, 28).
+        // Should NOT double-count matches in the overlap [12, 20).
+        QByteArray data(32, 0);
+        data[8]  = char(0xCC);
+        data[16] = char(0xCC);
+        data[24] = char(0xCC);
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xCC));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{4, 20}, {12, 28}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        // After merge: [4, 28). All three matches are in range, no duplicates.
+        QCOMPARE(results.size(), 3);
+    }
+
+
+    void scan_constrainRegions_patternAtFirstByte() {
+        // Pattern at the very first byte of a clipped sub-region.
+        // Region [0, 64). Constraint [20, 40). Match at offset 20.
+        QByteArray data(64, 0);
+        data[20] = char(0xFE);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 64, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0xFE));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{20, 40}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)20);
+    }
+
+    void scan_constrainRegions_patternAtLastByte() {
+        // Pattern at the very last valid position of a clipped sub-region.
+        // Region [0, 64). Constraint [20, 40). 4-byte pattern at offset 36 (last valid: 40-4=36).
+        QByteArray data(64, 0);
+        data[36] = char(0xDE); data[37] = char(0xAD); data[38] = char(0xBE); data[39] = char(0xEF);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 64, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\xDE\xAD\xBE\xEF", 4);
+        req.mask    = QByteArray("\xFF\xFF\xFF\xFF", 4);
+        req.constrainRegions = {{20, 40}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)36);
+    }
+
+    void scan_constrainRegions_patternOneByteAfterEnd() {
+        // Pattern starts 1 byte before constraint end — only 3 of 4 bytes are in range.
+        // Should NOT match because the full pattern doesn't fit.
+        // Region [0, 64). Constraint [20, 39). 4-byte pattern at offset 36 (needs 36..39, but 39 is excluded).
+        QByteArray data(64, 0);
+        data[36] = char(0xDE); data[37] = char(0xAD); data[38] = char(0xBE); data[39] = char(0xEF);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 64, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\xDE\xAD\xBE\xEF", 4);
+        req.mask    = QByteArray("\xFF\xFF\xFF\xFF", 4);
+        req.constrainRegions = {{20, 39}};  // ends at 39, pattern needs 36..39 inclusive
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 0);  // pattern doesn't fit
+    }
+
+    void scan_constrainRegions_regionSmallerThanPattern() {
+        // Clipped sub-region is smaller than the pattern. Should scan nothing, not crash.
+        // Region [0, 64). Constraint [30, 32). 4-byte pattern can't fit in 2 bytes.
+        QByteArray data(64, char(0xAA));
+        QVector<MemoryRegion> regions;
+        regions.append({0, 64, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\xAA\xAA\xAA\xAA", 4);
+        req.mask    = QByteArray("\xFF\xFF\xFF\xFF", 4);
+        req.constrainRegions = {{30, 32}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 0);
+    }
+
+    void scan_constrainRegions_patternExactlyFitsRegion() {
+        // Clipped sub-region is exactly pattern size. Should find match if bytes match.
+        // Region [0, 64). Constraint [30, 34). 4-byte pattern, 4-byte region.
+        QByteArray data(64, 0);
+        data[30] = char(0x11); data[31] = char(0x22); data[32] = char(0x33); data[33] = char(0x44);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 64, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\x11\x22\x33\x44", 4);
+        req.mask    = QByteArray("\xFF\xFF\xFF\xFF", 4);
+        req.constrainRegions = {{30, 34}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)30);
+    }
+
+    void scan_constrainRegions_matchAtRegionBoundaries() {
+        // Two adjacent clipped sub-regions. Matches at the last byte of the first
+        // and first byte of the second. Both should be found.
+        // Regions: [0, 16) and [16, 32). Constraint [0, 32) (full coverage).
+        QByteArray data(32, 0);
+        data[15] = char(0x77);  // last byte of first region
+        data[16] = char(0x77);  // first byte of second region
+        QVector<MemoryRegion> regions;
+        regions.append({0, 16, true, true, false, {}});
+        regions.append({16, 16, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray(1, char(0x77));
+        req.mask    = QByteArray(1, char(0xFF));
+        req.constrainRegions = {{0, 32}};
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results[0].address, (uint64_t)15);
+        QCOMPARE(results[1].address, (uint64_t)16);
+    }
+
+    void scan_constrainRegions_multibyteAtClipBoundary() {
+        // 4-byte pattern that straddles the constraint boundary — should NOT be found
+        // because the clipped region doesn't contain the full pattern.
+        // Region [0, 64). Constraint [10, 13). Pattern at offset 10 is 4 bytes (10..13),
+        // but constraint end is 13 (exclusive), so only 3 bytes [10,13) are in range.
+        QByteArray data(64, 0);
+        data[10] = char(0xAA); data[11] = char(0xBB); data[12] = char(0xCC); data[13] = char(0xDD);
+        QVector<MemoryRegion> regions;
+        regions.append({0, 64, true, true, false, {}});
+        auto prov = std::make_shared<RegionProvider>(data, regions);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = QByteArray("\xAA\xBB\xCC\xDD", 4);
+        req.mask    = QByteArray("\xFF\xFF\xFF\xFF", 4);
+        req.constrainRegions = {{10, 13}};  // only 3 bytes, pattern needs 4
+        engine.start(prov, req);
+        QVERIFY(finSpy.wait(5000));
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QCOMPARE(results.size(), 0);
+    }
+
+
+    // ── Value type + pattern scans at every position in a constrained region ──
+
+    // Helper: run a scan with the given pattern/mask/alignment in a constrained region,
+    // return the result addresses.
+    QVector<uint64_t> scanConstrained(const QByteArray& data,
+                                      const QByteArray& pat, const QByteArray& mask,
+                                      int alignment, uint64_t cStart, uint64_t cEnd) {
+        auto prov = std::make_shared<BufferProvider>(data);
+        ScanEngine engine;
+        QSignalSpy finSpy(&engine, &ScanEngine::finished);
+        ScanRequest req;
+        req.pattern = pat;
+        req.mask = mask;
+        req.alignment = alignment;
+        req.constrainRegions = {{cStart, cEnd}};
+        engine.start(prov, req);
+        if (!finSpy.wait(5000)) return {};
+        auto results = finSpy.first().first().value<QVector<ScanResult>>();
+        QVector<uint64_t> addrs;
+        for (const auto& r : results) addrs.append(r.address);
+        return addrs;
+    }
+
+    void scan_int32_atRegionStart() {
+        QByteArray data(128, 0);
+        int32_t v = 0x12345678;
+        std::memcpy(data.data() + 32, &v, 4);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Int32, "305419896", pat, mask));  // 0x12345678
+        auto addrs = scanConstrained(data, pat, mask, 4, 32, 96);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)32);
+    }
+
+    void scan_int32_atRegionEnd() {
+        QByteArray data(128, 0);
+        int32_t v = 0x12345678;
+        // Last aligned 4-byte position in [32, 96) is 92
+        std::memcpy(data.data() + 92, &v, 4);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Int32, "305419896", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 4, 32, 96);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)92);
+    }
+
+    void scan_float_atRegionStart() {
+        QByteArray data(128, 0);
+        float v = 3.14f;
+        std::memcpy(data.data() + 16, &v, 4);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Float, "3.14", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 4, 16, 80);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)16);
+    }
+
+    void scan_float_atRegionEnd() {
+        QByteArray data(128, 0);
+        float v = 3.14f;
+        // Last aligned 4-byte position in [16, 80) is 76
+        std::memcpy(data.data() + 76, &v, 4);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Float, "3.14", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 4, 16, 80);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)76);
+    }
+
+    void scan_double_atRegionEnd() {
+        QByteArray data(128, 0);
+        double v = 2.71828;
+        // Last aligned 8-byte position in [0, 128) is 120
+        std::memcpy(data.data() + 120, &v, 8);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Double, "2.71828", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 8, 0, 128);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)120);
+    }
+
+    void scan_int64_atRegionEnd() {
+        QByteArray data(128, 0);
+        int64_t v = 0x0BADC0DEDEADBEEFLL;
+        // Last aligned 8-byte position in [8, 72) is 64
+        std::memcpy(data.data() + 64, &v, 8);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Int64, "841540768839352047", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 8, 8, 72);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)64);
+    }
+
+    void scan_utf16_atRegionEnd() {
+        QByteArray data(128, 0);
+        // "AB" in UTF-16LE = 4 bytes
+        uint16_t chars[] = { 'A', 'B' };
+        // Last aligned 2-byte position where 4 bytes fit in [0, 128) is 124
+        std::memcpy(data.data() + 124, chars, 4);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::UTF16, "AB", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 2, 0, 128);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)124);
+    }
+
+    void scan_vec3_atRegionEnd() {
+        QByteArray data(128, 0);
+        float v[] = { 1.0f, 2.0f, 3.0f };  // 12 bytes
+        // Last aligned 4-byte position where 12 bytes fit in [0, 128) is 116
+        std::memcpy(data.data() + 116, v, 12);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Vec3, "1.0 2.0 3.0", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 4, 0, 128);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)116);
+    }
+
+    void scan_pattern_atRegionStart() {
+        QByteArray data(128, 0);
+        data[20] = char(0x48); data[21] = char(0x8B); data[22] = char(0x05);
+        QByteArray pat, mask;
+        QVERIFY(parseSignature("48 8B 05", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 1, 20, 100);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)20);
+    }
+
+    void scan_pattern_atRegionEnd() {
+        QByteArray data(128, 0);
+        // 3-byte pattern, last position in [20, 100) is 97
+        data[97] = char(0x48); data[98] = char(0x8B); data[99] = char(0x05);
+        QByteArray pat, mask;
+        QVERIFY(parseSignature("48 8B 05", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 1, 20, 100);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)97);
+    }
+
+    void scan_pattern_withWildcard_atRegionEnd() {
+        QByteArray data(128, 0);
+        // "48 ?? 05" at last position 97 in [20, 100)
+        data[97] = char(0x48); data[98] = char(0xFF); data[99] = char(0x05);
+        QByteArray pat, mask;
+        QVERIFY(parseSignature("48 ?? 05", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 1, 20, 100);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)97);
+    }
+
+    void scan_int32_multiplePositions_inConstrainedRegion() {
+        // Place int32 at first, middle, and last aligned positions in [32, 96).
+        // Aligned positions: 32, 36, 40, ..., 88, 92. First=32, last=92, mid=60.
+        QByteArray data(128, 0);
+        int32_t v = 0xCAFEBABE;
+        std::memcpy(data.data() + 32, &v, 4);
+        std::memcpy(data.data() + 60, &v, 4);
+        std::memcpy(data.data() + 92, &v, 4);
+        // Also place one outside the constraint to verify it's excluded
+        std::memcpy(data.data() + 8, &v, 4);
+        std::memcpy(data.data() + 100, &v, 4);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::UInt32, "0xCAFEBABE", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 4, 32, 96);
+        QCOMPARE(addrs.size(), 3);
+        QCOMPARE(addrs[0], (uint64_t)32);
+        QCOMPARE(addrs[1], (uint64_t)60);
+        QCOMPARE(addrs[2], (uint64_t)92);
+    }
+
+    void scan_pattern_multiplePositions_inConstrainedRegion() {
+        // IDA-style pattern at first, last, and middle of [16, 80).
+        // Pattern "AA BB" (2 bytes), alignment 1. First=16, last=78, mid=50.
+        QByteArray data(128, 0);
+        data[16] = char(0xAA); data[17] = char(0xBB);
+        data[50] = char(0xAA); data[51] = char(0xBB);
+        data[78] = char(0xAA); data[79] = char(0xBB);
+        // Outside constraint
+        data[10] = char(0xAA); data[11] = char(0xBB);
+        data[90] = char(0xAA); data[91] = char(0xBB);
+        QByteArray pat, mask;
+        QVERIFY(parseSignature("AA BB", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 1, 16, 80);
+        QCOMPARE(addrs.size(), 3);
+        QCOMPARE(addrs[0], (uint64_t)16);
+        QCOMPARE(addrs[1], (uint64_t)50);
+        QCOMPARE(addrs[2], (uint64_t)78);
+    }
+
+
+    void scan_int8_alignment1_atRegionEnd() {
+        // 1-byte value at last byte of constrained region [10, 50).
+        QByteArray data(64, 0);
+        data[49] = char(0x7F);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Int8, "127", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 1, 10, 50);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)49);
+    }
+
+    void scan_uint16_alignment2_atRegionEnd() {
+        // 2-byte value at last aligned-2 position in [10, 50) = offset 48.
+        QByteArray data(64, 0);
+        uint16_t v = 0xBEEF;
+        std::memcpy(data.data() + 48, &v, 2);
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::UInt16, "0xBEEF", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 2, 10, 50);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)48);
+    }
+
+    void scan_alignment4_skipsUnaligned() {
+        // int32 placed at unaligned offset 18 inside [16, 48). Alignment 4.
+        // Aligned positions from 16: 16, 20, 24, 28, 32, 36, 40, 44.
+        // Offset 18 is not aligned to 4 from the region start, so should be skipped.
+        QByteArray data(64, 0);
+        int32_t v = 0xDEADBEEF;
+        std::memcpy(data.data() + 18, &v, 4);  // unaligned
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::UInt32, "0xDEADBEEF", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 4, 16, 48);
+        QCOMPARE(addrs.size(), 0);
+    }
+
+    void scan_alignment8_skipsUnaligned() {
+        // double placed at offset 12 inside [0, 64). Alignment 8.
+        // Aligned positions: 0, 8, 16, 24, 32, 40, 48, 56.
+        // Offset 12 is not 8-aligned, so should be skipped.
+        QByteArray data(64, 0);
+        double v = 99.99;
+        std::memcpy(data.data() + 12, &v, 8);  // unaligned
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::Double, "99.99", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 8, 0, 64);
+        QCOMPARE(addrs.size(), 0);
+    }
+
+    void scan_alignment2_findsAligned_skipsUnaligned() {
+        // utf16 "Hi" (4 bytes) at aligned offset 20 and unaligned offset 33.
+        // Constraint [16, 48), alignment 2. Should find only offset 20.
+        QByteArray data(64, 0);
+        uint16_t chars[] = { 'H', 'i' };
+        std::memcpy(data.data() + 20, chars, 4);  // aligned to 2
+        std::memcpy(data.data() + 33, chars, 4);  // unaligned to 2
+        QByteArray pat, mask;
+        QVERIFY(serializeValue(ValueType::UTF16, "Hi", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 2, 16, 48);
+        QCOMPARE(addrs.size(), 1);
+        QCOMPARE(addrs[0], (uint64_t)20);
+    }
+
+    void scan_alignment1_overlappingWrites() {
+        // Pattern "AA BB" written at 20, then overwritten at 21, plus 25.
+        // Second write clobbers offset 20's pattern; only 21 and 25 match.
+        QByteArray data(48, 0);
+        data[20] = char(0xAA); data[21] = char(0xBB);
+        data[21] = char(0xAA); data[22] = char(0xBB);  // overlapping at 21
+        data[25] = char(0xAA); data[26] = char(0xBB);
+        QByteArray pat, mask;
+        QVERIFY(parseSignature("AA BB", pat, mask));
+        auto addrs = scanConstrained(data, pat, mask, 1, 16, 32);
+        QCOMPARE(addrs.size(), 2);  // 21 and 25 (20 was overwritten)
+        QCOMPARE(addrs[0], (uint64_t)21);
+        QCOMPARE(addrs[1], (uint64_t)25);
+    }
 };
 
 QTEST_MAIN(TestScanner)

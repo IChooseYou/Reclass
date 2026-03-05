@@ -60,6 +60,21 @@ public:
     QLabel*       condLabel()    const { return m_condLabel; }
     QCheckBox*    structOnlyCheck() const { return m_structOnlyCheck; }
 
+    /** Run a value scan and block until done. For MCP / automation. Returns results; updates panel table. */
+    QVector<ScanResult> runValueScanAndWait(ValueType valueType, const QString& value,
+                                            bool filterExecutable = false, bool filterWritable = false,
+                                            const QVector<AddressRange>& constrainRegions = {});
+
+    /** Run a pattern/signature scan and block until done. Pattern: space-separated hex bytes, e.g. "00 00 20 42 ?? ??". */
+    QVector<ScanResult> runPatternScanAndWait(const QString& pattern,
+                                              bool filterExecutable = false, bool filterWritable = false,
+                                              const QVector<AddressRange>& constrainRegions = {});
+
+    /** Run pattern scan using the given provider (for MCP: use tab's provider so scan runs on the right tab). */
+    QVector<ScanResult> runPatternScanAndWait(std::shared_ptr<Provider> provider, const QString& pattern,
+                                              bool filterExecutable = false, bool filterWritable = false,
+                                              const QVector<AddressRange>& constrainRegions = {});
+
 signals:
     void goToAddress(uint64_t address);
 
