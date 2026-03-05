@@ -1050,8 +1050,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
 
         for (int childIdx : state.childMap.value(container.id)) {
             const Node& child = tree.nodes[childIdx];
-            // Skip struct/array children — pointer headers shouldn't inflate sibling widths
-            if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
+            // Skip struct children — pointer headers shouldn't inflate sibling widths
+            if (child.kind == NodeKind::Struct)
                 continue;
             scopeMaxType = qMax(scopeMaxType, (int)nodeTypeName(child).size());
 
@@ -1085,8 +1085,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         int rootMaxName = kMinNameW;
         for (int childIdx : state.childMap.value(0)) {
             const Node& child = tree.nodes[childIdx];
-            // Skip struct/array children — pointer headers shouldn't inflate sibling widths
-            if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
+            // Skip struct children — pointer headers shouldn't inflate sibling widths
+            if (child.kind == NodeKind::Struct)
                 continue;
             rootMaxType = qMax(rootMaxType, (int)nodeTypeName(child).size());
 
