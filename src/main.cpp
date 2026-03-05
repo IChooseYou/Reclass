@@ -472,6 +472,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_centralPlaceholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     setCentralWidget(m_centralPlaceholder);
     setDockNestingEnabled(true);
+    // Give left/right docks full height (corners belong to left/right, not top/bottom)
+    setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
+    setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
+    setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
+    setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
     setTabPosition(Qt::TopDockWidgetArea, QTabWidget::North);
 
     createWorkspaceDock();
@@ -2620,6 +2625,10 @@ void MainWindow::importFromSource() {
     closeAllDocDocks();
     createTab(doc);
     rebuildWorkspaceModel();
+    if (!m_docDocks.isEmpty()) {
+        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+    }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 classes from source").arg(classCount));
 }
@@ -2670,6 +2679,10 @@ void MainWindow::importPdb() {
     closeAllDocDocks();
     createTab(doc);
     rebuildWorkspaceModel();
+    if (!m_docDocks.isEmpty()) {
+        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+    }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 classes from %2")
         .arg(classCount).arg(QFileInfo(pdbPath).fileName()));
@@ -2861,7 +2874,11 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         closeAllDocDocks();
         auto* dock = createTab(doc);
         rebuildWorkspaceModel();
-        m_workspaceDock->show();
+        if (!m_docDocks.isEmpty()) {
+        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+    }
+    m_workspaceDock->show();
         int classCount = 0;
         for (const auto& n : doc->tree.nodes)
             if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
@@ -2883,6 +2900,10 @@ QDockWidget* MainWindow::project_open(const QString& path) {
 
     auto* dock = createTab(doc);
     rebuildWorkspaceModel();
+    if (!m_docDocks.isEmpty()) {
+        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+    }
     m_workspaceDock->show();
     addRecentFile(filePath);
     return dock;
@@ -2929,7 +2950,7 @@ void MainWindow::closeAllDocDocks() {
 void MainWindow::createWorkspaceDock() {
     m_workspaceDock = new QDockWidget("Project", this);
     m_workspaceDock->setObjectName("WorkspaceDock");
-    m_workspaceDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    m_workspaceDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     m_workspaceDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
 
     // Custom titlebar: label + ✕ close button (matches MDI tab style)
@@ -3142,8 +3163,11 @@ void MainWindow::createWorkspaceDock() {
         });
     }
 
+    m_workspaceTree->setMinimumWidth(0);
+    m_workspaceSearch->setMinimumWidth(0);
+    dockContainer->setMinimumWidth(0);
     m_workspaceDock->setWidget(dockContainer);
-    addDockWidget(Qt::LeftDockWidgetArea, m_workspaceDock);
+    addDockWidget(Qt::TopDockWidgetArea, m_workspaceDock);
     m_workspaceDock->hide();
 
     connect(m_workspaceTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& index) {
