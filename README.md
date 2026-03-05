@@ -83,7 +83,7 @@ Full command stack with 15 undoable operations: ChangeKind, Rename, Collapse, In
 
 ## Plugin System
 
-Extensible provider architecture via DLL plugins with `IPlugin` interface, factory function discovery, and auto/manual loading from a Plugins folder.
+DLL plugins loaded from a `Plugins` folder, auto or manual.
 
 **Bundled plugins:**
 
@@ -92,7 +92,7 @@ Extensible provider architecture via DLL plugins with `IPlugin` interface, facto
 | **Process memory** | Attach to local processes on Windows and Linux — PID-based, with symbol resolution and module/region enumeration |
 | **WinDbg** | Access data from live WinDbg debugging sessions |
 | **Remote process memory** | TCP RPC-based remote process access with cross-architecture support |
-| **ReClass.NET compatibility** | Load existing ReClass.NET native DLL plugins directly; optional .NET CLR hosting for managed plugins |
+| **ReClass.NET compatibility** | Load existing ReClass.NET native DLL plugins directly |
 
 ## MCP Integration
 
