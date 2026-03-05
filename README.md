@@ -92,7 +92,7 @@ DLL plugins loaded from a `Plugins` folder, auto or manual.
 | **Process memory** | Attach to local processes on Windows and Linux — PID-based, with symbol resolution and module/region enumeration |
 | **WinDbg** | Access data from live WinDbg debugging sessions |
 | **Remote process memory** | TCP RPC-based remote process access with cross-architecture support |
-| **ReClass.NET compatibility** | Load existing ReClass.NET native DLL plugins directly |
+| **ReClass.NET compatibility** | Load existing ReClass.NET native DLL plugins directly; optional .NET CLR hosting for managed plugins |
 
 ## MCP Integration
 
