@@ -1122,7 +1122,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     if (state.braceWrap) {
         LineMeta braceLm;
         braceLm.nodeIdx   = -1;
-        braceLm.nodeId    = kCommandRowId;
+        braceLm.nodeId    = 0;  // not associated with any node (no hover)
         braceLm.depth     = 0;
         braceLm.lineKind  = LineKind::Header;
         braceLm.foldLevel = SC_FOLDLEVELBASE;
