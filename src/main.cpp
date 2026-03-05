@@ -1572,14 +1572,13 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     dock->raise();
     dock->show();
-    // Ensure the new dock's tab is activated in the tab bar
+    // Ensure the new dock's tab is activated in the tab bar.
+    // Since we tabify with the last dock, the new tab is always appended last.
     for (auto* tabBar : findChildren<QTabBar*>()) {
         if (tabBar->parent() != this) continue;
-        for (int i = 0; i < tabBar->count(); i++) {
-            if (tabBar->tabText(i) == dock->windowTitle()) {
-                tabBar->setCurrentIndex(i);
-                break;
-            }
+        if (tabBar->count() > 0) {
+            tabBar->setCurrentIndex(tabBar->count() - 1);
+            break;
         }
     }
 
