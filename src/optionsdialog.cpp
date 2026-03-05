@@ -122,6 +122,10 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     m_showIconCheck->setChecked(current.showIcon);
     visualLayout->addRow(m_showIconCheck);
 
+    m_braceWrapCheck = new QCheckBox("Opening brace on new line");
+    m_braceWrapCheck->setChecked(current.braceWrap);
+    visualLayout->addRow(m_braceWrapCheck);
+
     generalLayout->addWidget(visualGroup);
     generalLayout->addStretch();
 
@@ -212,6 +216,7 @@ OptionsResult OptionsDialog::result() const {
     r.autoStartMcp = m_autoMcpCheck->isChecked();
     r.refreshMs = m_refreshSpin->value();
     r.generatorAsserts = m_assertCheck->isChecked();
+    r.braceWrap = m_braceWrapCheck->isChecked();
     return r;
 }
 

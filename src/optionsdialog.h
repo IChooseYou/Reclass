@@ -18,6 +18,7 @@ struct OptionsResult {
     bool    autoStartMcp = true;
     int     refreshMs = 660;
     bool    generatorAsserts = false;
+    bool    braceWrap = false;
 };
 
 class OptionsDialog : public QDialog {
@@ -41,6 +42,7 @@ private:
     QCheckBox*      m_autoMcpCheck   = nullptr;
     QSpinBox*       m_refreshSpin    = nullptr;
     QCheckBox*      m_assertCheck    = nullptr;
+    QCheckBox*      m_braceWrapCheck = nullptr;
 
     // searchable keywords per leaf tree item
     QHash<QTreeWidgetItem*, QStringList> m_pageKeywords;

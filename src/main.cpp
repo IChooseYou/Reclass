@@ -1450,6 +1450,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     // Apply global compact columns setting to new tab
     ctrl->setCompactColumns(QSettings("Reclass", "Reclass").value("compactColumns", true).toBool());
     ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", false).toBool());
+    ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
@@ -2182,6 +2183,7 @@ void MainWindow::showOptionsDialog() {
     current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
     current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
     current.generatorAsserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    current.braceWrap = QSettings("Reclass", "Reclass").value("braceWrap", false).toBool();
 
     OptionsDialog dlg(current, this);
     if (dlg.exec() != QDialog::Accepted) return; // OptionsDialog doesn't apply anything. Only apply on OK
@@ -2216,6 +2218,12 @@ void MainWindow::showOptionsDialog() {
 
     if (r.generatorAsserts != current.generatorAsserts)
         QSettings("Reclass", "Reclass").setValue("generatorAsserts", r.generatorAsserts);
+
+    if (r.braceWrap != current.braceWrap) {
+        QSettings("Reclass", "Reclass").setValue("braceWrap", r.braceWrap);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setBraceWrap(r.braceWrap);
+    }
 }
 
 void MainWindow::setEditorFont(const QString& fontName) {

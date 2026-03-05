@@ -73,8 +73,8 @@ RcxDocument::RcxDocument(QObject* parent)
 }
 
 ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
-                                   bool treeLines) const {
-    return rcx::compose(tree, *provider, viewRootId, compactColumns, treeLines);
+                                   bool treeLines, bool braceWrap) const {
+    return rcx::compose(tree, *provider, viewRootId, compactColumns, treeLines, braceWrap);
 }
 
 bool RcxDocument::save(const QString& path) {
@@ -558,9 +558,9 @@ void RcxController::refresh() {
 
     // Compose against snapshot provider if active, otherwise real provider
     if (m_snapshotProv)
-        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines);
+        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap);
     else
-        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines);
+        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap);
 
     s_composeDoc = nullptr;
 
@@ -2444,6 +2444,7 @@ void RcxController::updateCommandRow() {
         .arg(elide(src, 40), elide(addr, 24));
 
     // Build row 2: root class type + name (uses current view root)
+    QString brace = m_braceWrap ? QString() : QStringLiteral(" {");
     QString row2;
     if (m_viewRootId != 0) {
         int vi = m_doc->tree.indexOfId(m_viewRootId);
@@ -2451,8 +2452,8 @@ void RcxController::updateCommandRow() {
             const auto& n = m_doc->tree.nodes[vi];
             QString keyword = n.resolvedClassKeyword();
             QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-            row2 = QStringLiteral("%1 %2 {")
-                .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className);
+            row2 = QStringLiteral("%1 %2%3")
+                .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className, brace);
         }
     }
     if (row2.isEmpty()) {
@@ -2462,14 +2463,14 @@ void RcxController::updateCommandRow() {
             if (n.parentId == 0 && n.kind == NodeKind::Struct) {
                 QString keyword = n.resolvedClassKeyword();
                 QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-                row2 = QStringLiteral("%1 %2 {")
-                    .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className);
+                row2 = QStringLiteral("%1 %2%3")
+                    .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className, brace);
                 break;
             }
         }
     }
     if (row2.isEmpty())
-        row2 = QStringLiteral("struct NoName {");
+        row2 = QStringLiteral("struct NoName") + brace;
 
     QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral("  ") + row2;
 
@@ -3258,6 +3259,11 @@ void RcxController::setCompactColumns(bool v) {
 
 void RcxController::setTreeLines(bool v) {
     m_treeLines = v;
+    refresh();
+}
+
+void RcxController::setBraceWrap(bool v) {
+    m_braceWrap = v;
     refresh();
 }
 

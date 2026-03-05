@@ -25,6 +25,7 @@ struct ComposeState {
     bool               baseEmitted = false;     // only first root struct shows base address
     bool               compactColumns = false;  // compact column mode: cap type width, overflow long types
     bool               treeLines      = false;  // draw Unicode tree connectors in indentation
+    bool               braceWrap      = false;  // opening brace on its own line
     QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
 
@@ -319,7 +320,24 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             lm.effectiveNameW = nameW;
             headerText = fmt::fmtStructHeader(node, depth, node.collapsed, typeW, nameW, state.compactColumns);
         }
-        state.emitLine(headerText, lm);
+        // Brace wrapping: move trailing '{' to its own line
+        if (state.braceWrap && !node.collapsed && headerText.endsWith(QChar('{'))) {
+            headerText.chop(1);
+            // Remove trailing separator spaces
+            while (headerText.endsWith(' ')) headerText.chop(1);
+            state.emitLine(headerText, lm);
+            // Emit standalone brace line
+            LineMeta braceLm;
+            braceLm.nodeIdx   = nodeIdx;
+            braceLm.nodeId    = node.id;
+            braceLm.depth     = depth;
+            braceLm.lineKind  = LineKind::Header;
+            braceLm.foldLevel = computeFoldLevel(depth, true);
+            braceLm.markerMask = (1u << M_STRUCT_BG);
+            state.emitLine(fmt::indent(depth) + QStringLiteral("{"), braceLm);
+        } else {
+            state.emitLine(headerText, lm);
+        }
     }
 
     if (!node.collapsed || isArrayChild || isRootHeader) {
@@ -840,9 +858,26 @@ void composeNode(ComposeState& state, const NodeTree& tree,
             lm.effectiveTypeW = ptrOverflow ? ptrTypeOverride.size() : typeW;
             lm.effectiveNameW = nameW;
             lm.pointerTargetName = ptrTargetName;
-            state.emitLine(fmt::fmtPointerHeader(node, depth, effectiveCollapsed,
-                                                  prov, absAddr, ptrTypeOverride,
-                                                  typeW, nameW, state.compactColumns), lm);
+            {
+                QString ptrText = fmt::fmtPointerHeader(node, depth, effectiveCollapsed,
+                                                         prov, absAddr, ptrTypeOverride,
+                                                         typeW, nameW, state.compactColumns);
+                if (state.braceWrap && !effectiveCollapsed && ptrText.endsWith(QChar('{'))) {
+                    ptrText.chop(1);
+                    while (ptrText.endsWith(' ')) ptrText.chop(1);
+                    state.emitLine(ptrText, lm);
+                    LineMeta braceLm;
+                    braceLm.nodeIdx   = nodeIdx;
+                    braceLm.nodeId    = node.id;
+                    braceLm.depth     = depth;
+                    braceLm.lineKind  = LineKind::Header;
+                    braceLm.foldLevel = computeFoldLevel(depth, true);
+                    braceLm.markerMask = lm.markerMask;
+                    state.emitLine(fmt::indent(depth) + QStringLiteral("{"), braceLm);
+                } else {
+                    state.emitLine(ptrText, lm);
+                }
+            }
         }
 
         if (!effectiveCollapsed) {
@@ -936,10 +971,11 @@ void composeNode(ComposeState& state, const NodeTree& tree,
 } // anonymous namespace
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId,
-                      bool compactColumns, bool treeLines) {
+                      bool compactColumns, bool treeLines, bool braceWrap) {
     ComposeState state;
     state.compactColumns = compactColumns;
     state.treeLines = treeLines;
+    state.braceWrap = braceWrap;
 
     // Precompute parent→children map
     for (int i = 0; i < tree.nodes.size(); i++)
@@ -1080,6 +1116,18 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         lm.effectiveTypeW = state.typeW;
         lm.effectiveNameW = state.nameW;
         state.emitLine(cmdRowText, lm);
+    }
+
+    // Brace wrapping: emit standalone "{" after CommandRow
+    if (state.braceWrap) {
+        LineMeta braceLm;
+        braceLm.nodeIdx   = -1;
+        braceLm.nodeId    = kCommandRowId;
+        braceLm.depth     = 0;
+        braceLm.lineKind  = LineKind::Header;
+        braceLm.foldLevel = SC_FOLDLEVELBASE;
+        braceLm.markerMask = 0;
+        state.emitLine(QStringLiteral("{"), braceLm);
     }
 
     const QVector<int>& roots = childIndices(state, 0);
