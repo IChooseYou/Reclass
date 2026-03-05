@@ -158,6 +158,7 @@ public:
 signals:
     void nodeSelected(int nodeIdx);
     void selectionChanged(int count);
+    void contextMenuAboutToShow(QMenu* menu, int line);
 
 private:
     RcxDocument*       m_doc;

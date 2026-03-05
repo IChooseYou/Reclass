@@ -1766,6 +1766,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             QApplication::clipboard()->setText(addrs.join('\n'));
         });
 
+        emit contextMenuAboutToShow(&menu, line);
         menu.exec(globalPos);
         return;
     }
@@ -2282,6 +2283,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         QTimer::singleShot(0, editor, &RcxEditor::showFindBar);
     });
 
+    emit contextMenuAboutToShow(&menu, line);
     menu.exec(globalPos);
 }
 

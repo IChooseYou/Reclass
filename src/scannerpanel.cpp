@@ -183,6 +183,7 @@ ScannerPanel::ScannerPanel(QWidget* parent)
                                QStringLiteral("Copy Address"), this);
     m_copyBtn->setEnabled(false);
     actionRow->addWidget(m_copyBtn);
+    actionRow->addSpacing(20);  // room for resize grip when floating
 
     mainLayout->addLayout(actionRow);
 

@@ -4,8 +4,6 @@
 #include "pluginmanager.h"
 #include "scannerpanel.h"
 #include <QMainWindow>
-#include <QMdiArea>
-#include <QMdiSubWindow>
 #include <QLabel>
 #include <QSplitter>
 #include <QTabWidget>
@@ -72,22 +70,19 @@ public:
     void clearMcpStatus();
 
     // Project Lifecycle API
-    QMdiSubWindow* project_new(const QString& classKeyword = QString());
-    QMdiSubWindow* project_open(const QString& path = {});
-    bool project_save(QMdiSubWindow* sub = nullptr, bool saveAs = false);
-    void project_close(QMdiSubWindow* sub = nullptr);
+    QDockWidget* project_new(const QString& classKeyword = QString());
+    QDockWidget* project_open(const QString& path = {});
+    bool project_save(QDockWidget* dock = nullptr, bool saveAs = false);
+    void project_close(QDockWidget* dock = nullptr);
 
 private:
     enum ViewMode { VM_Reclass, VM_Rendered };
 
-    QMdiArea*       m_mdiArea;
+    QWidget*        m_centralPlaceholder;
     ShimmerLabel*   m_statusLabel;
     QString         m_appStatus;
     bool            m_mcpBusy   = false;
     QTimer*         m_mcpClearTimer = nullptr;
-    QButtonGroup*   m_viewBtnGroup = nullptr;
-    QPushButton*    m_btnReclass   = nullptr;
-    QPushButton*    m_btnRendered  = nullptr;
     TitleBarWidget* m_titleBar = nullptr;
     QMenuBar*       m_menuBar = nullptr;
     bool            m_menuBarTitleCase = false;
@@ -117,7 +112,9 @@ private:
         QVector<SplitPane> panes;
         int                activePaneIdx = 0;
     };
-    QMap<QMdiSubWindow*, TabState> m_tabs;
+    QMap<QDockWidget*, TabState> m_tabs;
+    QVector<QDockWidget*> m_docDocks;       // ordered list for tabByIndex
+    QDockWidget* m_activeDocDock = nullptr;  // tracks active document dock
     QVector<RcxDocument*> m_allDocs;  // all open docs, shared with controllers
     void rebuildAllDocs();
 
@@ -134,8 +131,9 @@ private:
     TabState* activeTab();
     TabState* tabByIndex(int index);
     int tabCount() const { return m_tabs.size(); }
-    QMdiSubWindow* createTab(RcxDocument* doc);
+    QDockWidget* createTab(RcxDocument* doc);
     void updateWindowTitle();
+    void closeAllDocDocks();
 
     void setViewMode(ViewMode mode);
     void updateRenderedView(TabState& tab, SplitPane& pane);
@@ -145,7 +143,6 @@ private:
 
     SplitPane createSplitPane(TabState& tab);
     void applyTheme(const Theme& theme);
-    void styleTabCloseButtons();
     void syncViewButtons(ViewMode mode);
     SplitPane* findPaneByTabWidget(QTabWidget* tw);
     SplitPane* findActiveSplitPane();
