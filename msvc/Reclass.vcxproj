@@ -66,6 +66,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\third_party\fadec\;..\third_party\raw_pdb\src\;..\third_party\qscintilla\src\;..\src\</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <AdditionalDependencies>dwmapi.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -80,6 +81,7 @@
     </Link>
     <ClCompile>
       <AdditionalIncludeDirectories>..\third_party\fadec\;..\third_party\raw_pdb\src\;..\third_party\qscintilla\src\;..\src\</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <PostBuildEvent>
       <Command>$(QtToolsPath)/windeployqt $(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName).exe</Command>

@@ -2263,6 +2263,21 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     // Set text
     pane.rendered->setText(text);
 
+    // Set horizontal scroll width to match the longest line (ignoring trailing spaces)
+    {
+        int maxLen = 0;
+        const QStringList lines = text.split(QChar('\n'));
+        for (const auto& line : lines) {
+            int len = (int)line.size();
+            while (len > 0 && line[len - 1] == QChar(' ')) --len;
+            maxLen = std::max(maxLen, len);
+        }
+        QFontMetrics fm(pane.rendered->font());
+        int pixelWidth = fm.horizontalAdvance(QString(maxLen, QChar('0')));
+        pane.rendered->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
+                                     (unsigned long)qMax(1, pixelWidth));
+    }
+
     // Update margin width for line count
     int lineCount = pane.rendered->lines();
     QString marginStr = QString(QString::number(lineCount).size() + 2, '0');
