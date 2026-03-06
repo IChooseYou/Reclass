@@ -346,11 +346,6 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME test_controller COMMAND test_controller)
 
-        add_executable(grab_tabs tests/grab_tabs.cpp
-            src/themes/theme.cpp src/themes/thememanager.cpp src/resources.qrc)
-        target_include_directories(grab_tabs PRIVATE src)
-        target_link_libraries(grab_tabs PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
-
         add_executable(test_validation tests/test_validation.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
