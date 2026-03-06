@@ -574,6 +574,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     overlay->raise();
     overlay->show();
 
+    // Central placeholder — will be replaced by start page after construction
     m_centralPlaceholder = new QWidget(this);
     m_centralPlaceholder->setFixedSize(0, 0);
     m_centralPlaceholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
@@ -611,6 +612,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
             this, &MainWindow::applyTheme);
+
+    // Apply theme once at startup (the signal only fires on change, not initial load)
+    applyTheme(ThemeManager::instance().current());
 
     // Load plugins
     m_pluginManager.LoadPlugins();
@@ -2292,15 +2296,20 @@ void MainWindow::applyTheme(const Theme& theme) {
     if (m_titleBar)
         m_titleBar->applyTheme(theme);
 
+    // Start page
+    if (m_startPage)
+        m_startPage->applyTheme(theme);
+
     // Update border overlay color
     updateBorderColor(isActiveWindow() ? theme.borderFocused : theme.border);
 
-    // Style doc dock tab bars and remove dock borders
+    // Style doc dock tab bars and remove dock borders.
+    // QWidget default colors are required because having ANY stylesheet on QMainWindow
+    // switches children from palette-based to CSS-based rendering.
     setStyleSheet(QStringLiteral(
         "QMainWindow::separator { width: 1px; height: 1px; background: transparent; }"
         "QDockWidget { border: none; }"
-        "QDockWidget > QWidget { border: none; }")
-        .arg(theme.border.name()));
+        "QDockWidget > QWidget { border: none; }"));
 
     for (auto* tabBar : findChildren<QTabBar*>()) {
         // Only style tab bars owned directly by this QMainWindow (dock tabs),
@@ -3165,10 +3174,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     if (filePath.isEmpty()) {
         filePath = QFileDialog::getOpenFileName(this,
             "Open Definition", {},
-            "All Supported (*.rcx *.json *.reclass *.MemeCls *.xml)"
-            ";;Reclass (*.rcx)"
-            ";;JSON (*.json)"
-            ";;ReClass XML (*.reclass *.MemeCls *.xml)"
+            "Reclass (*.rcx)"
             ";;All (*)");
         if (filePath.isEmpty()) return nullptr;
     }
@@ -3179,8 +3185,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         QFile probe(filePath);
         if (probe.open(QIODevice::ReadOnly)) {
             QByteArray head = probe.read(64);
-            isXml = head.trimmed().startsWith("<?xml") || head.trimmed().startsWith("<ReClass")
-                    || head.trimmed().startsWith("<MemeCls");
+            isXml = head.trimmed().startsWith("<?xml") || head.trimmed().startsWith("<ReClass");
         }
     }
 
@@ -3950,6 +3955,66 @@ void MainWindow::updateBorderColor(const QColor& color) {
     m_borderOverlay->update();
 }
 
+void MainWindow::showStartPage() {
+    if (m_startPage) return;
+
+    m_startPage = new StartPageWidget(this);
+    m_startPage->applyTheme(ThemeManager::instance().current());
+
+    // Size the popup to ~85% of the main window, min 1060 wide for two-column layout
+    QSize sz(qBound(1060, int(width() * 0.85), width() - 40),
+             qBound(560, int(height() * 0.8), height() - 40));
+    m_startPage->setFixedSize(sz);
+
+    // Wire start page signals — each closes the dialog then performs action
+    connect(m_startPage, &StartPageWidget::openProject, this, [this]() {
+        dismissStartPage();
+        openFile();
+        if (m_tabs.isEmpty()) showStartPage();
+    });
+    connect(m_startPage, &StartPageWidget::newClass, this, [this]() {
+        dismissStartPage();
+        newClass();
+    });
+    connect(m_startPage, &StartPageWidget::importSource, this, [this]() {
+        dismissStartPage();
+        importFromSource();
+        if (m_tabs.isEmpty()) showStartPage();
+    });
+    connect(m_startPage, &StartPageWidget::importXml, this, [this]() {
+        dismissStartPage();
+        importReclassXml();
+        if (m_tabs.isEmpty()) showStartPage();
+    });
+    connect(m_startPage, &StartPageWidget::importPdb, this, [this]() {
+        dismissStartPage();
+        importPdb();
+        if (m_tabs.isEmpty()) showStartPage();
+    });
+    connect(m_startPage, &StartPageWidget::continueClicked, this, [this]() {
+        dismissStartPage();
+        selfTest();
+    });
+    connect(m_startPage, &StartPageWidget::fileSelected, this, [this](const QString& path) {
+        dismissStartPage();
+        project_open(path);
+    });
+    connect(m_startPage, &QDialog::rejected, this, [this]() {
+        dismissStartPage();
+    });
+
+    // Center over main window and show as application-modal
+    m_startPage->move(geometry().center() - m_startPage->rect().center());
+    m_startPage->open();
+}
+
+void MainWindow::dismissStartPage() {
+    if (!m_startPage) return;
+    m_startPage->close();
+    m_startPage->deleteLater();
+    m_startPage = nullptr;
+}
+
 } // namespace rcx
 
 // ── Entry point ──
@@ -3986,8 +4051,8 @@ int main(int argc, char* argv[]) {
 
     window.show();
 
-    // Auto-open demo project from saved .rcx file
-    QMetaObject::invokeMethod(&window, "selfTest");
+    // Show VS2022-style start page instead of jumping straight to demo
+    QMetaObject::invokeMethod(&window, "showStartPage", Qt::QueuedConnection);
 
     return app.exec();
 }

@@ -3,6 +3,7 @@
 #include "titlebar.h"
 #include "pluginmanager.h"
 #include "scannerpanel.h"
+#include "startpage.h"
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -168,6 +169,11 @@ private:
     QToolButton*          m_scanDockCloseBtn = nullptr;
     DockGripWidget*       m_scanDockGrip     = nullptr;
     void createScannerDock();
+
+    // Start page
+    StartPageWidget*      m_startPage        = nullptr;
+    Q_INVOKABLE void showStartPage();
+    void dismissStartPage();
 
 protected:
     void changeEvent(QEvent* event) override;

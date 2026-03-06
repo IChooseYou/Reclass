@@ -109,6 +109,8 @@ add_executable(Reclass
     src/scannerpanel.h
     src/scannerpanel.cpp
     src/mainwindow.h
+    src/startpage.h
+    src/dock_tab_buttons.h
     src/optionsdialog.h
     src/optionsdialog.cpp
     src/titlebar.h

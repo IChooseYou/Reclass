@@ -63,24 +63,10 @@ inline void buildProjectExplorer(QStandardItemModel* model,
         return QString::fromLatin1(kindToString(m.kind));
     };
 
-    // Sort structs by visible children count descending (most fields first)
-    auto countVisible = [&](const Entry& e) {
-        int n = 0;
-        for (int idx : e.tree->childrenOf(e.node->id))
-            if (!isHexPad(e.tree->nodes[idx].kind)) ++n;
-        return n;
-    };
-    auto cmpChildren = [&](const Entry& a, const Entry& b) {
-        int ca = countVisible(a);
-        int cb = countVisible(b);
-        if (ca != cb) return ca > cb;
-        return nameOf(a.node).compare(nameOf(b.node), Qt::CaseInsensitive) < 0;
-    };
-    std::sort(types.begin(), types.end(), cmpChildren);
-    auto cmpName = [&](const Entry& a, const Entry& b) {
-        return nameOf(a.node).compare(nameOf(b.node), Qt::CaseInsensitive) < 0;
-    };
-    std::sort(enums.begin(), enums.end(), cmpName);
+    // TODO: re-enable sorting once startup perf is acceptable
+    // auto countVisible = [&](const Entry& e) { ... };
+    // std::sort(types.begin(), types.end(), cmpChildren);
+    // std::sort(enums.begin(), enums.end(), cmpName);
 
     for (const auto& e : types) {
         QVector<int> members = e.tree->childrenOf(e.node->id);

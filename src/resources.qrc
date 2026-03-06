@@ -64,5 +64,6 @@
         <file alias="pinned.svg">vsicons/pinned.svg</file>
         <file alias="close-all.svg">vsicons/close-all.svg</file>
         <file alias="split-vertical.svg">vsicons/split-vertical.svg</file>
+        <file alias="book.svg">vsicons/book.svg</file>
     </qresource>
 </RCC>
