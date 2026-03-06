@@ -3961,9 +3961,9 @@ void MainWindow::showStartPage() {
     m_startPage = new StartPageWidget(this);
     m_startPage->applyTheme(ThemeManager::instance().current());
 
-    // Size the popup to ~85% of the main window, min 1060 wide for two-column layout
-    QSize sz(qBound(1060, int(width() * 0.85), width() - 40),
-             qBound(560, int(height() * 0.8), height() - 40));
+    // Size the popup to ~90% of the main window
+    QSize sz(qBound(900, int(width() * 0.9), width() - 20),
+             qBound(560, int(height() * 0.85), height() - 20));
     m_startPage->setFixedSize(sz);
 
     // Wire start page signals — each closes the dialog then performs action

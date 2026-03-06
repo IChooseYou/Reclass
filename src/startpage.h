@@ -60,7 +60,7 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
-        const int LX = 48, TM = 36, RM = 48, GAP = 40, RW = 340;
+        const int LX = 48, TM = 36, RM = 32, GAP = 40, RW = 340;
         const int rpX = width() - RW - RM;
         const int lW  = qMax(100, rpX - GAP - LX);
 
@@ -114,8 +114,8 @@ protected:
         auto [z, i] = hitTest(e->pos());
         if (z == HZ_Entry)    emit fileSelected(m_filtered[i].path);
         if (z == HZ_Group)    { m_groups[i].expanded = !m_groups[i].expanded; update(); }
-        if (z == HZ_Card && i == 0) emit openProject();
-        if (z == HZ_Card && i == 1) emit newClass();
+        if (z == HZ_Card && i == 0) emit newClass();
+        if (z == HZ_Card && i == 1) emit openProject();
         if (z == HZ_Card && i == 2) emit importSource();
         if (z == HZ_Card && i == 3) emit importXml();
         if (z == HZ_Card && i == 4) emit importPdb();
@@ -216,11 +216,11 @@ private:
     void drawCards(QPainter& p, int x, int y, int w) {
         struct C { const char* icon; const char* title; const char* desc; };
         static const C cards[] = {
-            {":/vsicons/folder-opened.svg", "Open a project",      "Open an existing .rcx project"},
-            {":/vsicons/symbol-class.svg",  "New Class",           "Start a new binary class definition"},
-            {":/vsicons/file-binary.svg",   "Import from Source",  "Import C/C++ header or source file"},
-            {":/vsicons/code.svg",          "Import ReClass XML",  "Import from ReClass .xml format"},
-            {":/vsicons/debug.svg",         "Import PDB",          "Import types from a .pdb symbol file"}
+            {":/vsicons/symbol-structure.svg", "New Class",          "Start a new binary class definition"},
+            {":/vsicons/folder-opened.svg",    "Open project",      "Open an existing .rcx project"},
+            {":/vsicons/file-binary.svg",      "Import from Source", "Import C/C++ header or source file"},
+            {":/vsicons/code.svg",             "Import ReClass XML", "Import from ReClass .xml format"},
+            {":/vsicons/debug.svg",            "Import PDB",         "Import types from a .pdb symbol file"}
         };
 
         const int N = 5, CH = 84, R = 6, panelH = N * CH;
@@ -263,15 +263,15 @@ private:
 
         p.restore();
 
-        // "Continue ->"
-        int cy = y + N * CH + 16;
+        // "Continue →" centered under the panel
+        int cy = y + panelH + 8;
         QFont lf = font(); lf.setPixelSize(13);
         if (m_hz == HZ_Continue) lf.setUnderline(true);
         p.setFont(lf); p.setPen(m_t.indHoverSpan);
         QFontMetrics lfm(lf);
         QString ct = QStringLiteral("Continue  \u2192");
         int cw = lfm.horizontalAdvance(ct);
-        m_contR = QRectF(x + w - cw, cy, cw, lfm.height());
+        m_contR = QRectF(x + (w - cw) / 2, cy, cw, lfm.height());
         p.drawText(int(m_contR.x()), cy + lfm.ascent(), ct);
     }
 
