@@ -4010,9 +4010,10 @@ void MainWindow::showStartPage() {
 
 void MainWindow::dismissStartPage() {
     if (!m_startPage) return;
-    m_startPage->close();
-    m_startPage->deleteLater();
-    m_startPage = nullptr;
+    auto* sp = m_startPage;
+    m_startPage = nullptr;  // null first — close() may re-enter via rejected signal
+    sp->close();
+    sp->deleteLater();
 }
 
 } // namespace rcx
