@@ -1733,6 +1733,7 @@ void MainWindow::setupDockTabBars() {
 
         // No stylesheet — painting handled by MenuBarStyle
         tabBar->setStyleSheet(QString());
+        tabBar->setAttribute(Qt::WA_Hover, true);
         tabBar->setElideMode(Qt::ElideNone);
         tabBar->setExpanding(false);
         // Set editor font so tab width sizing matches our label painting
@@ -2316,6 +2317,7 @@ void MainWindow::applyTheme(const Theme& theme) {
         if (tabBar->parent() == this) {
             // No stylesheet — painting handled by MenuBarStyle (CE_TabBarTabShape/Label)
             tabBar->setStyleSheet(QString());
+            tabBar->setAttribute(Qt::WA_Hover, true);
             tabBar->setElideMode(Qt::ElideNone);
             tabBar->setExpanding(false);
             // Set editor font so tab width sizing matches our label painting
