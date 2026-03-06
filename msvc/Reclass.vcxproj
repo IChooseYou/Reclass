@@ -72,7 +72,8 @@
       <AdditionalDependencies>dwmapi.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>$(QtToolsPath)/windeployqt $(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName).exe</Command>
+      <Command>$(QtToolsPath)/windeployqt $(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName).exe
+xcopy /Y /I /E "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(Configuration)\examples\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -84,7 +85,8 @@
       <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <PostBuildEvent>
-      <Command>$(QtToolsPath)/windeployqt $(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName).exe</Command>
+      <Command>$(QtToolsPath)/windeployqt $(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName).exe
+xcopy /Y /I /E "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(Configuration)\examples\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
