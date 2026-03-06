@@ -1777,7 +1777,41 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             && !node.bitfieldMembers.isEmpty()
             && subLine >= 0 && subLine < node.bitfieldMembers.size();
 
+        bool isEnumNode = node.resolvedClassKeyword() == QStringLiteral("enum");
+
         if (isEnumMember || isBitfieldMember) {
+            if (isEnumMember) {
+                menu.addAction(icon("diff-added.svg"), "Add Member Above", [this, nodeId, subLine]() {
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni < 0) return;
+                    auto members = m_doc->tree.nodes[ni].enumMembers;
+                    int64_t val = (subLine > 0) ? members[subLine - 1].second + 1 : 0;
+                    auto oldMembers = members;
+                    members.insert(subLine, {QStringLiteral("NewMember"), val});
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeEnumMembers{nodeId, oldMembers, members}));
+                });
+                menu.addAction(icon("diff-added.svg"), "Add Member Below", [this, nodeId, subLine]() {
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni < 0) return;
+                    auto members = m_doc->tree.nodes[ni].enumMembers;
+                    int64_t val = members[subLine].second + 1;
+                    auto oldMembers = members;
+                    members.insert(subLine + 1, {QStringLiteral("NewMember"), val});
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeEnumMembers{nodeId, oldMembers, members}));
+                });
+                menu.addAction(icon("trash.svg"), "Remove Member", [this, nodeId, subLine]() {
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni < 0) return;
+                    auto members = m_doc->tree.nodes[ni].enumMembers;
+                    auto oldMembers = members;
+                    members.remove(subLine);
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeEnumMembers{nodeId, oldMembers, members}));
+                });
+                menu.addSeparator();
+            }
             if (isBitfieldMember) {
                 const auto& bm = node.bitfieldMembers[subLine];
                 if (bm.bitWidth == 1) {
@@ -1791,6 +1825,28 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 }
                 menu.addSeparator();
             }
+            // Fall through to always-available actions
+        } else if (isEnumNode) {
+            // Enum header line — enum-specific actions only (no struct ops)
+            menu.addAction(icon("diff-added.svg"), "Add Member", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni < 0) return;
+                auto members = m_doc->tree.nodes[ni].enumMembers;
+                int64_t nextVal = members.isEmpty() ? 0 : members.last().second + 1;
+                auto oldMembers = members;
+                members.append({QStringLiteral("NewMember"), nextVal});
+                m_doc->undoStack.push(new RcxCommand(this,
+                    cmd::ChangeEnumMembers{nodeId, oldMembers, members}));
+            });
+            menu.addAction(icon("edit.svg"), "&Rename...", [this, editor, line]() {
+                editor->beginInlineEdit(EditTarget::Name, line);
+            });
+            menu.addSeparator();
+            menu.addAction(icon("trash.svg"), "&Delete", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) removeNode(ni);
+            });
+            menu.addSeparator();
             // Fall through to always-available actions
         } else {
 

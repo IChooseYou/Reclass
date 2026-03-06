@@ -1920,6 +1920,26 @@ void MainWindow::setupDockTabBars() {
 
 // Build a minimal empty struct for new documents
 static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QString()) {
+    // ── Enum: bare node with empty enumMembers, no hex children ──
+    if (classKeyword == QStringLiteral("enum")) {
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Unnamed";
+        root.structTypeName = "Unnamed";
+        root.classKeyword = classKeyword;
+        root.parentId = 0;
+        root.offset = 0;
+        root.enumMembers = {
+            {QStringLiteral("Member0"), 0},
+            {QStringLiteral("Member1"), 1},
+            {QStringLiteral("Member2"), 2},
+            {QStringLiteral("Member3"), 3},
+            {QStringLiteral("Member4"), 4},
+        };
+        tree.addNode(root);
+        return;
+    }
+
     Node root;
     root.kind = NodeKind::Struct;
     root.name = "instance";
@@ -1988,7 +2008,10 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::newClass() {
+    auto* first = project_new(QStringLiteral("class"));
     project_new(QStringLiteral("class"));
+    // Select the first tab
+    if (first) first->raise();
 }
 
 void MainWindow::newStruct() {
