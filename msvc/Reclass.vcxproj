@@ -73,7 +73,8 @@
     </Link>
     <PostBuildEvent>
       <Command>$(QtToolsPath)/windeployqt $(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName).exe
-xcopy /Y /I /E "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(Configuration)\examples\"</Command>
+xcopy /Y /I "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(Configuration)\examples\"
+xcopy /Y /I "$(SolutionDir)..\src\themes\defaults\*.json" "$(SolutionDir)$(Platform)\$(Configuration)\themes\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -86,7 +87,8 @@ xcopy /Y /I /E "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\
     </ClCompile>
     <PostBuildEvent>
       <Command>$(QtToolsPath)/windeployqt $(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName).exe
-xcopy /Y /I /E "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(Configuration)\examples\"</Command>
+xcopy /Y /I "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(Configuration)\examples\"
+xcopy /Y /I "$(SolutionDir)..\src\themes\defaults\*.json" "$(SolutionDir)$(Platform)\$(Configuration)\themes\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
