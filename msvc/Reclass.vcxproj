@@ -145,6 +145,7 @@
     <ClInclude Include="..\src\iplugin.h" />
     <ClInclude Include="..\src\pluginmanager.h" />
     <ClInclude Include="..\src\providerregistry.h" />
+    <QtMoc Include="..\src\startpage.h" />
     <ClInclude Include="..\src\workspace_model.h" />
     <ClInclude Include="..\src\imports\export_reclass_xml.h" />
     <ClInclude Include="..\src\imports\import_pdb.h" />

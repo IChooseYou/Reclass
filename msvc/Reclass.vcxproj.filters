@@ -92,6 +92,9 @@
     <QtMoc Include="..\src\dock_tab_buttons.h">
       <Filter>Header Files</Filter>
     </QtMoc>
+    <QtMoc Include="..\src\startpage.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\addressparser.h">
