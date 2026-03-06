@@ -1,5 +1,6 @@
 #include "titlebar.h"
 #include "themes/thememanager.h"
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QStyle>
@@ -76,15 +77,35 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
         QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; }")
             .arg(theme.text.name()));
 
-    // Menu bar palette — hover/bg handled by MenuBarStyle QProxyStyle.
-    // Set Window + Button to background so Fusion never paints a foreign color.
+    // Menu bar palette — all roles used by MenuBarStyle, so live theme
+    // switches don't rely on app-palette inheritance (which can stall
+    // once setPalette has been called on a widget).
     {
         QPalette mbPal = m_menuBar->palette();
         mbPal.setColor(QPalette::Window, theme.background);
         mbPal.setColor(QPalette::Button, theme.background);
         mbPal.setColor(QPalette::ButtonText, theme.text);
+        mbPal.setColor(QPalette::Text, theme.text);
+        mbPal.setColor(QPalette::Highlight, theme.selected);
+        mbPal.setColor(QPalette::Link, theme.indHoverSpan);
+        mbPal.setColor(QPalette::AlternateBase, theme.surface);
+        mbPal.setColor(QPalette::Dark, theme.border);
+        mbPal.setColor(QPalette::Mid, theme.hover);
         m_menuBar->setPalette(mbPal);
         m_menuBar->setAutoFillBackground(false);
+
+        // Propagate to existing QMenu children so dropdown popups update too
+        for (auto* menu : m_menuBar->findChildren<QMenu*>()) {
+            QPalette mp = menu->palette();
+            mp.setColor(QPalette::Window, theme.background);
+            mp.setColor(QPalette::WindowText, theme.text);
+            mp.setColor(QPalette::Text, theme.text);
+            mp.setColor(QPalette::Highlight, theme.selected);
+            mp.setColor(QPalette::Link, theme.indHoverSpan);
+            mp.setColor(QPalette::AlternateBase, theme.surface);
+            mp.setColor(QPalette::Dark, theme.border);
+            menu->setPalette(mp);
+        }
     }
 
     // Chrome buttons
