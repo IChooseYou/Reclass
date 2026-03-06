@@ -140,6 +140,7 @@
     <ClInclude Include="..\src\addressparser.h" />
     <ClInclude Include="..\src\core.h" />
     <ClInclude Include="..\src\disasm.h" />
+    <QtMoc Include="..\src\dock_tab_buttons.h" />
     <ClInclude Include="..\src\generator.h" />
     <ClInclude Include="..\src\iplugin.h" />
     <ClInclude Include="..\src\pluginmanager.h" />
@@ -163,7 +164,12 @@
     <ClCompile Include="..\src\editor.cpp" />
     <ClCompile Include="..\src\format.cpp" />
     <ClCompile Include="..\src\generator.cpp" />
-    <ClCompile Include="..\src\main.cpp" />
+    <ClCompile Include="..\src\main.cpp">
+      <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">input</DynamicSource>
+      <QtMocFileName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(Filename).moc</QtMocFileName>
+      <DynamicSource Condition="'$(Configuration)|$(Platform)'=='Release|x64'">input</DynamicSource>
+      <QtMocFileName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(Filename).moc</QtMocFileName>
+    </ClCompile>
     <ClCompile Include="..\src\optionsdialog.cpp" />
     <ClCompile Include="..\src\pluginmanager.cpp" />
     <ClCompile Include="..\src\processpicker.cpp" />
