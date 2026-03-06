@@ -89,6 +89,9 @@
     <QtMoc Include="..\src\themes\thememanager.h">
       <Filter>Header Files\themes</Filter>
     </QtMoc>
+    <QtMoc Include="..\src\dock_tab_buttons.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\addressparser.h">
@@ -165,9 +168,6 @@
     <ClCompile Include="..\src\generator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\optionsdialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -218,6 +218,9 @@
     </ClCompile>
     <ClCompile Include="..\src\themes\thememanager.cpp">
       <Filter>Source Files\themes</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\main.cpp">
+      <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
