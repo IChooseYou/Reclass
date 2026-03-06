@@ -29,6 +29,8 @@ public:
     void restoreViewState(const ViewState& vs);
 
     QsciScintilla* scintilla() const { return m_sci; }
+    QWidget* historyPopup() const { return m_historyPopup; }
+    QWidget* disasmPopup() const { return m_disasmPopup; }
     QWidget* structPreviewPopup() const { return m_structPreviewPopup; }
     const LineMeta* metaForLine(int line) const;
     int currentNodeIndex() const;

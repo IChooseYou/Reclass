@@ -2768,6 +2768,125 @@ private slots:
                      "Static fields should not have a separator line");
         }
     }
+
+    // ── Test: disasm popup dismisses when mouse moves onto it ("see-through") ──
+    //
+    // Scenario: hover a FuncPtr row → disasm popup appears below the row.
+    // User moves mouse down onto the popup.  The popup covers rows behind it
+    // but the mouse position maps to a different node's row in the viewport
+    // underneath, so the popup must dismiss.
+    void testDisasmPopupDismissesOnMouseMoveThrough() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "TestClass";
+        root.name = "TestClass";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // FuncPtr64 at offset 0 — its value points to "code" at byte 256
+        Node fp;
+        fp.kind = NodeKind::FuncPtr64;
+        fp.name = "VFunc1";
+        fp.parentId = rootId;
+        fp.offset = 0;
+        tree.addNode(fp);
+
+        // A plain UInt64 after it so there's a non-FuncPtr row below
+        Node pad;
+        pad.kind = NodeKind::UInt64;
+        pad.name = "padding";
+        pad.parentId = rootId;
+        pad.offset = 8;
+        tree.addNode(pad);
+
+        // Buffer layout:
+        //   [0..7]     FuncPtr value = 256  (points to code bytes)
+        //   [8..15]    padding field value
+        //   [256..383] x86 code bytes (push rbp; mov rbp,rsp; nop...; ret)
+        QByteArray data(512, '\0');
+        uint64_t codeAddr = 256;
+        memcpy(data.data(), &codeAddr, 8);
+        const uint8_t code[] = {
+            0x55,                   // push rbp
+            0x48, 0x89, 0xE5,      // mov rbp, rsp
+            0x90,                   // nop
+            0x90,                   // nop
+            0x5D,                   // pop rbp
+            0xC3                    // ret
+        };
+        memcpy(data.data() + 256, code, sizeof(code));
+        BufferProvider prov(data, "test_disasm_dismiss");
+
+        ComposeResult cr = compose(tree, prov);
+        m_editor->applyDocument(cr);
+        m_editor->setProviderRef(&prov, nullptr, &tree);
+        QApplication::processEvents();
+
+        // Find the FuncPtr line
+        int fpLine = -1;
+        for (int i = 0; i < cr.meta.size(); ++i) {
+            if (isFuncPtr(cr.meta[i].nodeKind)) {
+                fpLine = i;
+                break;
+            }
+        }
+        QVERIFY2(fpLine >= 0, "Could not find FuncPtr64 line in compose output");
+
+        // Hover over the FuncPtr value column to trigger the disasm popup
+        const LineMeta& lm = cr.meta[fpLine];
+        QString lineText;
+        {
+            long len = m_editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_LINELENGTH, (unsigned long)fpLine);
+            QByteArray buf(len + 1, '\0');
+            m_editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_GETLINE, (uintptr_t)fpLine,
+                static_cast<const char*>(buf.data()));
+            lineText = QString::fromUtf8(buf.left(len));
+        }
+        ColumnSpan vs = m_editor->valueSpan(lm, lineText.size(),
+                                             lm.effectiveTypeW, lm.effectiveNameW);
+        QVERIFY2(vs.valid, "Value span for FuncPtr line is not valid");
+
+        int hoverCol = (vs.start + vs.end) / 2;
+        QPoint vpFP = colToViewport(m_editor->scintilla(), fpLine, hoverCol);
+        sendMouseMove(m_editor->scintilla()->viewport(), vpFP);
+        QApplication::processEvents();
+
+        QWidget* popup = m_editor->disasmPopup();
+        QVERIFY2(popup && popup->isVisible(),
+                 "Disasm popup should be visible after hovering the FuncPtr value");
+
+        // See-through behavior: when the user moves the mouse down from the
+        // viewport onto the popup, the popup's mouseMoveEvent override forwards
+        // the global position back to the viewport hover logic.  If the row
+        // underneath the popup represents a different node, the popup dismisses.
+        //
+        // Simulate by sending a MouseMove event to the popup at a global
+        // position that maps to the CommandRow (line 0) — a non-FuncPtr row.
+        // sendEvent triggers the virtual mouseMoveEvent directly.
+        QPoint vpCmdRow = colToViewport(m_editor->scintilla(), 0, hoverCol);
+        QPoint globalCmdRow = m_editor->scintilla()->viewport()->mapToGlobal(vpCmdRow);
+        QPoint localOnPopup = popup->mapFromGlobal(globalCmdRow);
+        QMouseEvent moveOnPopup(QEvent::MouseMove,
+                                QPointF(localOnPopup), QPointF(globalCmdRow),
+                                Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(popup, &moveOnPopup);
+        QApplication::processEvents();
+
+        QVERIFY2(!popup->isVisible(),
+                 "Disasm popup must dismiss when mouseMoveEvent forwards "
+                 "to a non-FuncPtr row underneath (see-through behavior)");
+
+        // Restore
+        m_editor->setProviderRef(nullptr, nullptr, nullptr);
+        m_editor->applyDocument(m_result);
+    }
 };
 
 QTEST_MAIN(TestEditor)

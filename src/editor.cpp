@@ -40,18 +40,30 @@ class ValueHistoryPopup : public QFrame {
     QStringList m_values;
     QVector<QLabel*> m_labels;
     std::function<void(const QString&)> m_onSet;
+    std::function<void(QMouseEvent*)> m_onMouseMove;
 public:
     explicit ValueHistoryPopup(QWidget* parent)
         : QFrame(parent, Qt::ToolTip | Qt::FramelessWindowHint)
     {
         setAttribute(Qt::WA_DeleteOnClose, false);
         setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setMouseTracking(true);
         setFrameShape(QFrame::NoFrame);
         setAutoFillBackground(true);
     }
 
     uint64_t nodeId() const { return m_nodeId; }
+    bool hasButtons() const { return m_hasButtons; }
     void setOnSet(std::function<void(const QString&)> fn) { m_onSet = std::move(fn); }
+    void setOnMouseMove(std::function<void(QMouseEvent*)> fn) { m_onMouseMove = std::move(fn); }
+protected:
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (!m_hasButtons && m_onMouseMove)
+            m_onMouseMove(e);
+        else
+            QFrame::mouseMoveEvent(e);
+    }
+public:
 
     void populate(uint64_t nodeId, const ValueHistory& hist, const QFont& font,
                   bool showButtons = false) {
@@ -185,12 +197,14 @@ class DisasmPopup : public QFrame {
     QString  m_body;
     QLabel*  m_titleLabel = nullptr;
     QLabel*  m_bodyLabel  = nullptr;
+    std::function<void(QMouseEvent*)> m_onMouseMove;
 public:
     explicit DisasmPopup(QWidget* parent)
         : QFrame(parent, Qt::ToolTip | Qt::FramelessWindowHint)
     {
         setAttribute(Qt::WA_DeleteOnClose, false);
         setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setMouseTracking(true);
         setFrameShape(QFrame::NoFrame);
         setAutoFillBackground(true);
 
@@ -216,8 +230,14 @@ public:
         vbox->addWidget(m_bodyLabel);
     }
 
+    void setOnMouseMove(std::function<void(QMouseEvent*)> fn) { m_onMouseMove = std::move(fn); }
     uint64_t nodeId() const { return m_nodeId; }
-
+protected:
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (m_onMouseMove) m_onMouseMove(e);
+        else QFrame::mouseMoveEvent(e);
+    }
+public:
     void populate(uint64_t nodeId, const QString& title, const QString& body,
                   const QFont& font) {
         if (nodeId == m_nodeId && body == m_body && isVisible())
@@ -283,12 +303,14 @@ class StructPreviewPopup : public QFrame {
     QString  m_body;
     QLabel*  m_titleLabel = nullptr;
     QLabel*  m_bodyLabel  = nullptr;
+    std::function<void(QMouseEvent*)> m_onMouseMove;
 public:
     explicit StructPreviewPopup(QWidget* parent)
         : QFrame(parent, Qt::ToolTip | Qt::FramelessWindowHint)
     {
         setAttribute(Qt::WA_DeleteOnClose, false);
         setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setMouseTracking(true);
         setFrameShape(QFrame::NoFrame);
         setAutoFillBackground(true);
 
@@ -315,7 +337,13 @@ public:
     }
 
     uint64_t nodeId() const { return m_nodeId; }
-
+    void setOnMouseMove(std::function<void(QMouseEvent*)> fn) { m_onMouseMove = std::move(fn); }
+protected:
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (m_onMouseMove) m_onMouseMove(e);
+        else QFrame::mouseMoveEvent(e);
+    }
+public:
     void populate(uint64_t nodeId, const QString& title, const QString& body,
                   const QFont& font) {
         if (nodeId == m_nodeId && body == m_body && isVisible())
@@ -3002,8 +3030,26 @@ void RcxEditor::applyHoverCursor() {
                 if (lm.heatLevel > 0 && lm.nodeId != 0) {
                     auto it = m_valueHistory->find(lm.nodeId);
                     if (it != m_valueHistory->end() && it->uniqueCount() > 1) {
-                        if (!m_historyPopup)
+                        if (!m_historyPopup) {
                             m_historyPopup = new ValueHistoryPopup(this);
+                            static_cast<ValueHistoryPopup*>(m_historyPopup)->setOnMouseMove([this](QMouseEvent* e) {
+                                QPoint gp = e->globalPosition().toPoint();
+                                QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
+                                m_lastHoverPos = vp;
+                                m_hoverInside = m_sci->viewport()->rect().contains(vp);
+                                if (!m_editState.active) {
+                                    auto h2 = hitTest(m_lastHoverPos);
+                                    uint64_t nid = (m_hoverInside && h2.line >= 0) ? h2.nodeId : 0;
+                                    int nln = (m_hoverInside && h2.line >= 0) ? h2.line : -1;
+                                    if (nid != m_hoveredNodeId || nln != m_hoveredLine) {
+                                        m_hoveredNodeId = nid;
+                                        m_hoveredLine = nln;
+                                        applyHoverHighlight();
+                                    }
+                                }
+                                applyHoverCursor();
+                            });
+                        }
                         auto* popup = static_cast<ValueHistoryPopup*>(m_historyPopup);
                         popup->setOnSet([this](const QString& val) {
                             if (!m_editState.active) return;
@@ -3163,8 +3209,26 @@ void RcxEditor::applyHoverCursor() {
                     QString lineText = getLineText(m_sci, h.line);
                     ColumnSpan vs = valueSpan(lm, lineText.size(), lm.effectiveTypeW, lm.effectiveNameW);
                     if (vs.valid && h.col >= vs.start && h.col < vs.end) {
-                        if (!m_historyPopup)
+                        if (!m_historyPopup) {
                             m_historyPopup = new ValueHistoryPopup(this);
+                            static_cast<ValueHistoryPopup*>(m_historyPopup)->setOnMouseMove([this](QMouseEvent* e) {
+                                QPoint gp = e->globalPosition().toPoint();
+                                QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
+                                m_lastHoverPos = vp;
+                                m_hoverInside = m_sci->viewport()->rect().contains(vp);
+                                if (!m_editState.active) {
+                                    auto h2 = hitTest(m_lastHoverPos);
+                                    uint64_t nid = (m_hoverInside && h2.line >= 0) ? h2.nodeId : 0;
+                                    int nln = (m_hoverInside && h2.line >= 0) ? h2.line : -1;
+                                    if (nid != m_hoveredNodeId || nln != m_hoveredLine) {
+                                        m_hoveredNodeId = nid;
+                                        m_hoveredLine = nln;
+                                        applyHoverHighlight();
+                                    }
+                                }
+                                applyHoverCursor();
+                            });
+                        }
                         auto* popup = static_cast<ValueHistoryPopup*>(m_historyPopup);
                         popup->populate(lm.nodeId, *it, editorFont(), false);
                         long linePos = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
@@ -3248,8 +3312,26 @@ void RcxEditor::applyHoverCursor() {
                                     }
                                 }
                                 if (!body.isEmpty()) {
-                                    if (!m_disasmPopup)
+                                    if (!m_disasmPopup) {
                                         m_disasmPopup = new DisasmPopup(this);
+                                        static_cast<DisasmPopup*>(m_disasmPopup)->setOnMouseMove([this](QMouseEvent* e) {
+                                            QPoint gp = e->globalPosition().toPoint();
+                                            QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
+                                            m_lastHoverPos = vp;
+                                            m_hoverInside = m_sci->viewport()->rect().contains(vp);
+                                            if (!m_editState.active) {
+                                                auto h2 = hitTest(m_lastHoverPos);
+                                                uint64_t nid = (m_hoverInside && h2.line >= 0) ? h2.nodeId : 0;
+                                                int nln = (m_hoverInside && h2.line >= 0) ? h2.line : -1;
+                                                if (nid != m_hoveredNodeId || nln != m_hoveredLine) {
+                                                    m_hoveredNodeId = nid;
+                                                    m_hoveredLine = nln;
+                                                    applyHoverHighlight();
+                                                }
+                                            }
+                                            applyHoverCursor();
+                                        });
+                                    }
                                     auto* popup = static_cast<DisasmPopup*>(
                                         m_disasmPopup);
                                     popup->populate(lm.nodeId, title, body,
@@ -3317,8 +3399,26 @@ void RcxEditor::applyHoverCursor() {
                             }
                         }
                         if (!body.isEmpty()) {
-                            if (!m_structPreviewPopup)
+                            if (!m_structPreviewPopup) {
                                 m_structPreviewPopup = new StructPreviewPopup(this);
+                                static_cast<StructPreviewPopup*>(m_structPreviewPopup)->setOnMouseMove([this](QMouseEvent* e) {
+                                    QPoint gp = e->globalPosition().toPoint();
+                                    QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
+                                    m_lastHoverPos = vp;
+                                    m_hoverInside = m_sci->viewport()->rect().contains(vp);
+                                    if (!m_editState.active) {
+                                        auto h2 = hitTest(m_lastHoverPos);
+                                        uint64_t nid = (m_hoverInside && h2.line >= 0) ? h2.nodeId : 0;
+                                        int nln = (m_hoverInside && h2.line >= 0) ? h2.line : -1;
+                                        if (nid != m_hoveredNodeId || nln != m_hoveredLine) {
+                                            m_hoveredNodeId = nid;
+                                            m_hoveredLine = nln;
+                                            applyHoverHighlight();
+                                        }
+                                    }
+                                    applyHoverCursor();
+                                });
+                            }
                             auto* popup = static_cast<StructPreviewPopup*>(m_structPreviewPopup);
                             popup->populate(lm.nodeId,
                                 lm.pointerTargetName, body, editorFont());
