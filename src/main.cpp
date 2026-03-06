@@ -1441,8 +1441,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     splitter->setHandleWidth(1);
     auto* ctrl = new RcxController(doc, splitter);
 
-    QString title = doc->filePath.isEmpty()
-                    ? rootName(doc->tree) : QFileInfo(doc->filePath).fileName();
+    QString title = rootName(doc->tree);
     auto* dock = new QDockWidget(title, this);
     dock->setObjectName(QStringLiteral("DocDock_%1").arg(quintptr(dock), 0, 16));
     dock->setFeatures(QDockWidget::DockWidgetClosable |
@@ -1532,7 +1531,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     dockGrip->hide();
 
     // Swap title bar when floating/docking, show/hide border + grip
-    connect(dock, &QDockWidget::topLevelChanged, this, [dock, emptyTitleBar, floatTitleBar, dockBorder, dockGrip](bool floating) {
+    connect(dock, &QDockWidget::topLevelChanged, this, [this, dock, emptyTitleBar, floatTitleBar, dockBorder, dockGrip](bool floating) {
         dock->setTitleBarWidget(floating ? floatTitleBar : emptyTitleBar);
         if (floating) {
             dockBorder->setGeometry(0, 0, dock->width(), dock->height());
@@ -1544,6 +1543,8 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         } else {
             dockBorder->hide();
             dockGrip->hide();
+            // Re-docking creates a new tab bar — reinstall pin/close buttons
+            QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
         }
     });
     dock->installEventFilter(new DockBorderFilter(dockBorder, dockGrip, dock));
@@ -1667,8 +1668,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
-                    if (it2->doc->filePath.isEmpty())
-                        dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                    dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
                 }
                 rebuildWorkspaceModel();
                 updateWindowTitle();
@@ -1684,8 +1684,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
-                    if (it2->doc->filePath.isEmpty())
-                        dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                    dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
                 }
                 updateWindowTitle();
                 rebuildWorkspaceModel();
@@ -2639,9 +2638,7 @@ void MainWindow::updateWindowTitle() {
     auto* activeDock = m_activeDocDock;
     if (activeDock && m_tabs.contains(activeDock)) {
         auto& tab = m_tabs[activeDock];
-        QString name = tab.doc->filePath.isEmpty()
-                       ? rootName(tab.doc->tree, tab.ctrl->viewRootId())
-                       : QFileInfo(tab.doc->filePath).fileName();
+        QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
         if (tab.doc->modified) name += " *";
         title = name + " - Reclass";
     } else {
@@ -3713,9 +3710,7 @@ void MainWindow::rebuildWorkspaceModel() {
         TabState& tab = it.value();
         if (seenDocs.contains(tab.doc)) continue;  // skip duplicate doc views
         seenDocs.insert(tab.doc);
-        QString name = tab.doc->filePath.isEmpty()
-            ? rootName(tab.doc->tree, tab.ctrl->viewRootId())
-            : QFileInfo(tab.doc->filePath).fileName();
+        QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
         tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
     rcx::buildProjectExplorer(m_workspaceModel, tabs);

@@ -415,9 +415,9 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
             return btn;
         };
 
-        m_chipPrim  = makeChip(QStringLiteral("P"));
-        m_chipTypes = makeChip(QStringLiteral("T"));
-        m_chipEnums = makeChip(QStringLiteral("E"));
+        m_chipPrim  = makeChip(QStringLiteral("Built-in"));
+        m_chipTypes = makeChip(QStringLiteral("Types"));
+        m_chipEnums = makeChip(QStringLiteral("Enum"));
         m_chipPrim->setAccessibleName(QStringLiteral("Show primitives"));
         m_chipTypes->setAccessibleName(QStringLiteral("Show composites"));
         m_chipEnums->setAccessibleName(QStringLiteral("Show enums"));
@@ -1080,9 +1080,9 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     auto updateChipLabel = [](QToolButton* btn, const QString& abbrev, int count) {
         btn->setText(QStringLiteral("%1 (%2)").arg(abbrev).arg(count));
     };
-    if (m_chipPrim)  updateChipLabel(m_chipPrim,  QStringLiteral("P"),  primCount);
-    if (m_chipTypes) updateChipLabel(m_chipTypes, QStringLiteral("T"),  typeCount);
-    if (m_chipEnums) updateChipLabel(m_chipEnums, QStringLiteral("E"),  enumCount);
+    if (m_chipPrim)  updateChipLabel(m_chipPrim,  QStringLiteral("Built-in"),  primCount);
+    if (m_chipTypes) updateChipLabel(m_chipTypes, QStringLiteral("Types"),    typeCount);
+    if (m_chipEnums) updateChipLabel(m_chipEnums, QStringLiteral("Enum"),     enumCount);
 
     if (m_statusLabel)
         m_statusLabel->setText(QStringLiteral("%1 results").arg(resultCount));

@@ -231,17 +231,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         TypePopupMode mode = TypePopupMode::FieldType;
         if (target == EditTarget::ArrayElementType)
             mode = TypePopupMode::ArrayElement;
-        else if (target == EditTarget::PointerTarget) {
-            // Primitive pointers (ptrDepth>0) should open FieldType with
-            // the base type selected and *//** preselected — not PointerTarget.
-            bool isPrimPtr = false;
-            if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
-                const auto& n = m_doc->tree.nodes[nodeIdx];
-                isPrimPtr = n.ptrDepth > 0 && n.refId == 0;
-            }
-            mode = isPrimPtr ? TypePopupMode::FieldType
-                             : TypePopupMode::PointerTarget;
-        }
+        // PointerTarget is handled as FieldType — modifiers * / ** will be pre-selected
         showTypePopup(editor, mode, nodeIdx, globalPos);
     });
 
