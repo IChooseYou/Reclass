@@ -1582,7 +1582,6 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         if (visible) {
             m_activeDocDock = dock;
             updateWindowTitle();
-            rebuildWorkspaceModel();
             // Sync view toggle buttons to this tab's active pane
             auto it = m_tabs.find(dock);
             if (it != m_tabs.end()) {
@@ -2388,19 +2387,30 @@ void MainWindow::applyTheme(const Theme& theme) {
     if (auto* w = findChild<QWidget*>("resizeGrip"))
         static_cast<ResizeGrip*>(w)->setGripColor(theme.textFaint);
 
-    // Workspace tree: colors from theme (selection + text)
+    // Workspace tree: delegate colors, palette, stylesheet
+    if (m_workspaceDelegate)
+        m_workspaceDelegate->setThemeColors(theme);
     if (m_workspaceTree) {
         QPalette tp = m_workspaceTree->palette();
         tp.setColor(QPalette::Text, theme.textDim);
-        tp.setColor(QPalette::Highlight, theme.hover);
+        tp.setColor(QPalette::Highlight, theme.selected);
         tp.setColor(QPalette::HighlightedText, theme.text);
         m_workspaceTree->setPalette(tp);
+        m_workspaceTree->setStyleSheet(QStringLiteral(
+            "QTreeView { background: %1; border: none; }")
+            .arg(theme.background.name()));
+        m_workspaceTree->viewport()->update();
     }
     if (m_workspaceSearch) {
         m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: none;"
-            " border-bottom: 1px solid %3; padding: 4px 6px; }")
-            .arg(theme.background.name(), theme.textDim.name(), theme.border.name()));
+            "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+            " padding: 4px 8px; }"
+            "QLineEdit:focus { border-color: %4; }"
+            "QLineEdit QToolButton { padding: 0px 4px; }"
+            "QLineEdit QToolButton:hover { background: %5; }")
+            .arg(theme.background.name(), theme.textDim.name(),
+                 theme.border.name(), theme.borderFocused.name(),
+                 theme.hover.name()));
     }
 
     // Dock titlebar: restyle via palette + close button
@@ -2590,15 +2600,17 @@ void MainWindow::setEditorFont(const QString& fontName) {
             }
         }
     }
-    // Sync workspace tree font (match tab bar size)
-    if (m_workspaceTree) {
+    // Sync workspace tree, title, and search font (10pt monospace)
+    {
         QFont wf(fontName, 10);
         wf.setFixedPitch(true);
-        m_workspaceTree->setFont(wf);
+        if (m_workspaceTree)
+            m_workspaceTree->setFont(wf);
+        if (m_dockTitleLabel)
+            m_dockTitleLabel->setFont(wf);
+        if (m_workspaceSearch)
+            m_workspaceSearch->setFont(wf);
     }
-    // Sync dock titlebar font
-    if (m_dockTitleLabel)
-        m_dockTitleLabel->setFont(f);
     // Sync scanner panel font
     if (m_scannerPanel)
         m_scannerPanel->setEditorFont(f);
@@ -3314,6 +3326,10 @@ void MainWindow::createWorkspaceDock() {
             QPalette lp = m_dockTitleLabel->palette();
             lp.setColor(QPalette::WindowText, t.textDim);
             m_dockTitleLabel->setPalette(lp);
+            QSettings s("Reclass", "Reclass");
+            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+            f.setFixedPitch(true);
+            m_dockTitleLabel->setFont(f);
         }
         layout->addWidget(m_dockTitleLabel);
 
@@ -3343,11 +3359,34 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceSearch->setPlaceholderText(QStringLiteral("Search..."));
     m_workspaceSearch->setClearButtonEnabled(true);
     {
+        QSettings s("Reclass", "Reclass");
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        f.setFixedPitch(true);
+        m_workspaceSearch->setFont(f);
+    }
+    {
+        auto* searchAction = m_workspaceSearch->addAction(
+            QIcon(QStringLiteral(":/vsicons/search.svg")),
+            QLineEdit::LeadingPosition);
+        // Find the QToolButton created for the action and shrink its icon
+        for (auto* btn : m_workspaceSearch->findChildren<QToolButton*>()) {
+            if (btn->defaultAction() == searchAction) {
+                btn->setIconSize(QSize(14, 14));
+                break;
+            }
+        }
+    }
+    {
         const auto& t = ThemeManager::instance().current();
         m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: none;"
-            " border-bottom: 1px solid %3; padding: 4px 6px; }")
-            .arg(t.background.name(), t.textDim.name(), t.border.name()));
+            "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+            " padding: 4px 8px; }"
+            "QLineEdit:focus { border-color: %4; }"
+            "QLineEdit QToolButton { padding: 0px 4px; }"
+            "QLineEdit QToolButton:hover { background: %5; }")
+            .arg(t.background.name(), t.textDim.name(),
+                 t.border.name(), t.borderFocused.name(),
+                 t.hover.name()));
     }
     dockLayout->addWidget(m_workspaceSearch);
 
@@ -3380,14 +3419,22 @@ void MainWindow::createWorkspaceDock() {
             m_workspaceTree->collapseAll();
     });
 
-    // Override palette: selection + hover use theme colors (not default blue)
+    // Custom delegate for rich text rendering (name bright, metadata dim)
     {
         const auto& t = ThemeManager::instance().current();
+        m_workspaceDelegate = new rcx::WorkspaceDelegate(m_workspaceTree);
+        m_workspaceDelegate->setThemeColors(t);
+        m_workspaceTree->setItemDelegate(m_workspaceDelegate);
+
         QPalette tp = m_workspaceTree->palette();
         tp.setColor(QPalette::Text, t.textDim);
-        tp.setColor(QPalette::Highlight, t.hover);
+        tp.setColor(QPalette::Highlight, t.selected);
         tp.setColor(QPalette::HighlightedText, t.text);
         m_workspaceTree->setPalette(tp);
+
+        m_workspaceTree->setStyleSheet(QStringLiteral(
+            "QTreeView { background: %1; border: none; }")
+            .arg(t.background.name()));
     }
 
     dockLayout->addWidget(m_workspaceTree);
@@ -3714,16 +3761,28 @@ void MainWindow::rebuildAllDocs() {
 }
 
 void MainWindow::rebuildWorkspaceModel() {
+    // Debounce: coalesce rapid calls into a single rebuild
+    if (!m_workspaceRebuildTimer) {
+        m_workspaceRebuildTimer = new QTimer(this);
+        m_workspaceRebuildTimer->setSingleShot(true);
+        m_workspaceRebuildTimer->setInterval(50);
+        connect(m_workspaceRebuildTimer, &QTimer::timeout,
+                this, &MainWindow::rebuildWorkspaceModelNow);
+    }
+    m_workspaceRebuildTimer->start();
+}
+
+void MainWindow::rebuildWorkspaceModelNow() {
     QVector<rcx::TabInfo> tabs;
     QSet<RcxDocument*> seenDocs;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         TabState& tab = it.value();
-        if (seenDocs.contains(tab.doc)) continue;  // skip duplicate doc views
+        if (seenDocs.contains(tab.doc)) continue;
         seenDocs.insert(tab.doc);
         QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
         tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
-    rcx::buildProjectExplorer(m_workspaceModel, tabs);
+    rcx::syncProjectExplorer(m_workspaceModel, tabs);
 }
 
 void MainWindow::addRecentFile(const QString& path) {

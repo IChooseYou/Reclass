@@ -24,6 +24,7 @@ namespace rcx {
 class McpBridge;
 class ShimmerLabel;
 class DockGripWidget;
+class WorkspaceDelegate;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -155,11 +156,14 @@ private:
     QStandardItemModel*   m_workspaceModel  = nullptr;
     QSortFilterProxyModel* m_workspaceProxy = nullptr;
     QLineEdit*            m_workspaceSearch = nullptr;
+    WorkspaceDelegate*    m_workspaceDelegate = nullptr;
     QLabel*               m_dockTitleLabel  = nullptr;
     QToolButton*          m_dockCloseBtn    = nullptr;
     DockGripWidget*       m_dockGrip        = nullptr;
     void createWorkspaceDock();
-    void rebuildWorkspaceModel();
+    void rebuildWorkspaceModel();       // debounced — safe to call frequently
+    void rebuildWorkspaceModelNow();    // immediate rebuild
+    QTimer*               m_workspaceRebuildTimer = nullptr;
     void updateBorderColor(const QColor& color);
 
     // Scanner dock

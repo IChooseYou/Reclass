@@ -500,6 +500,14 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME bench_large_class COMMAND bench_large_class)
 
+        add_executable(bench_project tests/bench_project.cpp)
+        target_include_directories(bench_project PRIVATE src)
+        target_link_libraries(bench_project PRIVATE ${QT}::Widgets ${QT}::Test)
+        if(WIN32)
+            target_link_libraries(bench_project PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME bench_project COMMAND bench_project)
+
         # Deploy Qt runtime DLLs for tests (run windeployqt on a representative test exe
         # that links the broadest set of Qt modules; all test exes share the same output dir)
         if(TARGET ${QT}::windeployqt)

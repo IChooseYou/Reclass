@@ -517,16 +517,11 @@ private slots:
         QVector<TabInfo> tabs = {{ &tree, "TestProject.rcx", nullptr }};
         buildProjectExplorer(&model, tabs);
 
-        // Single "Project" root
+        // Flat model: Player at root (has 2 non-hex members → lazy placeholder)
         QCOMPARE(model.rowCount(), 1);
-        QStandardItem* project = model.item(0);
-        QCOMPARE(project->text(), QString("Project"));
-
-        // 1 type directly under Project: Player (no member fields)
-        QCOMPARE(project->rowCount(), 1);
-        QVERIFY(project->child(0)->text().contains("Player"));
-        QVERIFY(project->child(0)->text().contains("struct"));
-        QCOMPARE(project->child(0)->rowCount(), 0);
+        QVERIFY(model.item(0)->text().contains("Player"));
+        QVERIFY(model.item(0)->text().contains("struct"));
+        QVERIFY(model.item(0)->rowCount() > 0);  // children populated directly
     }
 
     void testWorkspace_twoRootTree() {
@@ -535,15 +530,10 @@ private slots:
         QVector<TabInfo> tabs = {{ &tree, "TwoRoot.rcx", nullptr }};
         buildProjectExplorer(&model, tabs);
 
-        QCOMPARE(model.rowCount(), 1);
-        QStandardItem* project = model.item(0);
-
-        // 2 types sorted alphabetically: Alpha, Bravo (no field children)
-        QCOMPARE(project->rowCount(), 2);
-        QVERIFY(project->child(0)->text().contains("Alpha"));
-        QVERIFY(project->child(1)->text().contains("Bravo"));
-        QCOMPARE(project->child(0)->rowCount(), 0);
-        QCOMPARE(project->child(1)->rowCount(), 0);
+        // Flat model: 2 types at root
+        QCOMPARE(model.rowCount(), 2);
+        QVERIFY(model.item(0)->text().contains("Alpha"));
+        QVERIFY(model.item(1)->text().contains("Bravo"));
     }
 
     void testWorkspace_richTree_rootCount() {
@@ -552,25 +542,19 @@ private slots:
         QVector<TabInfo> tabs = {{ &tree, "Rich.rcx", nullptr }};
         buildProjectExplorer(&model, tabs);
 
-        QStandardItem* project = model.item(0);
-        QCOMPARE(project->rowCount(), 3);  // Ball, Cat, Pet (sorted)
+        QCOMPARE(model.rowCount(), 3);  // Ball, Cat, Pet
     }
 
-    void testWorkspace_richTree_sorted() {
+    void testWorkspace_richTree_insertionOrder() {
         auto tree = makeRichTree();
         QStandardItemModel model;
         QVector<TabInfo> tabs = {{ &tree, "Rich.rcx", nullptr }};
         buildProjectExplorer(&model, tabs);
 
-        QStandardItem* project = model.item(0);
-        // Sorted alphabetically: Ball, Cat, Pet
-        QVERIFY(project->child(0)->text().contains("Ball"));
-        QVERIFY(project->child(1)->text().contains("Cat"));
-        QVERIFY(project->child(2)->text().contains("Pet"));
-        // No member fields under type nodes
-        QCOMPARE(project->child(0)->rowCount(), 0);
-        QCOMPARE(project->child(1)->rowCount(), 0);
-        QCOMPARE(project->child(2)->rowCount(), 0);
+        // Types at root in insertion order: Pet, Cat, Ball
+        QVERIFY(model.item(0)->text().contains("Pet"));
+        QVERIFY(model.item(1)->text().contains("Cat"));
+        QVERIFY(model.item(2)->text().contains("Ball"));
     }
 
     void testWorkspace_emptyTree() {
@@ -579,10 +563,8 @@ private slots:
         QVector<TabInfo> tabs = {{ &tree, "Empty.rcx", nullptr }};
         buildProjectExplorer(&model, tabs);
 
-        // Still has the "Project" root, just no children
-        QCOMPARE(model.rowCount(), 1);
-        QCOMPARE(model.item(0)->text(), QString("Project"));
-        QCOMPARE(model.item(0)->rowCount(), 0);
+        // Flat model: no types means no rows
+        QCOMPARE(model.rowCount(), 0);
     }
 
     void testWorkspace_structIdRole() {
@@ -591,15 +573,11 @@ private slots:
         QVector<TabInfo> tabs = {{ &tree, "Test.rcx", nullptr }};
         buildProjectExplorer(&model, tabs);
 
-        QStandardItem* project = model.item(0);
-        // Project root has kGroupSentinel
-        QCOMPARE(project->data(Qt::UserRole + 1).toULongLong(), kGroupSentinel);
-
-        // Player type item should have structId
-        QStandardItem* player = project->child(0);
+        // Flat model: first item is the Player type with its structId
+        QVERIFY(model.rowCount() > 0);
+        QStandardItem* player = model.item(0);
         QVERIFY(player->data(Qt::UserRole + 1).isValid());
         QVERIFY(player->data(Qt::UserRole + 1).toULongLong() > 0);
-        QVERIFY(player->data(Qt::UserRole + 1).toULongLong() != kGroupSentinel);
     }
 
     // ═══════════════════════════════════════════════════

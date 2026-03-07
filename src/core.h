@@ -333,6 +333,7 @@ struct NodeTree {
     int           pointerSize = 8;    // 4 for 32-bit targets, 8 for 64-bit
     uint64_t      m_nextId    = 1;
     mutable QHash<uint64_t, int> m_idCache;
+    mutable QHash<uint64_t, QVector<int>> m_childCache;
 
     int addNode(const Node& n) {
         Node copy = n;
@@ -342,13 +343,15 @@ struct NodeTree {
         nodes.append(copy);
         if (!m_idCache.isEmpty())
             m_idCache[copy.id] = idx;
+        if (!m_childCache.isEmpty())
+            m_childCache[copy.parentId].append(idx);
         return idx;
     }
 
     // Reserve a unique ID atomically (for use before pushing undo commands)
     uint64_t reserveId() { return m_nextId++; }
 
-    void invalidateIdCache() const { m_idCache.clear(); }
+    void invalidateIdCache() const { m_idCache.clear(); m_childCache.clear(); }
 
     int indexOfId(uint64_t id) const {
         if (m_idCache.isEmpty() && !nodes.isEmpty()) {
@@ -359,11 +362,11 @@ struct NodeTree {
     }
 
     QVector<int> childrenOf(uint64_t parentId) const {
-        QVector<int> result;
-        for (int i = 0; i < nodes.size(); i++) {
-            if (nodes[i].parentId == parentId) result.append(i);
+        if (m_childCache.isEmpty() && !nodes.isEmpty()) {
+            for (int i = 0; i < nodes.size(); i++)
+                m_childCache[nodes[i].parentId].append(i);
         }
-        return result;
+        return m_childCache.value(parentId);
     }
 
     // Collect node + all descendants (iterative, cycle-safe)
@@ -483,6 +486,7 @@ struct NodeTree {
         t.pointerSize = o["pointerSize"].toInt(8);
         t.m_nextId    = o["nextId"].toString("1").toULongLong();
         QJsonArray arr = o["nodes"].toArray();
+        t.nodes.reserve(arr.size());
         for (const auto& v : arr) {
             Node n = Node::fromJson(v.toObject());
             t.nodes.append(n);
