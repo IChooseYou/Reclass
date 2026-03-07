@@ -341,6 +341,19 @@ def parse_field_line(line, offset, parent_id, ids, struct_registry):
     line = re.sub(r'\bvolatile\b', '', line).strip()
     line = re.sub(r'\s+', ' ', line)
 
+    # Check for function pointer: RETURN_TYPE (*NAME)(PARAMS)
+    fnptr_m = re.search(r'\(\*\s*(\w+)\s*\)', line)
+    if fnptr_m:
+        field_name = fnptr_m.group(1)
+        node_id = ids.alloc()
+        return {
+            'id': str(node_id),
+            'kind': 'FuncPtr64',
+            'name': field_name,
+            'offset': offset,
+            'parentId': str(parent_id),
+        }
+
     # Check for struct/union keyword prefix
     keyword = None
     m = re.match(r'^(struct|union|enum)\s+(.+)', line)

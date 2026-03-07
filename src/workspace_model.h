@@ -21,13 +21,6 @@ inline void buildProjectExplorer(QStandardItemModel* model,
     model->clear();
     model->setHorizontalHeaderLabels({QStringLiteral("Name")});
 
-    // Single "Project" root with folder icon
-    void* firstSub = tabs.isEmpty() ? nullptr : tabs[0].subPtr;
-    auto* projectItem = new QStandardItem(QIcon(":/vsicons/folder.svg"),
-                                          QStringLiteral("Project"));
-    projectItem->setData(QVariant::fromValue(firstSub), Qt::UserRole);
-    projectItem->setData(QVariant::fromValue(kGroupSentinel), Qt::UserRole + 1);
-
     // Collect all top-level structs/enums across all tabs
     struct Entry { const Node* node; void* subPtr; const NodeTree* tree; };
     QVector<Entry> types, enums;
@@ -99,7 +92,7 @@ inline void buildProjectExplorer(QStandardItemModel* model,
             item->appendRow(childItem);
         }
 
-        projectItem->appendRow(item);
+        model->appendRow(item);
     }
 
     for (const auto& e : enums) {
@@ -111,10 +104,8 @@ inline void buildProjectExplorer(QStandardItemModel* model,
             QIcon(":/vsicons/symbol-enum.svg"), display);
         item->setData(QVariant::fromValue(e.subPtr), Qt::UserRole);
         item->setData(QVariant::fromValue(e.node->id), Qt::UserRole + 1);
-        projectItem->appendRow(item);
+        model->appendRow(item);
     }
-
-    model->appendRow(projectItem);
 }
 
 } // namespace rcx

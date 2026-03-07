@@ -1774,8 +1774,9 @@ void MainWindow::setupDockTabBars() {
             tabBar->setTabButton(i, QTabBar::RightSide, btns);
         }
 
-        // Context menu (install only once)
+        // Middle-click close + context menu (install only once)
         if (tabBar->contextMenuPolicy() == Qt::CustomContextMenu) continue;
+        tabBar->installEventFilter(this);
         tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(tabBar, &QTabBar::customContextMenuRequested,
                 this, [this, tabBar](const QPoint& pos) {
@@ -1790,9 +1791,6 @@ void MainWindow::setupDockTabBars() {
             if (!target) return;
 
             auto tabIt = m_tabs.find(target);
-            auto* btns = qobject_cast<DockTabButtons*>(
-                tabBar->tabButton(idx, QTabBar::RightSide));
-            bool isPinned = btns && btns->pinned;
 
             QMenu menu;
 
@@ -1816,28 +1814,6 @@ void MainWindow::setupDockTabBars() {
                 });
             }
 
-            // Close All But Pinned (only if any tab is pinned)
-            bool anyPinned = false;
-            for (int i = 0; i < tabBar->count(); ++i) {
-                auto* b = qobject_cast<DockTabButtons*>(
-                    tabBar->tabButton(i, QTabBar::RightSide));
-                if (b && b->pinned) { anyPinned = true; break; }
-            }
-            if (anyPinned) {
-                menu.addAction("Close All But Pinned", [this, tabBar]() {
-                    QVector<QDockWidget*> toClose;
-                    for (int i = 0; i < tabBar->count(); ++i) {
-                        auto* b = qobject_cast<DockTabButtons*>(
-                            tabBar->tabButton(i, QTabBar::RightSide));
-                        if (b && b->pinned) continue;
-                        QString title = tabBar->tabText(i);
-                        for (auto* d : m_docDocks)
-                            if (d->windowTitle() == title) { toClose.append(d); break; }
-                    }
-                    for (auto* d : toClose) d->close();
-                });
-            }
-
             menu.addSeparator();
 
             // Copy Full Path / Open Containing Folder (only if saved)
@@ -1858,14 +1834,6 @@ void MainWindow::setupDockTabBars() {
             });
 
             menu.addSeparator();
-
-            // Pin / Unpin
-            if (btns) {
-                QIcon pinIcon = makeIcon(isPinned ? ":/vsicons/pinned.svg"
-                                                  : ":/vsicons/pin.svg");
-                menu.addAction(pinIcon, isPinned ? "Unpin Tab" : "Pin Tab",
-                               [btns, isPinned]() { btns->setPinned(!isPinned); });
-            }
 
             menu.addSeparator();
 
@@ -1916,6 +1884,25 @@ void MainWindow::setupDockTabBars() {
             menu.exec(tabBar->mapToGlobal(pos));
         });
     }
+}
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    if (event->type() == QEvent::MouseButtonPress) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        if (me->button() == Qt::MiddleButton) {
+            if (auto* tabBar = qobject_cast<QTabBar*>(obj)) {
+                int idx = tabBar->tabAt(me->pos());
+                if (idx >= 0) {
+                    QString title = tabBar->tabText(idx);
+                    for (auto* d : m_docDocks) {
+                        if (d->windowTitle() == title) { d->close(); break; }
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }
 
 // Build a minimal empty struct for new documents
@@ -2008,10 +1995,7 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::newClass() {
-    auto* first = project_new(QStringLiteral("class"));
     project_new(QStringLiteral("class"));
-    // Select the first tab
-    if (first) first->raise();
 }
 
 void MainWindow::newStruct() {
@@ -2606,9 +2590,12 @@ void MainWindow::setEditorFont(const QString& fontName) {
             }
         }
     }
-    // Sync workspace tree font
-    if (m_workspaceTree)
-        m_workspaceTree->setFont(f);
+    // Sync workspace tree font (match tab bar size)
+    if (m_workspaceTree) {
+        QFont wf(fontName, 10);
+        wf.setFixedPitch(true);
+        m_workspaceTree->setFont(wf);
+    }
     // Sync dock titlebar font
     if (m_dockTitleLabel)
         m_dockTitleLabel->setFont(f);
@@ -3378,13 +3365,19 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_workspaceTree->setExpandsOnDoubleClick(false);
     m_workspaceTree->setMouseTracking(true);
+    {
+        QSettings s("Reclass", "Reclass");
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        f.setFixedPitch(true);
+        m_workspaceTree->setFont(f);
+    }
 
     connect(m_workspaceSearch, &QLineEdit::textChanged, this, [this](const QString& text) {
         m_workspaceProxy->setFilterFixedString(text);
         if (!text.isEmpty())
             m_workspaceTree->expandAll();
         else
-            m_workspaceTree->expandToDepth(0);
+            m_workspaceTree->collapseAll();
     });
 
     // Override palette: selection + hover use theme colors (not default blue)
@@ -3402,13 +3395,9 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceTree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_workspaceTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         QModelIndex index = m_workspaceTree->indexAt(pos);
-        if (!index.isValid()) return;
 
-        auto structIdVar = index.data(Qt::UserRole + 1);
-        uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
-
-        // Right-click on "Project" group → New Class / New Struct / New Enum
-        if (structId == rcx::kGroupSentinel) {
+        // Right-click on empty area → New Class / New Struct / New Enum
+        if (!index.isValid()) {
             QMenu menu;
             auto* actClass  = menu.addAction("New Class");
             auto* actStruct = menu.addAction("New Struct");
@@ -3420,6 +3409,8 @@ void MainWindow::createWorkspaceDock() {
             return;
         }
 
+        auto structIdVar = index.data(Qt::UserRole + 1);
+        uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
         if (structId == 0) return;
 
         auto subVar = index.data(Qt::UserRole);
@@ -3523,12 +3514,6 @@ void MainWindow::createWorkspaceDock() {
     connect(m_workspaceTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& index) {
         auto structIdVar = index.data(Qt::UserRole + 1);
         uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
-
-        if (structId == rcx::kGroupSentinel) {
-            // "Project" folder: toggle expand/collapse
-            m_workspaceTree->setExpanded(index, !m_workspaceTree->isExpanded(index));
-            return;
-        }
 
         auto subVar = index.data(Qt::UserRole);
         if (!subVar.isValid()) return;
@@ -3739,7 +3724,6 @@ void MainWindow::rebuildWorkspaceModel() {
         tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
     rcx::buildProjectExplorer(m_workspaceModel, tabs);
-    m_workspaceTree->expandToDepth(0);
 }
 
 void MainWindow::addRecentFile(const QString& path) {

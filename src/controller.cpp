@@ -2821,7 +2821,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         }
 
         // Add types from other open documents
-        if (mode != TypePopupMode::Root && m_projectDocs) {
+        if (m_projectDocs) {
             QSet<QString> localNames;
             for (const auto& e : entries)
                 if (e.entryKind == TypeEntry::Composite)
