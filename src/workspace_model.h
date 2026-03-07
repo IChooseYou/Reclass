@@ -165,9 +165,15 @@ inline void syncProjectExplorer(QStandardItemModel* model,
             item->setText(display);
         item->setData(QVariant::fromValue(e.subPtr), Qt::UserRole);
 
-        // Refresh children for structs
-        if (!e.isEnum)
-            buildStructChildren(item, e.tree, id, e.subPtr);
+        // Refresh children only when count changed (avoids destroying expansion state)
+        if (!e.isEnum) {
+            QVector<int> members = e.tree->childrenOf(id);
+            int visCount = 0;
+            for (int mi : members)
+                if (!isHexPad(e.tree->nodes[mi].kind)) ++visCount;
+            if (item->rowCount() != visCount)
+                buildStructChildren(item, e.tree, id, e.subPtr);
+        }
     }
 
     // Add new items

@@ -2314,10 +2314,6 @@ void MainWindow::applyTheme(const Theme& theme) {
 
     // Dock separator is 1px via PM_DockWidgetSeparatorExtent in MenuBarStyle
 
-    // Custom title bar
-    if (m_titleBar)
-        m_titleBar->applyTheme(theme);
-
     // Start page
     if (m_startPage)
         m_startPage->applyTheme(theme);
@@ -2332,6 +2328,11 @@ void MainWindow::applyTheme(const Theme& theme) {
         "QMainWindow::separator { width: 1px; height: 1px; background: transparent; }"
         "QDockWidget { border: none; }"
         "QDockWidget > QWidget { border: none; }"));
+
+    // Custom title bar — applied AFTER setStyleSheet() because the MainWindow
+    // stylesheet re-resolves descendant palettes and would reset the QMenuBar palette.
+    if (m_titleBar)
+        m_titleBar->applyTheme(theme);
 
     for (auto* tabBar : findChildren<QTabBar*>()) {
         // Only style tab bars owned directly by this QMainWindow (dock tabs),
@@ -2416,19 +2417,19 @@ void MainWindow::applyTheme(const Theme& theme) {
         tp.setColor(QPalette::HighlightedText, theme.text);
         m_workspaceTree->setPalette(tp);
         m_workspaceTree->setStyleSheet(QStringLiteral(
-            "QTreeView { background: %1; border: none; }")
+            "QTreeView { background: %1; border: none; }"
+            "QTreeView::branch:has-children:closed { image: url(:/chevron-right.svg); }"
+            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }")
             .arg(theme.background.name()));
         m_workspaceTree->viewport()->update();
     }
     if (m_workspaceSearch) {
         m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+            "QLineEdit { background: %1; color: %2; border: none;"
             " padding: 4px 8px; }"
-            "QLineEdit:focus { border-color: %4; }"
             "QLineEdit QToolButton { padding: 0px 4px; }"
-            "QLineEdit QToolButton:hover { background: %5; }")
+            "QLineEdit QToolButton:hover { background: %3; }")
             .arg(theme.background.name(), theme.textDim.name(),
-                 theme.border.name(), theme.borderFocused.name(),
                  theme.hover.name()));
     }
 
@@ -2450,6 +2451,9 @@ void MainWindow::applyTheme(const Theme& theme) {
             .arg(theme.textDim.name(), theme.indHoverSpan.name()));
     if (m_dockGrip)
         m_dockGrip->setGripColor(theme.textFaint);
+    if (m_workspaceDock)
+        m_workspaceDock->setStyleSheet(QStringLiteral(
+            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
 
     // Scanner dock
     if (m_scannerPanel)
@@ -3331,7 +3335,7 @@ void MainWindow::createWorkspaceDock() {
         const auto& t = ThemeManager::instance().current();
 
         auto* titleBar = new QWidget(m_workspaceDock);
-        titleBar->setFixedHeight(24);
+        titleBar->setFixedHeight(26);
         titleBar->setAutoFillBackground(true);
         {
             QPalette tbPal = titleBar->palette();
@@ -3371,6 +3375,13 @@ void MainWindow::createWorkspaceDock() {
         layout->addWidget(m_dockCloseBtn);
 
         m_workspaceDock->setTitleBarWidget(titleBar);
+    }
+
+    // Outer border around entire dock (header + search + tree)
+    {
+        const auto& t = ThemeManager::instance().current();
+        m_workspaceDock->setStyleSheet(QStringLiteral(
+            "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
     }
 
     // Container widget: search box + tree view
@@ -3421,13 +3432,11 @@ void MainWindow::createWorkspaceDock() {
     {
         const auto& t = ThemeManager::instance().current();
         m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+            "QLineEdit { background: %1; color: %2; border: none;"
             " padding: 4px 8px; }"
-            "QLineEdit:focus { border-color: %4; }"
             "QLineEdit QToolButton { padding: 0px 4px; }"
-            "QLineEdit QToolButton:hover { background: %5; }")
+            "QLineEdit QToolButton:hover { background: %3; }")
             .arg(t.background.name(), t.textDim.name(),
-                 t.border.name(), t.borderFocused.name(),
                  t.hover.name()));
     }
     dockLayout->addWidget(m_workspaceSearch);
@@ -3473,7 +3482,9 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceTree->setPalette(tp);
 
         m_workspaceTree->setStyleSheet(QStringLiteral(
-            "QTreeView { background: %1; border: none; }")
+            "QTreeView { background: %1; border: none; }"
+            "QTreeView::branch:has-children:closed { image: url(:/chevron-right.svg); }"
+            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }")
             .arg(t.background.name()));
     }
 

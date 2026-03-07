@@ -199,7 +199,7 @@ struct Node {
     QString  offsetExpr;           // C/C++ expression → absolute address (static fields only)
     int      arrayLen   = 1;   // Array: element count
     int      strLen     = 64;
-    bool     collapsed  = false;
+    bool     collapsed  = true;
     uint64_t refId      = 0;       // Pointer32/64: id of Struct to expand at *ptr
     NodeKind elementKind = NodeKind::UInt8;  // Array: element type; Pointer with ptrDepth>0: target type
     int      ptrDepth   = 0;   // Pointer: 0=struct/void ptr, 1=primitive*, 2=primitive**
@@ -285,7 +285,7 @@ struct Node {
         n.offsetExpr = o["offsetExpr"].toString();
         n.arrayLen  = qBound(1, o["arrayLen"].toInt(1), 1000000);
         n.strLen    = qBound(1, o["strLen"].toInt(64), 1000000);
-        n.collapsed = o["collapsed"].toBool(false);
+        n.collapsed = o["collapsed"].toBool(true);
         n.refId     = o["refId"].toString("0").toULongLong();
         n.elementKind = kindFromString(o["elementKind"].toString("UInt8"));
         n.ptrDepth  = qBound(0, o["ptrDepth"].toInt(0), 2);
