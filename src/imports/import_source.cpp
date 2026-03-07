@@ -332,7 +332,10 @@ struct Parser {
     QVector<ParsedStruct> structs;
     QSet<QString> forwardDecls;
     QHash<QString, QString> typedefs; // alias -> real type
+    QSet<QString> pointerTypedefs;    // aliases that are pointer-to-struct
+    QHash<QString, QVector<int>> arrayTypedefs; // aliases that are array types (alias -> dimensions)
     QHash<QString, int> sizeAsserts;  // struct name -> declared size
+    QHash<QString, int> structAlignments; // struct name -> ALIGN(N) value
 
     explicit Parser(const QVector<Token>& t, const QVector<LineOffset>& lo)
         : tokens(t), lineOffsets(lo) {}
@@ -375,12 +378,57 @@ struct Parser {
         }
     }
 
+    // Skip ALIGN( N ) macro if present (Vergilius-style headers)
+    // Returns the alignment value, or 0 if no ALIGN macro.
+    int skipAlignMacro() {
+        if (checkIdent("ALIGN") || checkIdent("__declspec")) {
+            advance();
+            int alignVal = 0;
+            if (match(TokKind::LParen)) {
+                // Try to read the alignment number
+                if (peek().kind == TokKind::Number) {
+                    alignVal = peek().text.toInt();
+                }
+                int depth = 1;
+                while (depth > 0 && peek().kind != TokKind::Eof) {
+                    if (peek().kind == TokKind::LParen) depth++;
+                    else if (peek().kind == TokKind::RParen) depth--;
+                    advance();
+                }
+            }
+            return alignVal;
+        }
+        return 0;
+    }
+
+    // Check if next tokens after keyword are ALIGN(...) then Ident/LBrace
+    bool peekPastAlign(int offset, TokKind expected) const {
+        int i = cur + offset;
+        if (i < tokens.size() && tokens[i].kind == TokKind::Ident &&
+            (tokens[i].text == QStringLiteral("ALIGN") ||
+             tokens[i].text == QStringLiteral("__declspec"))) {
+            i++; // skip ALIGN
+            if (i < tokens.size() && tokens[i].kind == TokKind::LParen) {
+                int depth = 1; i++;
+                while (i < tokens.size() && depth > 0) {
+                    if (tokens[i].kind == TokKind::LParen) depth++;
+                    else if (tokens[i].kind == TokKind::RParen) depth--;
+                    i++;
+                }
+            }
+            return i < tokens.size() && tokens[i].kind == expected;
+        }
+        return false;
+    }
+
     // ── Top-level parse ──
 
     void parse() {
         while (peek().kind != TokKind::Eof) {
             if (checkIdent("struct") || checkIdent("class")) {
                 parseStructOrForward();
+            } else if (checkIdent("union")) {
+                parseTopLevelUnion();
             } else if (checkIdent("static_assert")) {
                 parseStaticAssert();
             } else if (checkIdent("typedef")) {
@@ -400,6 +448,9 @@ struct Parser {
     void parseStructOrForward() {
         QString keyword = advance().text; // "struct" or "class"
 
+        // Skip ALIGN( N ) between keyword and name
+        int alignVal = skipAlignMacro();
+
         // Anonymous struct: struct { ... }
         if (check(TokKind::LBrace)) {
             // Skip anonymous struct at top level
@@ -410,6 +461,9 @@ struct Parser {
 
         if (!check(TokKind::Ident)) { skipToSemiOrBrace(); return; }
         QString name = advance().text;
+
+        if (alignVal > 0)
+            structAlignments[name] = alignVal;
 
         // Check for inheritance: struct Foo : public Bar {
         // Just skip the inheritance clause
@@ -446,14 +500,18 @@ struct Parser {
         while (peek().kind != TokKind::RBrace && peek().kind != TokKind::Eof) {
             // Nested struct definition
             if (checkIdent("struct") || checkIdent("class")) {
-                if (peek(1).kind == TokKind::Ident && peek(2).kind == TokKind::LBrace) {
+                // Check: struct [ALIGN(N)] Name {
+                if ((peek(1).kind == TokKind::Ident && peek(2).kind == TokKind::LBrace) ||
+                    peekPastAlign(1, TokKind::Ident)) {
                     // Nested named struct: parse as a top-level struct, then treat as embedded field
                     parseStructOrForward();
                     continue;
                 }
-                if (peek(1).kind == TokKind::LBrace) {
+                // Check: struct [ALIGN(N)] {
+                if (peek(1).kind == TokKind::LBrace || peekPastAlign(1, TokKind::LBrace)) {
                     // Anonymous nested struct { ... } fieldName;
                     advance(); // skip "struct"
+                    skipAlignMacro();
                     advance(); // skip "{"
                     // Skip body
                     int depth = 1;
@@ -499,8 +557,53 @@ struct Parser {
         }
     }
 
+    // Top-level named union definition: union [ALIGN(N)] Name { ... };
+    // Parsed as a struct with classKeyword "union" and all members as fields
+    void parseTopLevelUnion() {
+        advance(); // skip "union"
+        int alignVal = skipAlignMacro();
+
+        // Forward declaration: union Name;
+        if (check(TokKind::Ident) && peek(1).kind == TokKind::Semi) {
+            QString name = advance().text;
+            advance(); // skip ;
+            forwardDecls.insert(name);
+            return;
+        }
+
+        // Anonymous union at top level (skip)
+        if (check(TokKind::LBrace)) {
+            skipToSemiOrBrace();
+            if (check(TokKind::RBrace)) { advance(); match(TokKind::Semi); }
+            return;
+        }
+
+        if (!check(TokKind::Ident)) { skipToSemiOrBrace(); return; }
+        QString name = advance().text;
+
+        if (alignVal > 0)
+            structAlignments[name] = alignVal;
+
+        if (!match(TokKind::LBrace)) { skipToSemiOrBrace(); return; }
+
+        ParsedStruct ps;
+        ps.name = name;
+        ps.keyword = QStringLiteral("union");
+
+        // Parse body — same as struct body but members overlap at offset 0
+        parseStructBody(ps);
+
+        if (!match(TokKind::RBrace)) { skipToSemiOrBrace(); return; }
+        match(TokKind::Semi);
+
+        structs.append(ps);
+    }
+
     void parseUnion(ParsedStruct& ps) {
         advance(); // skip "union"
+
+        // Skip ALIGN( N ) between union keyword and name/brace
+        skipAlignMacro();
 
         // Optional union tag name (before {)
         if (check(TokKind::Ident) && peek(1).kind == TokKind::LBrace) {
@@ -525,9 +628,11 @@ struct Parser {
                 continue;
             }
 
-            // Handle anonymous struct inside union: struct { ... };
-            if ((checkIdent("struct") || checkIdent("class")) && peek(1).kind == TokKind::LBrace) {
+            // Handle anonymous struct inside union: struct [ALIGN(N)] { ... };
+            if ((checkIdent("struct") || checkIdent("class")) &&
+                (peek(1).kind == TokKind::LBrace || peekPastAlign(1, TokKind::LBrace))) {
                 advance(); // skip "struct"
+                skipAlignMacro();
                 advance(); // skip "{"
                 int depth = 1;
                 while (peek().kind != TokKind::Eof && depth > 0) {
@@ -541,9 +646,10 @@ struct Parser {
                 continue;
             }
 
-            // Handle nested named struct definition inside union
+            // Handle nested named struct definition inside union: struct [ALIGN(N)] Name {
             if ((checkIdent("struct") || checkIdent("class")) &&
-                peek(1).kind == TokKind::Ident && peek(2).kind == TokKind::LBrace) {
+                ((peek(1).kind == TokKind::Ident && peek(2).kind == TokKind::LBrace) ||
+                 peekPastAlign(1, TokKind::Ident))) {
                 parseStructOrForward();
                 continue;
             }
@@ -584,13 +690,26 @@ struct Parser {
         QString typeName = parseTypeName();
         if (typeName.isEmpty()) { cur = startPos; return false; }
 
-        // Resolve typedef
-        while (typedefs.contains(typeName))
-            typeName = typedefs[typeName];
+        // Resolve typedef — track pointer and array typedefs in the chain
+        bool typedefPointer = false;
+        QVector<int> typedefArrayDims;
+        {
+            QString resolved = typeName;
+            QSet<QString> seen;
+            while (typedefs.contains(resolved) && !seen.contains(resolved)) {
+                if (pointerTypedefs.contains(resolved))
+                    typedefPointer = true;
+                if (typedefArrayDims.isEmpty() && arrayTypedefs.contains(resolved))
+                    typedefArrayDims = arrayTypedefs[resolved];
+                seen.insert(resolved);
+                resolved = typedefs[resolved];
+            }
+            typeName = resolved;
+        }
 
         // Pointer stars
-        bool isPointer = false;
-        int ptrDepth = 0;
+        bool isPointer = typedefPointer;
+        int ptrDepth = typedefPointer ? 1 : 0;
         while (match(TokKind::Star)) {
             isPointer = true;
             ptrDepth++;
@@ -626,6 +745,18 @@ struct Parser {
                 field.arraySizes.append(0); // unsized array
             }
             match(TokKind::RBracket);
+        }
+
+        // Apply array dimensions from typedef (e.g. typedef ULONG GDI_HANDLE_BUFFER[60])
+        if (!typedefArrayDims.isEmpty()) {
+            if (field.arraySizes.isEmpty())
+                field.arraySizes = typedefArrayDims;
+            else {
+                // Combine: typedef dims come first, field dims appended
+                QVector<int> combined = typedefArrayDims;
+                combined.append(field.arraySizes);
+                field.arraySizes = combined;
+            }
         }
 
         // Bitfield: Type name : width
@@ -750,28 +881,83 @@ struct Parser {
                 parseStructOrForward();
                 return;
             }
-            // typedef struct ExistingName AliasName;
+            // typedef struct ExistingName * AliasName;
             advance(); // skip struct/class
             if (check(TokKind::Ident)) {
                 QString existingName = advance().text;
                 // Pointer stars
-                while (match(TokKind::Star)) {}
+                bool hasPtr = false;
+                while (match(TokKind::Star)) { hasPtr = true; }
+                // Skip const/volatile after pointer
+                while (checkIdent("const") || checkIdent("volatile")) advance();
                 if (check(TokKind::Ident)) {
                     QString aliasName = advance().text;
-                    typedefs[aliasName] = existingName;
+                    if (aliasName != existingName) { // skip self-referencing typedefs
+                        typedefs[aliasName] = existingName;
+                        if (hasPtr) pointerTypedefs.insert(aliasName);
+                    }
                 }
             }
             match(TokKind::Semi);
             return;
         }
 
-        // typedef BaseType AliasName;
+        // typedef BaseType [*] AliasName [N];
+        // Skip leading const/volatile qualifiers: typedef const Type* Alias;
+        while (checkIdent("const") || checkIdent("volatile")) advance();
         QString baseType = parseTypeName();
         if (baseType.isEmpty()) { skipToSemiOrBrace(); return; }
-        while (match(TokKind::Star)) {} // pointer typedefs
+        bool hasPtr = false;
+        while (match(TokKind::Star)) { hasPtr = true; }
+        // Skip const/volatile after pointer
+        while (checkIdent("const") || checkIdent("volatile")) advance();
+        while (match(TokKind::Star)) { hasPtr = true; }
+
+        // Function pointer typedef: typedef RetType ( *Name )( args... );
+        if (check(TokKind::LParen)) {
+            int save = cur;
+            advance(); // skip (
+            bool isFnPtr = false;
+            QString fnName;
+            if (match(TokKind::Star) && check(TokKind::Ident)) {
+                fnName = advance().text;
+                if (match(TokKind::RParen) && check(TokKind::LParen)) {
+                    isFnPtr = true;
+                }
+            }
+            if (isFnPtr) {
+                // Skip the argument list and register as pointer type
+                skipToSemiOrBrace();
+                pointerTypedefs.insert(fnName);
+                typedefs[fnName] = QStringLiteral("void");
+            } else {
+                cur = save;
+                skipToSemiOrBrace();
+            }
+            return;
+        }
+
         if (check(TokKind::Ident)) {
             QString alias = advance().text;
-            typedefs[alias] = baseType;
+            // Array dimensions: typedef Type Name[N][M];
+            QVector<int> dims;
+            while (check(TokKind::LBracket)) {
+                advance();
+                if (check(TokKind::Number)) {
+                    bool ok;
+                    QString numText = peek().text;
+                    int val = numText.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)
+                        ? numText.mid(2).toInt(&ok, 16) : numText.toInt(&ok);
+                    if (ok) dims.append(val);
+                    advance();
+                }
+                match(TokKind::RBracket);
+            }
+            if (alias != baseType) { // skip self-referencing typedefs
+                typedefs[alias] = baseType;
+                if (hasPtr) pointerTypedefs.insert(alias);
+                if (!dims.isEmpty()) arrayTypedefs[alias] = dims;
+            }
         }
         match(TokKind::Semi);
     }
@@ -945,7 +1131,61 @@ struct BuildContext {
     bool useCommentOffsets;
     QSet<QString> enumNames;  // enum type names (emit as UInt32 + refId)
     int ptrSize = 8;          // target pointer size (4 or 8)
+    const QHash<QString, int>& sizeAsserts; // declared struct sizes from static_assert
+    const QHash<QString, int>& structAlignments; // struct name -> ALIGN(N) value
 };
+
+// Forward declaration
+static int fieldNaturalAlignment(const ParsedField& field, const BuildContext& ctx);
+
+// Compute natural alignment for a union from its members (max member alignment)
+static int unionNaturalAlignment(const ParsedField& field, const BuildContext& ctx) {
+    int maxAlign = 1;
+    for (const auto& member : field.unionMembers) {
+        int a = fieldNaturalAlignment(member, ctx);
+        if (a > maxAlign) maxAlign = a;
+    }
+    return maxAlign;
+}
+
+// Return natural alignment for a parsed field (used when computing offsets without comments)
+static int fieldNaturalAlignment(const ParsedField& field, const BuildContext& ctx) {
+    if (field.isPointer) return ctx.ptrSize;
+    if (field.isUnion) return unionNaturalAlignment(field, ctx);
+    if (field.bitfieldWidth >= 0) {
+        // Bitfield alignment is determined by its storage type
+        auto it = ctx.typeTable.find(field.typeName);
+        if (it != ctx.typeTable.end()) return alignmentFor(it->kind);
+        return 4; // default bitfield alignment
+    }
+    auto it = ctx.typeTable.find(field.typeName);
+    if (it != ctx.typeTable.end()) return alignmentFor(it->kind);
+    // Unknown type (struct reference) — align to pointer size
+    return ctx.ptrSize;
+}
+
+static inline int alignUp(int offset, int align) {
+    return (offset + align - 1) & ~(align - 1);
+}
+
+// Look up the byte size of a struct type (from already-built tree or static_assert declarations)
+static int structTypeSize(const QString& typeName, const BuildContext& ctx) {
+    auto classIt = ctx.classIds.find(typeName);
+    if (classIt != ctx.classIds.end()) {
+        int span = ctx.tree.structSpan(classIt.value());
+        if (span > 0) {
+            // Pad to struct's declared alignment (ALIGN(N))
+            auto alignIt = ctx.structAlignments.find(typeName);
+            if (alignIt != ctx.structAlignments.end() && *alignIt > 1)
+                span = alignUp(span, *alignIt);
+            return span;
+        }
+    }
+    auto sizeIt = ctx.sizeAsserts.find(typeName);
+    if (sizeIt != ctx.sizeAsserts.end())
+        return sizeIt.value();
+    return 0;
+}
 
 static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
                         const QVector<ParsedField>& fields) {
@@ -959,8 +1199,11 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             int groupOffset;
             if (ctx.useCommentOffsets && field.commentOffset >= 0)
                 groupOffset = field.commentOffset - baseOffset;
-            else
+            else {
+                int bfAlign = fieldNaturalAlignment(field, ctx);
+                computedOffset = alignUp(computedOffset, bfAlign);
                 groupOffset = computedOffset;
+            }
             int startIdx = fi;
             int totalBits = 0;
             while (fi < fields.size() && fields[fi].bitfieldWidth >= 0) {
@@ -982,8 +1225,11 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             int unionOffset;
             if (ctx.useCommentOffsets && field.commentOffset >= 0)
                 unionOffset = field.commentOffset - baseOffset;
-            else
+            else {
+                int uAlign = fieldNaturalAlignment(field, ctx);
+                computedOffset = alignUp(computedOffset, uAlign);
                 unionOffset = computedOffset;
+            }
 
             Node unionNode;
             unionNode.kind = NodeKind::Struct;
@@ -1013,8 +1259,11 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
         int fieldOffset;
         if (ctx.useCommentOffsets && field.commentOffset >= 0)
             fieldOffset = field.commentOffset - baseOffset;
-        else
+        else {
+            int fAlign = fieldNaturalAlignment(field, ctx);
+            computedOffset = alignUp(computedOffset, fAlign);
             fieldOffset = computedOffset;
+        }
 
         // Resolve type
         auto typeIt = ctx.typeTable.find(field.typeName);
@@ -1022,8 +1271,27 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
 
         // Pointer field
         if (field.isPointer) {
+            NodeKind ptrKind = (ctx.ptrSize >= 8) ? NodeKind::Pointer64 : NodeKind::Pointer32;
+
+            // Array of pointers: PVOID arr[N]
+            if (!field.arraySizes.isEmpty()) {
+                int totalElements = 1;
+                for (int dim : field.arraySizes) totalElements *= (dim > 0 ? dim : 1);
+
+                Node n;
+                n.kind = NodeKind::Array;
+                n.name = field.name;
+                n.parentId = parentId;
+                n.offset = fieldOffset;
+                n.arrayLen = totalElements;
+                n.elementKind = ptrKind;
+                ctx.tree.addNode(n);
+                computedOffset = fieldOffset + totalElements * ctx.ptrSize;
+                continue;
+            }
+
             Node n;
-            n.kind = (ctx.ptrSize >= 8) ? NodeKind::Pointer64 : NodeKind::Pointer32;
+            n.kind = ptrKind;
             n.name = field.name;
             n.parentId = parentId;
             n.offset = fieldOffset;
@@ -1098,7 +1366,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             if (firstDim <= 0) firstDim = 1;
 
             if (baseKind == NodeKind::Int8 && field.arraySizes.size() == 1 &&
-                field.typeName == QStringLiteral("char")) {
+                field.typeName == QStringLiteral("char") && firstDim <= 128) {
                 Node n;
                 n.kind = NodeKind::UTF8;
                 n.name = field.name;
@@ -1111,7 +1379,8 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             }
 
             if (baseKind == NodeKind::UInt16 && field.arraySizes.size() == 1 &&
-                (field.typeName == QStringLiteral("wchar_t") || field.typeName == QStringLiteral("WCHAR"))) {
+                (field.typeName == QStringLiteral("wchar_t") || field.typeName == QStringLiteral("WCHAR")) &&
+                firstDim <= 128) {
                 Node n;
                 n.kind = NodeKind::UTF16;
                 n.name = field.name;
@@ -1165,6 +1434,8 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
 
         // Struct-type field
         if (isStructType) {
+            int elemSize = structTypeSize(field.typeName, ctx);
+
             if (!field.arraySizes.isEmpty()) {
                 int totalElements = 1;
                 for (int dim : field.arraySizes) totalElements *= (dim > 0 ? dim : 1);
@@ -1182,6 +1453,8 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
                 int nodeIdx = ctx.tree.addNode(n);
                 uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
                 ctx.pendingRefs.append({nodeId, field.typeName});
+                if (elemSize > 0)
+                    computedOffset = fieldOffset + totalElements * elemSize;
                 continue;
             }
 
@@ -1196,6 +1469,8 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             int nodeIdx = ctx.tree.addNode(n);
             uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
             ctx.pendingRefs.append({nodeId, field.typeName});
+            if (elemSize > 0)
+                computedOffset = fieldOffset + elemSize;
             continue;
         }
 
@@ -1271,7 +1546,7 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg, int poin
             enumNames.insert(ps.name);
     }
 
-    BuildContext ctx{tree, typeTable, classIds, pendingRefs, useCommentOffsets, enumNames, pointerSize};
+    BuildContext ctx{tree, typeTable, classIds, pendingRefs, useCommentOffsets, enumNames, pointerSize, parser.sizeAsserts, parser.structAlignments};
 
     // Build nodes for each struct/enum
     for (const auto& ps : parser.structs) {

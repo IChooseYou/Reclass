@@ -22,6 +22,32 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS ${_QT_COMPONENTS})
 set(QT Qt${QT_VERSION_MAJOR})
 message(STATUS "Using ${QT}: ${${QT}_DIR}")
 
+# ── ABI sanity check: prevent MSVC ↔ MinGW Qt mismatch ──
+# Building with MSVC against MinGW Qt (or vice versa) compiles fine but
+# crashes immediately at runtime (ABI mismatch in QString/QSettings internals).
+if(MSVC AND "${${QT}_DIR}" MATCHES "mingw")
+    message(FATAL_ERROR
+        "Qt installation was built with MinGW but this project is being compiled with MSVC.\n"
+        "  Qt found at: ${${QT}_DIR}\n"
+        "This will compile but crash at startup due to ABI mismatch.\n"
+        "Fix: install Qt for MSVC (e.g. msvc2019_64) and set CMAKE_PREFIX_PATH to it:\n"
+        "  cmake -DCMAKE_PREFIX_PATH=C:/Qt/6.5.2/msvc2019_64 ..")
+elseif(MINGW AND "${${QT}_DIR}" MATCHES "msvc")
+    message(FATAL_ERROR
+        "Qt installation was built with MSVC but this project is being compiled with MinGW.\n"
+        "  Qt found at: ${${QT}_DIR}\n"
+        "This will compile but crash at startup due to ABI mismatch.\n"
+        "Fix: install Qt for MinGW and set CMAKE_PREFIX_PATH to it:\n"
+        "  cmake -DCMAKE_PREFIX_PATH=C:/Qt/6.5.2/mingw_64 ..")
+endif()
+
+# ── MSVC compile flags ──
+if(MSVC)
+    # /utf-8: treat source and execution character sets as UTF-8
+    # /MP: multi-processor compilation
+    add_compile_options(/utf-8 /MP)
+endif()
+
 # Qt5 on Windows needs WinExtras for HICON conversion
 set(_QT_WINEXTRAS "")
 if(QT_VERSION_MAJOR EQUAL 5 AND WIN32)
@@ -184,12 +210,30 @@ if(APPLE)
     )
 endif()
 
-# Copy built-in theme JSON files to build directory
+# Copy built-in theme JSON files next to the executable.
+# For single-config generators (Ninja/Make) the exe is in ${CMAKE_BINARY_DIR},
+# for multi-config generators (MSVC/Xcode) it's in ${CMAKE_BINARY_DIR}/<config>.
+# Using a post-build copy with $<TARGET_FILE_DIR:Reclass> handles both.
 file(GLOB _theme_files "${CMAKE_SOURCE_DIR}/src/themes/defaults/*.json")
-file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/themes")
+
+# Single-config: configure_file for IDE convenience (available before first build)
+if(NOT CMAKE_CONFIGURATION_TYPES)
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/themes")
+    foreach(_tf ${_theme_files})
+        get_filename_component(_name ${_tf} NAME)
+        configure_file(${_tf} "${CMAKE_BINARY_DIR}/themes/${_name}" COPYONLY)
+    endforeach()
+endif()
+
+# Post-build: always copy to the actual exe directory (works for all generators)
+add_custom_command(TARGET Reclass POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Reclass>/themes"
+    COMMENT "Creating themes directory next to executable")
 foreach(_tf ${_theme_files})
     get_filename_component(_name ${_tf} NAME)
-    configure_file(${_tf} "${CMAKE_BINARY_DIR}/themes/${_name}" COPYONLY)
+    add_custom_command(TARGET Reclass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_tf}" "$<TARGET_FILE_DIR:Reclass>/themes/${_name}")
 endforeach()
 
 if(APPLE)
@@ -198,12 +242,25 @@ if(APPLE)
         PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/themes")
 endif()
 
-# Copy example .rcx files to build directory
+# Copy example .rcx files next to the executable (same logic as themes)
 file(GLOB _example_files "${CMAKE_SOURCE_DIR}/src/examples/*.rcx")
-file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+
+if(NOT CMAKE_CONFIGURATION_TYPES)
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+    foreach(_ef ${_example_files})
+        get_filename_component(_name ${_ef} NAME)
+        configure_file(${_ef} "${CMAKE_BINARY_DIR}/examples/${_name}" COPYONLY)
+    endforeach()
+endif()
+
+add_custom_command(TARGET Reclass POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Reclass>/examples"
+    COMMENT "Creating examples directory next to executable")
 foreach(_ef ${_example_files})
     get_filename_component(_name ${_ef} NAME)
-    configure_file(${_ef} "${CMAKE_BINARY_DIR}/examples/${_name}" COPYONLY)
+    add_custom_command(TARGET Reclass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_ef}" "$<TARGET_FILE_DIR:Reclass>/examples/${_name}")
 endforeach()
 
 if(APPLE)

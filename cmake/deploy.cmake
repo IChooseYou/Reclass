@@ -1,7 +1,7 @@
 # cmake/deploy.cmake - Dual-mode script for deploying Qt runtime DLLs
 #
 # Script mode:  cmake -P deploy.cmake <target_exe> <windeployqt>
-# Include mode: include(deploy) from CMakeLists.txt (creates "deploy" target)
+# Include mode: include(deploy) from CMakeLists.txt (creates "deploy" target + post-build)
 
 if(CMAKE_SCRIPT_MODE_FILE)
     set(TARGET_EXE ${CMAKE_ARGV3})
@@ -17,7 +17,6 @@ if(CMAKE_SCRIPT_MODE_FILE)
 
     execute_process(
         COMMAND ${WINDEPLOYQT}
-            --pdb
             --no-compiler-runtime
             --no-translations
             --no-opengl-sw
@@ -67,6 +66,7 @@ if(NOT TARGET ${QT}::windeployqt AND TARGET ${QT}::qmake)
 endif()
 
 if(TARGET ${QT}::windeployqt)
+    # Standalone "deploy" target (can still be invoked manually)
     add_custom_target(deploy
         COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/deploy.cmake
             $<TARGET_FILE:Reclass>
@@ -79,4 +79,13 @@ if(TARGET ${QT}::windeployqt)
     set_target_properties(deploy PROPERTIES
         ADDITIONAL_CLEAN_FILES $<TARGET_FILE_DIR:Reclass>/.qt_deployed
     )
+
+    # Auto-deploy as post-build step so the correct Qt DLLs are always next
+    # to the exe.  Without this, MSVC builds load whatever Qt DLLs happen to
+    # be in PATH (often MinGW ones), causing instant ABI-mismatch crashes.
+    add_custom_command(TARGET Reclass POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/deploy.cmake
+            $<TARGET_FILE:Reclass>
+            $<TARGET_FILE:${QT}::windeployqt>
+        COMMENT "Auto-deploying Qt runtime DLLs...")
 endif()

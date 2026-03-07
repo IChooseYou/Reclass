@@ -498,9 +498,9 @@ void TestImportSource::computedOffsets() {
     auto kids = childrenOf(tree, tree.nodes[0].id);
     QCOMPARE(kids.size(), 4);
     QCOMPARE(tree.nodes[kids[0]].offset, 0);  // uint8_t at 0
-    QCOMPARE(tree.nodes[kids[1]].offset, 1);  // uint16_t at 1
-    QCOMPARE(tree.nodes[kids[2]].offset, 3);  // uint32_t at 3
-    QCOMPARE(tree.nodes[kids[3]].offset, 7);  // uint64_t at 7
+    QCOMPARE(tree.nodes[kids[1]].offset, 2);  // uint16_t at 2 (aligned)
+    QCOMPARE(tree.nodes[kids[2]].offset, 4);  // uint32_t at 4 (aligned)
+    QCOMPARE(tree.nodes[kids[3]].offset, 8);  // uint64_t at 8 (aligned)
 }
 
 void TestImportSource::mixedOffsetsAutoDetect() {
@@ -805,7 +805,7 @@ void TestImportSource::bitfieldSkipped() {
     QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[1].bitWidth, (uint8_t)12);
     QCOMPARE(tree.nodes[kids[1]].bitfieldMembers[1].bitOffset, (uint8_t)4);
     QCOMPARE(tree.nodes[kids[2]].name, QStringLiteral("after"));
-    QCOMPARE(tree.nodes[kids[2]].offset, 6);
+    QCOMPARE(tree.nodes[kids[2]].offset, 8);  // aligned to uint32_t boundary
 }
 
 void TestImportSource::bitfieldWithOffsetsEmitsHex() {
