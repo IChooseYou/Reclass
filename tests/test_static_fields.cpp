@@ -360,17 +360,45 @@ private slots:
     }
 
     void testComposeNoStaticFieldsWhenCollapsed() {
-        TestTree t;
-        t.addField("x", NodeKind::Float, 0);
-        t.addStaticField("h", "base");
-        // Collapse the root struct
-        t.tree.nodes[0].collapsed = true;
+        // Use a non-root struct to test collapsed behavior
+        // (root structs are always expanded via isRootHeader)
+        NodeTree tree;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node child;
+        child.kind = NodeKind::Struct;
+        child.name = "Child";
+        child.parentId = rootId;
+        child.offset = 0;
+        child.collapsed = true;  // collapsed child struct
+        int ci = tree.addNode(child);
+        uint64_t childId = tree.nodes[ci].id;
+
+        Node f;
+        f.kind = NodeKind::Float;
+        f.name = "x";
+        f.parentId = childId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "h";
+        sf.parentId = childId;
+        sf.offset = 0;
+        sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base");
+        tree.addNode(sf);
 
         NullProvider prov;
-        ComposeResult result = compose(t.tree, prov);
+        ComposeResult result = compose(tree, prov);
 
         // When collapsed, no static field lines should appear
-        QStringList lines = result.text.split('\n');
         for (const auto& lm : result.meta)
             QVERIFY2(!lm.isStaticLine,
                      "Static field line should not appear when struct is collapsed");

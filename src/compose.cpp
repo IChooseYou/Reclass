@@ -587,7 +587,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         }
 
         // ── Static fields: render after regular children, before footer ──
-        if (!staticIdxs.isEmpty() && !node.collapsed) {
+        if (!staticIdxs.isEmpty() && (!node.collapsed || isRootHeader)) {
             // Build identifier resolver for static field expressions
             auto makeResolver = [&](uint64_t parentAbsAddr) {
                 AddressParserCallbacks cbs;

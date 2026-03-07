@@ -234,6 +234,7 @@ private slots:
         child.name = "Child";
         child.parentId = rootId;
         child.offset = 0;
+        child.collapsed = false;
         int ci = tree.addNode(child);
         uint64_t childId = tree.nodes[ci].id;
 
@@ -281,6 +282,7 @@ private slots:
         inner.name = "Inner";
         inner.parentId = rootId;
         inner.offset = 4;
+        inner.collapsed = false;
         int ii = tree.addNode(inner);
         uint64_t innerId = tree.nodes[ii].id;
 
@@ -354,6 +356,7 @@ private slots:
         tmpl.name = "VTable";
         tmpl.parentId = 0;
         tmpl.offset = 200;  // far away so standalone rendering uses offset 200
+        tmpl.collapsed = false;
         int ti = tree.addNode(tmpl);
         uint64_t tmplId = tree.nodes[ti].id;
 
@@ -378,6 +381,7 @@ private slots:
         ptr.parentId = mainId;
         ptr.offset = 4;
         ptr.refId = tmplId;
+        ptr.collapsed = false;
         tree.addNode(ptr);
 
         // Provider: pointer at offset 4 points to address 100
@@ -434,6 +438,7 @@ private slots:
         tmpl.name = "Target";
         tmpl.parentId = 0;
         tmpl.offset = 200;
+        tmpl.collapsed = false;
         int ti = tree.addNode(tmpl);
         uint64_t tmplId = tree.nodes[ti].id;
 
@@ -450,6 +455,7 @@ private slots:
         ptr.parentId = mainId;
         ptr.offset = 0;
         ptr.refId = tmplId;
+        ptr.collapsed = false;
         tree.addNode(ptr);
 
         // All zeros = null pointer
@@ -493,6 +499,7 @@ private slots:
         tmpl.name = "Target";
         tmpl.parentId = 0;
         tmpl.offset = 200;
+        tmpl.collapsed = false;  // standalone rendering shows children
         int ti = tree.addNode(tmpl);
         uint64_t tmplId = tree.nodes[ti].id;
 
@@ -509,7 +516,7 @@ private slots:
         ptr.parentId = mainId;
         ptr.offset = 0;
         ptr.refId = tmplId;
-        ptr.collapsed = true;  // collapsed
+        ptr.collapsed = true;  // collapsed — this is the test condition
         tree.addNode(ptr);
 
         // Non-null pointer
@@ -548,6 +555,7 @@ private slots:
         tmpl.name = "Recursive";
         tmpl.parentId = 0;
         tmpl.offset = 200;
+        tmpl.collapsed = false;
         int ti = tree.addNode(tmpl);
         uint64_t tmplId = tree.nodes[ti].id;
 
@@ -565,6 +573,7 @@ private slots:
         backPtr.parentId = tmplId;
         backPtr.offset = 4;
         backPtr.refId = tmplId;  // points back to same struct
+        backPtr.collapsed = false;
         tree.addNode(backPtr);
 
         // Pointer in Main → Recursive
@@ -574,6 +583,7 @@ private slots:
         ptr.parentId = mainId;
         ptr.offset = 0;
         ptr.refId = tmplId;
+        ptr.collapsed = false;
         tree.addNode(ptr);
 
         // Provider: main ptr at offset 0 points to 100
@@ -696,6 +706,7 @@ private slots:
         arr.offset = 0;
         arr.elementKind = NodeKind::Int32;
         arr.arrayLen = 10;
+        arr.collapsed = false;
         tree.addNode(arr);
 
         NullProvider prov;
@@ -847,6 +858,7 @@ private slots:
         arr.offset = 0;
         arr.elementKind = NodeKind::Int32;
         arr.arrayLen = 2;
+        arr.collapsed = false;
         int ai = tree.addNode(arr);
         uint64_t arrId = tree.nodes[ai].id;
 
@@ -856,6 +868,7 @@ private slots:
         elem0.name = "Item";
         elem0.parentId = arrId;
         elem0.offset = 0;
+        elem0.collapsed = false;
         int e0i = tree.addNode(elem0);
         uint64_t elem0Id = tree.nodes[e0i].id;
 
@@ -871,6 +884,7 @@ private slots:
         elem1.name = "Item";
         elem1.parentId = arrId;
         elem1.offset = 4;
+        elem1.collapsed = false;
         int e1i = tree.addNode(elem1);
         uint64_t elem1Id = tree.nodes[e1i].id;
 
@@ -1035,6 +1049,7 @@ private slots:
         arr.offset = 0;
         arr.elementKind = NodeKind::UInt32;
         arr.arrayLen = 4;
+        arr.collapsed = false;
         tree.addNode(arr);
 
         // Buffer with known values: 0x11, 0x22, 0x33, 0x44
@@ -1140,6 +1155,7 @@ private slots:
         arr.offset = 0;
         arr.elementKind = NodeKind::Struct;
         arr.arrayLen = 1;
+        arr.collapsed = false;
         int ai = tree.addNode(arr);
         uint64_t arrId = tree.nodes[ai].id;
 
@@ -1149,6 +1165,7 @@ private slots:
         elem.name = "Item";
         elem.parentId = arrId;
         elem.offset = 0;
+        elem.collapsed = false;
         int ei = tree.addNode(elem);
         uint64_t elemId = tree.nodes[ei].id;
 
@@ -1481,6 +1498,7 @@ private slots:
         structC.structTypeName = "InnerData";
         structC.parentId = 0;
         structC.offset = 300;
+        structC.collapsed = false;
         int ci = tree.addNode(structC);
         uint64_t structCId = tree.nodes[ci].id;
 
@@ -1498,6 +1516,7 @@ private slots:
         structB.structTypeName = "Wrapper";
         structB.parentId = 0;
         structB.offset = 200;
+        structB.collapsed = false;
         int bi = tree.addNode(structB);
         uint64_t structBId = tree.nodes[bi].id;
 
@@ -1514,6 +1533,7 @@ private slots:
         bptr.parentId = structBId;
         bptr.offset = 4;
         bptr.refId = structCId;  // points to InnerData
+        bptr.collapsed = false;
         tree.addNode(bptr);
 
         // Root's pointer to StructB
@@ -1523,6 +1543,7 @@ private slots:
         rptr.parentId = rootId;
         rptr.offset = 0;
         rptr.refId = structBId;
+        rptr.collapsed = false;
         tree.addNode(rptr);
 
         // Provider: rptr at 0 → addr 100, bptr at 100+4=104 → addr 150
@@ -1591,6 +1612,7 @@ private slots:
         structB.name = "StructB";
         structB.parentId = 0;
         structB.offset = 200;
+        structB.collapsed = false;
         int bi = tree.addNode(structB);
         uint64_t structBId = tree.nodes[bi].id;
 
@@ -1608,6 +1630,7 @@ private slots:
         ptrToB.parentId = mainId;
         ptrToB.offset = 4;
         ptrToB.refId = structBId;
+        ptrToB.collapsed = false;
         tree.addNode(ptrToB);
 
         // StructB → Main pointer (creates cycle!)
@@ -1617,6 +1640,7 @@ private slots:
         ptrToMain.parentId = structBId;
         ptrToMain.offset = 4;
         ptrToMain.refId = mainId;
+        ptrToMain.collapsed = false;
         tree.addNode(ptrToMain);
 
         // Provider: Main.to_b at offset 4 → addr 100
@@ -2009,6 +2033,7 @@ private slots:
         u.name = "u1";
         u.parentId = rootId;
         u.offset = 0;
+        u.collapsed = false;
         int ui = tree.addNode(u);
         uint64_t uId = tree.nodes[ui].id;
 
@@ -2655,6 +2680,7 @@ private slots:
         inner.kind = NodeKind::Struct;
         inner.name = "NewClass";
         inner.parentId = 0;
+        inner.collapsed = false;
         inner.offset = 200;
         int ii = tree.addNode(inner);
         uint64_t innerId = tree.nodes[ii].id;
@@ -2688,6 +2714,7 @@ private slots:
         ptr.parentId = rootId;
         ptr.offset = 8;
         ptr.refId = innerId;
+        ptr.collapsed = false;
         tree.addNode(ptr);
 
         // Last child: hex64 at depth 1

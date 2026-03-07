@@ -214,6 +214,7 @@ private slots:
         vptr.parentId = rootId;
         vptr.offset = 0;
         vptr.refId = vtId;
+        vptr.collapsed = false;
         tree.addNode(vptr);
 
         // Compose the tree
@@ -408,6 +409,7 @@ private slots:
 
         Node vptr; vptr.kind = NodeKind::Pointer64; vptr.name = "__vptr";
         vptr.parentId = rootId; vptr.offset = 0; vptr.refId = vtId;
+        vptr.collapsed = false;
         tree.addNode(vptr);
 
         // Compose with the snapshot (like production: compose uses snapshot)
