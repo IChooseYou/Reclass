@@ -73,6 +73,13 @@ public:
     // Default: returns empty (scan engine falls back to [0, size())).
     virtual QVector<MemoryRegion> enumerateRegions() const { return {}; }
 
+    // Process Environment Block address (x64 PEB VA in target process).
+    // Only meaningful for live process providers. Returns 0 if unavailable.
+    virtual uint64_t peb() const { return 0; }
+
+    struct ThreadInfo { uint64_t tebAddress; uint32_t threadId; };
+    virtual QVector<ThreadInfo> tebs() const { return {}; }
+
     // --- Derived convenience (non-virtual, never override) ---
 
     bool isValid() const { return size() > 0; }

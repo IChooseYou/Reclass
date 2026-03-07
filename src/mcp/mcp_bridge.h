@@ -60,6 +60,7 @@ private:
     QJsonObject toolUiAction(const QJsonObject& args);
     QJsonObject toolTreeSearch(const QJsonObject& args);
     QJsonObject toolNodeHistory(const QJsonObject& args);
+    QJsonObject toolProcessInfo(const QJsonObject& args);
 
     // Helpers
     QJsonObject makeTextResult(const QString& text, bool isError = false);
