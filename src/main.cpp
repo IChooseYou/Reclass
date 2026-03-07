@@ -509,7 +509,19 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
 
     qApp->setPalette(pal);
 
-    qApp->setStyleSheet(QString());
+    // Global scrollbar styling — track matches control bg, handle is solid
+    qApp->setStyleSheet(QStringLiteral(
+        "QScrollBar:vertical { background: palette(window); width: 12px; margin: 0; border: none; }"
+        "QScrollBar::handle:vertical { background: %1; min-height: 20px; border: none; }"
+        "QScrollBar::handle:vertical:hover { background: %2; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
+        "QScrollBar:horizontal { background: palette(window); height: 12px; margin: 0; border: none; }"
+        "QScrollBar::handle:horizontal { background: %1; min-width: 20px; border: none; }"
+        "QScrollBar::handle:horizontal:hover { background: %2; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }")
+        .arg(theme.textFaint.name(), theme.textDim.name()));
 }
 
 class BorderOverlay : public QWidget {
@@ -1218,16 +1230,20 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Style to match the top dock tab bar, with accent line on selected tab
     {
         const auto& t = ThemeManager::instance().current();
+        QSettings s("Reclass", "Reclass");
+        QString editorFont = s.value("font", "JetBrains Mono").toString();
         pane.tabWidget->setStyleSheet(QStringLiteral(
             "QTabBar { border: none; }"
             "QTabBar::tab {"
             "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
+            "  font-family: '%7'; font-size: 10pt;"
             "}"
             "QTabBar::tab:selected { color: %3; background: %4;"
             "  border-top: 3px solid %6; padding-top: -3px; }"
             "QTabBar::tab:hover { color: %3; background: %5; }")
             .arg(t.background.name(), t.textMuted.name(), t.text.name(),
-                 t.backgroundAlt.name(), t.hover.name(), t.indHoverSpan.name()));
+                 t.backgroundAlt.name(), t.hover.name(), t.indHoverSpan.name(),
+                 editorFont));
     }
 
     // Create editor via controller (parent = tabWidget for ownership)
@@ -2352,16 +2368,19 @@ void MainWindow::applyTheme(const Theme& theme) {
 
     // Restyle per-pane view tab bars (Reclass / C++)
     {
+        QString editorFont = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
         QString paneTabStyle = QStringLiteral(
             "QTabBar { border: none; }"
             "QTabBar::tab {"
             "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
+            "  font-family: '%7'; font-size: 10pt;"
             "}"
             "QTabBar::tab:selected { color: %3; background: %4;"
             "  border-top: 3px solid %6; padding-top: -3px; }"
             "QTabBar::tab:hover { color: %3; background: %5; }")
             .arg(theme.background.name(), theme.textMuted.name(), theme.text.name(),
-                 theme.backgroundAlt.name(), theme.hover.name(), theme.indHoverSpan.name());
+                 theme.backgroundAlt.name(), theme.hover.name(), theme.indHoverSpan.name(),
+                 editorFont);
         for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
             for (auto& pane : it->panes) {
                 if (pane.tabWidget)
@@ -2498,10 +2517,11 @@ void MainWindow::applyTheme(const Theme& theme) {
                 lexer->setColor(theme.text, QsciLexerCPP::Identifier);
                 lexer->setColor(theme.syntaxPreproc, QsciLexerCPP::PreProcessor);
                 lexer->setColor(theme.text, QsciLexerCPP::Operator);
+                const QColor editorBg = theme.background.darker(115);
                 for (int i = 0; i <= 127; i++)
-                    lexer->setPaper(theme.background, i);
+                    lexer->setPaper(editorBg, i);
             }
-            sci->setPaper(theme.background);
+            sci->setPaper(theme.background.darker(115));
             sci->setColor(theme.text);
             sci->setCaretForegroundColor(theme.text);
             sci->setCaretLineBackgroundColor(theme.hover);
@@ -2631,6 +2651,9 @@ void MainWindow::setEditorFont(const QString& fontName) {
                 tabBar->update();
             }
         }
+        // Pane tab bars (Reclass / C++) — re-apply stylesheet with new font
+        // (stylesheet overrides setFont, so font must be in the CSS)
+        applyTheme(ThemeManager::instance().current());
     }
 }
 
@@ -2716,15 +2739,16 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     lexer->setColor(theme.text, QsciLexerCPP::Identifier);
     lexer->setColor(theme.syntaxPreproc, QsciLexerCPP::PreProcessor);
     lexer->setColor(theme.text, QsciLexerCPP::Operator);
+    const QColor editorBg = theme.background.darker(115);
     for (int i = 0; i <= 127; i++) {
-        lexer->setPaper(theme.background, i);
+        lexer->setPaper(editorBg, i);
         lexer->setFont(f, i);
     }
     sci->setLexer(lexer);
     sci->setBraceMatching(QsciScintilla::NoBraceMatch);
 
     // Colors applied AFTER setLexer() — the lexer resets these on attach
-    sci->setPaper(theme.background);
+    sci->setPaper(editorBg);
     sci->setColor(theme.text);
     sci->setCaretForegroundColor(theme.text);
     sci->setCaretLineVisible(true);
@@ -2980,7 +3004,7 @@ void MainWindow::importFromSource() {
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
     }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 classes from source").arg(classCount));
@@ -3034,7 +3058,7 @@ void MainWindow::importPdb() {
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
     }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 classes from %2")
@@ -3225,7 +3249,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         rebuildWorkspaceModel();
         if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
     }
     m_workspaceDock->show();
         int classCount = 0;
@@ -3251,7 +3275,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {220}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
     }
     m_workspaceDock->show();
     addRecentFile(filePath);

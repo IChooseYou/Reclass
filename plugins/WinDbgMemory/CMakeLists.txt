@@ -20,7 +20,7 @@ set(PLUGIN_SOURCES
 add_library(WinDbgMemoryPlugin SHARED ${PLUGIN_SOURCES})
 
 # Link Qt + DbgEng
-target_link_libraries(WinDbgMemoryPlugin PRIVATE ${QT}::Widgets dbgeng ole32)
+target_link_libraries(WinDbgMemoryPlugin PRIVATE ${QT}::Widgets ole32)
 
 # Include directories
 target_include_directories(WinDbgMemoryPlugin PRIVATE

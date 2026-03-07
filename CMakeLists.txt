@@ -151,6 +151,26 @@ target_link_libraries(Reclass PRIVATE
 )
 if(WIN32)
     target_link_libraries(Reclass PRIVATE dbghelp dwmapi psapi raw_pdb)
+
+    # Copy Debugging Tools dbghelp.dll next to Reclass.exe so the Windows
+    # loader picks it up (app dir > System32).  The system dbghelp.dll
+    # lacks StackWalk2 which the tools dbgeng.dll needs for remote debug.
+    set(_DBG_TOOLS_DIRS
+        "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64"
+        "C:/Program Files/Windows Kits/10/Debuggers/x64")
+    foreach(_dir ${_DBG_TOOLS_DIRS})
+        if(EXISTS "${_dir}/dbghelp.dll")
+            foreach(_dll dbghelp.dll dbgcore.dll symsrv.dll)
+                if(EXISTS "${_dir}/${_dll}")
+                    add_custom_command(TARGET Reclass POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${_dir}/${_dll}" $<TARGET_FILE_DIR:Reclass>
+                        COMMENT "Copying ${_dll} from Debugging Tools")
+                endif()
+            endforeach()
+            break()
+        endif()
+    endforeach()
 endif()
 
 add_executable(ReclassMcpBridge tools/rcx-mcp-stdio.cpp)

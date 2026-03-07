@@ -219,7 +219,7 @@ public:
         if (opt.state & QStyle::State_Selected) {
             painter->fillRect(opt.rect, m_selected);
             // Left accent bar
-            painter->fillRect(QRect(opt.rect.x(), opt.rect.y(), 2, opt.rect.height()), m_accent);
+            painter->fillRect(QRect(opt.rect.x(), opt.rect.y(), 1, opt.rect.height()), m_accent);
         } else if (opt.state & QStyle::State_MouseOver) {
             painter->fillRect(opt.rect, m_hover);
         }

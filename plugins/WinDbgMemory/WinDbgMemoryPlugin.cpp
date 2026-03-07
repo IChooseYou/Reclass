@@ -12,12 +12,99 @@
 #include <QDebug>
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QSettings>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <initguid.h>
 #include <dbgeng.h>
-#pragma comment(lib, "dbgeng.lib")
+// dbgeng.dll is loaded dynamically — see loadDbgEngTools()
+
+// The system dbgeng.dll (C:\Windows\System32) does not support remote
+// connections (DebugConnect returns 0x8007053d).  The full version lives
+// in the Debugging Tools for Windows directory.  We load it dynamically
+// so the plugin works without requiring the debugger tools on PATH.
+static const char* const kDbgToolsDirs[] = {
+    "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64",
+    "C:\\Program Files\\Windows Kits\\10\\Debuggers\\x64",
+};
+static const char* const kSettingsKey = "WinDbgPlugin/DbgToolsDir";
+
+typedef HRESULT (STDAPICALLTYPE *PFN_DebugConnect)(PCSTR, REFIID, PVOID*);
+typedef HRESULT (STDAPICALLTYPE *PFN_DebugCreate)(REFIID, PVOID*);
+
+static QString  s_loadedDir;
+static HMODULE  s_hDbgEng = nullptr;
+
+static HMODULE tryLoadFrom(const char* dir) {
+    SetDllDirectoryA(dir);
+    // Pre-load dependencies so the tools versions are used instead of
+    // the older System32 copies (e.g. dbghelp.dll without StackWalk2).
+    char path[MAX_PATH];
+    for (auto dep : {"dbghelp.dll", "dbgcore.dll", "symsrv.dll"}) {
+        snprintf(path, sizeof(path), "%s\\%s", dir, dep);
+        LoadLibraryA(path); // OK if missing
+    }
+    snprintf(path, sizeof(path), "%s\\dbgeng.dll", dir);
+    HMODULE h = LoadLibraryA(path);
+    if (h) {
+        s_loadedDir = QString::fromLocal8Bit(dir);
+        qDebug() << "[WinDbg] Loaded dbgeng.dll from" << dir;
+    }
+    return h;
+}
+
+static HMODULE loadDbgEngTools() {
+    if (s_hDbgEng) return s_hDbgEng;
+
+    // 1. Try user-configured path from settings
+    QSettings settings;
+    QString userDir = settings.value(kSettingsKey).toString();
+    if (!userDir.isEmpty()) {
+        s_hDbgEng = tryLoadFrom(userDir.toLocal8Bit().constData());
+        if (s_hDbgEng) return s_hDbgEng;
+    }
+
+    // 2. Try well-known install paths
+    for (auto dir : kDbgToolsDirs) {
+        s_hDbgEng = tryLoadFrom(dir);
+        if (s_hDbgEng) return s_hDbgEng;
+    }
+
+    SetDllDirectoryA(nullptr);
+    return nullptr;
+}
+
+static bool dbgToolsFound() {
+    loadDbgEngTools();
+    return s_hDbgEng != nullptr;
+}
+
+static PFN_DebugConnect getDebugConnect() {
+    static PFN_DebugConnect pfn = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        HMODULE h = loadDbgEngTools();
+        if (h) pfn = (PFN_DebugConnect)GetProcAddress(h, "DebugConnect");
+        if (!pfn) qWarning() << "[WinDbg] DebugConnect not available — Debugging Tools not found";
+    }
+    return pfn;
+}
+
+static PFN_DebugCreate getDebugCreate() {
+    static PFN_DebugCreate pfn = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        HMODULE h = loadDbgEngTools();
+        if (h) pfn = (PFN_DebugCreate)GetProcAddress(h, "DebugCreate");
+        if (!pfn) qWarning() << "[WinDbg] DebugCreate not available — Debugging Tools not found";
+    }
+    return pfn;
+}
 #endif
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -65,6 +152,9 @@ WinDbgMemoryProvider::WinDbgMemoryProvider(const QString& target)
     dispatchToOwner([this, &target]() {
         HRESULT hr;
 
+        // COM must be initialized on this thread for DbgEng
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
         qDebug() << "[WinDbg] Opening target:" << target
                  << "on DbgEng thread" << QThread::currentThread();
 
@@ -72,9 +162,11 @@ WinDbgMemoryProvider::WinDbgMemoryProvider(const QString& target)
             || target.startsWith("npipe:", Qt::CaseInsensitive))
         {
             // ── Remote: connect to existing WinDbg debug server ──
+            auto pfnConnect = getDebugConnect();
+            if (!pfnConnect) { qWarning() << "[WinDbg] Debugging Tools required for remote connections"; return; }
             QByteArray connUtf8 = target.toUtf8();
             qDebug() << "[WinDbg] DebugConnect:" << target;
-            hr = DebugConnect(connUtf8.constData(), IID_IDebugClient, (void**)&m_client);
+            hr = pfnConnect(connUtf8.constData(), IID_IDebugClient, (void**)&m_client);
             qDebug() << "[WinDbg] DebugConnect hr=" << Qt::hex << (unsigned long)hr
                      << "client=" << (void*)m_client;
             if (FAILED(hr) || !m_client) {
@@ -86,7 +178,9 @@ WinDbgMemoryProvider::WinDbgMemoryProvider(const QString& target)
         else
         {
             // ── Local: create debug client for pid/dump ──
-            hr = DebugCreate(IID_IDebugClient, (void**)&m_client);
+            auto pfnCreate = getDebugCreate();
+            if (!pfnCreate) { qWarning() << "[WinDbg] Debugging Tools required"; return; }
+            hr = pfnCreate(IID_IDebugClient, (void**)&m_client);
             qDebug() << "[WinDbg] DebugCreate hr=" << Qt::hex << (unsigned long)hr
                      << "client=" << (void*)m_client;
             if (FAILED(hr) || !m_client) {
@@ -239,6 +333,7 @@ WinDbgMemoryProvider::~WinDbgMemoryProvider()
                     m_client->DetachProcesses();
             }
             cleanup();
+            CoUninitialize();
         });
     } else {
         // Thread not running — clean up directly (best-effort)
@@ -503,7 +598,7 @@ std::unique_ptr<rcx::Provider> WinDbgMemoryPlugin::createProvider(const QString&
                 *errorMsg = QString("Failed to connect to debug server.\n\n"
                                    "Target: %1\n\n"
                                    "Make sure WinDbg is running with a matching .server command\n"
-                                   "(e.g. .server tcp:port=5055) and the port/pipe is reachable.")
+                                   "(e.g. .server tcp:port=5056) and the port/pipe is reachable.")
                             .arg(target);
             else if (target.startsWith("pid:", Qt::CaseInsensitive))
                 *errorMsg = QString("Failed to attach to process.\n\n"
@@ -532,7 +627,7 @@ bool WinDbgMemoryPlugin::selectTarget(QWidget* parent, QString* target)
 {
     QDialog dlg(parent);
     dlg.setWindowTitle("WinDbg Settings");
-    dlg.resize(460, 300);
+    dlg.resize(480, 360);
 
     QPalette dlgPal = qApp->palette();
     dlg.setPalette(dlgPal);
@@ -540,17 +635,27 @@ bool WinDbgMemoryPlugin::selectTarget(QWidget* parent, QString* target)
 
     auto* layout = new QVBoxLayout(&dlg);
 
+    QColor editBg = dlgPal.window().color().darker(115);
+    QString editSS = QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+        " border-radius: 3px; padding: 4px 6px; }")
+        .arg(editBg.name(),
+             dlgPal.color(QPalette::Text).name(),
+             dlgPal.color(QPalette::Mid).name());
+
     layout->addWidget(new QLabel(
         "Connect to a running WinDbg debug server.\n"
-        "In WinDbg, run:  .server tcp:port=5055\n\n"
+        "In WinDbg, run:  .server tcp:port=5056\n\n"
         "Non-invasive debug and dump files only.\n"
-        "Execution control (bp, g, t, p) is not supported."));
+        "Execution control (bp, g, t, p) is not supported.\n"
+        "WinDbg Classic is recommended."));
 
     layout->addSpacing(8);
     layout->addWidget(new QLabel("Connection string:"));
     auto* connEdit = new QLineEdit;
-    connEdit->setPlaceholderText("tcp:Port=5055,Server=localhost");
-    connEdit->setText("tcp:Port=5055,Server=localhost");
+    connEdit->setPlaceholderText("tcp:Port=5056,Server=127.0.0.1");
+    connEdit->setText("tcp:Port=5056,Server=127.0.0.1");
+    connEdit->setStyleSheet(editSS);
     layout->addWidget(connEdit);
 
     layout->addSpacing(4);
@@ -574,8 +679,72 @@ bool WinDbgMemoryPlugin::selectTarget(QWidget* parent, QString* target)
         layout->addLayout(row);
     };
 
-    addExample(".server tcp:port=5055");
+    addExample(".server tcp:port=5056");
     addExample(".server npipe:pipe=reclass");
+
+    // ── Debugger Tools status ──
+    layout->addSpacing(8);
+#ifdef _WIN32
+    bool found = dbgToolsFound();
+    auto* toolsRow = new QHBoxLayout;
+    auto* toolsLabel = new QLabel;
+    if (found) {
+        toolsLabel->setText(QStringLiteral("Debugging Tools:  %1").arg(s_loadedDir));
+        QPalette tp = dlgPal;
+        tp.setColor(QPalette::WindowText, dlgPal.color(QPalette::Disabled, QPalette::WindowText));
+        toolsLabel->setPalette(tp);
+    } else {
+        toolsLabel->setText("Debugging Tools:  not found");
+        QPalette tp = dlgPal;
+        tp.setColor(QPalette::WindowText, QColor(220, 120, 80));
+        toolsLabel->setPalette(tp);
+    }
+    toolsLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    toolsRow->addWidget(toolsLabel, 1);
+
+    auto* browseBtn = new QPushButton("Browse...");
+    browseBtn->setFixedWidth(70);
+    browseBtn->setToolTip("Locate Debugging Tools for Windows directory (contains dbgeng.dll)");
+    QObject::connect(browseBtn, &QPushButton::clicked, [&dlg, toolsLabel, &dlgPal]() {
+        QString dir = QFileDialog::getExistingDirectory(&dlg,
+            "Locate Debugging Tools for Windows",
+            "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers");
+        if (dir.isEmpty()) return;
+        QString dllPath = dir + "/dbgeng.dll";
+        if (!QFileInfo::exists(dllPath)) {
+            QMessageBox::warning(&dlg, "Not Found",
+                "dbgeng.dll was not found in that directory.\n"
+                "Select the folder containing dbgeng.dll\n"
+                "(e.g. Debuggers\\x64).");
+            return;
+        }
+        QSettings settings;
+        settings.setValue(kSettingsKey, dir);
+        // Force reload on next use
+        s_hDbgEng = nullptr;
+        s_loadedDir.clear();
+        if (dbgToolsFound()) {
+            toolsLabel->setText(QStringLiteral("Debugging Tools:  %1").arg(s_loadedDir));
+            QPalette tp = dlgPal;
+            tp.setColor(QPalette::WindowText, dlgPal.color(QPalette::Disabled, QPalette::WindowText));
+            toolsLabel->setPalette(tp);
+        }
+    });
+    toolsRow->addWidget(browseBtn);
+    layout->addLayout(toolsRow);
+
+    if (!found) {
+        auto* note = new QLabel(
+            "The system dbgeng.dll does not support remote connections.\n"
+            "Install Debugging Tools for Windows or use Browse to locate them.");
+        QPalette np = dlgPal;
+        np.setColor(QPalette::WindowText, dlgPal.color(QPalette::Disabled, QPalette::WindowText));
+        note->setPalette(np);
+        note->setWordWrap(true);
+        layout->addWidget(note);
+    }
+#endif
+
     layout->addStretch();
 
     auto* btnLayout = new QHBoxLayout;

@@ -837,8 +837,11 @@ void RcxEditor::allocateMarginStyles() {
 }
 
 void RcxEditor::applyTheme(const Theme& theme) {
+    // Editor uses a slightly darker background than chrome for visual depth
+    const QColor editorBg = theme.background.darker(115);
+
     // Paper and text
-    m_sci->setPaper(theme.background);
+    m_sci->setPaper(editorBg);
     m_sci->setColor(theme.text);
     m_sci->setCaretForegroundColor(theme.text);
 
@@ -882,25 +885,25 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_lexer->setColor(theme.text, QsciLexerCPP::Operator);
     m_lexer->setColor(theme.syntaxType, QsciLexerCPP::GlobalClass);
     for (int i = 0; i <= 127; i++)
-        m_lexer->setPaper(theme.background, i);
+        m_lexer->setPaper(editorBg, i);
 
     // Margins
-    m_sci->setMarginsBackgroundColor(theme.background);
+    m_sci->setMarginsBackgroundColor(editorBg);
     m_sci->setMarginsForegroundColor(theme.textFaint);
-    m_sci->setFoldMarginColors(theme.background, theme.background);
+    m_sci->setFoldMarginColors(editorBg, editorBg);
 
     // Markers
     m_sci->setMarkerBackgroundColor(theme.markerPtr, M_PTR0);
     m_sci->setMarkerForegroundColor(theme.markerPtr, M_PTR0);
-    m_sci->setMarkerBackgroundColor(theme.background, M_CYCLE);
-    m_sci->setMarkerForegroundColor(theme.background, M_CYCLE);
+    m_sci->setMarkerBackgroundColor(editorBg, M_CYCLE);
+    m_sci->setMarkerForegroundColor(editorBg, M_CYCLE);
     m_sci->setMarkerBackgroundColor(theme.markerError, M_ERR);
     m_sci->setMarkerForegroundColor(theme.text, M_ERR);
-    m_sci->setMarkerBackgroundColor(theme.background, M_STRUCT_BG);
+    m_sci->setMarkerBackgroundColor(editorBg, M_STRUCT_BG);
     m_sci->setMarkerForegroundColor(theme.text, M_STRUCT_BG);
     m_sci->setMarkerBackgroundColor(theme.hover, M_HOVER);
     m_sci->setMarkerBackgroundColor(theme.selected, M_SELECTED);
-    m_sci->setMarkerBackgroundColor(theme.background, M_CMD_ROW);
+    m_sci->setMarkerBackgroundColor(editorBg, M_CMD_ROW);
     m_sci->setMarkerBackgroundColor(theme.indHoverSpan, M_ACCENT);
 
     // Margin extended styles
@@ -911,7 +914,7 @@ void RcxEditor::applyTheme(const Theme& theme) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE,
                                  abs, theme.textFaint);
             m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
-                                 abs, theme.background);
+                                 abs, editorBg);
         }
     }
 

@@ -24,7 +24,7 @@
 using namespace rcx;
 
 static const char* CDB_PATH = "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\cdb.exe";
-static const int   DBG_PORT = 5055;
+static const int   DBG_PORT = 5056;
 
 class TestWinDbgProvider : public QObject {
     Q_OBJECT
@@ -132,7 +132,7 @@ private slots:
 
     void initTestCase()
     {
-        m_connString = QString("tcp:Port=%1,Server=localhost").arg(DBG_PORT);
+        m_connString = QString("tcp:Port=%1,Server=127.0.0.1").arg(DBG_PORT);
 
         // If a debug server is already listening (e.g. WinDbg with .server),
         // skip launching our own cdb.exe.
@@ -207,7 +207,7 @@ private slots:
     void plugin_canHandle_tcp()
     {
         WinDbgMemoryPlugin plugin;
-        QVERIFY(plugin.canHandle("tcp:Port=5055,Server=localhost"));
+        QVERIFY(plugin.canHandle("tcp:Port=5056,Server=localhost"));
         QVERIFY(plugin.canHandle("TCP:Port=1234,Server=10.0.0.1"));
     }
 
@@ -608,7 +608,7 @@ private slots:
     // ── Kernel/dump session tests ──
     // Set WINDBG_KERNEL_CONN to a target string:
     //   "dump:F:/path/to/file.dmp"          — open dump directly
-    //   "tcp:Port=5055,Server=localhost"     — connect to debug server
+    //   "tcp:Port=5056,Server=localhost"     — connect to debug server
     // Set WINDBG_KERNEL_ADDR to a readable hex address (e.g. kernel base).
 
     static QString kernelTarget()
