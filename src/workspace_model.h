@@ -60,17 +60,16 @@ inline QString typeDisplayString(const Node* node, const NodeTree* tree) {
         return n->structTypeName.isEmpty() ? n->name : n->structTypeName;
     };
     if (node->resolvedClassKeyword() == QStringLiteral("enum")) {
-        return QStringLiteral("%1 (%2) \u2014 %3")
-            .arg(nameOf(node), node->resolvedClassKeyword(),
+        return QStringLiteral("%1 \u2014 %2")
+            .arg(nameOf(node),
                  QString::number(node->enumMembers.size()));
     }
     QVector<int> members = tree->childrenOf(node->id);
     int vc = 0;
     for (int mi : members)
         if (!isHexPad(tree->nodes[mi].kind)) ++vc;
-    return QStringLiteral("%1 (%2) \u2014 %3")
-        .arg(nameOf(node), node->resolvedClassKeyword(),
-             QString::number(vc));
+    return QStringLiteral("%1 \u2014 %2")
+        .arg(nameOf(node), QString::number(vc));
 }
 
 // Build a new item for a type entry.
@@ -83,6 +82,7 @@ inline QStandardItem* makeTypeItem(const Node* node, const NodeTree* tree,
         typeDisplayString(node, tree));
     item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
     item->setData(QVariant::fromValue(node->id), Qt::UserRole + 1);
+    item->setData(isEnum, Qt::UserRole + 2);
 
     if (!isEnum)
         buildStructChildren(item, tree, node->id, subPtr);
@@ -243,12 +243,11 @@ public:
         painter->setFont(opt.font);
 
         if (!isChild) {
-            // Top-level: "StructName (class) — 3"
+            // Top-level: "StructName — 3"
             int dashPos = fullText.indexOf(QChar(0x2014));
-            int parenPos = dashPos > 0 ? fullText.lastIndexOf(QStringLiteral(" ("), dashPos) : -1;
-            if (parenPos > 0) {
-                QString name = fullText.left(parenPos);
-                QString meta = fullText.mid(parenPos);
+            if (dashPos > 1) {
+                QString name = fullText.left(dashPos - 1);
+                QString meta = fullText.mid(dashPos - 1);
 
                 painter->setPen(m_text);
                 painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, name);

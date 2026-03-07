@@ -3381,7 +3381,7 @@ void MainWindow::createWorkspaceDock() {
 
     m_workspaceSearch = new QLineEdit(dockContainer);
     m_workspaceSearch->setPlaceholderText(QStringLiteral("Search..."));
-    m_workspaceSearch->setClearButtonEnabled(true);
+    // Clear button uses our close.svg icon instead of Qt's default circle-X
     {
         QSettings s("Reclass", "Reclass");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
@@ -3395,6 +3395,24 @@ void MainWindow::createWorkspaceDock() {
         // Find the QToolButton created for the action and shrink its icon
         for (auto* btn : m_workspaceSearch->findChildren<QToolButton*>()) {
             if (btn->defaultAction() == searchAction) {
+                btn->setIconSize(QSize(14, 14));
+                break;
+            }
+        }
+    }
+    {
+        auto* clearAction = m_workspaceSearch->addAction(
+            QIcon(QStringLiteral(":/vsicons/close.svg")),
+            QLineEdit::TrailingPosition);
+        clearAction->setVisible(false);
+        connect(clearAction, &QAction::triggered,
+                m_workspaceSearch, &QLineEdit::clear);
+        connect(m_workspaceSearch, &QLineEdit::textChanged,
+                clearAction, [clearAction](const QString& text) {
+            clearAction->setVisible(!text.isEmpty());
+        });
+        for (auto* btn : m_workspaceSearch->findChildren<QToolButton*>()) {
+            if (btn->defaultAction() == clearAction) {
                 btn->setIconSize(QSize(14, 14));
                 break;
             }
@@ -3439,8 +3457,6 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceProxy->setFilterFixedString(text);
         if (!text.isEmpty())
             m_workspaceTree->expandAll();
-        else
-            m_workspaceTree->collapseAll();
     });
 
     // Custom delegate for rich text rendering (name bright, metadata dim)
@@ -3807,6 +3823,25 @@ void MainWindow::rebuildWorkspaceModelNow() {
         tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
     rcx::syncProjectExplorer(m_workspaceModel, tabs);
+
+    if (m_dockTitleLabel) {
+        int structs = 0, enums = 0;
+        for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
+            if (m_workspaceModel->item(i)->data(Qt::UserRole + 2).toBool())
+                ++enums;
+            else
+                ++structs;
+        }
+        QString title = QStringLiteral("Project");
+        if (structs || enums) {
+            title += QStringLiteral(" \u2014 %1 struct%2")
+                .arg(structs).arg(structs != 1 ? "s" : "");
+            if (enums)
+                title += QStringLiteral(" \u00b7 %1 enum%2")
+                    .arg(enums).arg(enums != 1 ? "s" : "");
+        }
+        m_dockTitleLabel->setText(title);
+    }
 }
 
 void MainWindow::addRecentFile(const QString& path) {
