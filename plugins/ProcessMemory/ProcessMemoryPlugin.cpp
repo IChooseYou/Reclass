@@ -19,6 +19,60 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <shellapi.h>
+
+typedef struct _UNICODE_STRING { USHORT Length, MaximumLength; PWSTR Buffer; } UNICODE_STRING;
+typedef struct _CLIENT_ID { HANDLE UniqueProcess; HANDLE UniqueThread; } CLIENT_ID;
+typedef struct _SYSTEM_THREAD_INFORMATION {
+    LARGE_INTEGER KernelTime, UserTime, CreateTime;
+    ULONG WaitTime; PVOID StartAddress; CLIENT_ID ClientId;
+    LONG Priority, BasePriority; ULONG ContextSwitches, ThreadState, WaitReason;
+} SYSTEM_THREAD_INFORMATION;
+typedef struct _SYSTEM_PROCESS_INFORMATION {
+    ULONG NextEntryOffset;                  // 0x000
+    ULONG NumberOfThreads;                  // 0x004
+    LARGE_INTEGER WorkingSetPrivateSize;    // 0x008
+    ULONG HardFaultCount;                   // 0x010
+    ULONG NumberOfThreadsHighWatermark;     // 0x014
+    ULONGLONG CycleTime;                    // 0x018
+    LARGE_INTEGER CreateTime;               // 0x020
+    LARGE_INTEGER UserTime;                 // 0x028
+    LARGE_INTEGER KernelTime;               // 0x030
+    UNICODE_STRING ImageName;               // 0x038
+    LONG BasePriority;                      // 0x048
+    HANDLE UniqueProcessId;                 // 0x050
+    PVOID InheritedFromUniqueProcessId;     // 0x058
+    ULONG HandleCount;                      // 0x060
+    ULONG SessionId;                        // 0x064
+    ULONG_PTR UniqueProcessKey;             // 0x068
+    SIZE_T PeakVirtualSize;                 // 0x070
+    SIZE_T VirtualSize;                     // 0x078
+    ULONG PageFaultCount;                   // 0x080
+    ULONG _pad0;                            // 0x084
+    SIZE_T PeakWorkingSetSize;              // 0x088
+    SIZE_T WorkingSetSize;                  // 0x090
+    SIZE_T QuotaPeakPagedPoolUsage;         // 0x098
+    SIZE_T QuotaPagedPoolUsage;             // 0x0A0
+    SIZE_T QuotaPeakNonPagedPoolUsage;      // 0x0A8
+    SIZE_T QuotaNonPagedPoolUsage;          // 0x0B0
+    SIZE_T PagefileUsage;                   // 0x0B8
+    SIZE_T PeakPagefileUsage;               // 0x0C0
+    SIZE_T PrivatePageCount;                // 0x0C8
+    LARGE_INTEGER ReadOperationCount;       // 0x0D0
+    LARGE_INTEGER WriteOperationCount;      // 0x0D8
+    LARGE_INTEGER OtherOperationCount;      // 0x0E0
+    LARGE_INTEGER ReadTransferCount;        // 0x0E8
+    LARGE_INTEGER WriteTransferCount;       // 0x0F0
+    LARGE_INTEGER OtherTransferCount;       // 0x0F8
+} SYSTEM_PROCESS_INFORMATION; // sizeof = 0x100
+typedef struct alignas(8) _THREAD_BASIC_INFORMATION {
+    NTSTATUS  ExitStatus;       // 0x00
+    ULONG     _pad;             // 0x04
+    PVOID     TebBaseAddress;   // 0x08
+    CLIENT_ID ClientId;         // 0x10
+    ULONG_PTR AffinityMask;     // 0x20
+    LONG      Priority;         // 0x28
+    LONG      BasePriority;     // 0x2C
+} THREAD_BASIC_INFORMATION;
 #elif defined(__linux__)
 #include <climits>
 #include <sys/types.h>
@@ -61,6 +115,17 @@ ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& proces
         BOOL isWow64 = FALSE;
         if (IsWow64Process(m_handle, &isWow64) && isWow64)
             m_pointerSize = 4;
+        // Query PEB address via NtQueryInformationProcess
+        {
+            typedef NTSTATUS(NTAPI* NtQIP_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+            static NtQIP_t pNtQIP = (NtQIP_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+            if (pNtQIP) {
+                struct { PVOID r1; PVOID PebBaseAddress; PVOID r2[2]; ULONG_PTR pid; PVOID r3; } pbi = {};
+                ULONG retLen = 0;
+                if (pNtQIP(m_handle, /*ProcessBasicInformation*/0, &pbi, sizeof(pbi), &retLen) >= 0 && pbi.PebBaseAddress)
+                    m_peb = (uint64_t)(uintptr_t)pbi.PebBaseAddress;
+            }
+        }
         cacheModules();
     }
 }
@@ -426,6 +491,58 @@ int ProcessMemoryProvider::size() const
 #endif
 }
 
+
+QVector<rcx::Provider::ThreadInfo> ProcessMemoryProvider::tebs() const
+{
+#ifdef _WIN32
+    QVector<ThreadInfo> result;
+    if (!m_handle || !m_peb) return result;
+
+    typedef NTSTATUS(NTAPI* NtQSI_t)(ULONG, PVOID, ULONG, PULONG);
+    typedef NTSTATUS(NTAPI* NtQIT_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static auto pNtQSI = (NtQSI_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation");
+    static auto pNtQIT = (NtQIT_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
+    if (!pNtQSI || !pNtQIT) return result;
+
+    // Enumerate threads via SystemProcessInformation (class 5)
+    ULONG retLen = 0;
+    ULONG bufSize = 1 << 20;
+    QByteArray buf(bufSize, 0);
+    NTSTATUS qsiSt;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        qsiSt = pNtQSI(5, buf.data(), bufSize, &retLen);
+        if ((uint32_t)qsiSt != 0xC0000004u) break;
+        bufSize *= 2;
+        buf.resize(bufSize);
+    }
+    if (qsiSt < 0) return result;
+
+    // Walk process entries to find ours
+    auto* proc = (SYSTEM_PROCESS_INFORMATION*)buf.data();
+    for (;;) {
+        if ((uintptr_t)proc->UniqueProcessId == m_pid) {
+            auto* threads = (SYSTEM_THREAD_INFORMATION*)((char*)proc + sizeof(*proc));
+            for (ULONG i = 0; i < proc->NumberOfThreads; ++i) {
+                DWORD tid = (DWORD)(uintptr_t)threads[i].ClientId.UniqueThread;
+                HANDLE hThread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+                if (!hThread) continue;
+                THREAD_BASIC_INFORMATION tbi = {};
+                ULONG tbiLen = 0;
+                NTSTATUS qitSt = pNtQIT(hThread, 0, &tbi, sizeof(tbi), &tbiLen);
+                if (qitSt >= 0 && tbi.TebBaseAddress)
+                    result.append({(uint64_t)(uintptr_t)tbi.TebBaseAddress, tid});
+                CloseHandle(hThread);
+            }
+            break;
+        }
+        if (!proc->NextEntryOffset) break;
+        proc = (SYSTEM_PROCESS_INFORMATION*)((char*)proc + proc->NextEntryOffset);
+    }
+    return result;
+#else
+    return {};
+#endif
+}
 // ──────────────────────────────────────────────────────────────────────────
 // ProcessMemoryPlugin implementation
 // ──────────────────────────────────────────────────────────────────────────

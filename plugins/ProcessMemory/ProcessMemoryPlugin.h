@@ -41,6 +41,8 @@ public:
     // Process-specific helpers
     uint32_t pid() const { return m_pid; }
     void refreshModules() { m_modules.clear(); cacheModules(); }
+    uint64_t peb() const override { return m_peb; }
+    QVector<ThreadInfo> tebs() const override;
 
 private:
     void cacheModules();
@@ -56,6 +58,7 @@ private:
     bool m_writable;
     uint64_t m_base;
     int m_pointerSize = 8;
+    uint64_t m_peb = 0;
 
     struct ModuleInfo {
         QString  name;

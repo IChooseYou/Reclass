@@ -447,6 +447,22 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+
+    // process.info
+    tools.append(QJsonObject{
+        {"name", "process.info"},
+        {"description", "Returns PEB address and enumerates all Thread Environment Blocks (TEBs) for the attached process. "
+                        "TEBs are discovered via NtQuerySystemInformation and NtQueryInformationThread. "
+                        "Each TEB entry includes: address, threadId. "
+                        "Requires a live process provider with PEB support."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }}
+        }}
+    });
     return okReply(id, QJsonObject{{"tools", tools}});
 }
 
@@ -472,6 +488,7 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "ui.action")      result = toolUiAction(args);
     else if (toolName == "tree.search")   result = toolTreeSearch(args);
     else if (toolName == "node.history")  result = toolNodeHistory(args);
+    else if (toolName == "process.info") result = toolProcessInfo(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
     m_mainWindow->clearMcpStatus();
@@ -1325,6 +1342,39 @@ QJsonObject McpBridge::toolNodeHistory(const QJsonObject& args) {
     }
     return makeTextResult(QString::fromUtf8(
         QJsonDocument(result).toJson(QJsonDocument::Compact)));
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: process.info — PEB address + TEB enumeration
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolProcessInfo(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    auto* prov = tab->doc->provider.get();
+    if (!prov) return makeTextResult("No data source attached", true);
+    if (!prov->isLive()) return makeTextResult("Not a live provider", true);
+
+    uint64_t pebAddr = prov->peb();
+    if (!pebAddr) return makeTextResult("PEB not available for this provider", true);
+
+    QJsonObject out;
+    out["peb"] = "0x" + QString::number(pebAddr, 16).toUpper();
+
+    auto tebList = prov->tebs();
+    QJsonArray tebArr;
+    for (const auto& t : tebList) {
+        tebArr.append(QJsonObject{
+            {"address", "0x" + QString::number(t.tebAddress, 16).toUpper()},
+            {"threadId", (qint64)t.threadId}
+        });
+    }
+
+    out["tebs"] = tebArr;
+    out["tebCount"] = tebArr.size();
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
 }
 
 // ════════════════════════════════════════════════════════════════════
