@@ -72,6 +72,7 @@ static QHash<QString, TypeInfo> buildTypeTable(int ptrSize = 8) {
     t[QStringLiteral("USHORT")]    = {NodeKind::UInt16, 2};
     t[QStringLiteral("SHORT")]     = {NodeKind::Int16,  2};
     t[QStringLiteral("WCHAR")]     = {NodeKind::UInt16, 2};
+    t[QStringLiteral("TCHAR")]     = {NodeKind::UInt16, 2};
     t[QStringLiteral("DWORD")]     = {NodeKind::UInt32, 4};
     t[QStringLiteral("ULONG")]     = {NodeKind::UInt32, 4};
     t[QStringLiteral("UINT")]      = {NodeKind::UInt32, 4};
@@ -1366,7 +1367,8 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             if (firstDim <= 0) firstDim = 1;
 
             if (baseKind == NodeKind::Int8 && field.arraySizes.size() == 1 &&
-                field.typeName == QStringLiteral("char") && firstDim <= 128) {
+                (field.typeName == QStringLiteral("char") ||
+                 field.typeName == QStringLiteral("CHAR"))) {
                 Node n;
                 n.kind = NodeKind::UTF8;
                 n.name = field.name;
@@ -1379,8 +1381,9 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             }
 
             if (baseKind == NodeKind::UInt16 && field.arraySizes.size() == 1 &&
-                (field.typeName == QStringLiteral("wchar_t") || field.typeName == QStringLiteral("WCHAR")) &&
-                firstDim <= 128) {
+                (field.typeName == QStringLiteral("wchar_t") ||
+                 field.typeName == QStringLiteral("WCHAR") ||
+                 field.typeName == QStringLiteral("TCHAR"))) {
                 Node n;
                 n.kind = NodeKind::UTF16;
                 n.name = field.name;
@@ -1574,6 +1577,13 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg, int poin
         classIds[ps.name] = structId;
 
         buildFields(ctx, structId, 0, ps.fields);
+
+        // Union: all direct children overlap at offset 0
+        if (ps.keyword == QStringLiteral("union")) {
+            QVector<int> children = tree.childrenOf(structId);
+            for (int ci : children)
+                tree.nodes[ci].offset = 0;
+        }
 
         // Apply static_assert size: add tail padding if needed
         auto sizeIt = parser.sizeAsserts.find(ps.name);

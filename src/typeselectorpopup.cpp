@@ -326,8 +326,9 @@ public:
             if (row >= 0 && row < m_filtered->size()) {
                 const auto& e = (*m_filtered)[row];
                 if (e.entryKind == TypeEntry::Composite && !e.fieldSummary.isEmpty()) {
-                    QString tip = QStringLiteral("%1 (%2 B, %3 fields)\n")
-                        .arg(e.displayName).arg(e.sizeBytes).arg(e.fieldCount);
+                    QString tip = QStringLiteral("%1 (0x%2 bytes, %3 fields)\n")
+                        .arg(e.displayName, QString::number(e.sizeBytes, 16).toUpper())
+                        .arg(e.fieldCount);
                     tip += e.fieldSummary.join(QChar('\n'));
                     if (e.fieldCount > e.fieldSummary.size())
                         tip += QStringLiteral("\n...");
@@ -740,6 +741,7 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
     m_titleLabel->setPalette(pal);
     m_filterEdit->setPalette(pal);
     m_listView->setPalette(pal);
+    m_listView->viewport()->setPalette(pal);
     m_arrayCountEdit->setPalette(pal);
 
     // Esc button (snapped to corner)
@@ -999,7 +1001,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
 
     auto makeLabel = [](const TypeEntry& e) {
         QString label = e.displayName;
-        if (e.sizeBytes > 0) label += QStringLiteral(" - %1").arg(e.sizeBytes);
+        if (e.sizeBytes > 0) label += QStringLiteral(" - 0x%1 bytes").arg(QString::number(e.sizeBytes, 16).toUpper());
         return label;
     };
 

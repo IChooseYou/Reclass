@@ -163,8 +163,13 @@ QString fmtStructHeader(const Node& node, int depth, bool collapsed, int colType
     return ind + type + SEP + node.name + SEP + suffix;
 }
 
-QString fmtStructFooter(const Node& /*node*/, int depth, int /*totalSize*/) {
-    return indent(depth) + QStringLiteral("};");
+QString fmtStructFooter(const Node& node, int depth, int /*totalSize*/) {
+    QString footer = indent(depth) + QStringLiteral("};");
+    if (node.resolvedClassKeyword() == QStringLiteral("enum"))
+        footer += QStringLiteral("  +10");
+    else
+        footer += QStringLiteral("  +1024  Trim");
+    return footer;
 }
 
 // ── Array header ──

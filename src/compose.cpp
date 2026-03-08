@@ -8,6 +8,49 @@ namespace rcx {
 
 namespace {
 
+// ── Value preview for type hints ──
+// Formats raw bytes as the suggested type using existing fmt:: functions.
+
+static QString formatPreview(const uint8_t* data, int len, const TypeSuggestion& s) {
+    using namespace detail;
+    if (s.kinds.isEmpty()) return {};
+    NodeKind k = s.kinds[0];
+    if (s.kinds.size() == 1) {
+        switch (k) {
+        case NodeKind::Float:     return fmt::fmtFloat(loadF32(data));
+        case NodeKind::Double:    return fmt::fmtDouble(loadF64(data));
+        case NodeKind::Int32:     return fmt::fmtInt32((int32_t)loadU32(data));
+        case NodeKind::UInt32:    return fmt::fmtUInt32(loadU32(data));
+        case NodeKind::Int16:     return fmt::fmtInt16((int16_t)loadU16(data));
+        case NodeKind::UInt16:    return fmt::fmtUInt16(loadU16(data));
+        case NodeKind::Int64:     return fmt::fmtInt64((int64_t)loadU64(data));
+        case NodeKind::UInt64:    return fmt::fmtUInt64(loadU64(data));
+        case NodeKind::Pointer64: return fmt::fmtPointer64(loadU64(data));
+        case NodeKind::Pointer32: return fmt::fmtPointer32(loadU32(data));
+        case NodeKind::Bool:      return fmt::fmtBool(data[0]);
+        case NodeKind::UTF8: {
+            int n = std::min(len, 8);
+            QString s;
+            for (int i = 0; i < n && data[i] >= 0x20 && data[i] <= 0x7E; ++i)
+                s += QLatin1Char(data[i]);
+            return s.isEmpty() ? QString() : (QStringLiteral("\"") + s + QStringLiteral("\""));
+        }
+        default: return {};
+        }
+    }
+    // Split: show each part
+    int partSz = len / s.kinds.size();
+    QStringList parts;
+    for (int i = 0; i < s.kinds.size(); ++i) {
+        TypeSuggestion sub;
+        sub.kinds = {s.kinds[i]};
+        sub.score = s.score;
+        sub.strength = s.strength;
+        parts << formatPreview(data + i * partSz, partSz, sub);
+    }
+    return parts.join(QStringLiteral(", "));
+}
+
 // Scintilla fold constants (avoid including Scintilla headers in core)
 constexpr int SC_FOLDLEVELBASE       = 0x400;
 constexpr int SC_FOLDLEVELHEADERFLAG = 0x2000;
@@ -218,9 +261,14 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 ? prov.readBytes(absAddr, sz) : QByteArray(sz, '\0');
             auto suggestions = inferTypes(
                 reinterpret_cast<const uint8_t*>(b.constData()), sz);
-            if (!suggestions.isEmpty()) {
+            if (!suggestions.isEmpty() && suggestions[0].strength >= 2) {
                 lm.typeHintStart = lineText.size() + 2; // after "  " gap
+                lm.typeHintKinds = suggestions[0].kinds;
                 lm.typeHint = formatHint(suggestions[0]);
+                QString preview = formatPreview(
+                    reinterpret_cast<const uint8_t*>(b.constData()), sz, suggestions[0]);
+                if (!preview.isEmpty())
+                    lm.typeHint += QStringLiteral("  ") + preview;
                 lineText += QStringLiteral("  ") + lm.typeHint;
             }
         }

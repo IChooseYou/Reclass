@@ -627,6 +627,7 @@ struct LineMeta {
     bool     isStaticLine   = false;  // true for static field node lines
     QString  typeHint;                 // Type inference hint text (e.g. "Float×2") — only set for hex nodes when hints enabled
     int      typeHintStart  = -1;      // Character offset where hint text starts in line text (-1 = none)
+    QVector<NodeKind> typeHintKinds;   // Suggested kinds from inference (empty = no hint)
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {

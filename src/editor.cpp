@@ -912,6 +912,21 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     applySymbolColoring(result.meta, lineTexts);
     applyCommandRowPills();
 
+    // Footer buttons — pill styling
+    for (int i = 0; i < result.meta.size(); i++) {
+        if (result.meta[i].lineKind != LineKind::Footer) continue;
+        QString ft = getLineText(m_sci, i);
+        int addStart = ft.indexOf(QStringLiteral("+1024"));
+        if (addStart >= 0)
+            fillIndicatorCols(IND_CMD_PILL, i, addStart, addStart + 5);
+        int add10Start = ft.indexOf(QStringLiteral("+10"));
+        if (add10Start >= 0)
+            fillIndicatorCols(IND_CMD_PILL, i, add10Start, add10Start + 3);
+        int trimStart = ft.indexOf(QStringLiteral("Trim"));
+        if (trimStart >= 0)
+            fillIndicatorCols(IND_CMD_PILL, i, trimStart, trimStart + 4);
+    }
+
     // Reset hint line - applySelectionOverlay will repaint indicators
     m_hintLine = -1;
 
@@ -1179,6 +1194,7 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta) {
             }
         }
     }
+
 }
 
 void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
@@ -2025,6 +2041,26 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             if (h.inFoldCol) {
                 emit marginClicked(0, h.line, me->modifiers());
                 return true;
+            }
+            // Footer buttons: +1024, +10, Trim
+            if (h.line >= 0 && h.line < m_meta.size()
+                && m_meta[h.line].lineKind == LineKind::Footer) {
+                QString ft = getLineText(m_sci, h.line);
+                int addStart = ft.indexOf(QStringLiteral("+1024"));
+                if (addStart >= 0 && h.col >= addStart && h.col < addStart + 5) {
+                    emit appendBytesRequested(m_meta[h.line].nodeId, 1024);
+                    return true;
+                }
+                int add10Start = ft.indexOf(QStringLiteral("+10"));
+                if (add10Start >= 0 && h.col >= add10Start && h.col < add10Start + 3) {
+                    emit appendEnumMembersRequested(m_meta[h.line].nodeId, 10);
+                    return true;
+                }
+                int trimStart = ft.indexOf(QStringLiteral("Trim"));
+                if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4) {
+                    emit trimHexRequested(m_meta[h.line].nodeId);
+                    return true;
+                }
             }
             // CommandRow: try chevron/ADDR edit or consume
             if (h.nodeId == kCommandRowId) {
@@ -3117,6 +3153,27 @@ void RcxEditor::applyHoverCursor() {
         m_hoverSpanLines.append(h.line);
     }
 
+    // Apply hover span on footer pills (+1024, +10, Trim)
+    if (h.line >= 0 && h.line < m_meta.size()
+        && m_meta[h.line].lineKind == LineKind::Footer) {
+        QString ft = getLineText(m_sci, h.line);
+        int addStart = ft.indexOf(QStringLiteral("+1024"));
+        if (addStart >= 0 && h.col >= addStart && h.col < addStart + 5) {
+            fillIndicatorCols(IND_HOVER_SPAN, h.line, addStart, addStart + 5);
+            m_hoverSpanLines.append(h.line);
+        }
+        int add10Start = ft.indexOf(QStringLiteral("+10"));
+        if (add10Start >= 0 && h.col >= add10Start && h.col < add10Start + 3) {
+            fillIndicatorCols(IND_HOVER_SPAN, h.line, add10Start, add10Start + 3);
+            m_hoverSpanLines.append(h.line);
+        }
+        int trimStart = ft.indexOf(QStringLiteral("Trim"));
+        if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4) {
+            fillIndicatorCols(IND_HOVER_SPAN, h.line, trimStart, trimStart + 4);
+            m_hoverSpanLines.append(h.line);
+        }
+    }
+
     // Value history popup on hover (read-only, no buttons)
     // Skip FuncPtr and void-Pointer nodes — they use the disasm popup instead.
     {
@@ -3381,6 +3438,18 @@ void RcxEditor::applyHoverCursor() {
 
     if (h.inFoldCol) {
         desired = Qt::PointingHandCursor;  // fold toggle = button
+    } else if (h.line >= 0 && h.line < m_meta.size()
+               && m_meta[h.line].lineKind == LineKind::Footer) {
+        QString ft = getLineText(m_sci, h.line);
+        int addStart = ft.indexOf(QStringLiteral("+1024"));
+        if (addStart >= 0 && h.col >= addStart && h.col < addStart + 5)
+            desired = Qt::PointingHandCursor;
+        int add10Start = ft.indexOf(QStringLiteral("+10"));
+        if (add10Start >= 0 && h.col >= add10Start && h.col < add10Start + 3)
+            desired = Qt::PointingHandCursor;
+        int trimStart = ft.indexOf(QStringLiteral("Trim"));
+        if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4)
+            desired = Qt::PointingHandCursor;
     } else if (tokenHit) {
         // Check if mouse is actually over trimmed text content (not column padding)
         NormalizedSpan trimmed;

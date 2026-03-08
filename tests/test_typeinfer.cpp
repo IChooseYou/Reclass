@@ -138,17 +138,26 @@ private slots:
     }
 
     // ── formatHint ──
-    void formatHint_single() {
+    void formatHint_strong() {
         TypeSuggestion s;
         s.kinds = {NodeKind::Float};
-        QCOMPARE(formatHint(s), QStringLiteral("float"));
+        s.strength = 3;
+        QCOMPARE(formatHint(s), QStringLiteral("float strong"));
+    }
+    void formatHint_moderate() {
+        TypeSuggestion s;
+        s.kinds = {NodeKind::Float};
+        s.strength = 2;
+        QCOMPARE(formatHint(s), QStringLiteral("float moderate"));
     }
     void formatHint_split() {
         TypeSuggestion s;
         s.kinds = {NodeKind::Float, NodeKind::Float};
+        s.strength = 3;
         QString h = formatHint(s);
         QVERIFY(h.contains("float"));
         QVERIFY(h.contains("2"));
+        QVERIFY(h.endsWith("strong"));
     }
 
     // ── Denormal rejection ──

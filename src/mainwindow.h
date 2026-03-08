@@ -4,6 +4,7 @@
 #include "pluginmanager.h"
 #include "scannerpanel.h"
 #include "startpage.h"
+#include "workspace_model.h"
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -68,6 +69,7 @@ private slots:
 public:
     // Status bar helpers — separate app / MCP channels
     void setAppStatus(const QString& text);
+    void setAppStatus(const QString& text, const QString& dimSuffix);
     void setMcpStatus(const QString& text);
     void clearMcpStatus();
 
@@ -83,6 +85,7 @@ private:
     QWidget*        m_centralPlaceholder;
     ShimmerLabel*   m_statusLabel;
     QString         m_appStatus;
+    QString         m_appStatusDim;
     bool            m_mcpBusy   = false;
     QTimer*         m_mcpClearTimer = nullptr;
     TitleBarWidget* m_titleBar = nullptr;
@@ -134,6 +137,7 @@ private:
     TabState* tabByIndex(int index);
     int tabCount() const { return m_tabs.size(); }
     QDockWidget* createTab(RcxDocument* doc);
+    QString tabTitle(const TabState& tab) const;
     void setupDockTabBars();
     void updateWindowTitle();
     void closeAllDocDocks();
@@ -165,6 +169,7 @@ private:
     void rebuildWorkspaceModel();       // debounced — safe to call frequently
     void rebuildWorkspaceModelNow();    // immediate rebuild
     QTimer*               m_workspaceRebuildTimer = nullptr;
+    QTimer*               m_workspaceSearchTimer  = nullptr;
     void updateBorderColor(const QColor& color);
 
     // Scanner dock

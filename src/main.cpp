@@ -261,7 +261,7 @@ public:
         if (type == CT_TabBarTab) {
             if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
                 if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
-                    s.setHeight(28);
+                    s.setHeight(31);
                 }
             }
         }
@@ -514,12 +514,12 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
 
     // Global scrollbar styling — track matches control bg, handle is solid
     qApp->setStyleSheet(QStringLiteral(
-        "QScrollBar:vertical { background: palette(window); width: 12px; margin: 0; border: none; }"
+        "QScrollBar:vertical { background: palette(window); width: 8px; margin: 0; border: none; }"
         "QScrollBar::handle:vertical { background: %1; min-height: 20px; border: none; }"
         "QScrollBar::handle:vertical:hover { background: %2; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
-        "QScrollBar:horizontal { background: palette(window); height: 12px; margin: 0; border: none; }"
+        "QScrollBar:horizontal { background: palette(window); height: 8px; margin: 0; border: none; }"
         "QScrollBar::handle:horizontal { background: %1; min-width: 20px; border: none; }"
         "QScrollBar::handle:horizontal:hover { background: %2; }"
         "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
@@ -1027,7 +1027,8 @@ public:
         });
     }
 
-    void setText(const QString& t) { m_text = t; update(); }
+    void setText(const QString& t) { m_text = t; m_dimSuffix.clear(); update(); }
+    void setText(const QString& t, const QString& dimSuffix) { m_text = t; m_dimSuffix = dimSuffix; update(); }
     QString text() const { return m_text; }
 
     void setShimmerActive(bool on) {
@@ -1042,7 +1043,8 @@ public:
     void setAlignment(Qt::Alignment a) { m_align = a; update(); }
 
     // Colours configurable from theme
-    QColor colBase;     // dim text (normal)
+    QColor colBase;     // normal text
+    QColor colDim;      // dimmed suffix text
     QColor colBright;   // highlight sweep
 
 protected:
@@ -1058,7 +1060,18 @@ protected:
             QColor c = colBase.isValid() ? colBase
                                          : palette().color(QPalette::WindowText);
             p.setPen(c);
-            p.drawText(r, m_align, m_text);
+            if (m_dimSuffix.isEmpty()) {
+                p.drawText(r, m_align, m_text);
+            } else {
+                QFontMetrics fm(font());
+                int tw = fm.horizontalAdvance(m_text);
+                p.drawText(r, m_align, m_text);
+                QColor dc = colDim.isValid() ? colDim : c;
+                p.setPen(dc);
+                QRect sr = r;
+                sr.setLeft(r.left() + tw);
+                p.drawText(sr, m_align, m_dimSuffix);
+            }
             return;
         }
 
@@ -1083,6 +1096,7 @@ protected:
 
 private:
     QString      m_text;
+    QString      m_dimSuffix;
     bool         m_shimmer = false;
     float        m_phase   = 0.0f;
     Qt::Alignment m_align  = Qt::AlignLeft | Qt::AlignVCenter;
@@ -1174,8 +1188,6 @@ void MainWindow::createStatusBar() {
     sb->tabRow = nullptr;
     sb->label  = m_statusLabel;
 
-    sb->setMinimumHeight(sb->fontMetrics().height() + 6);
-
     // Grip is a direct child of the main window, NOT in the status bar layout.
     // Positioned via reposition() in resizeEvent — immune to font/margin changes.
     auto* grip = new ResizeGrip(this);
@@ -1194,15 +1206,34 @@ void MainWindow::createStatusBar() {
         sb->setDividerColor(t.border);
 
         m_statusLabel->colBase   = t.textDim;
+        m_statusLabel->colDim    = t.textMuted;
         m_statusLabel->colBright = t.indHoverSpan;
     }
 
+    // Sync status bar font to global editor font (10pt monospace)
+    {
+        QSettings s("Reclass", "Reclass");
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        f.setFixedPitch(true);
+        m_statusLabel->setFont(f);
+        sb->setMinimumHeight(QFontMetrics(f).height() + 6);
+    }
 }
 
 void MainWindow::setAppStatus(const QString& text) {
     m_appStatus = text;
+    m_appStatusDim.clear();
     if (!m_mcpBusy) {
         m_statusLabel->setText(text);
+        m_statusLabel->setShimmerActive(false);
+    }
+}
+
+void MainWindow::setAppStatus(const QString& text, const QString& dimSuffix) {
+    m_appStatus = text;
+    m_appStatusDim = dimSuffix;
+    if (!m_mcpBusy) {
+        m_statusLabel->setText(text, dimSuffix);
         m_statusLabel->setShimmerActive(false);
     }
 }
@@ -1222,7 +1253,7 @@ void MainWindow::clearMcpStatus() {
         m_mcpClearTimer->setSingleShot(true);
         connect(m_mcpClearTimer, &QTimer::timeout, this, [this]() {
             m_mcpBusy = false;
-            m_statusLabel->setText(m_appStatus);
+            m_statusLabel->setText(m_appStatus, m_appStatusDim);
             m_statusLabel->setShimmerActive(false);
         });
     }
@@ -1248,7 +1279,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
             "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
             "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
+            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 26px;"
             "  font-family: '%7'; font-size: 10pt;"
             "}"
             "QTabBar::tab:selected { color: %3; background: %4;"
@@ -1476,6 +1507,18 @@ static QString rootName(const NodeTree& tree, uint64_t viewRootId = 0) {
     return QStringLiteral("Untitled");
 }
 
+QString MainWindow::tabTitle(const TabState& tab) const {
+    QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
+    int srcIdx = tab.ctrl->activeSourceIndex();
+    const auto& sources = tab.ctrl->savedSources();
+    if (srcIdx >= 0 && srcIdx < sources.size()) {
+        const auto& src = sources[srcIdx];
+        if (!src.displayName.isEmpty())
+            name += QStringLiteral(" \u2014 ") + src.displayName;
+    }
+    return name;
+}
+
 QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     auto* splitter = new QSplitter(Qt::Horizontal);
     splitter->setHandleWidth(1);
@@ -1662,20 +1705,40 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     connect(ctrl, &RcxController::nodeSelected,
             this, [this, ctrl, dock](int nodeIdx) {
         if (nodeIdx >= 0 && nodeIdx < ctrl->document()->tree.nodes.size()) {
-            auto& node = ctrl->document()->tree.nodes[nodeIdx];
+            auto& tree = ctrl->document()->tree;
+            auto& node = tree.nodes[nodeIdx];
+
+            // Build "StructName.fieldName" — walk up to root struct
+            QString rootName;
+            if (node.parentId == 0) {
+                // Root node — use its own structTypeName or name
+                rootName = node.structTypeName.isEmpty() ? node.name : node.structTypeName;
+            } else {
+                // Walk up to root
+                int cur = nodeIdx;
+                while (cur >= 0 && tree.nodes[cur].parentId != 0)
+                    cur = tree.indexOfId(tree.nodes[cur].parentId);
+                if (cur >= 0) {
+                    auto& root = tree.nodes[cur];
+                    rootName = root.structTypeName.isEmpty() ? root.name : root.structTypeName;
+                }
+            }
+
+            QString main;
+            if (node.parentId == 0)
+                main = rootName;
+            else if (!rootName.isEmpty())
+                main = rootName + "." + node.name;
+            else
+                main = node.name;
+
+            QString dimPart = QString("  +0x%1").arg(node.offset, 2, 16, QChar('0'));
+
             auto* ap = findActiveSplitPane();
             if (ap && ap->viewMode == VM_Rendered)
-                setAppStatus(
-                    QString("Rendered: %1 %2")
-                        .arg(kindToString(node.kind))
-                        .arg(node.name));
+                setAppStatus(QString("Rendered: %1").arg(main));
             else
-                setAppStatus(
-                    QString("%1 %2  offset: 0x%3  size: %4 bytes")
-                        .arg(kindToString(node.kind))
-                        .arg(node.name)
-                        .arg(node.offset, 4, 16, QChar('0'))
-                        .arg(node.byteSize()));
+                setAppStatus(main, dimPart);
         }
         // Update all rendered panes on selection change
         auto it = m_tabs.find(dock);
@@ -1711,7 +1774,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
-                    dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                    dockGuard->setWindowTitle(tabTitle(*it2));
                 }
                 rebuildWorkspaceModel();
                 updateWindowTitle();
@@ -1727,7 +1790,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
-                    dockGuard->setWindowTitle(rootName(it2->doc->tree, it2->ctrl->viewRootId()));
+                    dockGuard->setWindowTitle(tabTitle(*it2));
                 }
                 updateWindowTitle();
                 rebuildWorkspaceModel();
@@ -1794,6 +1857,23 @@ void MainWindow::setupDockTabBars() {
         tp.setColor(QPalette::Dark, theme.border);
         tp.setColor(QPalette::Link, theme.indHoverSpan);
         tabBar->setPalette(tp);
+
+        // Style scroll arrows (appear when tabs overflow)
+        for (auto* btn : tabBar->findChildren<QToolButton*>()) {
+            if (btn->arrowType() == Qt::LeftArrow) {
+                btn->setArrowType(Qt::NoArrow);
+                btn->setIcon(QIcon(QStringLiteral(":/vsicons/chevron-left.svg")));
+                btn->setIconSize(QSize(14, 14));
+            } else if (btn->arrowType() == Qt::RightArrow) {
+                btn->setArrowType(Qt::NoArrow);
+                btn->setIcon(QIcon(QStringLiteral(":/vsicons/chevron-right.svg")));
+                btn->setIconSize(QSize(14, 14));
+            } else continue;
+            btn->setStyleSheet(QStringLiteral(
+                "QToolButton { background: %1; border: 1px solid %2; padding: 2px; }"
+                "QToolButton:hover { background: %3; }")
+                .arg(theme.background.name(), theme.border.name(), theme.hover.name()));
+        }
 
         // Install tab buttons for any tab that doesn't have them yet
         for (int i = 0; i < tabBar->count(); ++i) {
@@ -1949,13 +2029,16 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
 }
 
 // Build a minimal empty struct for new documents
+static int s_classCounter = 0;
+
 static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QString()) {
     // ── Enum: bare node with empty enumMembers, no hex children ──
     if (classKeyword == QStringLiteral("enum")) {
+        int idx = s_classCounter++;
         Node root;
         root.kind = NodeKind::Struct;
-        root.name = "Unnamed";
-        root.structTypeName = "Unnamed";
+        root.name = QStringLiteral("UnnamedEnum%1").arg(idx);
+        root.structTypeName = root.name;
         root.classKeyword = classKeyword;
         root.parentId = 0;
         root.offset = 0;
@@ -1970,10 +2053,11 @@ static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QStri
         return;
     }
 
+    int idx = s_classCounter++;
     Node root;
     root.kind = NodeKind::Struct;
-    root.name = "instance";
-    root.structTypeName = "Unnamed";
+    root.name = QStringLiteral("instance%1").arg(idx);
+    root.structTypeName = QStringLiteral("UnnamedClass%1").arg(idx);
     root.classKeyword = classKeyword;
     root.parentId = 0;
     root.offset = 0;
@@ -2392,6 +2476,14 @@ void MainWindow::applyTheme(const Theme& theme) {
                     tabBar->tabButton(i, QTabBar::RightSide));
                 if (btns) btns->applyTheme(theme.hover);
             }
+            // Update scroll arrow styling
+            for (auto* btn : tabBar->findChildren<QToolButton*>(QString(), Qt::FindDirectChildrenOnly)) {
+                if (btn->icon().isNull()) continue;  // skip non-arrow buttons
+                btn->setStyleSheet(QStringLiteral(
+                    "QToolButton { background: %1; border: 1px solid %2; padding: 2px; }"
+                    "QToolButton:hover { background: %3; }")
+                    .arg(theme.background.name(), theme.border.name(), theme.hover.name()));
+            }
         }
     }
 
@@ -2402,7 +2494,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
             "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
+            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 26px;"
             "  font-family: '%7'; font-size: 10pt;"
             "}"
             "QTabBar::tab:selected { color: %3; background: %4;"
@@ -2425,6 +2517,9 @@ void MainWindow::applyTheme(const Theme& theme) {
         sbPal.setColor(QPalette::Window, theme.background);
         sbPal.setColor(QPalette::WindowText, theme.textDim);
         statusBar()->setPalette(sbPal);
+        m_statusLabel->colBase   = theme.textDim;
+        m_statusLabel->colDim    = theme.textMuted;
+        m_statusLabel->colBright = theme.indHoverSpan;
     }
     // Status bar chrome
     {
@@ -2447,8 +2542,9 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_workspaceTree->setPalette(tp);
         m_workspaceTree->setStyleSheet(QStringLiteral(
             "QTreeView { background: %1; border: none; }"
-            "QTreeView::branch:has-children:closed { image: url(:/chevron-right.svg); }"
-            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }"
+            "QTreeView::branch:has-children:closed { image: url(:/vsicons/chevron-right.svg); }"
+            "QTreeView::branch:has-children:open { image: url(:/vsicons/chevron-down.svg); }"
+            "QTreeView::branch { width: 12px; }"
             "QAbstractScrollArea::corner { background: %1; border: none; }"
             "QHeaderView { background: %1; border: none; }"
             "QHeaderView::section { background: %1; border: none; }")
@@ -2457,12 +2553,33 @@ void MainWindow::applyTheme(const Theme& theme) {
     }
     if (m_workspaceSearch) {
         m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: none;"
-            " padding: 4px 8px; }"
-            "QLineEdit QToolButton { padding: 0px 4px; }"
+            "QLineEdit { background: %1; color: %2;"
+            " border: 1px solid %4;"
+            " padding: 4px 8px 4px 2px; }"
+            "QLineEdit:focus { border: 1px solid %5; }"
+            "QLineEdit QToolButton { padding: 0px 8px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
             .arg(theme.background.name(), theme.textDim.name(),
-                 theme.hover.name()));
+                 theme.hover.name(), theme.border.name(),
+                 theme.borderFocused.name()));
+    }
+
+    // Workspace tab bar + separator theme update
+    if (m_workspaceDock) {
+        if (auto* tabBar = m_workspaceDock->findChild<QWidget*>("workspaceTabBar")) {
+            for (auto* btn : tabBar->findChildren<QToolButton*>()) {
+                btn->setStyleSheet(QStringLiteral(
+                    "QToolButton { color: %1; border: none; border-bottom: 2px solid transparent;"
+                    " padding: 4px 0; }"
+                    "QToolButton:checked { color: %2; border-bottom: 2px solid %3; }")
+                    .arg(theme.textMuted.name(), theme.text.name(), theme.borderFocused.name()));
+            }
+        }
+        if (auto* sep = m_workspaceDock->findChild<QFrame*>("workspaceSep")) {
+            sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
+        }
+        m_workspaceDock->setStyleSheet(QStringLiteral(
+            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
     }
 
     // Dock titlebar: restyle via stylesheet + close button
@@ -2483,9 +2600,12 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_dockGrip->setGripColor(theme.textFaint);
     if (m_workspaceDock)
         m_workspaceDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; border-right: none; }").arg(theme.border.name()));
+            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
 
     // Scanner dock
+    if (m_scannerDock)
+        m_scannerDock->setStyleSheet(QStringLiteral(
+            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
     if (m_scannerPanel)
         m_scannerPanel->applyTheme(theme);
     if (m_scanDockTitle)
@@ -2652,7 +2772,7 @@ void MainWindow::setEditorFont(const QString& fontName) {
             }
         }
     }
-    // Sync workspace tree, title, and search font (10pt monospace)
+    // Sync workspace tree, title, search, and status bar font (10pt monospace)
     {
         QFont wf(fontName, 10);
         wf.setFixedPitch(true);
@@ -2662,6 +2782,11 @@ void MainWindow::setEditorFont(const QString& fontName) {
             m_dockTitleLabel->setFont(wf);
         if (m_workspaceSearch)
             m_workspaceSearch->setFont(wf);
+        if (m_statusLabel) {
+            m_statusLabel->setFont(wf);
+            auto* fsb = static_cast<FlatStatusBar*>(statusBar());
+            fsb->setMinimumHeight(QFontMetrics(wf).height() + 6);
+        }
     }
     // Sync scanner panel font
     if (m_scannerPanel)
@@ -3249,7 +3374,7 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
         m_workspaceDock->show();
     }
 
-    rebuildWorkspaceModel();
+    rebuildWorkspaceModelNow();
     return dock;
 }
 
@@ -3367,7 +3492,7 @@ void MainWindow::createWorkspaceDock() {
         const auto& t = ThemeManager::instance().current();
 
         auto* titleBar = new QWidget(m_workspaceDock);
-        titleBar->setFixedHeight(26);
+        titleBar->setFixedHeight(29);
         titleBar->setAutoFillBackground(true);
         {
             QPalette tbPal = titleBar->palette();
@@ -3414,7 +3539,7 @@ void MainWindow::createWorkspaceDock() {
     {
         const auto& t = ThemeManager::instance().current();
         m_workspaceDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; border-right: none; }").arg(t.border.name()));
+            "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
     }
 
     // Container widget: search box + tree view
@@ -3424,7 +3549,7 @@ void MainWindow::createWorkspaceDock() {
     dockLayout->setSpacing(0);
 
     m_workspaceSearch = new QLineEdit(dockContainer);
-    m_workspaceSearch->setPlaceholderText(QStringLiteral("Search..."));
+    m_workspaceSearch->setPlaceholderText(QStringLiteral("Filter types..."));
     // Clear button uses our close.svg icon instead of Qt's default circle-X
     {
         QSettings s("Reclass", "Reclass");
@@ -3465,14 +3590,28 @@ void MainWindow::createWorkspaceDock() {
     {
         const auto& t = ThemeManager::instance().current();
         m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: none;"
-            " padding: 4px 8px; }"
-            "QLineEdit QToolButton { padding: 0px 4px; }"
+            "QLineEdit { background: %1; color: %2;"
+            " border: 1px solid %4;"
+            " padding: 4px 8px 4px 2px; }"
+            "QLineEdit:focus { border: 1px solid %5; }"
+            "QLineEdit QToolButton { padding: 0px 8px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
             .arg(t.background.name(), t.textDim.name(),
-                 t.hover.name()));
+                 t.hover.name(), t.border.name(),
+                 t.borderFocused.name()));
     }
+    m_workspaceSearch->setContentsMargins(6, 6, 6, 6);
     dockLayout->addWidget(m_workspaceSearch);
+    // Separator below search
+    {
+        const auto& t = ThemeManager::instance().current();
+        auto* sep = new QFrame(dockContainer);
+        sep->setObjectName(QStringLiteral("workspaceSep"));
+        sep->setFrameShape(QFrame::HLine);
+        sep->setFixedHeight(1);
+        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
+        dockLayout->addWidget(sep);
+    }
 
     m_workspaceTree = new QTreeView(dockContainer);
     m_workspaceModel = new QStandardItemModel(this);
@@ -3496,10 +3635,19 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceTree->setFont(f);
     }
 
-    connect(m_workspaceSearch, &QLineEdit::textChanged, this, [this](const QString& text) {
+    m_workspaceSearchTimer = new QTimer(this);
+    m_workspaceSearchTimer->setSingleShot(true);
+    m_workspaceSearchTimer->setInterval(150);
+    connect(m_workspaceSearchTimer, &QTimer::timeout, this, [this]() {
+        QString text = m_workspaceSearch->text();
         m_workspaceProxy->setFilterFixedString(text);
         if (!text.isEmpty())
             m_workspaceTree->expandAll();
+        else
+            m_workspaceTree->collapseAll();
+    });
+    connect(m_workspaceSearch, &QLineEdit::textChanged, this, [this]() {
+        m_workspaceSearchTimer->start();
     });
 
     // Custom delegate for rich text rendering (name bright, metadata dim)
@@ -3517,14 +3665,16 @@ void MainWindow::createWorkspaceDock() {
 
         m_workspaceTree->setStyleSheet(QStringLiteral(
             "QTreeView { background: %1; border: none; }"
-            "QTreeView::branch:has-children:closed { image: url(:/chevron-right.svg); }"
-            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }"
+            "QTreeView::branch:has-children:closed { image: url(:/vsicons/chevron-right.svg); }"
+            "QTreeView::branch:has-children:open { image: url(:/vsicons/chevron-down.svg); }"
+            "QTreeView::branch { width: 12px; }"
             "QAbstractScrollArea::corner { background: %1; border: none; }"
             "QHeaderView { background: %1; border: none; }"
             "QHeaderView::section { background: %1; border: none; }")
             .arg(t.background.name()));
     }
 
+    m_workspaceTree->setIndentation(12);
     dockLayout->addWidget(m_workspaceTree);
 
     m_workspaceTree->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -3691,7 +3841,9 @@ void MainWindow::createWorkspaceDock() {
             const auto& item = items[0];
             if (!m_tabs.contains(item.dock)) return;
             RcxDocument* doc = m_tabs[item.dock].doc;
-            doc->tree.nodes[item.nodeIdx].collapsed = false;
+            int ni = doc->tree.indexOfId(item.structId);
+            if (ni < 0) return;
+            doc->tree.nodes[ni].collapsed = false;
 
             // Use the active tab if it shares the same document, else use owner
             QDockWidget* targetDock = item.dock;
@@ -3705,24 +3857,27 @@ void MainWindow::createWorkspaceDock() {
             targetDock->raise();
             targetDock->show();
             m_activeDocDock = targetDock;
-            QString structName = doc->tree.nodes[item.nodeIdx].structTypeName.isEmpty()
-                ? doc->tree.nodes[item.nodeIdx].name
-                : doc->tree.nodes[item.nodeIdx].structTypeName;
+            QString structName = doc->tree.nodes[ni].structTypeName.isEmpty()
+                ? doc->tree.nodes[ni].name
+                : doc->tree.nodes[ni].structTypeName;
             if (!structName.isEmpty())
                 targetDock->setWindowTitle(structName);
+            rebuildWorkspaceModel();
 
         } else if (chosen && chosen == actOpenNew && items.size() == 1) {
             // Open in a brand new tab (sharing the same document)
             const auto& item = items[0];
             if (!m_tabs.contains(item.dock)) return;
             RcxDocument* doc = m_tabs[item.dock].doc;
-            doc->tree.nodes[item.nodeIdx].collapsed = false;
+            int ni = doc->tree.indexOfId(item.structId);
+            if (ni < 0) return;
+            doc->tree.nodes[ni].collapsed = false;
             auto* newDock = createTab(doc);
             m_tabs[newDock].ctrl->setViewRootId(item.structId);
             m_tabs[newDock].ctrl->refresh();
-            QString structName = doc->tree.nodes[item.nodeIdx].structTypeName.isEmpty()
-                ? doc->tree.nodes[item.nodeIdx].name
-                : doc->tree.nodes[item.nodeIdx].structTypeName;
+            QString structName = doc->tree.nodes[ni].structTypeName.isEmpty()
+                ? doc->tree.nodes[ni].name
+                : doc->tree.nodes[ni].structTypeName;
             if (!structName.isEmpty())
                 newDock->setWindowTitle(structName);
             rebuildWorkspaceModel();
@@ -3748,8 +3903,10 @@ void MainWindow::createWorkspaceDock() {
             tab.ctrl->setSuppressRefresh(true);
             tab.doc->undoStack.beginMacro(QStringLiteral("Duplicate ") + item.typeName);
 
-            // Clone root node
-            rcx::Node root = tree.nodes[item.nodeIdx];
+            // Clone root node (re-lookup by ID since menu.exec() may have invalidated index)
+            int ni = tree.indexOfId(item.structId);
+            if (ni < 0) return;
+            rcx::Node root = tree.nodes[ni];
             root.id = tree.reserveId();
             root.structTypeName = newName;
             root.name = newName;
@@ -3971,6 +4128,12 @@ void MainWindow::createScannerDock() {
         m_scannerDock->setTitleBarWidget(titleBar);
     }
 
+    {
+        const auto& t = ThemeManager::instance().current();
+        m_scannerDock->setStyleSheet(QStringLiteral(
+            "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
+    }
+
     m_scannerPanel = new ScannerPanel(m_scannerDock);
     m_scannerPanel->applyTheme(ThemeManager::instance().current());
     {
@@ -4089,6 +4252,7 @@ void MainWindow::rebuildWorkspaceModelNow() {
         viewedIds.insert(it->ctrl->viewRootId());
     for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
         auto* item = m_workspaceModel->item(i);
+        if (!item) continue;
         uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
         item->setData(viewedIds.contains(id), Qt::UserRole + 3);
     }
@@ -4096,7 +4260,9 @@ void MainWindow::rebuildWorkspaceModelNow() {
     if (m_dockTitleLabel) {
         int structs = 0, enums = 0;
         for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
-            if (m_workspaceModel->item(i)->data(Qt::UserRole + 2).toBool())
+            auto* item = m_workspaceModel->item(i);
+            if (!item) continue;
+            if (item->data(Qt::UserRole + 2).toBool())
                 ++enums;
             else
                 ++structs;

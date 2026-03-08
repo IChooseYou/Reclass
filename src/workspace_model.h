@@ -5,6 +5,7 @@
 #include <QStandardItemModel>
 #include <QStandardItem>
 #include <QStyledItemDelegate>
+#include <QSortFilterProxyModel>
 #include <QPainter>
 #include <QApplication>
 #include <algorithm>
@@ -43,6 +44,7 @@ inline void buildStructChildren(QStandardItem* item,
     };
 
     for (int mi : members) {
+        if (mi < 0 || mi >= tree->nodes.size()) continue;
         const Node& m = tree->nodes[mi];
         if (isHexPad(m.kind)) continue;
         QString childDisplay = QStringLiteral("%1 %2")
@@ -75,10 +77,11 @@ inline QString typeDisplayString(const Node* node, const NodeTree* tree) {
 // Build a new item for a type entry.
 inline QStandardItem* makeTypeItem(const Node* node, const NodeTree* tree,
                                    void* subPtr) {
+    static const QIcon enumIcon(":/vsicons/symbol-enum.svg");
+    static const QIcon structIcon(":/vsicons/symbol-structure.svg");
     bool isEnum = node->resolvedClassKeyword() == QStringLiteral("enum");
     auto* item = new QStandardItem(
-        QIcon(isEnum ? ":/vsicons/symbol-enum.svg"
-                     : ":/vsicons/symbol-structure.svg"),
+        isEnum ? enumIcon : structIcon,
         typeDisplayString(node, tree));
     item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
     item->setData(QVariant::fromValue(node->id), Qt::UserRole + 1);
@@ -145,7 +148,9 @@ inline void syncProjectExplorer(QStandardItemModel* model,
 
     // Remove stale items (backwards)
     for (int i = model->rowCount() - 1; i >= 0; --i) {
-        uint64_t id = model->item(i)->data(Qt::UserRole + 1).toULongLong();
+        auto* item = model->item(i);
+        if (!item) continue;
+        uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
         if (!desiredMap.contains(id))
             model->removeRow(i);
     }
@@ -201,6 +206,8 @@ public:
         m_selected  = t.selected;
         m_accent    = t.borderFocused; // left accent bar
         m_bg        = t.background;
+        m_badgeBg   = t.backgroundAlt;
+        m_badgeText = t.textDim;
     }
 
     QSize sizeHint(const QStyleOptionViewItem& option,
@@ -234,40 +241,62 @@ public:
         QString fullText = index.data(Qt::DisplayRole).toString();
         QRect textRect = opt.rect.adjusted(4, 0, -4, 0);
 
-        // Draw icon for top-level items
-        if (!isChild) {
-            bool viewed = index.data(Qt::UserRole + 3).toBool();
-            QVariant iconVar = index.data(Qt::DecorationRole);
-            if (iconVar.isValid()) {
-                QIcon icon = iconVar.value<QIcon>();
-                int iconSz = opt.fontMetrics.height();
-                int iconY = textRect.y() + (textRect.height() - iconSz) / 2;
-                icon.paint(painter, QRect(textRect.x(), iconY, iconSz, iconSz),
-                           Qt::AlignCenter, viewed ? QIcon::Normal : QIcon::Disabled);
-                textRect.setLeft(textRect.left() + iconSz + 4);
+        // Letter badge (S/E for top-level, F for children)
+        {
+            QChar letter = 'F';
+            if (!isChild) {
+                bool isEnum = index.data(Qt::UserRole + 2).toBool();
+                letter = isEnum ? 'E' : 'S';
             }
+            int sz = opt.fontMetrics.height();
+            int y = textRect.y() + (textRect.height() - sz) / 2;
+            QRect badge(textRect.x(), y, sz, sz);
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            painter->setRenderHint(QPainter::TextAntialiasing, true);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(m_badgeBg);
+            painter->drawRoundedRect(badge, 3, 3);
+            QColor letterCol = m_badgeText;
+            if (!isChild && !index.data(Qt::UserRole + 3).toBool())
+                letterCol.setAlpha(100);
+            painter->setPen(letterCol);
+            QFont bf = opt.font;
+            bf.setBold(true);
+            painter->setFont(bf);
+            painter->drawText(badge, Qt::AlignCenter, letter);
+            painter->setRenderHint(QPainter::Antialiasing, false);
+            textRect.setLeft(textRect.left() + sz + 4);
         }
 
         painter->setFont(opt.font);
 
         if (!isChild) {
-            // Top-level: "StructName — 3"
+            // Top-level: "StructName — 3" → name left, count pill right
             int dashPos = fullText.indexOf(QChar(0x2014));
-            if (dashPos > 1) {
-                QString name = fullText.left(dashPos - 1);
-                QString meta = fullText.mid(dashPos - 1);
+            QString name = (dashPos > 1) ? fullText.left(dashPos - 1) : fullText;
+            QString count = (dashPos > 1) ? fullText.mid(dashPos + 2).trimmed() : QString();
 
-                painter->setPen(m_text);
-                painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, name);
-                int nameW = opt.fontMetrics.horizontalAdvance(name);
-
-                QRect metaRect = textRect;
-                metaRect.setLeft(textRect.left() + nameW);
+            if (!count.isEmpty()) {
+                int cw = opt.fontMetrics.horizontalAdvance(count) + 10;
+                int ch = opt.fontMetrics.height();
+                int cy = textRect.y() + (textRect.height() - ch) / 2;
+                QRect pill(textRect.right() - cw, cy, cw, ch);
+                // Draw name clipped before pill
+                if (pill.left() > textRect.left() + 4) {
+                    QRect nameRect = textRect;
+                    nameRect.setRight(pill.left() - 4);
+                    QString elided = opt.fontMetrics.elidedText(name, Qt::ElideRight, nameRect.width());
+                    painter->setPen(m_text);
+                    painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elided);
+                }
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(m_badgeBg);
+                painter->drawRect(pill);
                 painter->setPen(m_textMuted);
-                painter->drawText(metaRect, Qt::AlignLeft | Qt::AlignVCenter, meta);
+                painter->drawText(pill, Qt::AlignCenter, count);
             } else {
                 painter->setPen(m_text);
-                painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, fullText);
+                painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, name);
             }
         } else {
             // Child: "TypeName fieldName"
@@ -296,6 +325,7 @@ public:
 private:
     QColor m_text, m_textDim, m_textMuted, m_syntaxType;
     QColor m_hover, m_selected, m_accent, m_bg;
+    QColor m_badgeBg, m_badgeText;
 };
 
 } // namespace rcx

@@ -246,6 +246,67 @@ void RcxController::connectEditor(RcxEditor* editor) {
         }
     });
 
+    // Footer "+1024" button
+    connect(editor, &RcxEditor::appendBytesRequested,
+            this, [this](uint64_t structId, int byteCount) {
+        int hex64Count = byteCount / 8;
+        int remainBytes = byteCount % 8;
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
+        for (int i = 0; i < hex64Count; i++)
+            insertNode(structId, -1, NodeKind::Hex64,
+                       QStringLiteral("field_%1").arg(i));
+        for (int i = 0; i < remainBytes; i++)
+            insertNode(structId, -1, NodeKind::Hex8,
+                       QStringLiteral("field_%1").arg(hex64Count + i));
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = false;
+        refresh();
+    });
+
+    // Footer "Trim" button — remove trailing hex nodes from end of struct
+    connect(editor, &RcxEditor::trimHexRequested,
+            this, [this](uint64_t structId) {
+        QVector<int> children = m_doc->tree.childrenOf(structId);
+        if (children.isEmpty()) return;
+
+        // Sort by offset descending to find trailing hex nodes
+        std::sort(children.begin(), children.end(), [&](int a, int b) {
+            return m_doc->tree.nodes[a].offset > m_doc->tree.nodes[b].offset;
+        });
+
+        // Collect trailing hex nodes to remove
+        QVector<int> toRemove;
+        for (int ci : children) {
+            const Node& n = m_doc->tree.nodes[ci];
+            if (!isHexNode(n.kind)) break;
+            toRemove.append(ci);
+        }
+        if (toRemove.isEmpty()) return;
+
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Trim %1 trailing hex nodes").arg(toRemove.size()));
+        for (int ni : toRemove)
+            removeNode(ni);
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = false;
+        refresh();
+    });
+
+    // Footer "+10" button — append enum members sequentially from highest value
+    connect(editor, &RcxEditor::appendEnumMembersRequested,
+            this, [this](uint64_t enumId, int count) {
+        int ni = m_doc->tree.indexOfId(enumId);
+        if (ni < 0) return;
+        auto members = m_doc->tree.nodes[ni].enumMembers;
+        int64_t nextVal = members.isEmpty() ? 0 : members.last().second + 1;
+        auto oldMembers = members;
+        for (int i = 0; i < count; i++)
+            members.append({QStringLiteral("Member%1").arg(nextVal + i), nextVal + i});
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeEnumMembers{enumId, oldMembers, members}));
+    });
+
     // Inline editing signals
     connect(editor, &RcxEditor::inlineEditCommitted,
             this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text,
@@ -1850,6 +1911,40 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             // Fall through to always-available actions
         } else {
 
+        // ── Inference-based quick convert (from type hints) ──
+        if (isHexNode(node.kind) && line >= 0 && line < m_lastResult.meta.size()) {
+            const auto& lm = m_lastResult.meta[line];
+            if (!lm.typeHintKinds.isEmpty()) {
+                NodeKind suggested = lm.typeHintKinds[0];
+                if (lm.typeHintKinds.size() == 1) {
+                    auto* m = kindMeta(suggested);
+                    QString label = QStringLiteral("Convert to %1").arg(QString::fromLatin1(m->typeName));
+                    menu.addAction(label, [this, nodeId, suggested]() {
+                        int ni = m_doc->tree.indexOfId(nodeId);
+                        if (ni >= 0) changeNodeKind(ni, suggested);
+                    });
+                } else {
+                    auto* m = kindMeta(lm.typeHintKinds[0]);
+                    QString label = QStringLiteral("Split into %1\u00D7%2")
+                        .arg(QString::fromLatin1(m->typeName))
+                        .arg(lm.typeHintKinds.size());
+                    menu.addAction(label, [this, nodeId, kinds = lm.typeHintKinds]() {
+                        int ni = m_doc->tree.indexOfId(nodeId);
+                        if (ni < 0) return;
+                        changeNodeKind(ni, kinds[0]);
+                        for (int k = 1; k < kinds.size(); ++k) {
+                            ni = m_doc->tree.indexOfId(nodeId);
+                            if (ni < 0) break;
+                            int next = ni + 1;
+                            if (next < m_doc->tree.nodes.size() && isHexNode(m_doc->tree.nodes[next].kind))
+                                changeNodeKind(next, kinds[k]);
+                        }
+                    });
+                }
+                menu.addSeparator();
+            }
+        }
+
         // ── Quick-convert suggestions (top-level for fast access) ──
         bool addedQuickConvert = false;
         if (node.kind == NodeKind::Hex64) {
@@ -3130,8 +3225,8 @@ void RcxController::switchToSavedSource(int idx) {
         // Restore formula before attach so it can be re-evaluated against the new provider
         m_doc->tree.baseAddressFormula = entry.baseAddressFormula;
         attachViaPlugin(entry.kind, entry.providerTarget);
-        // Restore saved base address (user may have navigated away from provider default)
-        if (entry.baseAddress != 0 && entry.baseAddressFormula.isEmpty())
+        // Restore saved base address — always override with saved value on source switch
+        if (entry.baseAddressFormula.isEmpty())
             m_doc->tree.baseAddress = entry.baseAddress;
     }
 }

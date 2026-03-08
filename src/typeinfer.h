@@ -34,15 +34,15 @@ QVector<TypeSuggestion> inferTypes(
     const InferHints& hints = {},
     int maxResults = 3);
 
-// Format top suggestion as short display string (e.g. "Float×2", "Int32", "UTF8")
+// Format top suggestion as short display string (e.g. "ptr64 strong", "float×2 moderate")
 inline QString formatHint(const TypeSuggestion& s) {
     if (s.kinds.isEmpty()) return {};
     const char* name = kindMeta(s.kinds[0])->typeName;
     QString base = (s.kinds.size() == 1)
         ? QString::fromLatin1(name)
         : QStringLiteral("%1\u00D7%2").arg(QString::fromLatin1(name)).arg(s.kinds.size());
-    if (s.strength <= 2) base += QLatin1Char('?');  // moderate gets ?
-    return base;
+    const char* conf = s.strength >= 3 ? " strong" : " moderate";
+    return base + QLatin1String(conf);
 }
 
 // ── Implementation (header-only) ──
@@ -137,11 +137,15 @@ inline FeatureResult countFloatFeatures(uint32_t cur,
 inline FeatureResult countIntFeatures(uint32_t val,
                                       const uint8_t* minP, const uint8_t* maxP,
                                       const InferHints& h) {
+    // Hard reject: zero and sentinel are never useful integers
+    if (val == 0 || val == 0xFFFFFFFF)
+        return {0, 3};
+
     int passed = 0, checked = 3;
     int32_t sv = (int32_t)val;
 
-    // Feature 1: non-zero
-    passed += (val != 0) ? 1 : 0;
+    // Feature 1: non-zero and not sentinel (always passes after hard reject)
+    passed += 1;
     // Feature 2: small absolute value
     passed += (val <= 1000000u || (uint32_t)(sv + 1000000) <= 2000000u) ? 1 : 0;
     // Feature 3: fits int16 range
@@ -189,19 +193,24 @@ inline FeatureResult countFlagFeatures(uint32_t val,
 // ── Pointer feature checker ──
 
 inline FeatureResult countPtrFeatures64(uint64_t val) {
-    int passed = 0, checked = 5;
-    // Feature 1: non-zero and not common sentinel values
-    passed += (val != 0 && val != 0xFFFFFFFFFFFFFFFFULL
-               && val != 0x00000000FFFFFFFFULL) ? 1 : 0;
-    // Feature 2: canonical 48-bit address (sign-extended from bit 47)
+    // Hard reject: common sentinel values are never pointers
+    if (val == 0 || val == 0xFFFFFFFFFFFFFFFFULL || val == 0x00000000FFFFFFFFULL)
+        return {0, 6};
+
+    int passed = 0, checked = 6;
+    // Feature 1: canonical 48-bit address (sign-extended from bit 47)
     passed += (val <= 0x00007FFFFFFFFFFFULL
                || val >= 0xFFFF800000000000ULL) ? 1 : 0;
-    // Feature 3: aligned to 8 (heap/vtable allocations)
+    // Feature 2: aligned to 8 (heap/vtable allocations)
     passed += ((val & 7) == 0) ? 1 : 0;
-    // Feature 4: above null guard pages (real addresses >= 64KB)
+    // Feature 3: above null guard pages (real addresses >= 64KB)
     passed += (val >= 0x10000) ? 1 : 0;
-    // Feature 5: has upper 32 bits (real 64-bit address, not a small constant)
+    // Feature 4: has upper 32 bits (real 64-bit address, not a small constant)
     passed += ((val >> 32) != 0) ? 1 : 0;
+    // Feature 5: above 4GB (in real 64-bit address space, not a 32-bit value)
+    passed += (val > 0x100000000ULL) ? 1 : 0;
+    // Feature 6: user-mode address range (not kernel 0xFFFF800000000000+)
+    passed += (val < 0xFFFF800000000000ULL) ? 1 : 0;
     return {passed, checked};
 }
 

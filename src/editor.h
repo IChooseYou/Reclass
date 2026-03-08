@@ -86,6 +86,9 @@ signals:
     void typePickerRequested(EditTarget target, int nodeIdx, QPoint globalPos);
     void insertAboveRequested(int nodeIdx, NodeKind kind);
     void relativeOffsetsChanged(bool relative);
+    void appendBytesRequested(uint64_t structId, int byteCount);
+    void trimHexRequested(uint64_t structId);
+    void appendEnumMembersRequested(uint64_t enumId, int count);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
