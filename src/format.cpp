@@ -168,7 +168,7 @@ QString fmtStructFooter(const Node& node, int depth, int /*totalSize*/) {
     if (node.resolvedClassKeyword() == QStringLiteral("enum"))
         footer += QStringLiteral("  +10");
     else
-        footer += QStringLiteral("  +1024  Trim");
+        footer += QStringLiteral("  +10h +100h +1000h Trim");
     return footer;
 }
 

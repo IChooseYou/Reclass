@@ -916,11 +916,19 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     for (int i = 0; i < result.meta.size(); i++) {
         if (result.meta[i].lineKind != LineKind::Footer) continue;
         QString ft = getLineText(m_sci, i);
-        int addStart = ft.indexOf(QStringLiteral("+1024"));
-        if (addStart >= 0)
-            fillIndicatorCols(IND_CMD_PILL, i, addStart, addStart + 5);
+        // Struct footer: +10h +100h +1000h Trim (search longest first)
+        int p1000 = ft.indexOf(QStringLiteral("+1000h"));
+        if (p1000 >= 0)
+            fillIndicatorCols(IND_CMD_PILL, i, p1000, p1000 + 6);
+        int p100 = ft.indexOf(QStringLiteral("+100h"));
+        if (p100 >= 0 && p100 != p1000 + 1)
+            fillIndicatorCols(IND_CMD_PILL, i, p100, p100 + 5);
+        int p10 = ft.indexOf(QStringLiteral("+10h"));
+        if (p10 >= 0 && p10 != p100 && p10 != p1000)
+            fillIndicatorCols(IND_CMD_PILL, i, p10, p10 + 4);
+        // Enum footer: +10 (no 'h')
         int add10Start = ft.indexOf(QStringLiteral("+10"));
-        if (add10Start >= 0)
+        if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000)
             fillIndicatorCols(IND_CMD_PILL, i, add10Start, add10Start + 3);
         int trimStart = ft.indexOf(QStringLiteral("Trim"));
         if (trimStart >= 0)
@@ -2042,23 +2050,39 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 emit marginClicked(0, h.line, me->modifiers());
                 return true;
             }
-            // Footer buttons: +1024, +10, Trim
+            // Footer buttons: +10h/+100h/+1000h, +10 (enum), Trim
             if (h.line >= 0 && h.line < m_meta.size()
                 && m_meta[h.line].lineKind == LineKind::Footer) {
                 QString ft = getLineText(m_sci, h.line);
-                int addStart = ft.indexOf(QStringLiteral("+1024"));
-                if (addStart >= 0 && h.col >= addStart && h.col < addStart + 5) {
-                    emit appendBytesRequested(m_meta[h.line].nodeId, 1024);
+                uint64_t nid = m_meta[h.line].nodeId;
+                // Struct: +1000h (0x1000 = 4096 bytes)
+                int p1000 = ft.indexOf(QStringLiteral("+1000h"));
+                if (p1000 >= 0 && h.col >= p1000 && h.col < p1000 + 6) {
+                    emit appendBytesRequested(nid, 0x1000);
                     return true;
                 }
+                // Struct: +100h (0x100 = 256 bytes)
+                int p100 = ft.indexOf(QStringLiteral("+100h"));
+                if (p100 >= 0 && p100 != p1000 + 1 && h.col >= p100 && h.col < p100 + 5) {
+                    emit appendBytesRequested(nid, 0x100);
+                    return true;
+                }
+                // Struct: +10h (0x10 = 16 bytes)
+                int p10 = ft.indexOf(QStringLiteral("+10h"));
+                if (p10 >= 0 && p10 != p100 && p10 != p1000 && h.col >= p10 && h.col < p10 + 4) {
+                    emit appendBytesRequested(nid, 0x10);
+                    return true;
+                }
+                // Enum: +10 (10 members)
                 int add10Start = ft.indexOf(QStringLiteral("+10"));
-                if (add10Start >= 0 && h.col >= add10Start && h.col < add10Start + 3) {
-                    emit appendEnumMembersRequested(m_meta[h.line].nodeId, 10);
+                if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000
+                    && h.col >= add10Start && h.col < add10Start + 3) {
+                    emit appendEnumMembersRequested(nid, 10);
                     return true;
                 }
                 int trimStart = ft.indexOf(QStringLiteral("Trim"));
                 if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4) {
-                    emit trimHexRequested(m_meta[h.line].nodeId);
+                    emit trimHexRequested(nid);
                     return true;
                 }
             }
@@ -3153,25 +3177,28 @@ void RcxEditor::applyHoverCursor() {
         m_hoverSpanLines.append(h.line);
     }
 
-    // Apply hover span on footer pills (+1024, +10, Trim)
+    // Apply hover span on footer pills (+10h/+100h/+1000h, +10, Trim)
     if (h.line >= 0 && h.line < m_meta.size()
         && m_meta[h.line].lineKind == LineKind::Footer) {
         QString ft = getLineText(m_sci, h.line);
-        int addStart = ft.indexOf(QStringLiteral("+1024"));
-        if (addStart >= 0 && h.col >= addStart && h.col < addStart + 5) {
-            fillIndicatorCols(IND_HOVER_SPAN, h.line, addStart, addStart + 5);
-            m_hoverSpanLines.append(h.line);
-        }
+        auto tryPill = [&](const QString& text, int pos) {
+            if (pos >= 0 && h.col >= pos && h.col < pos + text.size()) {
+                fillIndicatorCols(IND_HOVER_SPAN, h.line, pos, pos + text.size());
+                m_hoverSpanLines.append(h.line);
+            }
+        };
+        int p1000 = ft.indexOf(QStringLiteral("+1000h"));
+        tryPill(QStringLiteral("+1000h"), p1000);
+        int p100 = ft.indexOf(QStringLiteral("+100h"));
+        if (p100 >= 0 && p100 != p1000 + 1)
+            tryPill(QStringLiteral("+100h"), p100);
+        int p10 = ft.indexOf(QStringLiteral("+10h"));
+        if (p10 >= 0 && p10 != p100 && p10 != p1000)
+            tryPill(QStringLiteral("+10h"), p10);
         int add10Start = ft.indexOf(QStringLiteral("+10"));
-        if (add10Start >= 0 && h.col >= add10Start && h.col < add10Start + 3) {
-            fillIndicatorCols(IND_HOVER_SPAN, h.line, add10Start, add10Start + 3);
-            m_hoverSpanLines.append(h.line);
-        }
-        int trimStart = ft.indexOf(QStringLiteral("Trim"));
-        if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4) {
-            fillIndicatorCols(IND_HOVER_SPAN, h.line, trimStart, trimStart + 4);
-            m_hoverSpanLines.append(h.line);
-        }
+        if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000)
+            tryPill(QStringLiteral("+10"), add10Start);
+        tryPill(QStringLiteral("Trim"), ft.indexOf(QStringLiteral("Trim")));
     }
 
     // Value history popup on hover (read-only, no buttons)
@@ -3441,11 +3468,18 @@ void RcxEditor::applyHoverCursor() {
     } else if (h.line >= 0 && h.line < m_meta.size()
                && m_meta[h.line].lineKind == LineKind::Footer) {
         QString ft = getLineText(m_sci, h.line);
-        int addStart = ft.indexOf(QStringLiteral("+1024"));
-        if (addStart >= 0 && h.col >= addStart && h.col < addStart + 5)
+        int p1000 = ft.indexOf(QStringLiteral("+1000h"));
+        if (p1000 >= 0 && h.col >= p1000 && h.col < p1000 + 6)
+            desired = Qt::PointingHandCursor;
+        int p100 = ft.indexOf(QStringLiteral("+100h"));
+        if (p100 >= 0 && p100 != p1000 + 1 && h.col >= p100 && h.col < p100 + 5)
+            desired = Qt::PointingHandCursor;
+        int p10 = ft.indexOf(QStringLiteral("+10h"));
+        if (p10 >= 0 && p10 != p100 && p10 != p1000 && h.col >= p10 && h.col < p10 + 4)
             desired = Qt::PointingHandCursor;
         int add10Start = ft.indexOf(QStringLiteral("+10"));
-        if (add10Start >= 0 && h.col >= add10Start && h.col < add10Start + 3)
+        if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000
+            && h.col >= add10Start && h.col < add10Start + 3)
             desired = Qt::PointingHandCursor;
         int trimStart = ft.indexOf(QStringLiteral("Trim"));
         if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4)
