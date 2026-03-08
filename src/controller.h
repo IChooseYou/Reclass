@@ -41,7 +41,8 @@ public:
     }
 
     ComposeResult compose(uint64_t viewRootId = 0, bool compactColumns = false,
-                          bool treeLines = false, bool braceWrap = false) const;
+                          bool treeLines = false, bool braceWrap = false,
+                          bool typeHints = false) const;
     bool save(const QString& path);
     bool load(const QString& path);
     void loadData(const QString& binaryPath);
@@ -131,6 +132,8 @@ public:
     void setCompactColumns(bool v);
     void setTreeLines(bool v);
     void setBraceWrap(bool v);
+    void setTypeHints(bool v);
+    bool typeHints() const { return m_typeHints; }
     void resetProvider();
 
     // MCP bridge accessors
@@ -171,6 +174,7 @@ private:
     bool               m_compactColumns = false;
     bool               m_treeLines = false;
     bool               m_braceWrap = false;
+    bool               m_typeHints = false;
     uint64_t           m_viewRootId = 0;
 
     // ── Saved sources for quick-switch ──

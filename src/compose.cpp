@@ -1,4 +1,5 @@
 #include "core.h"
+#include "typeinfer.h"
 #include "addressparser.h"
 #include <algorithm>
 #include <numeric>
@@ -26,6 +27,7 @@ struct ComposeState {
     bool               compactColumns = false;  // compact column mode: cap type width, overflow long types
     bool               treeLines      = false;  // draw Unicode tree connectors in indentation
     bool               braceWrap      = false;  // opening brace on its own line
+    bool               typeHints      = false;  // show type inference hints on hex nodes
     QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
 
@@ -208,6 +210,21 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         QString lineText = fmt::fmtNodeLine(node, prov, absAddr, depth, sub,
                                             /*comment=*/{}, typeW, nameW, ptrTypeOverride,
                                             state.compactColumns);
+
+        // Type inference hint for hex nodes (when enabled)
+        if (state.typeHints && isHexNode(node.kind) && sub == 0) {
+            const int sz = sizeForKind(node.kind);
+            QByteArray b = prov.isReadable(absAddr, sz)
+                ? prov.readBytes(absAddr, sz) : QByteArray(sz, '\0');
+            auto suggestions = inferTypes(
+                reinterpret_cast<const uint8_t*>(b.constData()), sz);
+            if (!suggestions.isEmpty()) {
+                lm.typeHintStart = lineText.size() + 2; // after "  " gap
+                lm.typeHint = formatHint(suggestions[0]);
+                lineText += QStringLiteral("  ") + lm.typeHint;
+            }
+        }
+
         state.emitLine(lineText, std::move(lm));
     }
 }
@@ -469,7 +486,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             int eNW = state.effectiveNameW(node.id);
             for (int i = 0; i < node.arrayLen; i++) {
                 state.setTreeSibling(childDepth, i < node.arrayLen - 1);
-                uint64_t elemAddr = absAddr + i * elemSize;
+                uint64_t elemAddr = absAddr + (uint64_t)i * elemSize;
 
                 // Type override: "float[0]", "uint32_t[1]", etc.
                 QString elemTypeStr = fmt::typeNameRaw(node.elementKind)
@@ -478,7 +495,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 Node elem;
                 elem.kind = node.elementKind;
                 elem.name = QString();  // no name for array elements
-                elem.offset = node.offset + i * elemSize;
+                elem.offset = node.offset + (int)((uint64_t)i * elemSize);
                 elem.parentId = node.id;
                 elem.id = 0;
 
@@ -971,11 +988,13 @@ void composeNode(ComposeState& state, const NodeTree& tree,
 } // anonymous namespace
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId,
-                      bool compactColumns, bool treeLines, bool braceWrap) {
+                      bool compactColumns, bool treeLines, bool braceWrap,
+                      bool typeHints) {
     ComposeState state;
     state.compactColumns = compactColumns;
     state.treeLines = treeLines;
     state.braceWrap = braceWrap;
+    state.typeHints = typeHints;
 
     // Precompute parent→children map
     for (int i = 0; i < tree.nodes.size(); i++)

@@ -236,12 +236,14 @@ public:
 
         // Draw icon for top-level items
         if (!isChild) {
+            bool viewed = index.data(Qt::UserRole + 3).toBool();
             QVariant iconVar = index.data(Qt::DecorationRole);
             if (iconVar.isValid()) {
                 QIcon icon = iconVar.value<QIcon>();
                 int iconSz = opt.fontMetrics.height();
                 int iconY = textRect.y() + (textRect.height() - iconSz) / 2;
-                icon.paint(painter, textRect.x(), iconY, iconSz, iconSz);
+                icon.paint(painter, QRect(textRect.x(), iconY, iconSz, iconSz),
+                           Qt::AlignCenter, viewed ? QIcon::Normal : QIcon::Disabled);
                 textRect.setLeft(textRect.left() + iconSz + 4);
             }
         }

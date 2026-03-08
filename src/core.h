@@ -450,8 +450,8 @@ struct NodeTree {
             if (c.isStatic) continue;  // static fields don't affect struct size
             int sz = (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
                 ? structSpan(c.id, childMap, visited) : c.byteSize();
-            int end = c.offset + sz;
-            if (end > maxEnd) maxEnd = end;
+            int64_t end = (int64_t)c.offset + sz;
+            if (end > maxEnd) maxEnd = (int)qMin(end, (int64_t)INT_MAX);
         }
 
         // Embedded struct reference: no own children but refId points to a struct definition
@@ -625,6 +625,8 @@ struct LineMeta {
     bool     isArrayElement  = false;  // true for synthesized primitive array element lines
     bool     isMemberLine   = false;  // true for enum member / bitfield member lines
     bool     isStaticLine   = false;  // true for static field node lines
+    QString  typeHint;                 // Type inference hint text (e.g. "Float×2") — only set for hex nodes when hints enabled
+    int      typeHintStart  = -1;      // Character offset where hint text starts in line text (-1 = none)
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {
@@ -1037,6 +1039,6 @@ namespace fmt {
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId = 0,
                       bool compactColumns = false, bool treeLines = false,
-                      bool braceWrap = false);
+                      bool braceWrap = false, bool typeHints = false);
 
 } // namespace rcx

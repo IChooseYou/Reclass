@@ -299,6 +299,9 @@ public:
         // Kill the status bar item frame and panel border
         if (elem == PE_FrameStatusBarItem || elem == PE_PanelStatusBar)
             return;
+        // Kill Fusion's frame outline on QScintilla (window.darker(140) = ~#171717)
+        if (elem == PE_Frame && w && w->inherits("QsciScintilla"))
+            return;
         // Transparent menu bar background (no CSS needed)
         if (elem == PE_PanelMenuBar)
             return;
@@ -835,6 +838,15 @@ void MainWindow::createMenus() {
                 pane.editor->setRelativeOffsets(checked);
     });
 
+    auto* actTypeHints = view->addAction("Type &Hints");
+    actTypeHints->setCheckable(true);
+    actTypeHints->setChecked(settings.value("typeHints", false).toBool());
+    connect(actTypeHints, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("typeHints", checked);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setTypeHints(checked);
+    });
+
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
     {
@@ -1233,6 +1245,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         QSettings s("Reclass", "Reclass");
         QString editorFont = s.value("font", "JetBrains Mono").toString();
         pane.tabWidget->setStyleSheet(QStringLiteral(
+            "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
             "QTabBar::tab {"
             "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
@@ -1378,7 +1391,8 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
         // Sync status bar buttons if this is the active pane
         auto* tab = activeTab();
-        if (tab && &tab->panes[tab->activePaneIdx] == p)
+        if (tab && tab->activePaneIdx >= 0 && tab->activePaneIdx < tab->panes.size()
+            && &tab->panes[tab->activePaneIdx] == p)
             syncViewButtons(p->viewMode);
 
         if (index == 1) {
@@ -1599,6 +1613,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     ctrl->setCompactColumns(QSettings("Reclass", "Reclass").value("compactColumns", true).toBool());
     ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", true).toBool());
     ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
+    ctrl->setTypeHints(QSettings("Reclass", "Reclass").value("typeHints", false).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
@@ -2338,9 +2353,9 @@ void MainWindow::applyTheme(const Theme& theme) {
     // QWidget default colors are required because having ANY stylesheet on QMainWindow
     // switches children from palette-based to CSS-based rendering.
     setStyleSheet(QStringLiteral(
-        "QMainWindow::separator { width: 1px; height: 1px; background: transparent; }"
+        "QMainWindow::separator { width: 1px; height: 1px; background: %1; }"
         "QDockWidget { border: none; }"
-        "QDockWidget > QWidget { border: none; }"));
+        "QDockWidget > QWidget { border: none; }").arg(theme.background.name()));
 
     // Custom title bar — applied AFTER setStyleSheet() because the MainWindow
     // stylesheet re-resolves descendant palettes and would reset the QMenuBar palette.
@@ -2384,6 +2399,7 @@ void MainWindow::applyTheme(const Theme& theme) {
     {
         QString editorFont = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
         QString paneTabStyle = QStringLiteral(
+            "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
             "QTabBar::tab {"
             "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 24px;"
@@ -2432,7 +2448,10 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_workspaceTree->setStyleSheet(QStringLiteral(
             "QTreeView { background: %1; border: none; }"
             "QTreeView::branch:has-children:closed { image: url(:/chevron-right.svg); }"
-            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }")
+            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }"
+            "QAbstractScrollArea::corner { background: %1; border: none; }"
+            "QHeaderView { background: %1; border: none; }"
+            "QHeaderView::section { background: %1; border: none; }")
             .arg(theme.background.name()));
         m_workspaceTree->viewport()->update();
     }
@@ -2446,12 +2465,10 @@ void MainWindow::applyTheme(const Theme& theme) {
                  theme.hover.name()));
     }
 
-    // Dock titlebar: restyle via palette + close button
-    if (m_dockTitleLabel) {
-        QPalette lp = m_dockTitleLabel->palette();
-        lp.setColor(QPalette::WindowText, theme.textDim);
-        m_dockTitleLabel->setPalette(lp);
-    }
+    // Dock titlebar: restyle via stylesheet + close button
+    if (m_dockTitleLabel)
+        m_dockTitleLabel->setStyleSheet(
+            QStringLiteral("color: %1;").arg(theme.textDim.name()));
     if (auto* titleBar = m_workspaceDock ? m_workspaceDock->titleBarWidget() : nullptr) {
         QPalette tbPal = titleBar->palette();
         tbPal.setColor(QPalette::Window, theme.backgroundAlt);
@@ -2466,16 +2483,14 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_dockGrip->setGripColor(theme.textFaint);
     if (m_workspaceDock)
         m_workspaceDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
+            "QDockWidget { border: 1px solid %1; border-right: none; }").arg(theme.border.name()));
 
     // Scanner dock
     if (m_scannerPanel)
         m_scannerPanel->applyTheme(theme);
-    if (m_scanDockTitle) {
-        QPalette lp = m_scanDockTitle->palette();
-        lp.setColor(QPalette::WindowText, theme.textDim);
-        m_scanDockTitle->setPalette(lp);
-    }
+    if (m_scanDockTitle)
+        m_scanDockTitle->setStyleSheet(
+            QStringLiteral("color: %1;").arg(theme.textDim.name()));
     if (auto* titleBar = m_scannerDock ? m_scannerDock->titleBarWidget() : nullptr) {
         QPalette tbPal = titleBar->palette();
         tbPal.setColor(QPalette::Window, theme.backgroundAlt);
@@ -3368,9 +3383,8 @@ void MainWindow::createWorkspaceDock() {
 
         m_dockTitleLabel = new QLabel("Project", titleBar);
         {
-            QPalette lp = m_dockTitleLabel->palette();
-            lp.setColor(QPalette::WindowText, t.textDim);
-            m_dockTitleLabel->setPalette(lp);
+            m_dockTitleLabel->setStyleSheet(
+                QStringLiteral("color: %1;").arg(t.textDim.name()));
             QSettings s("Reclass", "Reclass");
             QFont f(s.value("font", "JetBrains Mono").toString(), 10);
             f.setFixedPitch(true);
@@ -3381,13 +3395,14 @@ void MainWindow::createWorkspaceDock() {
         layout->addStretch();
 
         m_dockCloseBtn = new QToolButton(titleBar);
-        m_dockCloseBtn->setText(QStringLiteral("\u2715"));
+        m_dockCloseBtn->setIcon(QIcon(QStringLiteral(":/vsicons/close.svg")));
+        m_dockCloseBtn->setIconSize(QSize(14, 14));
         m_dockCloseBtn->setAutoRaise(true);
         m_dockCloseBtn->setCursor(Qt::PointingHandCursor);
         m_dockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
-            "QToolButton:hover { color: %2; }")
-            .arg(t.textDim.name(), t.indHoverSpan.name()));
+            "QToolButton { border: none; padding: 0px 4px; }"
+            "QToolButton:hover { background: %1; }")
+            .arg(t.hover.name()));
         connect(m_dockCloseBtn, &QToolButton::clicked, m_workspaceDock, &QDockWidget::close);
         layout->addWidget(m_dockCloseBtn);
 
@@ -3395,10 +3410,11 @@ void MainWindow::createWorkspaceDock() {
     }
 
     // Outer border around entire dock (header + search + tree)
+    // background + ::title needed to suppress Fusion outline frame (renders ~#171717)
     {
         const auto& t = ThemeManager::instance().current();
         m_workspaceDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
+            "QDockWidget { border: 1px solid %1; border-right: none; }").arg(t.border.name()));
     }
 
     // Container widget: search box + tree view
@@ -3472,6 +3488,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_workspaceTree->setExpandsOnDoubleClick(false);
     m_workspaceTree->setMouseTracking(true);
+    m_workspaceTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     {
         QSettings s("Reclass", "Reclass");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
@@ -3501,7 +3518,10 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceTree->setStyleSheet(QStringLiteral(
             "QTreeView { background: %1; border: none; }"
             "QTreeView::branch:has-children:closed { image: url(:/chevron-right.svg); }"
-            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }")
+            "QTreeView::branch:has-children:open { image: url(:/chevron-down.svg); }"
+            "QAbstractScrollArea::corner { background: %1; border: none; }"
+            "QHeaderView { background: %1; border: none; }"
+            "QHeaderView::section { background: %1; border: none; }")
             .arg(t.background.name()));
     }
 
@@ -3509,10 +3529,10 @@ void MainWindow::createWorkspaceDock() {
 
     m_workspaceTree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_workspaceTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
-        QModelIndex index = m_workspaceTree->indexAt(pos);
+        QModelIndex clickedIndex = m_workspaceTree->indexAt(pos);
 
         // Right-click on empty area → New Class / New Struct / New Enum
-        if (!index.isValid()) {
+        if (!clickedIndex.isValid()) {
             QMenu menu;
             auto* actClass  = menu.addAction("New Class");
             auto* actStruct = menu.addAction("New Struct");
@@ -3524,85 +3544,245 @@ void MainWindow::createWorkspaceDock() {
             return;
         }
 
-        auto structIdVar = index.data(Qt::UserRole + 1);
-        uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
-        if (structId == 0) return;
+        // If right-clicked item is not in current selection, select only it
+        auto* sel = m_workspaceTree->selectionModel();
+        if (!sel->isSelected(clickedIndex))
+            sel->select(clickedIndex,
+                QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
 
-        auto subVar = index.data(Qt::UserRole);
-        if (!subVar.isValid()) return;
-        auto* dock = static_cast<QDockWidget*>(subVar.value<void*>());
-        if (!dock || !m_tabs.contains(dock)) return;
+        // Gather all selected ROOT items (children are not independently actionable)
+        struct SelItem {
+            uint64_t structId;
+            QDockWidget* dock;
+            int nodeIdx;
+            QString keyword;
+            QString typeName;
+        };
+        QVector<SelItem> items;
 
-        auto& tab = m_tabs[dock];
-        int ni = tab.doc->tree.indexOfId(structId);
-        if (ni < 0) return;
-        QString kw = tab.doc->tree.nodes[ni].resolvedClassKeyword();
+        for (const auto& idx : sel->selectedIndexes()) {
+            if (idx.parent().isValid()) continue;  // skip children
+            auto idVar = idx.data(Qt::UserRole + 1);
+            uint64_t sid = idVar.isValid() ? idVar.toULongLong() : 0;
+            if (sid == 0) continue;
+            auto subVar = idx.data(Qt::UserRole);
+            if (!subVar.isValid()) continue;
+            auto* dk = static_cast<QDockWidget*>(subVar.value<void*>());
+            if (!dk || !m_tabs.contains(dk)) continue;
+            int ni = m_tabs[dk].doc->tree.indexOfId(sid);
+            if (ni < 0) continue;
+            const auto& nd = m_tabs[dk].doc->tree.nodes[ni];
+            QString tn = nd.structTypeName.isEmpty() ? nd.name : nd.structTypeName;
+            if (tn.isEmpty()) tn = QStringLiteral("(unnamed)");
+            items.append({sid, dk, ni, nd.resolvedClassKeyword(), tn});
+        }
+        if (items.isEmpty()) return;
 
         QMenu menu;
+
+        // Navigation actions (single selection only)
+        QAction* actOpenCurrent = nullptr;
+        QAction* actOpenNew = nullptr;
+        QAction* actDuplicate = nullptr;
+        if (items.size() == 1) {
+            actOpenCurrent = menu.addAction("Open in Current Tab");
+            actOpenNew     = menu.addAction("Open in New Tab");
+            actDuplicate   = menu.addAction("Duplicate");
+            menu.addSeparator();
+        }
+
+        // Convert: only for single selection, class↔struct (not enum)
         QAction* actConvert = nullptr;
-        // class↔struct conversion only (no enum conversion)
-        if (kw == QStringLiteral("class"))
-            actConvert = menu.addAction("Convert to Struct");
-        else if (kw == QStringLiteral("struct"))
-            actConvert = menu.addAction("Convert to Class");
-        auto* actDelete = menu.addAction(QIcon(":/vsicons/remove.svg"), "Delete");
+        if (items.size() == 1) {
+            if (items[0].keyword == QStringLiteral("class"))
+                actConvert = menu.addAction("Convert to Struct");
+            else if (items[0].keyword == QStringLiteral("struct"))
+                actConvert = menu.addAction("Convert to Class");
+        }
+
+        // Delete: works for single or multi
+        QString delLabel = items.size() == 1
+            ? QStringLiteral("Delete")
+            : QStringLiteral("Delete %1 items").arg(items.size());
+        auto* actDelete = menu.addAction(QIcon(":/vsicons/remove.svg"), delLabel);
 
         QAction* chosen = menu.exec(m_workspaceTree->viewport()->mapToGlobal(pos));
-        if (chosen == actDelete) {
-            QString typeName = tab.doc->tree.nodes[ni].structTypeName.isEmpty()
-                ? tab.doc->tree.nodes[ni].name
-                : tab.doc->tree.nodes[ni].structTypeName;
-            if (typeName.isEmpty()) typeName = QStringLiteral("(unnamed)");
 
-            // Collect detailed reference info
+        if (chosen == actDelete) {
+            // Collect reference info across all selected items
             QStringList refDetails;
-            for (const auto& n : tab.doc->tree.nodes) {
-                if (n.refId == structId) {
-                    QString ownerName;
-                    uint64_t pid = n.parentId;
-                    while (pid != 0) {
-                        int pi = tab.doc->tree.indexOfId(pid);
-                        if (pi < 0) break;
-                        if (tab.doc->tree.nodes[pi].parentId == 0) {
-                            ownerName = tab.doc->tree.nodes[pi].structTypeName.isEmpty()
-                                ? tab.doc->tree.nodes[pi].name
-                                : tab.doc->tree.nodes[pi].structTypeName;
-                            break;
+            QStringList typeNames;
+            for (const auto& item : items) {
+                typeNames << item.typeName;
+                if (!m_tabs.contains(item.dock)) continue;
+                for (const auto& n : m_tabs[item.dock].doc->tree.nodes) {
+                    if (n.refId == item.structId) {
+                        QString ownerName;
+                        uint64_t pid = n.parentId;
+                        while (pid != 0) {
+                            int pi = m_tabs[item.dock].doc->tree.indexOfId(pid);
+                            if (pi < 0) break;
+                            if (m_tabs[item.dock].doc->tree.nodes[pi].parentId == 0) {
+                                const auto& pn = m_tabs[item.dock].doc->tree.nodes[pi];
+                                ownerName = pn.structTypeName.isEmpty()
+                                    ? pn.name : pn.structTypeName;
+                                break;
+                            }
+                            pid = m_tabs[item.dock].doc->tree.nodes[pi].parentId;
                         }
-                        pid = tab.doc->tree.nodes[pi].parentId;
+                        QString fieldDesc = ownerName.isEmpty()
+                            ? n.name
+                            : QStringLiteral("%1::%2").arg(ownerName, n.name);
+                        refDetails << QStringLiteral("  \u2022 %1 (%2)")
+                            .arg(fieldDesc, kindToString(n.kind));
                     }
-                    QString fieldDesc = ownerName.isEmpty()
-                        ? n.name
-                        : QStringLiteral("%1::%2").arg(ownerName, n.name);
-                    refDetails << QStringLiteral("  \u2022 %1 (%2)")
-                        .arg(fieldDesc, kindToString(n.kind));
                 }
             }
 
             QString msg;
-            if (refDetails.isEmpty()) {
-                msg = QString("Delete '%1'?").arg(typeName);
+            if (items.size() == 1) {
+                msg = refDetails.isEmpty()
+                    ? QStringLiteral("Delete '%1'?").arg(typeNames[0])
+                    : QStringLiteral("Delete '%1'?\n\n"
+                        "The following %2 field(s) reference this type "
+                        "and will become untyped (void):\n\n%3")
+                        .arg(typeNames[0])
+                        .arg(refDetails.size())
+                        .arg(refDetails.join('\n'));
             } else {
-                msg = QString("Delete '%1'?\n\n"
-                              "The following %2 field(s) reference this type "
-                              "and will become untyped (void):\n\n%3")
-                    .arg(typeName)
-                    .arg(refDetails.size())
-                    .arg(refDetails.join('\n'));
+                msg = QStringLiteral("Delete %1 types?\n\n%2")
+                    .arg(items.size())
+                    .arg(typeNames.join(QStringLiteral(", ")));
+                if (!refDetails.isEmpty())
+                    msg += QStringLiteral("\n\n%1 field(s) reference these types "
+                        "and will become untyped (void):\n\n%2")
+                        .arg(refDetails.size())
+                        .arg(refDetails.join('\n'));
             }
 
             auto answer = QMessageBox::question(this, "Delete Type", msg,
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             if (answer != QMessageBox::Yes) return;
 
-            tab.ctrl->deleteRootStruct(structId);
+            // Group deletes by controller for single undo macro per document
+            QHash<RcxController*, QVector<uint64_t>> byCtrl;
+            for (const auto& item : items) {
+                if (!m_tabs.contains(item.dock)) continue;
+                byCtrl[m_tabs[item.dock].ctrl].append(item.structId);
+            }
+            for (auto it = byCtrl.begin(); it != byCtrl.end(); ++it) {
+                auto* ctrl = it.key();
+                const auto& ids = it.value();
+                if (ids.size() == 1) {
+                    ctrl->deleteRootStruct(ids[0]);
+                } else {
+                    // Wrap multiple deletes in a single undo macro
+                    ctrl->document()->undoStack.beginMacro(
+                        QStringLiteral("Delete %1 types").arg(ids.size()));
+                    for (uint64_t sid : ids)
+                        ctrl->deleteRootStruct(sid);
+                    ctrl->document()->undoStack.endMacro();
+                }
+            }
             rebuildWorkspaceModel();
-        } else if (chosen && chosen == actConvert) {
-            QString newKw = kw == QStringLiteral("class")
-                ? QStringLiteral("struct") : QStringLiteral("class");
-            QString oldKw = tab.doc->tree.nodes[ni].resolvedClassKeyword();
+
+        } else if (chosen && chosen == actOpenCurrent && items.size() == 1) {
+            // Open in current (active) tab — set viewRootId on active editor
+            const auto& item = items[0];
+            if (!m_tabs.contains(item.dock)) return;
+            RcxDocument* doc = m_tabs[item.dock].doc;
+            doc->tree.nodes[item.nodeIdx].collapsed = false;
+
+            // Use the active tab if it shares the same document, else use owner
+            QDockWidget* targetDock = item.dock;
+            if (m_activeDocDock && m_tabs.contains(m_activeDocDock)
+                && m_tabs[m_activeDocDock].doc == doc)
+                targetDock = m_activeDocDock;
+
+            auto& tab = m_tabs[targetDock];
+            tab.ctrl->setViewRootId(item.structId);
+            tab.ctrl->refresh();
+            targetDock->raise();
+            targetDock->show();
+            m_activeDocDock = targetDock;
+            QString structName = doc->tree.nodes[item.nodeIdx].structTypeName.isEmpty()
+                ? doc->tree.nodes[item.nodeIdx].name
+                : doc->tree.nodes[item.nodeIdx].structTypeName;
+            if (!structName.isEmpty())
+                targetDock->setWindowTitle(structName);
+
+        } else if (chosen && chosen == actOpenNew && items.size() == 1) {
+            // Open in a brand new tab (sharing the same document)
+            const auto& item = items[0];
+            if (!m_tabs.contains(item.dock)) return;
+            RcxDocument* doc = m_tabs[item.dock].doc;
+            doc->tree.nodes[item.nodeIdx].collapsed = false;
+            auto* newDock = createTab(doc);
+            m_tabs[newDock].ctrl->setViewRootId(item.structId);
+            m_tabs[newDock].ctrl->refresh();
+            QString structName = doc->tree.nodes[item.nodeIdx].structTypeName.isEmpty()
+                ? doc->tree.nodes[item.nodeIdx].name
+                : doc->tree.nodes[item.nodeIdx].structTypeName;
+            if (!structName.isEmpty())
+                newDock->setWindowTitle(structName);
+            rebuildWorkspaceModel();
+
+        } else if (chosen && chosen == actDuplicate && items.size() == 1) {
+            // Duplicate: deep-copy the struct as a new root with a unique name
+            const auto& item = items[0];
+            if (!m_tabs.contains(item.dock)) return;
+            auto& tab = m_tabs[item.dock];
+            auto& tree = tab.doc->tree;
+
+            // Generate unique name
+            QString baseName = item.typeName + QStringLiteral("_copy");
+            QString newName = baseName;
+            int counter = 1;
+            QSet<QString> existing;
+            for (const auto& n : tree.nodes)
+                if (n.kind == rcx::NodeKind::Struct && !n.structTypeName.isEmpty())
+                    existing.insert(n.structTypeName);
+            while (existing.contains(newName))
+                newName = baseName + QString::number(counter++);
+
+            tab.ctrl->setSuppressRefresh(true);
+            tab.doc->undoStack.beginMacro(QStringLiteral("Duplicate ") + item.typeName);
+
+            // Clone root node
+            rcx::Node root = tree.nodes[item.nodeIdx];
+            root.id = tree.reserveId();
+            root.structTypeName = newName;
+            root.name = newName;
+            root.parentId = 0;
             tab.doc->undoStack.push(new rcx::RcxCommand(tab.ctrl,
-                rcx::cmd::ChangeClassKeyword{structId, oldKw, newKw}));
+                rcx::cmd::Insert{root}));
+
+            // Clone children (re-lookup after insert since indices may shift)
+            QVector<int> children = tree.childrenOf(item.structId);
+            for (int ci : children) {
+                rcx::Node child = tree.nodes[ci];
+                child.id = tree.reserveId();
+                child.parentId = root.id;
+                child.refId = 0;  // don't copy pointer refs
+                tab.doc->undoStack.push(new rcx::RcxCommand(tab.ctrl,
+                    rcx::cmd::Insert{child}));
+            }
+
+            tab.doc->undoStack.endMacro();
+            tab.ctrl->setSuppressRefresh(false);
+            tab.ctrl->refresh();
+            rebuildWorkspaceModel();
+
+        } else if (chosen && chosen == actConvert && items.size() == 1) {
+            const auto& item = items[0];
+            if (!m_tabs.contains(item.dock)) return;
+            auto& tab = m_tabs[item.dock];
+            int ni = tab.doc->tree.indexOfId(item.structId);
+            if (ni < 0) return;
+            QString newKw = item.keyword == QStringLiteral("class")
+                ? QStringLiteral("struct") : QStringLiteral("class");
+            tab.doc->undoStack.push(new rcx::RcxCommand(tab.ctrl,
+                rcx::cmd::ChangeClassKeyword{item.structId, item.keyword, newKw}));
             rebuildWorkspaceModel();
         }
     });
@@ -3651,9 +3831,10 @@ void MainWindow::createWorkspaceDock() {
             if (pi >= 0) tree.nodes[pi].collapsed = false;
             tab.ctrl->setViewRootId(parentId);
             tab.ctrl->scrollToNodeId(structId);
-            QTimer::singleShot(0, this, [this, ownerDock]() {
-                if (!m_tabs.contains(ownerDock)) return;
-                auto& t = m_tabs[ownerDock];
+            QPointer<QDockWidget> dockRef = ownerDock;
+            QTimer::singleShot(0, this, [this, dockRef]() {
+                if (!dockRef || !m_tabs.contains(dockRef)) return;
+                auto& t = m_tabs[dockRef];
                 if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
                     auto& p = t.panes[t.activePaneIdx];
                     if (p.viewMode == VM_Rendered) updateRenderedView(t, p);
@@ -3683,6 +3864,59 @@ void MainWindow::createWorkspaceDock() {
         if (!structName.isEmpty())
             newDock->setWindowTitle(structName);
         rebuildWorkspaceModel();
+    });
+
+    // Single-click: peek (raise existing tab / scroll to member) — no new tab creation
+    connect(m_workspaceTree, &QTreeView::clicked, this, [this](const QModelIndex& index) {
+        // Modifier held → user is multi-selecting, don't navigate
+        if (QApplication::keyboardModifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            return;
+
+        auto structIdVar = index.data(Qt::UserRole + 1);
+        uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
+        if (structId == 0) return;
+
+        auto subVar = index.data(Qt::UserRole);
+        if (!subVar.isValid()) return;
+        auto* ownerDock = static_cast<QDockWidget*>(subVar.value<void*>());
+        if (!ownerDock || !m_tabs.contains(ownerDock)) return;
+
+        RcxDocument* doc = m_tabs[ownerDock].doc;
+        auto& tree = doc->tree;
+        int ni = tree.indexOfId(structId);
+        if (ni < 0) return;
+
+        uint64_t parentId = tree.nodes[ni].parentId;
+        if (parentId != 0) {
+            // Child member: navigate within owner tab, scroll to member
+            ownerDock->raise();
+            ownerDock->show();
+            m_activeDocDock = ownerDock;
+            auto& tab = m_tabs[ownerDock];
+            int pi = tree.indexOfId(parentId);
+            if (pi >= 0) tree.nodes[pi].collapsed = false;
+            tab.ctrl->setViewRootId(parentId);
+            tab.ctrl->scrollToNodeId(structId);
+            QPointer<QDockWidget> dockRef = ownerDock;
+            QTimer::singleShot(0, this, [this, dockRef]() {
+                if (!dockRef || !m_tabs.contains(dockRef)) return;
+                auto& t = m_tabs[dockRef];
+                if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
+                    auto& p = t.panes[t.activePaneIdx];
+                    if (p.viewMode == VM_Rendered) updateRenderedView(t, p);
+                }
+            });
+        } else {
+            // Root item: raise existing tab if one views this struct (peek only)
+            for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+                if (it->doc == doc && it->ctrl->viewRootId() == structId) {
+                    it.key()->raise();
+                    it.key()->show();
+                    m_activeDocDock = it.key();
+                    return;
+                }
+            }
+        }
     });
 }
 
@@ -3717,11 +3951,8 @@ void MainWindow::createScannerDock() {
         layout->addWidget(m_scanDockGrip);
 
         m_scanDockTitle = new QLabel("Scanner", titleBar);
-        {
-            QPalette lp = m_scanDockTitle->palette();
-            lp.setColor(QPalette::WindowText, t.textDim);
-            m_scanDockTitle->setPalette(lp);
-        }
+        m_scanDockTitle->setStyleSheet(
+            QStringLiteral("color: %1;").arg(t.textDim.name()));
         layout->addWidget(m_scanDockTitle);
 
         layout->addStretch();
@@ -3851,6 +4082,16 @@ void MainWindow::rebuildWorkspaceModelNow() {
         tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
     rcx::syncProjectExplorer(m_workspaceModel, tabs);
+
+    // Mark items that are currently viewed in a tab
+    QSet<uint64_t> viewedIds;
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
+        viewedIds.insert(it->ctrl->viewRootId());
+    for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
+        auto* item = m_workspaceModel->item(i);
+        uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
+        item->setData(viewedIds.contains(id), Qt::UserRole + 3);
+    }
 
     if (m_dockTitleLabel) {
         int structs = 0, enums = 0;
@@ -4201,6 +4442,24 @@ int main(int argc, char* argv[]) {
     window.setWindowIcon(QIcon(":/icons/class.png"));
 
     window.show();
+
+    // --screenshot <path>: open default project, grab window, save, exit
+    {
+        QStringList args = app.arguments();
+        int ssIdx = args.indexOf("--screenshot");
+        if (ssIdx >= 0 && ssIdx + 1 < args.size()) {
+            QString ssPath = args[ssIdx + 1];
+            QMetaObject::invokeMethod(&window, [&window, ssPath]() {
+                window.project_new();
+                QTimer::singleShot(500, &window, [&window, ssPath]() {
+                    QPixmap px = window.grab();
+                    px.save(ssPath);
+                    qApp->quit();
+                });
+            }, Qt::QueuedConnection);
+            return app.exec();
+        }
+    }
 
     // Show VS2022-style start page instead of jumping straight to demo
     QMetaObject::invokeMethod(&window, "showStartPage", Qt::QueuedConnection);

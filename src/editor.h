@@ -37,6 +37,7 @@ public:
     void scrollToNodeId(uint64_t nodeId);
     void showFindBar();
     void dismissHistoryPopup();
+    void dismissAllPopups();
 
     // ── Column span computation ──
     static ColumnSpan typeSpan(const LineMeta& lm, int typeW = kColType);
@@ -155,8 +156,8 @@ private:
     // ── Value history ref (owned by controller) ──
     const QHash<uint64_t, ValueHistory>* m_valueHistory = nullptr;
     QWidget* m_historyPopup = nullptr;  // ValueHistoryPopup (file-local class in editor.cpp)
-    QWidget* m_disasmPopup = nullptr;   // DisasmPopup (file-local class in editor.cpp)
-    QWidget* m_structPreviewPopup = nullptr; // StructPreviewPopup (file-local class in editor.cpp)
+    QWidget* m_disasmPopup = nullptr;        // TitleBodyPopup (file-local class in editor.cpp)
+    QWidget* m_structPreviewPopup = nullptr; // TitleBodyPopup (file-local class in editor.cpp)
     const Provider* m_disasmProvider = nullptr;   // snapshot or real — for reading tree data
     const Provider* m_disasmRealProv = nullptr;   // real process provider — for reading code at arbitrary addresses
     const NodeTree* m_disasmTree = nullptr;

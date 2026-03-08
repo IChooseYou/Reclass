@@ -32,17 +32,14 @@ namespace rcx {
 // Forward declaration (defined below, after RcxEditor constructor)
 static QString getLineText(QsciScintilla* sci, int line);
 
-// ── Value history popup (styled like TypeSelectorPopup) ──
+// ── Base class for all hover popups ──
 
-class ValueHistoryPopup : public QFrame {
+class HoverPopup : public QFrame {
+protected:
     uint64_t m_nodeId = 0;
-    bool     m_hasButtons = false;
-    QStringList m_values;
-    QVector<QLabel*> m_labels;
-    std::function<void(const QString&)> m_onSet;
     std::function<void(QMouseEvent*)> m_onMouseMove;
 public:
-    explicit ValueHistoryPopup(QWidget* parent)
+    explicit HoverPopup(QWidget* parent)
         : QFrame(parent, Qt::ToolTip | Qt::FramelessWindowHint)
     {
         setAttribute(Qt::WA_DeleteOnClose, false);
@@ -53,9 +50,129 @@ public:
     }
 
     uint64_t nodeId() const { return m_nodeId; }
+    void setOnMouseMove(std::function<void(QMouseEvent*)> fn) { m_onMouseMove = std::move(fn); }
+
+    void showAt(const QPoint& globalPos, int lineHeight = 0) {
+        QSize sz = sizeHint();
+        QRect screen = QApplication::screenAt(globalPos)
+            ? QApplication::screenAt(globalPos)->availableGeometry()
+            : QRect(0, 0, 1920, 1080);
+        int x = qMin(globalPos.x(), screen.right() - sz.width());
+        int y = globalPos.y();
+        if (y + sz.height() > screen.bottom())
+            y = globalPos.y() - sz.height() - lineHeight - 4;
+        move(x, y);
+        if (!isVisible()) show();
+    }
+
+    virtual void dismiss() {
+        if (isVisible()) hide();
+        m_nodeId = 0;
+    }
+
+protected:
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (m_onMouseMove) m_onMouseMove(e);
+        else QFrame::mouseMoveEvent(e);
+    }
+
+    void applyThemePalette(const Theme& t) {
+        QPalette pal;
+        pal.setColor(QPalette::Window, t.backgroundAlt);
+        pal.setColor(QPalette::WindowText, t.text);
+        setPalette(pal);
+    }
+
+    void styleSeparator(const Theme& t) {
+        for (auto* child : findChildren<QFrame*>()) {
+            if (child->frameShape() == QFrame::HLine) {
+                QPalette sp;
+                sp.setColor(QPalette::WindowText, t.border);
+                child->setPalette(sp);
+                break;
+            }
+        }
+    }
+};
+
+// ── Title + body popup (used for disasm/hex-dump and struct preview) ──
+
+class TitleBodyPopup : public HoverPopup {
+    QString m_body;
+    QLabel* m_titleLabel = nullptr;
+    QLabel* m_bodyLabel  = nullptr;
+public:
+    explicit TitleBodyPopup(QWidget* parent) : HoverPopup(parent) {
+        auto* vbox = new QVBoxLayout(this);
+        vbox->setContentsMargins(8, 6, 8, 6);
+        vbox->setSpacing(2);
+
+        m_titleLabel = new QLabel;
+        QFont bold = m_titleLabel->font();
+        bold.setBold(true);
+        m_titleLabel->setFont(bold);
+        vbox->addWidget(m_titleLabel);
+
+        auto* sep = new QFrame;
+        sep->setFrameShape(QFrame::HLine);
+        sep->setFrameShadow(QFrame::Plain);
+        sep->setFixedHeight(1);
+        vbox->addWidget(sep);
+
+        m_bodyLabel = new QLabel;
+        m_bodyLabel->setTextFormat(Qt::PlainText);
+        m_bodyLabel->setWordWrap(false);
+        vbox->addWidget(m_bodyLabel);
+    }
+
+    void populate(uint64_t nodeId, const QString& title, const QString& body,
+                  const QFont& font, const QColor& bodyColor) {
+        if (nodeId == m_nodeId && body == m_body && isVisible())
+            return;
+
+        m_nodeId = nodeId;
+        m_body = body;
+
+        const auto& theme = ThemeManager::instance().current();
+        applyThemePalette(theme);
+
+        QFont bold = font;
+        bold.setBold(true);
+        m_titleLabel->setFont(bold);
+        m_titleLabel->setText(title);
+        m_titleLabel->setStyleSheet(
+            QStringLiteral("color: %1;").arg(theme.text.name()));
+
+        styleSeparator(theme);
+
+        m_bodyLabel->setFont(font);
+        m_bodyLabel->setText(body);
+        m_bodyLabel->setStyleSheet(
+            QStringLiteral("color: %1;").arg(bodyColor.name()));
+
+        setMaximumWidth(600);
+        adjustSize();
+    }
+
+    void dismiss() override {
+        HoverPopup::dismiss();
+        m_body.clear();
+    }
+};
+
+// ── Value history popup ──
+
+class ValueHistoryPopup : public HoverPopup {
+    bool     m_hasButtons = false;
+    QStringList m_values;
+    QVector<QLabel*> m_labels;
+    std::function<void(const QString&)> m_onSet;
+public:
+    explicit ValueHistoryPopup(QWidget* parent) : HoverPopup(parent) {}
+
     bool hasButtons() const { return m_hasButtons; }
     void setOnSet(std::function<void(const QString&)> fn) { m_onSet = std::move(fn); }
-    void setOnMouseMove(std::function<void(QMouseEvent*)> fn) { m_onMouseMove = std::move(fn); }
+
 protected:
     void mouseMoveEvent(QMouseEvent* e) override {
         if (!m_hasButtons && m_onMouseMove)
@@ -63,8 +180,8 @@ protected:
         else
             QFrame::mouseMoveEvent(e);
     }
-public:
 
+public:
     void populate(uint64_t nodeId, const ValueHistory& hist, const QFont& font,
                   bool showButtons = false) {
         QStringList vals;
@@ -93,10 +210,7 @@ public:
         qDeleteAll(findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly));
 
         const auto& theme = ThemeManager::instance().current();
-        QPalette pal;
-        pal.setColor(QPalette::Window, theme.backgroundAlt);
-        pal.setColor(QPalette::WindowText, theme.text);
-        setPalette(pal);
+        applyThemePalette(theme);
 
         auto* vbox = new QVBoxLayout(this);
         vbox->setContentsMargins(8, 6, 8, 6);
@@ -169,237 +283,10 @@ public:
         adjustSize();
     }
 
-    void showAt(const QPoint& globalPos, int lineHeight = 0) {
-        QSize sz = sizeHint();
-        QRect screen = QApplication::screenAt(globalPos)
-            ? QApplication::screenAt(globalPos)->availableGeometry()
-            : QRect(0, 0, 1920, 1080);
-        int x = qMin(globalPos.x(), screen.right() - sz.width());
-        int y = globalPos.y();
-        if (y + sz.height() > screen.bottom())
-            y = globalPos.y() - sz.height() - lineHeight - 4;
-        move(x, y);
-        if (!isVisible()) show();
-    }
-
-    void dismiss() {
-        if (isVisible()) hide();
-        m_nodeId = 0;
+    void dismiss() override {
+        HoverPopup::dismiss();
         m_values.clear();
         m_labels.clear();
-    }
-};
-
-// ── Disassembly / hex-dump hover popup ──
-
-class DisasmPopup : public QFrame {
-    uint64_t m_nodeId = 0;
-    QString  m_body;
-    QLabel*  m_titleLabel = nullptr;
-    QLabel*  m_bodyLabel  = nullptr;
-    std::function<void(QMouseEvent*)> m_onMouseMove;
-public:
-    explicit DisasmPopup(QWidget* parent)
-        : QFrame(parent, Qt::ToolTip | Qt::FramelessWindowHint)
-    {
-        setAttribute(Qt::WA_DeleteOnClose, false);
-        setAttribute(Qt::WA_ShowWithoutActivating, true);
-        setMouseTracking(true);
-        setFrameShape(QFrame::NoFrame);
-        setAutoFillBackground(true);
-
-        auto* vbox = new QVBoxLayout(this);
-        vbox->setContentsMargins(8, 6, 8, 6);
-        vbox->setSpacing(2);
-
-        m_titleLabel = new QLabel;
-        QFont bold = m_titleLabel->font();
-        bold.setBold(true);
-        m_titleLabel->setFont(bold);
-        vbox->addWidget(m_titleLabel);
-
-        auto* sep = new QFrame;
-        sep->setFrameShape(QFrame::HLine);
-        sep->setFrameShadow(QFrame::Plain);
-        sep->setFixedHeight(1);
-        vbox->addWidget(sep);
-
-        m_bodyLabel = new QLabel;
-        m_bodyLabel->setTextFormat(Qt::PlainText);
-        m_bodyLabel->setWordWrap(false);
-        vbox->addWidget(m_bodyLabel);
-    }
-
-    void setOnMouseMove(std::function<void(QMouseEvent*)> fn) { m_onMouseMove = std::move(fn); }
-    uint64_t nodeId() const { return m_nodeId; }
-protected:
-    void mouseMoveEvent(QMouseEvent* e) override {
-        if (m_onMouseMove) m_onMouseMove(e);
-        else QFrame::mouseMoveEvent(e);
-    }
-public:
-    void populate(uint64_t nodeId, const QString& title, const QString& body,
-                  const QFont& font) {
-        if (nodeId == m_nodeId && body == m_body && isVisible())
-            return;
-
-        m_nodeId = nodeId;
-        m_body = body;
-
-        const auto& theme = ThemeManager::instance().current();
-        QPalette pal;
-        pal.setColor(QPalette::Window, theme.backgroundAlt);
-        pal.setColor(QPalette::WindowText, theme.text);
-        setPalette(pal);
-
-        QFont bold = font;
-        bold.setBold(true);
-        m_titleLabel->setFont(bold);
-        m_titleLabel->setText(title);
-        m_titleLabel->setStyleSheet(
-            QStringLiteral("color: %1;").arg(theme.text.name()));
-
-        // Find and style the separator
-        for (auto* child : findChildren<QFrame*>()) {
-            if (child->frameShape() == QFrame::HLine) {
-                QPalette sp;
-                sp.setColor(QPalette::WindowText, theme.border);
-                child->setPalette(sp);
-                break;
-            }
-        }
-
-        m_bodyLabel->setFont(font);
-        m_bodyLabel->setText(body);
-        m_bodyLabel->setStyleSheet(
-            QStringLiteral("color: %1;").arg(theme.syntaxNumber.name()));
-
-        setMaximumWidth(600);
-        adjustSize();
-    }
-
-    void showAt(const QPoint& globalPos, int lineHeight = 0) {
-        QSize sz = sizeHint();
-        QRect screen = QApplication::screenAt(globalPos)
-            ? QApplication::screenAt(globalPos)->availableGeometry()
-            : QRect(0, 0, 1920, 1080);
-        int x = qMin(globalPos.x(), screen.right() - sz.width());
-        int y = globalPos.y();
-        if (y + sz.height() > screen.bottom())
-            y = globalPos.y() - sz.height() - lineHeight - 4;
-        move(x, y);
-        if (!isVisible()) show();
-    }
-
-    void dismiss() {
-        if (isVisible()) hide();
-        m_nodeId = 0;
-        m_body.clear();
-    }
-};
-
-class StructPreviewPopup : public QFrame {
-    uint64_t m_nodeId = 0;
-    QString  m_body;
-    QLabel*  m_titleLabel = nullptr;
-    QLabel*  m_bodyLabel  = nullptr;
-    std::function<void(QMouseEvent*)> m_onMouseMove;
-public:
-    explicit StructPreviewPopup(QWidget* parent)
-        : QFrame(parent, Qt::ToolTip | Qt::FramelessWindowHint)
-    {
-        setAttribute(Qt::WA_DeleteOnClose, false);
-        setAttribute(Qt::WA_ShowWithoutActivating, true);
-        setMouseTracking(true);
-        setFrameShape(QFrame::NoFrame);
-        setAutoFillBackground(true);
-
-        auto* vbox = new QVBoxLayout(this);
-        vbox->setContentsMargins(8, 6, 8, 6);
-        vbox->setSpacing(2);
-
-        m_titleLabel = new QLabel;
-        QFont bold = m_titleLabel->font();
-        bold.setBold(true);
-        m_titleLabel->setFont(bold);
-        vbox->addWidget(m_titleLabel);
-
-        auto* sep = new QFrame;
-        sep->setFrameShape(QFrame::HLine);
-        sep->setFrameShadow(QFrame::Plain);
-        sep->setFixedHeight(1);
-        vbox->addWidget(sep);
-
-        m_bodyLabel = new QLabel;
-        m_bodyLabel->setTextFormat(Qt::PlainText);
-        m_bodyLabel->setWordWrap(false);
-        vbox->addWidget(m_bodyLabel);
-    }
-
-    uint64_t nodeId() const { return m_nodeId; }
-    void setOnMouseMove(std::function<void(QMouseEvent*)> fn) { m_onMouseMove = std::move(fn); }
-protected:
-    void mouseMoveEvent(QMouseEvent* e) override {
-        if (m_onMouseMove) m_onMouseMove(e);
-        else QFrame::mouseMoveEvent(e);
-    }
-public:
-    void populate(uint64_t nodeId, const QString& title, const QString& body,
-                  const QFont& font) {
-        if (nodeId == m_nodeId && body == m_body && isVisible())
-            return;
-
-        m_nodeId = nodeId;
-        m_body = body;
-
-        const auto& theme = ThemeManager::instance().current();
-        QPalette pal;
-        pal.setColor(QPalette::Window, theme.backgroundAlt);
-        pal.setColor(QPalette::WindowText, theme.text);
-        setPalette(pal);
-
-        QFont bold = font;
-        bold.setBold(true);
-        m_titleLabel->setFont(bold);
-        m_titleLabel->setText(title);
-        m_titleLabel->setStyleSheet(
-            QStringLiteral("color: %1;").arg(theme.text.name()));
-
-        for (auto* child : findChildren<QFrame*>()) {
-            if (child->frameShape() == QFrame::HLine) {
-                QPalette sp;
-                sp.setColor(QPalette::WindowText, theme.border);
-                child->setPalette(sp);
-                break;
-            }
-        }
-
-        m_bodyLabel->setFont(font);
-        m_bodyLabel->setText(body);
-        m_bodyLabel->setStyleSheet(
-            QStringLiteral("color: %1;").arg(theme.text.name()));
-
-        setMaximumWidth(600);
-        adjustSize();
-    }
-
-    void showAt(const QPoint& globalPos, int lineHeight = 0) {
-        QSize sz = sizeHint();
-        QRect screen = QApplication::screenAt(globalPos)
-            ? QApplication::screenAt(globalPos)->availableGeometry()
-            : QRect(0, 0, 1920, 1080);
-        int x = qMin(globalPos.x(), screen.right() - sz.width());
-        int y = globalPos.y();
-        if (y + sz.height() > screen.bottom())
-            y = globalPos.y() - sz.height() - lineHeight - 4;
-        move(x, y);
-        if (!isVisible()) show();
-    }
-
-    void dismiss() {
-        if (isVisible()) hide();
-        m_nodeId = 0;
-        m_body.clear();
     }
 };
 
@@ -415,6 +302,7 @@ static constexpr int IND_LOCAL_OFF    = 16; // Dim text for inline local offset 
 static constexpr int IND_HEAT_WARM    = 17; // Heatmap level 2 (moderate changes)
 static constexpr int IND_HEAT_HOT     = 18; // Heatmap level 3 (frequent changes)
 static constexpr int IND_FIND         = 19; // Search match highlight
+static constexpr int IND_TYPE_HINT    = 20; // Dimmed type inference hint text on hex nodes
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -724,6 +612,10 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_LOCAL_OFF, 17 /*INDIC_TEXTFORE*/);
 
+    // Type inference hint — dimmed text appended to hex lines
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_TYPE_HINT, 17 /*INDIC_TEXTFORE*/);
+
     // Find match highlight — thick underline (avoids box rendering artifacts)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_FIND, 14 /*INDIC_COMPOSITIONTHICK*/);
@@ -869,6 +761,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_HINT_GREEN, theme.indHintGreen);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_LOCAL_OFF, theme.textFaint);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_TYPE_HINT, theme.textFaint);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_FIND, theme.borderFocused);
 
@@ -1030,9 +924,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     if (m_hoveredNodeId != 0 && !m_nodeLineIndex.contains(m_hoveredNodeId)) {
         m_hoveredNodeId = 0;
         m_hoveredLine = -1;
-        dismissHistoryPopup();
-        if (m_disasmPopup) m_disasmPopup->hide();
-        if (m_structPreviewPopup) m_structPreviewPopup->hide();
+        dismissAllPopups();
     }
 
     // Re-apply hover markers (setText() clears all Scintilla markers).
@@ -1463,7 +1355,13 @@ void RcxEditor::showFindBar() {
 
 void RcxEditor::dismissHistoryPopup() {
     if (m_historyPopup)
-        static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
+        static_cast<HoverPopup*>(m_historyPopup)->dismiss();
+}
+
+void RcxEditor::dismissAllPopups() {
+    if (m_historyPopup)       static_cast<HoverPopup*>(m_historyPopup)->dismiss();
+    if (m_disasmPopup)        static_cast<HoverPopup*>(m_disasmPopup)->dismiss();
+    if (m_structPreviewPopup) static_cast<HoverPopup*>(m_structPreviewPopup)->dismiss();
 }
 
 void RcxEditor::hideFindBar() {
@@ -2503,10 +2401,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     m_hoveredLine = -1;
     applyHoverHighlight();
     // Dismiss hover popups so they get recreated with Set buttons once edit starts
-    if (m_historyPopup)
-        static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
-    if (m_structPreviewPopup)
-        static_cast<StructPreviewPopup*>(m_structPreviewPopup)->dismiss();
+    dismissAllPopups();
     // Clear editable-token color hints (de-emphasize non-active tokens)
     clearIndicatorLine(IND_EDITABLE, m_hintLine);
     m_hintLine = -1;
@@ -3109,25 +3004,19 @@ void RcxEditor::applyHoverCursor() {
                 }
             }
             if (!showPopup && m_historyPopup && m_historyPopup->isVisible())
-                static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
+                static_cast<HoverPopup*>(m_historyPopup)->dismiss();
         }
         // Always dismiss disasm/preview popups during inline editing
-        if (m_disasmPopup && m_disasmPopup->isVisible())
-            static_cast<DisasmPopup*>(m_disasmPopup)->dismiss();
-        if (m_structPreviewPopup && m_structPreviewPopup->isVisible())
-            static_cast<StructPreviewPopup*>(m_structPreviewPopup)->dismiss();
+        if (m_disasmPopup)        static_cast<HoverPopup*>(m_disasmPopup)->dismiss();
+        if (m_structPreviewPopup) static_cast<HoverPopup*>(m_structPreviewPopup)->dismiss();
         return;
     }
 
     // Mouse left viewport - set Arrow, dismiss popups
     // (but not during applyDocument — the Leave is synthetic from setText)
     if (!m_hoverInside) {
-        if (m_historyPopup && !m_applyingDocument)
-            static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
-        if (m_disasmPopup && !m_applyingDocument)
-            static_cast<DisasmPopup*>(m_disasmPopup)->dismiss();
-        if (m_structPreviewPopup && !m_applyingDocument)
-            static_cast<StructPreviewPopup*>(m_structPreviewPopup)->dismiss();
+        if (!m_applyingDocument)
+            dismissAllPopups();
         m_sci->viewport()->setCursor(Qt::ArrowCursor);
         return;
     }
@@ -3283,7 +3172,7 @@ void RcxEditor::applyHoverCursor() {
             }
         }
         if (!showPopup && m_historyPopup && m_historyPopup->isVisible())
-            static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
+            static_cast<HoverPopup*>(m_historyPopup)->dismiss();
     }
 
     // Disasm / hex-dump popup on hover for FuncPtr and void Pointer nodes
@@ -3348,8 +3237,8 @@ void RcxEditor::applyHoverCursor() {
                                 }
                                 if (!body.isEmpty()) {
                                     if (!m_disasmPopup) {
-                                        m_disasmPopup = new DisasmPopup(this);
-                                        static_cast<DisasmPopup*>(m_disasmPopup)->setOnMouseMove([this](QMouseEvent* e) {
+                                        m_disasmPopup = new TitleBodyPopup(this);
+                                        static_cast<TitleBodyPopup*>(m_disasmPopup)->setOnMouseMove([this](QMouseEvent* e) {
                                             QPoint gp = e->globalPosition().toPoint();
                                             QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
                                             m_lastHoverPos = vp;
@@ -3367,10 +3256,11 @@ void RcxEditor::applyHoverCursor() {
                                             applyHoverCursor();
                                         });
                                     }
-                                    auto* popup = static_cast<DisasmPopup*>(
+                                    auto* popup = static_cast<TitleBodyPopup*>(
                                         m_disasmPopup);
                                     popup->populate(lm.nodeId, title, body,
-                                                    editorFont());
+                                                    editorFont(),
+                                                    ThemeManager::instance().current().syntaxNumber);
                                     long linePos = m_sci->SendScintilla(
                                         QsciScintillaBase::SCI_POSITIONFROMLINE,
                                         (unsigned long)h.line);
@@ -3391,7 +3281,7 @@ void RcxEditor::applyHoverCursor() {
                                     showDisasm = true;
                                     // Dismiss value history popup to avoid fighting
                                     if (m_historyPopup && m_historyPopup->isVisible())
-                                        static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
+                                        static_cast<HoverPopup*>(m_historyPopup)->dismiss();
                                 }
                             }
                         }
@@ -3400,7 +3290,7 @@ void RcxEditor::applyHoverCursor() {
             }
         }
         if (!showDisasm && m_disasmPopup && m_disasmPopup->isVisible())
-            static_cast<DisasmPopup*>(m_disasmPopup)->dismiss();
+            static_cast<HoverPopup*>(m_disasmPopup)->dismiss();
     }
 
     // Struct preview popup for collapsed typed pointers
@@ -3435,8 +3325,8 @@ void RcxEditor::applyHoverCursor() {
                         }
                         if (!body.isEmpty()) {
                             if (!m_structPreviewPopup) {
-                                m_structPreviewPopup = new StructPreviewPopup(this);
-                                static_cast<StructPreviewPopup*>(m_structPreviewPopup)->setOnMouseMove([this](QMouseEvent* e) {
+                                m_structPreviewPopup = new TitleBodyPopup(this);
+                                static_cast<TitleBodyPopup*>(m_structPreviewPopup)->setOnMouseMove([this](QMouseEvent* e) {
                                     QPoint gp = e->globalPosition().toPoint();
                                     QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
                                     m_lastHoverPos = vp;
@@ -3454,9 +3344,10 @@ void RcxEditor::applyHoverCursor() {
                                     applyHoverCursor();
                                 });
                             }
-                            auto* popup = static_cast<StructPreviewPopup*>(m_structPreviewPopup);
+                            auto* popup = static_cast<TitleBodyPopup*>(m_structPreviewPopup);
                             popup->populate(lm.nodeId,
-                                lm.pointerTargetName, body, editorFont());
+                                lm.pointerTargetName, body, editorFont(),
+                                ThemeManager::instance().current().text);
                             long linePos = m_sci->SendScintilla(
                                 QsciScintillaBase::SCI_POSITIONFROMLINE,
                                 (unsigned long)h.line);
@@ -3475,14 +3366,14 @@ void RcxEditor::applyHoverCursor() {
                             popup->showAt(anchor, lh);
                             showPreview = true;
                             if (m_historyPopup && m_historyPopup->isVisible())
-                                static_cast<ValueHistoryPopup*>(m_historyPopup)->dismiss();
+                                static_cast<HoverPopup*>(m_historyPopup)->dismiss();
                         }
                     }
                 }
             }
         }
         if (!showPreview && m_structPreviewPopup && m_structPreviewPopup->isVisible())
-            static_cast<StructPreviewPopup*>(m_structPreviewPopup)->dismiss();
+            static_cast<HoverPopup*>(m_structPreviewPopup)->dismiss();
     }
 
     // Determine cursor shape based on interaction type
