@@ -179,13 +179,11 @@ private:
     void setupMarkers();
     void allocateMarginStyles();
 
-    void applyMarginText(const QVector<LineMeta>& meta);
+    void applyLineAttributes(const QVector<LineMeta>& meta);
     void reformatMargins();
-    void applyMarkers(const QVector<LineMeta>& meta);
-    void applyFoldLevels(const QVector<LineMeta>& meta);
     void applyHexDimming(const QVector<LineMeta>& meta);
-    void applyHeatmapHighlight(const QVector<LineMeta>& meta);
-    void applySymbolColoring(const QVector<LineMeta>& meta);
+    void applyHeatmapHighlight(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts);
+    void applySymbolColoring(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts);
     void applyBaseAddressColoring(const QVector<LineMeta>& meta);
     void applyCommandRowPills();
 

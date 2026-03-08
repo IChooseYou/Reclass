@@ -973,15 +973,22 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     m_sci->setText(result.text);
     m_sci->setReadOnly(true);
 
-    // Set horizontal scroll width to match the longest line (ignoring trailing spaces)
+    // Set horizontal scroll width to match the longest line (ignoring trailing spaces).
+    // Single-pass scan avoids QString::split() allocation of entire QStringList.
     {
-        int maxLen = 0;
-        const QStringList lines = result.text.split(QChar('\n'));
-        for (const auto& line : lines) {
-            int len = (int)line.size();
-            while (len > 0 && line[len - 1] == QChar(' ')) --len;
-            maxLen = std::max(len, maxLen);
+        int maxLen = 0, curLen = 0, lastNonSpace = 0;
+        for (int i = 0; i < result.text.size(); i++) {
+            QChar ch = result.text[i];
+            if (ch == '\n') {
+                maxLen = qMax(maxLen, lastNonSpace);
+                curLen = 0;
+                lastNonSpace = 0;
+            } else {
+                ++curLen;
+                if (ch != ' ') lastNonSpace = curLen;
+            }
         }
+        maxLen = qMax(maxLen, lastNonSpace);
         QFontMetrics fm(editorFont());
         int pixelWidth = fm.horizontalAdvance(QString(maxLen, QChar('0')));
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
@@ -995,12 +1002,20 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // Force full re-lex to fix stale syntax coloring after edits
     m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, (uintptr_t)0, (long)-1);
 
-    applyMarginText(result.meta);
-    applyMarkers(result.meta);
-    applyFoldLevels(result.meta);
+    applyLineAttributes(result.meta);
     applyHexDimming(result.meta);
-    applyHeatmapHighlight(result.meta);
-    applySymbolColoring(result.meta);
+
+    // Build line-text cache for indicator passes (avoids redundant Scintilla IPC)
+    QVector<QString> lineTexts(result.meta.size());
+    for (int i = 0; i < result.meta.size(); i++) {
+        const auto& lm = result.meta[i];
+        if (lm.heatLevel > 0 || isFuncPtr(lm.nodeKind) ||
+            lm.nodeKind == NodeKind::Pointer32 ||
+            lm.nodeKind == NodeKind::Pointer64)
+            lineTexts[i] = getLineText(m_sci, i);
+    }
+    applyHeatmapHighlight(result.meta, lineTexts);
+    applySymbolColoring(result.meta, lineTexts);
     applyCommandRowPills();
 
     // Reset hint line - applySelectionOverlay will repaint indicators
@@ -1051,22 +1066,47 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     }
 }
 
-void RcxEditor::applyMarginText(const QVector<LineMeta>& meta) {
-    if (m_relativeOffsets)
-        return reformatMargins();
+void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta) {
+    // Margin text
+    if (m_relativeOffsets) {
+        reformatMargins();
+    } else {
+        m_sci->clearMarginText(-1);
+    }
 
-    m_sci->clearMarginText(-1);
+    // Clear markers
+    for (int m = M_CONT; m <= M_STRUCT_BG; m++)
+        m_sci->markerDeleteAll(m);
+    m_sci->markerDeleteAll(M_CMD_ROW);
 
+    // Single pass: margin text (absolute mode), markers, fold levels
     for (int i = 0; i < meta.size(); i++) {
         const auto& lm = meta[i];
-        if (lm.offsetText.isEmpty()) continue;
 
-        QByteArray text = lm.offsetText.toUtf8();
-        m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETTEXT,
-                             (uintptr_t)i, text.constData());
-        QByteArray styles(text.size(), '\0');  // style 0 = dim
-        m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLES,
-                             (uintptr_t)i, styles.constData());
+        // Margin text (only in absolute offset mode; reformatMargins handles relative)
+        if (!m_relativeOffsets && !lm.offsetText.isEmpty()) {
+            QByteArray text = lm.offsetText.toUtf8();
+            m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETTEXT,
+                                 (uintptr_t)i, text.constData());
+            QByteArray styles(text.size(), '\0');
+            m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLES,
+                                 (uintptr_t)i, styles.constData());
+        }
+
+        // Markers
+        if (lm.lineKind == LineKind::CommandRow) {
+            m_sci->markerAdd(i, M_CMD_ROW);
+        } else {
+            uint32_t mask = lm.markerMask;
+            for (int m = M_CONT; m <= M_STRUCT_BG; m++) {
+                if (mask & (1u << m))
+                    m_sci->markerAdd(i, m);
+            }
+        }
+
+        // Fold level
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETFOLDLEVEL,
+                             (unsigned long)i, (long)lm.foldLevel);
     }
 }
 
@@ -1187,31 +1227,6 @@ void RcxEditor::reformatMargins() {
     m_sci->setReadOnly(true);
 }
 
-void RcxEditor::applyMarkers(const QVector<LineMeta>& meta) {
-    for (int m = M_CONT; m <= M_STRUCT_BG; m++) {
-        m_sci->markerDeleteAll(m);
-    }
-    m_sci->markerDeleteAll(M_CMD_ROW);
-    for (int i = 0; i < meta.size(); i++) {
-        if (meta[i].lineKind == LineKind::CommandRow) {
-            m_sci->markerAdd(i, M_CMD_ROW);
-            continue;
-        }
-        uint32_t mask = meta[i].markerMask;
-        for (int m = M_CONT; m <= M_STRUCT_BG; m++) {
-            if (mask & (1u << m)) {
-                m_sci->markerAdd(i, m);
-            }
-        }
-    }
-}
-
-void RcxEditor::applyFoldLevels(const QVector<LineMeta>& meta) {
-    for (int i = 0; i < meta.size(); i++) {
-        m_sci->SendScintilla(QsciScintillaBase::SCI_SETFOLDLEVEL,
-                             (unsigned long)i, (long)meta[i].foldLevel);
-    }
-}
 
 static inline void lineRangeNoEol(QsciScintilla* sci, int line, long& start, long& len) {
     start = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)line);
@@ -1524,7 +1539,8 @@ static QString getLineText(QsciScintilla* sci, int line) {
     return text;
 }
 
-void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta) {
+void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta,
+                                       const QVector<QString>& lineTexts) {
     static constexpr int heatIndicators[] = { IND_HEAT_COLD, IND_HEAT_WARM, IND_HEAT_HOT };
 
     for (int i = 0; i < meta.size(); i++) {
@@ -1546,7 +1562,7 @@ void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta) {
         int activeInd = heatIndicators[qBound(0, heat - 1, 2)];
 
         // Apply heat-level indicator to value span (narrowed for pointer-like nodes)
-        QString lineText = getLineText(m_sci, i);
+        const QString& lineText = lineTexts[i];
         ColumnSpan vs = narrowPtrValueSpan(lm,
             valueSpan(lm, lineText.size(), typeW, nameW), lineText);
         if (!vs.valid) continue;
@@ -1561,14 +1577,15 @@ void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta) {
     }
 }
 
-void RcxEditor::applySymbolColoring(const QVector<LineMeta>& meta) {
+void RcxEditor::applySymbolColoring(const QVector<LineMeta>& meta,
+                                     const QVector<QString>& lineTexts) {
     for (int i = 0; i < meta.size(); i++) {
         const LineMeta& lm = meta[i];
         if (!isFuncPtr(lm.nodeKind)
             && lm.nodeKind != NodeKind::Pointer32
             && lm.nodeKind != NodeKind::Pointer64)
             continue;
-        QString lineText = getLineText(m_sci, i);
+        const QString& lineText = lineTexts[i];
         // Find "  // " within the value region and color "// sym" portion green
         ColumnSpan vs = valueSpan(lm, lineText.size(), lm.effectiveTypeW, lm.effectiveNameW);
         if (!vs.valid) continue;

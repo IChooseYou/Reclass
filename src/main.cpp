@@ -3227,6 +3227,13 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
                                        currentCtrl->activeSourceIndex());
     }
 
+    // Ensure workspace dock is split alongside editor with sensible proportions
+    if (m_docDocks.size() == 1 && m_workspaceDock) {
+        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
+        m_workspaceDock->show();
+    }
+
     rebuildWorkspaceModel();
     return dock;
 }
