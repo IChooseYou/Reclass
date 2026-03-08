@@ -322,6 +322,104 @@ private slots:
         }
     }
 
+    // ── Benchmark: large SDK (5000 structs) ──
+
+    void benchmarkLargeSDK() {
+        auto ms = [](qint64 ns) { return QString::number(ns / 1000000.0, 'f', 2); };
+
+        // Build 5000 composite types with field summaries (simulates WinSDK)
+        QVector<TypeEntry> types;
+        types.reserve(5000);
+        for (int i = 0; i < 5000; i++) {
+            TypeEntry e;
+            e.entryKind = TypeEntry::Composite;
+            e.structId = (uint64_t)(i + 1);
+            e.displayName = QStringLiteral("_STRUCT_%1").arg(i, 4, 10, QChar('0'));
+            e.classKeyword = QStringLiteral("struct");
+            e.sizeBytes = 64 + (i % 256) * 8;
+            e.alignment = 8;
+            e.fieldCount = 5 + (i % 20);
+            for (int f = 0; f < qMin(6, e.fieldCount); f++)
+                e.fieldSummary << QStringLiteral("0x%1: int32_t field_%2")
+                    .arg(f * 4, 2, 16, QChar('0')).arg(f);
+            types.append(e);
+        }
+
+        QFont font("Consolas", 12);
+        font.setFixedPitch(true);
+        auto* popup = new TypeSelectorPopup();
+        popup->warmUp();
+        popup->setFont(font);
+
+        // Measure setTypes (data loading)
+        QElapsedTimer t;
+        t.start();
+        popup->setTypes(types, nullptr);
+        qint64 tSetTypes = t.nsecsElapsed();
+
+        // Measure popup show (broken down)
+        t.restart();
+        popup->popup(QPoint(100, 100));
+        qint64 tPopupCall = t.nsecsElapsed();
+        t.restart();
+        QApplication::processEvents();
+        qint64 tProcessEvents = t.nsecsElapsed();
+        qint64 tShow = tPopupCall + tProcessEvents;
+
+        // Second popup show (warm)
+        popup->hide();
+        QApplication::processEvents();
+        t.restart();
+        popup->popup(QPoint(100, 100));
+        qint64 tPopup2 = t.nsecsElapsed();
+        t.restart();
+        QApplication::processEvents();
+        qint64 tProcess2 = t.nsecsElapsed();
+
+        // Measure filter with 1-char (worst case: most matches)
+        t.restart();
+        auto* filterEdit = popup->findChild<QLineEdit*>();
+        QVERIFY(filterEdit);
+
+        filterEdit->setText(QStringLiteral("S"));
+        qint64 tFilter1 = t.nsecsElapsed();
+
+        // Measure filter with 3-char (moderate filtering)
+        t.restart();
+        filterEdit->setText(QStringLiteral("STR"));
+        qint64 tFilter3 = t.nsecsElapsed();
+
+        // Measure filter with 6-char (narrow results)
+        t.restart();
+        filterEdit->setText(QStringLiteral("STRUCT"));
+        qint64 tFilter6 = t.nsecsElapsed();
+
+        // Measure clear filter (back to grouped view)
+        t.restart();
+        filterEdit->setText(QString());
+        qint64 tClear = t.nsecsElapsed();
+
+        popup->hide();
+        QApplication::processEvents();
+
+        qDebug() << "";
+        qDebug().noquote() << "=== Large SDK Benchmark (5000 structs) ===";
+        qDebug().noquote() << QString("  setTypes:        %1 ms").arg(ms(tSetTypes));
+        qDebug().noquote() << QString("  popup() call:    %1 ms").arg(ms(tPopupCall));
+        qDebug().noquote() << QString("  processEvents:   %1 ms").arg(ms(tProcessEvents));
+        qDebug().noquote() << QString("  popup total:     %1 ms").arg(ms(tShow));
+        qDebug().noquote() << QString("  popup2() call:   %1 ms  (warm)").arg(ms(tPopup2));
+        qDebug().noquote() << QString("  processEvents2:  %1 ms  (warm)").arg(ms(tProcess2));
+        qDebug().noquote() << QString("  popup2 total:    %1 ms  (warm)").arg(ms(tPopup2 + tProcess2));
+        qDebug().noquote() << QString("  filter 'S':    %1 ms").arg(ms(tFilter1));
+        qDebug().noquote() << QString("  filter 'STR':  %1 ms").arg(ms(tFilter3));
+        qDebug().noquote() << QString("  filter 'STRUCT': %1 ms").arg(ms(tFilter6));
+        qDebug().noquote() << QString("  clear filter:  %1 ms").arg(ms(tClear));
+        QVERIFY(tSetTypes > 0);
+
+        delete popup;
+    }
+
     // ── Popup data model ──
 
     void testPopupListsRootStructs() {

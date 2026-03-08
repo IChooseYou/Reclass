@@ -120,6 +120,7 @@ private:
     int                m_pointerSize = 8;
     bool               m_loading = false;
     QFont              m_font;
+    int                m_cachedMaxNameLen = 0; // longest displayName length (chars)
 
     void applyFilter(const QString& text);
     void updateModifierPreview();

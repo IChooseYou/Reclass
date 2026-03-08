@@ -57,51 +57,73 @@ TypeSpec parseTypeSpec(const QString& text) {
 }
 
 // ── Fuzzy scorer: subsequence match with word-boundary bonuses ──
+// Hot path — uses stack arrays and pre-lowered QChars to avoid heap allocs.
+
+static constexpr int kMaxFuzzyLen = 64;
 
 static int fuzzyScore(const QString& pattern, const QString& text,
                       QVector<int>* outPositions = nullptr) {
     int pLen = pattern.size(), tLen = text.size();
     if (pLen == 0) return 1;
     if (pLen > tLen) return 0;
+    if (pLen > kMaxFuzzyLen || tLen > 256) {
+        // Fallback: prefix match only for very long names
+        if (text.startsWith(pattern, Qt::CaseInsensitive)) return 1;
+        return 0;
+    }
 
-    // Quick subsequence reject
+    // Pre-compute lowercase chars on the stack
+    QChar pLow[kMaxFuzzyLen];
+    for (int i = 0; i < pLen; i++) pLow[i] = pattern[i].toLower();
+    QChar tLow[256];
+    for (int i = 0; i < tLen; i++) tLow[i] = text[i].toLower();
+
+    // Quick subsequence reject using pre-lowered arrays
     { int pi = 0;
       for (int ti = 0; ti < tLen && pi < pLen; ti++)
-          if (pattern[pi].toLower() == text[ti].toLower()) pi++;
+          if (pLow[pi] == tLow[ti]) pi++;
       if (pi < pLen) return 0;
     }
 
     // Recursive best-match (bounded: max 4 branches per pattern char)
-    QVector<int> bestPos;
+    // Stack arrays instead of QVector to avoid heap allocation
+    int bestPos[kMaxFuzzyLen];
+    int curPos[kMaxFuzzyLen];
     int best = 0;
+    int bestLen = 0;
 
-    auto solve = [&](auto& self, int pi, int ti, QVector<int>& cur, int score) -> void {
+    auto solve = [&](auto& self, int pi, int ti, int curLen, int score) -> void {
         if (pi == pLen) {
-            if (score > best) { best = score; bestPos = cur; }
+            if (score > best) {
+                best = score;
+                bestLen = curLen;
+                memcpy(bestPos, curPos, curLen * sizeof(int));
+            }
             return;
         }
         int maxTi = tLen - (pLen - pi);
         int branches = 0;
         for (int i = ti; i <= maxTi && branches < 4; i++) {
-            if (pattern[pi].toLower() != text[i].toLower()) continue;
+            if (pLow[pi] != tLow[i]) continue;
             int bonus = 1;
             if (i == 0)                                          bonus = 10;
             else if (text[i - 1] == '_' || text[i - 1] == ' ') bonus = 8;
             else if (text[i].isUpper() && text[i - 1].isLower()) bonus = 8;
-            if (!cur.isEmpty() && i == cur.last() + 1)          bonus += 5;
-            cur.append(i);
-            self(self, pi + 1, i + 1, cur, score + bonus);
-            cur.removeLast();
+            if (curLen > 0 && i == curPos[curLen - 1] + 1)      bonus += 5;
+            curPos[curLen] = i;
+            self(self, pi + 1, i + 1, curLen + 1, score + bonus);
             branches++;
         }
     };
 
-    QVector<int> cur;
-    solve(solve, 0, 0, cur, 0);
+    solve(solve, 0, 0, 0, 0);
     if (best > 0) {
         best += qMax(0, 20 - (tLen - pLen));  // tightness bonus
         if (pLen == tLen) best += 20;          // exact match bonus
-        if (outPositions) *outPositions = bestPos;
+        if (outPositions) {
+            outPositions->resize(bestLen);
+            memcpy(outPositions->data(), bestPos, bestLen * sizeof(int));
+        }
     }
     return best;
 }
@@ -113,7 +135,7 @@ public:
     explicit TypeSelectorDelegate(TypeSelectorPopup* popup, QObject* parent = nullptr)
         : QStyledItemDelegate(parent), m_popup(popup) {}
 
-    void setFont(const QFont& f) { m_font = f; }
+    void setFont(const QFont& f) { m_font = f; updateCachedSizeHint(); }
     void setLoading(bool v) { m_isLoading = v; }
     void setFilteredTypes(const QVector<TypeEntry>* filtered) {
         m_filtered = filtered;
@@ -287,13 +309,13 @@ public:
     }
 
     QSize sizeHint(const QStyleOptionViewItem& /*option*/,
-                   const QModelIndex& index) const override {
+                   const QModelIndex& /*index*/) const override {
+        return m_cachedSizeHint;
+    }
+
+    void updateCachedSizeHint() {
         QFontMetrics fm(m_font);
-        int row = index.row();
-        bool isSection = (m_filtered && row >= 0 && row < m_filtered->size()
-                          && (*m_filtered)[row].entryKind == TypeEntry::Section);
-        int h = isSection ? fm.height() + 2 : fm.height() + 8;
-        return QSize(200, h);
+        m_cachedSizeHint = QSize(200, fm.height() + 8);
     }
 
     bool helpEvent(QHelpEvent* event, QAbstractItemView* view,
@@ -322,6 +344,7 @@ public:
 private:
     TypeSelectorPopup* m_popup = nullptr;
     QFont m_font;
+    QSize m_cachedSizeHint{200, 20};
     bool m_isLoading = false;
     const QVector<TypeEntry>* m_filtered = nullptr;
     const QVector<QVector<int>>* m_matchPositions = nullptr;
@@ -448,6 +471,9 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_listView->setEditTriggers(QAbstractItemView::NoEditTriggers);
         m_listView->viewport()->setAttribute(Qt::WA_Hover, true);
         m_listView->setAccessibleName(QStringLiteral("Type list"));
+        m_listView->setUniformItemSizes(true);
+        m_listView->setLayoutMode(QListView::Batched);
+        m_listView->setBatchSize(50);
         m_listView->installEventFilter(this);
 
         auto* delegate = new TypeSelectorDelegate(this, m_listView);
@@ -826,6 +852,12 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
     if (delegate) delegate->setLoading(false);
 
     m_allTypes = types;
+    // Cache max display name length for popup width calculation
+    m_cachedMaxNameLen = 0;
+    for (const auto& t : m_allTypes) {
+        if (t.entryKind != TypeEntry::Section)
+            m_cachedMaxNameLen = qMax(m_cachedMaxNameLen, (int)t.displayName.size());
+    }
     if (current) {
         m_currentEntry = *current;
         m_hasCurrent = true;
@@ -858,13 +890,12 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
 
 void TypeSelectorPopup::popup(const QPoint& globalPos) {
     QFontMetrics fm(m_font);
-    int maxTextW = fm.horizontalAdvance(QStringLiteral("Choose element type        "));
-    for (const auto& t : m_allTypes) {
-        int iconColW = fm.height() + 4;
-        int w = iconColW + fm.horizontalAdvance(t.displayName) + 16;
-        if (w > maxTextW) maxTextW = w;
-    }
-    int popupW = qBound(480, maxTextW + 24, 560);
+    constexpr int kMaxPopupW = 560;
+    // Estimate max width from cached max name length (avoids iterating all types)
+    int iconColW = fm.height() + 4;
+    int estMaxW = iconColW + fm.horizontalAdvance(QChar('W')) * m_cachedMaxNameLen + 16;
+    int maxTextW = qMax(fm.horizontalAdvance(QStringLiteral("Choose element type        ")), estMaxW);
+    int popupW = qBound(480, maxTextW + 24, kMaxPopupW);
     int rowH = fm.height() + 8;
     int headerH = rowH * 2 + 10;   // filter + chips + separator
     int footerH = rowH + 6;        // separator + action row
@@ -973,13 +1004,22 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     };
 
     int primCount = 0, typeCount = 0, enumCount = 0;
+    const int totalTypes = m_allTypes.size();
+
+    // Pre-reserve to avoid realloc churn
+    m_filteredTypes.reserve(totalTypes);
+    m_matchPositions.reserve(totalTypes);
+    displayStrings.reserve(totalTypes);
 
     if (!filterBase.isEmpty()) {
         // ── Fuzzy search: flat ranked list, no section headers ──
-        struct Scored { TypeEntry entry; int score; QVector<int> pos; };
+        // Use index + score to avoid deep-copying TypeEntry structs
+        struct Scored { int idx; int score; QVector<int> pos; };
         QVector<Scored> scored;
+        scored.reserve(totalTypes);
 
-        for (const auto& t : m_allTypes) {
+        for (int i = 0; i < totalTypes; i++) {
+            const auto& t = m_allTypes[i];
             if (t.entryKind == TypeEntry::Section) continue;
             QVector<int> pos;
             int sc = fuzzyScore(filterBase, t.displayName, &pos);
@@ -988,15 +1028,15 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             else if (t.category == TypeEntry::CatEnum) enumCount++;
             else typeCount++;
             if (catAllowed(t))
-                scored.append({t, sc, pos});
+                scored.append({i, sc, std::move(pos)});
         }
         std::sort(scored.begin(), scored.end(),
                   [](const Scored& a, const Scored& b) { return a.score > b.score; });
 
         for (const auto& s : scored) {
-            m_filteredTypes.append(s.entry);
+            m_filteredTypes.append(m_allTypes[s.idx]);
             m_matchPositions.append(s.pos);
-            displayStrings << makeLabel(s.entry);
+            displayStrings << makeLabel(m_allTypes[s.idx]);
         }
     } else {
         // ── No filter: grouped sections, alphabetical ──
