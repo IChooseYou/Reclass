@@ -73,7 +73,7 @@ QString pointerTypeName(NodeKind kind, const QString& targetName) {
 // ── Value formatting ──
 
 static QString hexVal(uint64_t v) {
-    return QStringLiteral("0x") + QString::number(v, 16);
+    return QString::asprintf("0x%llx", (unsigned long long)v);
 }
 
 static QString rawHex(uint64_t v, int digits) {
@@ -228,15 +228,18 @@ static QString bytesToAscii(const QByteArray& b, int slot) {
     return out;
 }
 
+static const char kHexDigits[] = "0123456789ABCDEF";
+
 static QString bytesToHex(const QByteArray& b, int slot) {
-    QString out;
-    out.reserve(slot * 3);
+    QChar buf[64]; // max slot=8 → 8*3-1=23 chars; 64 is plenty
+    int pos = 0;
     for (int i = 0; i < slot; ++i) {
         uint8_t c = (i < b.size()) ? (uint8_t)b[i] : 0;
-        out += QString::asprintf("%02X", (unsigned)c);
-        if (i + 1 < slot) out += ' ';
+        buf[pos++] = QLatin1Char(kHexDigits[c >> 4]);
+        buf[pos++] = QLatin1Char(kHexDigits[c & 0xF]);
+        if (i + 1 < slot) buf[pos++] = QLatin1Char(' ');
     }
-    return out;
+    return QString(buf, pos);
 }
 
 static QString fmtAsciiAndBytes(const Provider& prov, uint64_t addr,
@@ -715,6 +718,7 @@ uint64_t extractBits(const Provider& prov, uint64_t addr,
     case NodeKind::Hex32: container = prov.readU32(addr); break;
     default:              container = prov.readU64(addr); break;
     }
+    Q_ASSERT(bitOffset + bitWidth <= 64);
     if (bitWidth >= 64) return container >> bitOffset;
     return (container >> bitOffset) & ((1ULL << bitWidth) - 1);
 }

@@ -53,7 +53,7 @@ struct ComposeState {
         siblingStack[d] = hasMoreSiblings;
     }
 
-    void emitLine(const QString& lineText, LineMeta lm) {
+    void emitLine(const QString& lineText, LineMeta&& lm) {
         if (currentLine > 0) text += '\n';
         // 3-char fold indicator column: " - " expanded, " + " collapsed, "   " other
         // CommandRow has no fold prefix (flush left)
@@ -87,7 +87,7 @@ struct ComposeState {
             text += lineText;
         }
 
-        meta.append(lm);
+        meta.append(std::move(lm));
         currentLine++;
     }
 };
@@ -208,7 +208,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         QString lineText = fmt::fmtNodeLine(node, prov, absAddr, depth, sub,
                                             /*comment=*/{}, typeW, nameW, ptrTypeOverride,
                                             state.compactColumns);
-        state.emitLine(lineText, lm);
+        state.emitLine(lineText, std::move(lm));
     }
 }
 
@@ -246,7 +246,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.markerMask = (1u << M_CYCLE) | (1u << M_ERR);
         lm.foldLevel  = computeFoldLevel(depth, false);
         state.emitLine(fmt::indent(depth) + QStringLiteral("/* CYCLE: ") +
-                       node.name + QStringLiteral(" */"), lm);
+                       node.name + QStringLiteral(" */"), std::move(lm));
         return;
     }
     state.visiting.insert(node.id);
@@ -267,7 +267,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.arrayElementIdx = arrayElementIdx;
         uint64_t relOff = absAddr - arrayContainerAddr;
         QString relOffHex = QString::number(relOff, 16).toUpper();
-        state.emitLine(fmt::indent(depth) + QStringLiteral("[%1] +0x%2").arg(arrayElementIdx).arg(relOffHex), lm);
+        state.emitLine(fmt::indent(depth) + QStringLiteral("[%1] +0x%2").arg(arrayElementIdx).arg(relOffHex), std::move(lm));
     }
 
     // Detect root header: first root-level struct — suppressed from display
@@ -325,7 +325,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             headerText.chop(1);
             // Remove trailing separator spaces
             while (headerText.endsWith(' ')) headerText.chop(1);
-            state.emitLine(headerText, lm);
+            state.emitLine(headerText, std::move(lm));
             // Emit standalone brace line
             LineMeta braceLm;
             braceLm.nodeIdx   = nodeIdx;
@@ -334,9 +334,9 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             braceLm.lineKind  = LineKind::Header;
             braceLm.foldLevel = computeFoldLevel(depth, true);
             braceLm.markerMask = (1u << M_STRUCT_BG);
-            state.emitLine(fmt::indent(depth) + QStringLiteral("{"), braceLm);
+            state.emitLine(fmt::indent(depth) + QStringLiteral("{"), std::move(braceLm));
         } else {
-            state.emitLine(headerText, lm);
+            state.emitLine(headerText, std::move(lm));
         }
     }
 
@@ -372,7 +372,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.offsetText = fmt::fmtOffsetMargin(absAddr, true, state.offsetHexDigits);
                 lm.offsetAddr = absAddr;
                 lm.ptrBase    = state.currentPtrBase;
-                state.emitLine(fmt::fmtEnumMember(m.first, m.second, childDepth, maxNameLen), lm);
+                state.emitLine(fmt::fmtEnumMember(m.first, m.second, childDepth, maxNameLen), std::move(lm));
             }
 
             // Footer
@@ -389,7 +389,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.offsetText = fmt::fmtOffsetMargin(absAddr, false, state.offsetHexDigits);
                 lm.offsetAddr = absAddr;
                 lm.ptrBase    = state.currentPtrBase;
-                state.emitLine(fmt::fmtStructFooter(node, depth, 0), lm);
+                state.emitLine(fmt::fmtStructFooter(node, depth, 0), std::move(lm));
             }
 
             state.visiting.remove(node.id);
@@ -423,7 +423,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.offsetAddr = absAddr;
                 lm.ptrBase    = state.currentPtrBase;
                 state.emitLine(fmt::fmtBitfieldMember(m.name, m.bitWidth, bitVal,
-                                                       childDepth, maxNameLen), lm);
+                                                       childDepth, maxNameLen), std::move(lm));
             }
 
             // Footer
@@ -441,7 +441,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.offsetText = fmt::fmtOffsetMargin(absAddr + sz, false, state.offsetHexDigits);
                 lm.offsetAddr = absAddr + sz;
                 lm.ptrBase    = state.currentPtrBase;
-                state.emitLine(fmt::fmtStructFooter(node, depth, sz), lm);
+                state.emitLine(fmt::fmtStructFooter(node, depth, sz), std::move(lm));
             }
 
             state.visiting.remove(node.id);
@@ -501,7 +501,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
                 state.emitLine(fmt::fmtNodeLine(elem, prov, elemAddr, childDepth, 0,
                                                 {}, eTW, eNW, elemTypeStr,
-                                                state.compactColumns), lm);
+                                                state.compactColumns), std::move(lm));
             }
         }
 
@@ -559,7 +559,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                         lm.effectiveTypeW = overflow ? rawType.size() : typeW;
                         lm.effectiveNameW = nameW;
                         state.emitLine(fmt::fmtStructHeader(child, childDepth,
-                            /*collapsed=*/true, typeW, nameW, state.compactColumns), lm);
+                            /*collapsed=*/true, typeW, nameW, state.compactColumns), std::move(lm));
                         continue;
                     }
                     composeNode(state, tree, prov, childIdx, childDepth,
@@ -700,7 +700,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.ptrBase    = state.currentPtrBase;
                 lm.effectiveTypeW = typeName.size() + 7; // "static " prefix
                 lm.effectiveNameW = sf.name.size();
-                state.emitLine(headerLine, lm);
+                state.emitLine(headerLine, std::move(lm));
 
                 // ── Body + children (only when expanded) ──
                 if (!isCollapsed) {
@@ -747,7 +747,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                         blm.offsetText = QString(state.offsetHexDigits, QChar(' '));
                         blm.offsetAddr = staticAddr;
                         blm.ptrBase    = state.currentPtrBase;
-                        state.emitLine(bodyLine, blm);
+                        state.emitLine(bodyLine, std::move(blm));
                     }
 
                     // If struct/array, compose children at evaluated address
@@ -780,7 +780,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                             flm.offsetAddr = staticAddr;
                         }
                         flm.ptrBase    = state.currentPtrBase;
-                        state.emitLine(fmt::indent(childDepth) + QStringLiteral("};"), flm);
+                        state.emitLine(fmt::indent(childDepth) + QStringLiteral("};"), std::move(flm));
                     }
                 }
             }
@@ -802,7 +802,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.offsetText = fmt::fmtOffsetMargin(absAddr + sz, false, state.offsetHexDigits);
         lm.offsetAddr = absAddr + sz;
         lm.ptrBase    = state.currentPtrBase;
-        state.emitLine(fmt::fmtStructFooter(node, depth, sz), lm);
+        state.emitLine(fmt::fmtStructFooter(node, depth, sz), std::move(lm));
     }
 
     state.visiting.remove(node.id);
@@ -865,7 +865,7 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 if (state.braceWrap && !effectiveCollapsed && ptrText.endsWith(QChar('{'))) {
                     ptrText.chop(1);
                     while (ptrText.endsWith(' ')) ptrText.chop(1);
-                    state.emitLine(ptrText, lm);
+                    state.emitLine(ptrText, std::move(lm));
                     LineMeta braceLm;
                     braceLm.nodeIdx   = nodeIdx;
                     braceLm.nodeId    = node.id;
@@ -873,9 +873,9 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                     braceLm.lineKind  = LineKind::Header;
                     braceLm.foldLevel = computeFoldLevel(depth, true);
                     braceLm.markerMask = lm.markerMask;
-                    state.emitLine(fmt::indent(depth) + QStringLiteral("{"), braceLm);
+                    state.emitLine(fmt::indent(depth) + QStringLiteral("{"), std::move(braceLm));
                 } else {
-                    state.emitLine(ptrText, lm);
+                    state.emitLine(ptrText, std::move(lm));
                 }
             }
         }
@@ -955,7 +955,7 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 lm.offsetText.clear();
                 lm.foldLevel = computeFoldLevel(depth, false);
                 lm.markerMask = 0;
-                state.emitLine(fmt::indent(depth) + QStringLiteral("}"), lm);
+                state.emitLine(fmt::indent(depth) + QStringLiteral("}"), std::move(lm));
             }
         }
         return;
@@ -988,10 +988,32 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         });
     }
 
-    // Precompute absolute offsets (baseAddress + structure-relative offset)
+    // Pre-allocate output buffers (estimate ~3 lines per node, ~80 chars per line)
+    state.meta.reserve(tree.nodes.size() * 3);
+    state.text.reserve(tree.nodes.size() * 80);
+
+    // Precompute absolute offsets via BFS (O(N) — avoids per-node parent-chain walk)
     state.absOffsets.resize(tree.nodes.size());
+    state.absOffsets.fill(0);
     for (int i = 0; i < tree.nodes.size(); i++)
-        state.absOffsets[i] = tree.baseAddress + tree.computeOffset(i);
+        if (tree.nodes[i].parentId == 0)
+            state.absOffsets[i] = tree.nodes[i].offset;
+    {
+        QVector<int> bfsQueue;
+        for (int i : state.childMap.value(0))
+            bfsQueue.append(i);
+        int front = 0;
+        while (front < bfsQueue.size()) {
+            int idx = bfsQueue[front++];
+            int pi = tree.indexOfId(tree.nodes[idx].parentId);
+            state.absOffsets[idx] = (pi >= 0 ? state.absOffsets[pi] : 0)
+                                  + tree.nodes[idx].offset;
+            for (int ci : state.childMap.value(tree.nodes[idx].id))
+                bfsQueue.append(ci);
+        }
+    }
+    for (auto& v : state.absOffsets)
+        v += tree.baseAddress;
 
     // Compute hex digit tier from max absolute address
     {
@@ -1020,23 +1042,21 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         return fmt::typeNameRaw(n.kind);
     };
 
-    // Compute effective type column width from longest type name
-    // Include struct/array headers which use "struct TypeName" or "type[count]" format
+    // Pre-compute type name lengths (avoids re-creating temp QStrings in width loops)
+    QVector<int> typeNameLens(tree.nodes.size());
+    for (int i = 0; i < tree.nodes.size(); i++)
+        typeNameLens[i] = nodeTypeName(tree.nodes[i]).size();
+
+    // Compute effective column widths from longest type/name in a single pass
     const int typeCap = state.compactColumns ? kCompactTypeW : kMaxTypeW;
     int maxTypeLen = kMinTypeW;
-    for (const Node& node : tree.nodes) {
-        maxTypeLen = qMax(maxTypeLen, (int)nodeTypeName(node).size());
+    int maxNameLen = kMinNameW;
+    for (int i = 0; i < tree.nodes.size(); i++) {
+        maxTypeLen = qMax(maxTypeLen, typeNameLens[i]);
+        if (!isHexPreview(tree.nodes[i].kind))
+            maxNameLen = qMax(maxNameLen, (int)tree.nodes[i].name.size());
     }
     state.typeW = qBound(kMinTypeW, maxTypeLen, typeCap);
-
-    // Compute effective name column width from longest name
-    // Include struct/array names - they now use columnar layout too
-    int maxNameLen = kMinNameW;
-    for (const Node& node : tree.nodes) {
-        // Skip hex (they show ASCII preview, not name column)
-        if (isHexPreview(node.kind)) continue;
-        maxNameLen = qMax(maxNameLen, (int)node.name.size());
-    }
     state.nameW = qBound(kMinNameW, maxNameLen, kMaxNameW);
 
     // Pre-compute per-scope widths (each container gets widths based on direct children only)
@@ -1053,7 +1073,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
             // Skip struct children — pointer headers shouldn't inflate sibling widths
             if (child.kind == NodeKind::Struct)
                 continue;
-            scopeMaxType = qMax(scopeMaxType, (int)nodeTypeName(child).size());
+            scopeMaxType = qMax(scopeMaxType, typeNameLens[childIdx]);
 
             // Name width (skip hex, but include containers)
             if (!isHexPreview(child.kind)) {
@@ -1079,7 +1099,6 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     }
 
     // Compute scope widths for root level (parentId == 0)
-    // Include struct/array headers - they now use columnar layout too
     {
         int rootMaxType = kMinTypeW;
         int rootMaxName = kMinNameW;
@@ -1088,7 +1107,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
             // Skip struct children — pointer headers shouldn't inflate sibling widths
             if (child.kind == NodeKind::Struct)
                 continue;
-            rootMaxType = qMax(rootMaxType, (int)nodeTypeName(child).size());
+            rootMaxType = qMax(rootMaxType, typeNameLens[childIdx]);
 
             // Name width (skip hex, include containers)
             if (!isHexPreview(child.kind)) {
@@ -1115,7 +1134,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         lm.markerMask = 0;
         lm.effectiveTypeW = state.typeW;
         lm.effectiveNameW = state.nameW;
-        state.emitLine(cmdRowText, lm);
+        state.emitLine(cmdRowText, std::move(lm));
     }
 
     // Brace wrapping: emit standalone "{" after CommandRow
@@ -1127,7 +1146,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         braceLm.lineKind  = LineKind::Header;
         braceLm.foldLevel = SC_FOLDLEVELBASE;
         braceLm.markerMask = 0;
-        state.emitLine(QStringLiteral("{"), braceLm);
+        state.emitLine(QStringLiteral("{"), std::move(braceLm));
     }
 
     const QVector<int>& roots = childIndices(state, 0);

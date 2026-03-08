@@ -818,17 +818,17 @@ void MainWindow::createMenus() {
 
     auto* actTreeLines = view->addAction("&Tree Lines");
     actTreeLines->setCheckable(true);
-    actTreeLines->setChecked(settings.value("treeLines", false).toBool());
+    actTreeLines->setChecked(settings.value("treeLines", true).toBool());
     connect(actTreeLines, &QAction::triggered, this, [this](bool checked) {
         QSettings("Reclass", "Reclass").setValue("treeLines", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setTreeLines(checked);
     });
 
-    auto* actRelOfs = view->addAction("R&elative Offsets");
-    actRelOfs->setCheckable(true);
-    actRelOfs->setChecked(settings.value("relativeOffsets", true).toBool());
-    connect(actRelOfs, &QAction::triggered, this, [this](bool checked) {
+    m_actRelOfs = view->addAction("R&elative Offsets");
+    m_actRelOfs->setCheckable(true);
+    m_actRelOfs->setChecked(settings.value("relativeOffsets", true).toBool());
+    connect(m_actRelOfs, &QAction::triggered, this, [this](bool checked) {
         QSettings("Reclass", "Reclass").setValue("relativeOffsets", checked);
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
@@ -1250,6 +1250,16 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
     pane.editor->setRelativeOffsets(
         QSettings("Reclass", "Reclass").value("relativeOffsets", true).toBool());
+    // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
+    connect(pane.editor, &RcxEditor::relativeOffsetsChanged, this, [this](bool rel) {
+        QSettings("Reclass", "Reclass").setValue("relativeOffsets", rel);
+        if (m_actRelOfs) m_actRelOfs->setChecked(rel);
+        // Propagate to all other editors so they stay in sync
+        for (auto& tab : m_tabs)
+            for (auto& p : tab.panes)
+                if (p.editor && p.editor != sender())
+                    p.editor->setRelativeOffsets(rel);
+    });
     pane.tabWidget->addTab(pane.editor, "Reclass");     // index 0
 
     // Create per-pane rendered C++ view with find bar
@@ -1463,6 +1473,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     dock->setFeatures(QDockWidget::DockWidgetClosable |
                       QDockWidget::DockWidgetMovable |
                       QDockWidget::DockWidgetFloatable);
+    dock->setAttribute(Qt::WA_DeleteOnClose);
     // Two title bar widgets: a hidden one (docked) and a draggable one (floating)
     auto* emptyTitleBar = new QWidget(dock);
     emptyTitleBar->setFixedHeight(0);
@@ -1586,7 +1597,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     // Apply global compact columns setting to new tab
     ctrl->setCompactColumns(QSettings("Reclass", "Reclass").value("compactColumns", true).toBool());
-    ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", false).toBool());
+    ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", true).toBool());
     ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
@@ -1629,6 +1640,8 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             m_activeDocDock = m_docDocks.isEmpty() ? nullptr : m_docDocks.last();
         rebuildAllDocs();
         rebuildWorkspaceModel();
+        if (m_tabs.isEmpty())
+            project_new();
     });
 
     connect(ctrl, &RcxController::nodeSelected,
@@ -3309,16 +3322,13 @@ void MainWindow::project_close(QDockWidget* dock) {
     if (!dock) dock = m_activeDocDock;
     if (!dock) return;
     dock->close();
-    rebuildWorkspaceModel();
 }
 
 void MainWindow::closeAllDocDocks() {
     // Take a copy since closing modifies m_docDocks via destroyed signal
     auto docks = m_docDocks;
-    for (auto* dock : docks) {
-        dock->setAttribute(Qt::WA_DeleteOnClose);
+    for (auto* dock : docks)
         dock->close();
-    }
 }
 
 

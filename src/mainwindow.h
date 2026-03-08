@@ -92,6 +92,7 @@ private:
     PluginManager   m_pluginManager;
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
+    QAction*        m_actRelOfs = nullptr;
     QMenu*          m_sourceMenu = nullptr;
     QMenu*          m_recentFilesMenu = nullptr;
 

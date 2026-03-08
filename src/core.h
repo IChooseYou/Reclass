@@ -575,6 +575,7 @@ static constexpr uint64_t kArrayElemMask  = 0x3FFF000000000000ULL;  // 14 bits â
 
 // Encode an array element selection ID: nodeId | kArrayElemBit | (elemIdx << 48)
 inline uint64_t makeArrayElemSelId(uint64_t nodeId, int elemIdx) {
+    Q_ASSERT(elemIdx >= 0);
     return nodeId | kArrayElemBit | ((uint64_t)(elemIdx & 0x3FFF) << kArrayElemShift);
 }
 inline int arrayElemIdxFromSelId(uint64_t selId) {

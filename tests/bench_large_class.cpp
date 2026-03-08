@@ -65,6 +65,7 @@ private:
 private slots:
     void initTestCase();
     void benchCompose();
+    void benchComposeLarge();
     void benchApplyDocument();
     void benchHoverHighlight();
     void benchSelectionOverlay();
@@ -106,6 +107,36 @@ void BenchLargeClass::benchCompose()
 
     qDebug() << "";
     qDebug() << "=== Compose Benchmark (500 fields) ===";
+    qDebug() << "  Iterations:" << ITERS;
+    qDebug() << "  Total:" << elapsed << "ms";
+    qDebug() << "  Per-compose:" << (double)elapsed / ITERS << "ms";
+    QVERIFY(elapsed > 0);
+}
+
+void BenchLargeClass::benchComposeLarge()
+{
+    // Build a 2000-field tree to stress-test compose at scale
+    NodeTree bigTree = buildLargeTree(2000);
+    QByteArray buf(0x40000, '\0');
+    for (int i = 0; i < buf.size(); ++i) buf[i] = (char)(i & 0xFF);
+    BufferProvider bigProv(buf, QStringLiteral("bench_large"));
+
+    // Warmup
+    { ComposeResult w = rcx::compose(bigTree, bigProv); Q_UNUSED(w); }
+
+    const int ITERS = 50;
+    QElapsedTimer timer;
+
+    timer.start();
+    for (int i = 0; i < ITERS; ++i) {
+        ComposeResult r = rcx::compose(bigTree, bigProv);
+        Q_UNUSED(r);
+    }
+    qint64 elapsed = timer.elapsed();
+
+    qDebug() << "";
+    qDebug() << "=== Compose Benchmark (2000 fields) ===";
+    qDebug() << "  Tree:" << bigTree.nodes.size() << "nodes";
     qDebug() << "  Iterations:" << ITERS;
     qDebug() << "  Total:" << elapsed << "ms";
     qDebug() << "  Per-compose:" << (double)elapsed / ITERS << "ms";

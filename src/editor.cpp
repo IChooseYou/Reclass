@@ -562,9 +562,11 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
             if (chosen == actRel && !m_relativeOffsets) {
                 m_relativeOffsets = true;
                 reformatMargins();
+                emit relativeOffsetsChanged(true);
             } else if (chosen == actAbs && m_relativeOffsets) {
                 m_relativeOffsets = false;
                 reformatMargins();
+                emit relativeOffsetsChanged(false);
             }
             return;
         }
@@ -958,8 +960,14 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     }
 
     // Dynamically resize margin to fit the current hex digit tier
-    QString marginSizer = QString("  %1  ").arg(QString(m_layout.offsetHexDigits, '0'));
-    m_sci->setMarginWidth(0, marginSizer);
+    // RVA mode uses half width since relative offsets are much shorter
+    {
+        int marginDigits = m_relativeOffsets
+            ? qMax(m_layout.offsetHexDigits / 2, 4)
+            : m_layout.offsetHexDigits;
+        QString marginSizer = QString("  %1  ").arg(QString(marginDigits, '0'));
+        m_sci->setMarginWidth(0, marginSizer);
+    }
 
     m_sci->setReadOnly(false);
     m_sci->setText(result.text);
@@ -1065,6 +1073,11 @@ void RcxEditor::applyMarginText(const QVector<LineMeta>& meta) {
 void RcxEditor::reformatMargins() {
     uint64_t base = m_layout.baseAddress;
     int hexDigits = m_layout.offsetHexDigits;
+
+    // Resize margin: RVA offsets are much shorter than full addresses
+    int marginDigits = m_relativeOffsets ? qMax(hexDigits / 2, 4) : hexDigits;
+    QString marginSizer = QString("  %1  ").arg(QString(marginDigits, '0'));
+    m_sci->setMarginWidth(0, marginSizer);
 
     // ── Pass 1: margin text (global offset only) ──
     m_sci->clearMarginText(-1);
@@ -2195,6 +2208,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
 #endif
             m_relativeOffsets = !m_relativeOffsets;
             reformatMargins();
+            emit relativeOffsetsChanged(m_relativeOffsets);
             return true;
         }
     }
@@ -2274,7 +2288,8 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_hoverInside = m_sci->viewport()->rect().contains(m_lastHoverPos);
         }
         // Resolve hovered nodeId on move/wheel (non-edit mode only)
-        if (!m_editState.active &&
+        // Guard: skip during applyDocument — m_nodeLineIndex may be stale
+        if (!m_editState.active && !m_applyingDocument &&
             (event->type() == QEvent::MouseMove || event->type() == QEvent::Wheel)) {
             auto h = hitTest(m_lastHoverPos);
             uint64_t newHoverId = (m_hoverInside && h.line >= 0) ? h.nodeId : 0;
@@ -3602,8 +3617,13 @@ void RcxEditor::setEditorFont(const QString& fontName) {
     // Re-apply margin styles and width with new font metrics
     allocateMarginStyles();
     applyTheme(ThemeManager::instance().current());
-    QString marginSizer = QString("  %1  ").arg(QString(m_layout.offsetHexDigits, '0'));
-    m_sci->setMarginWidth(0, marginSizer);
+    {
+        int marginDigits = m_relativeOffsets
+            ? qMax(m_layout.offsetHexDigits / 2, 4)
+            : m_layout.offsetHexDigits;
+        QString marginSizer = QString("  %1  ").arg(QString(marginDigits, '0'));
+        m_sci->setMarginWidth(0, marginSizer);
+    }
 }
 
 void RcxEditor::setGlobalFontName(const QString& fontName) {

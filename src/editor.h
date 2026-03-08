@@ -84,6 +84,7 @@ signals:
     void typeSelectorRequested();
     void typePickerRequested(EditTarget target, int nodeIdx, QPoint globalPos);
     void insertAboveRequested(int nodeIdx, NodeKind kind);
+    void relativeOffsetsChanged(bool relative);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
