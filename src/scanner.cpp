@@ -473,14 +473,14 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
              << " filterExec:" << req.filterExecutable
              << " filterWrite:" << req.filterWritable;
 
-    // Fallback for providers that don't enumerate regions (file/buffer)
+    // Fallback for providers that don't enumerate regions (file/buffer/syscall without modules)
     if (regions.isEmpty()) {
         MemoryRegion fallback;
         fallback.base = 0;
         fallback.size = (uint64_t)prov->size();
         fallback.readable = true;
         fallback.writable = true;
-        fallback.executable = false;
+        fallback.executable = true;  // unknown; include so filters don't exclude the only region
         regions.append(fallback);
     }
 
@@ -515,7 +515,8 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
 
     constexpr int kChunk = 256 * 1024;
 
-    for (const auto& region : regions) {
+    for (int regionIndex = 0; regionIndex < regions.size(); ++regionIndex) {
+        const auto& region = regions[regionIndex];
         if (m_abort.load()) break;
 
         if (req.filterExecutable && !region.executable) continue;
@@ -540,7 +541,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             continue;
         }
 
-        const int overlap = patternLen - 1;
+        const int overlap = patternLen;  // need full patternLen overlap so pattern at chunk end is found
         QByteArray chunk(qMin((uint64_t)kChunk, regSize), Qt::Uninitialized);
         uint64_t regOffset = regStart - region.base; // offset within provider region
 
@@ -552,6 +553,8 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
 
             if (!prov->read(regStart + off, chunk.data(), readLen)) {
                 // Skip unreadable chunk
+                qDebug() << "[scan] read failed region" << regionIndex << "addr" << Qt::showbase << Qt::hex
+                         << (region.base + off) << "base" << region.base << "off" << off << "len" << readLen << Qt::dec;
                 off += readLen;
                 scannedBytes += readLen;
                 continue;

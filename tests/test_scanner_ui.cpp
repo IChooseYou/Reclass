@@ -790,6 +790,7 @@ private slots:
         QByteArray newBytes(4, '\0');
         std::memcpy(newBytes.data(), &newVal, 4);
         prov->writeBytes(8, newBytes);
+        m_panel->valueEdit()->setText("99");
 
         // Click update — runs async
         QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
@@ -839,6 +840,7 @@ private slots:
             std::memcpy(nb.data(), &newVal, 4);
             prov->writeBytes(i * 4, nb);
         }
+        m_panel->valueEdit()->setText("21");
 
         // Click Re-scan — runs async
         QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
@@ -930,6 +932,7 @@ private slots:
         QByteArray nb2(4, '\0');
         std::memcpy(nb2.data(), &v2, 4);
         prov->writeBytes(4, nb2);
+        m_panel->valueEdit()->setText("20");
         {
             QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
             QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
@@ -944,6 +947,7 @@ private slots:
         QByteArray nb3(4, '\0');
         std::memcpy(nb3.data(), &v3, 4);
         prov->writeBytes(4, nb3);
+        m_panel->valueEdit()->setText("30");
         {
             QSignalSpy rescanSpy(m_panel->engine(), &ScanEngine::rescanFinished);
             QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
@@ -1009,6 +1013,7 @@ private slots:
             int32_t newVal = kVal + iter;
             for (int off = 0; off + 4 <= kBufSize; off += kStride)
                 std::memcpy(prov->data().data() + off, &newVal, 4);
+            m_panel->valueEdit()->setText(QString::number(newVal));
 
             QElapsedTimer iterTimer;
             iterTimer.start();

@@ -45,9 +45,13 @@ void McpBridge::start() {
 
 void McpBridge::stop() {
     if (m_client) {
+        m_client->disconnect(this);
         m_client->disconnectFromServer();
+        m_client->deleteLater();
         m_client = nullptr;
     }
+    m_readBuffer.clear();
+    m_initialized = false;
     if (m_server) {
         m_server->close();
         delete m_server;
@@ -65,8 +69,10 @@ void McpBridge::onNewConnection() {
 
     // Single client — disconnect previous
     if (m_client) {
+        m_client->disconnect(this);
         m_client->disconnectFromServer();
         m_client->deleteLater();
+        m_client = nullptr;
     }
 
     m_client = pending;
@@ -82,10 +88,13 @@ void McpBridge::onNewConnection() {
 }
 
 void McpBridge::onReadyRead() {
+    if (!m_client) return;
     m_readBuffer.append(m_client->readAll());
 
     // Newline-delimited JSON framing
-    while (true) {
+    // Guard: processLine→sendJson→flush can re-enter the event loop
+    // and trigger onDisconnected, nulling m_client mid-loop.
+    while (m_client) {
         int idx = m_readBuffer.indexOf('\n');
         if (idx < 0) break;
         QByteArray line = m_readBuffer.left(idx).trimmed();
@@ -97,7 +106,12 @@ void McpBridge::onReadyRead() {
 
 void McpBridge::onDisconnected() {
     qDebug() << "[MCP] Client disconnected";
-    m_client = nullptr;
+    if (m_client) {
+        m_client->disconnect(this);
+        m_client->deleteLater();
+        m_client = nullptr;
+    }
+    m_readBuffer.clear();
     m_initialized = false;
 }
 
@@ -127,7 +141,7 @@ void McpBridge::sendJson(const QJsonObject& obj) {
     qDebug() << "[MCP] >>" << data.left(200);
     data.append('\n');
     m_client->write(data);
-    m_client->flush();
+    if (m_client) m_client->flush();
 }
 
 void McpBridge::sendNotification(const QString& method, const QJsonObject& params) {
@@ -172,12 +186,10 @@ void McpBridge::processLine(const QByteArray& line) {
 
     if (method == "initialize") {
         m_mainWindow->setMcpStatus(QStringLiteral("MCP: client connected"));
-        QCoreApplication::processEvents();
         sendJson(handleInitialize(id, req.value("params").toObject()));
         m_mainWindow->clearMcpStatus();
     } else if (method == "tools/list") {
         m_mainWindow->setMcpStatus(QStringLiteral("MCP: tools/list"));
-        QCoreApplication::processEvents();
         sendJson(handleToolsList(id));
         m_mainWindow->clearMcpStatus();
     } else if (method == "tools/call") {
