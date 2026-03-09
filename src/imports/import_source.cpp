@@ -1188,6 +1188,16 @@ static int structTypeSize(const QString& typeName, const BuildContext& ctx) {
     return 0;
 }
 
+// Compute total array elements from multi-dimensional sizes, capped to prevent overflow.
+static int clampedArrayElements(const QVector<int>& dims, int maxElements = 1000000) {
+    int64_t total = 1;
+    for (int dim : dims) {
+        total *= (dim > 0 ? dim : 1);
+        if (total > maxElements) return maxElements;
+    }
+    return (int)total;
+}
+
 static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
                         const QVector<ParsedField>& fields) {
     int computedOffset = 0;
@@ -1276,8 +1286,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
 
             // Array of pointers: PVOID arr[N]
             if (!field.arraySizes.isEmpty()) {
-                int totalElements = 1;
-                for (int dim : field.arraySizes) totalElements *= (dim > 0 ? dim : 1);
+                int totalElements = clampedArrayElements(field.arraySizes);
 
                 Node n;
                 n.kind = NodeKind::Array;
@@ -1315,8 +1324,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             int elemSize = 4;
             NodeKind elemKind = NodeKind::UInt32;
             if (!field.arraySizes.isEmpty()) {
-                int totalElements = 1;
-                for (int dim : field.arraySizes) totalElements *= (dim > 0 ? dim : 1);
+                int totalElements = clampedArrayElements(field.arraySizes);
                 Node n;
                 n.kind = NodeKind::Array;
                 n.name = field.name;
@@ -1420,8 +1428,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
                 ctx.tree.addNode(n); computedOffset = fieldOffset + 64; continue;
             }
 
-            int totalElements = 1;
-            for (int dim : field.arraySizes) totalElements *= (dim > 0 ? dim : 1);
+            int totalElements = clampedArrayElements(field.arraySizes);
 
             Node n;
             n.kind = NodeKind::Array;
@@ -1440,8 +1447,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             int elemSize = structTypeSize(field.typeName, ctx);
 
             if (!field.arraySizes.isEmpty()) {
-                int totalElements = 1;
-                for (int dim : field.arraySizes) totalElements *= (dim > 0 ? dim : 1);
+                int totalElements = clampedArrayElements(field.arraySizes);
 
                 Node n;
                 n.kind = NodeKind::Array;

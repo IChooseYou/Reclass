@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QByteArray>
+#include <QTimer>
 
 namespace rcx {
 
@@ -34,6 +35,7 @@ private:
     QByteArray     m_readBuffer;
     bool           m_initialized = false;
     bool           m_slowMode    = false;
+    QTimer*        m_notifyTimer = nullptr;
 
     // JSON-RPC plumbing
     void onNewConnection();
@@ -65,10 +67,11 @@ private:
     // Helpers
     QJsonObject makeTextResult(const QString& text, bool isError = false);
     QString resolvePlaceholder(const QString& ref,
-                               const QHash<QString, uint64_t>& placeholderMap);
+                               const QHash<QString, uint64_t>& placeholderMap,
+                               bool* ok = nullptr);
 
     // Smart tab resolution: tabIndex arg → activeTab → first tab → auto-create
-    MainWindow::TabState* resolveTab(const QJsonObject& args);
+    MainWindow::TabState* resolveTab(const QJsonObject& args, int* resolvedIndex = nullptr);
 };
 
 } // namespace rcx

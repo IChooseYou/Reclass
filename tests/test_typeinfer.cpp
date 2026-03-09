@@ -125,39 +125,27 @@ private slots:
         QVERIFY(r[0].kinds[0] == NodeKind::Int16 || r[0].kinds[0] == NodeKind::UInt16);
     }
 
-    // ── Hex8: bool-like ──
-    void hex8_bool() {
+    // ── Hex8: uint8 ──
+    void hex8_uint() {
         uint8_t d[1] = {1};
         auto r = inferTypes(d, 1);
         QVERIFY(!r.isEmpty());
-        bool foundBool = false;
-        for (const auto& s : r)
-            if (s.kinds.size() == 1 && s.kinds[0] == NodeKind::Bool)
-                foundBool = true;
-        QVERIFY(foundBool);
+        QCOMPARE(r[0].kinds[0], NodeKind::UInt8);
     }
 
     // ── formatHint ──
-    void formatHint_strong() {
+    void formatHint_single() {
         TypeSuggestion s;
         s.kinds = {NodeKind::Float};
         s.strength = 3;
-        QCOMPARE(formatHint(s), QStringLiteral("float strong"));
-    }
-    void formatHint_moderate() {
-        TypeSuggestion s;
-        s.kinds = {NodeKind::Float};
-        s.strength = 2;
-        QCOMPARE(formatHint(s), QStringLiteral("float moderate"));
+        QCOMPARE(formatHint(s), QStringLiteral("float"));
     }
     void formatHint_split() {
         TypeSuggestion s;
         s.kinds = {NodeKind::Float, NodeKind::Float};
         s.strength = 3;
         QString h = formatHint(s);
-        QVERIFY(h.contains("float"));
-        QVERIFY(h.contains("2"));
-        QVERIFY(h.endsWith("strong"));
+        QCOMPARE(h, QStringLiteral("float\u00D72"));
     }
 
     // ── Denormal rejection ──

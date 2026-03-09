@@ -702,7 +702,7 @@ void ScannerPanel::onCellEdited(int row, int col) {
             m_statusLabel->setText(QStringLiteral("Wrote %1 byte%2 to 0x%3")
                 .arg(bytes.size())
                 .arg(bytes.size() == 1 ? "" : "s")
-                .arg(addr, 0, 16, QLatin1Char('0')).toUpper());
+                .arg(QString::number(addr, 16).toUpper()));
             // Re-read and update cache
             m_resultTable->blockSignals(true);
             int readSize = (m_lastScanMode == 1) ? valueSize() : 16;

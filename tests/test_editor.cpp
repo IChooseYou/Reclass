@@ -1964,6 +1964,7 @@ private slots:
         root.structTypeName = "Chain";
         root.name = "chain";
         root.parentId = 0;
+        root.collapsed = false;
         int ri = tree.addNode(root);
         uint64_t rootId = tree.nodes[ri].id;
 
@@ -1974,6 +1975,7 @@ private slots:
         inner.name = "Inner";
         inner.parentId = 0;
         inner.offset = 300;
+        inner.collapsed = false;
         int ii = tree.addNode(inner);
         uint64_t innerId = tree.nodes[ii].id;
         {
@@ -1990,6 +1992,7 @@ private slots:
         outer.name = "Outer";
         outer.parentId = 0;
         outer.offset = 200;
+        outer.collapsed = false;
         int oi = tree.addNode(outer);
         uint64_t outerId = tree.nodes[oi].id;
         {
@@ -2002,6 +2005,7 @@ private slots:
             p.kind = NodeKind::Pointer64; p.name = "pInner";
             p.parentId = outerId; p.offset = 8;
             p.refId = innerId;
+            p.collapsed = false;
             tree.addNode(p);
         }
 
@@ -2011,6 +2015,7 @@ private slots:
             p.kind = NodeKind::Pointer64; p.name = "pOuter";
             p.parentId = rootId; p.offset = 0;
             p.refId = outerId;
+            p.collapsed = false;
             tree.addNode(p);
         }
 
@@ -2706,6 +2711,7 @@ private slots:
         sf.offset = 0;
         sf.isStatic = true;
         sf.offsetExpr = QStringLiteral("base + 0x10");
+        sf.collapsed = false;
         tree.addNode(sf);
 
         NullProvider prov;

@@ -53,6 +53,7 @@ public:
     bool isReadable(uint64_t addr, int len) const override {
         if (len <= 0) return (len == 0);
         uint64_t end = addr + static_cast<uint64_t>(len);
+        if (end < addr) return false;   // overflow
         for (uint64_t p = addr & kPageMask; p < end; p += kPageSize) {
             if (!m_pages.contains(p)) return false;
         }

@@ -762,7 +762,7 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_LOCAL_OFF, theme.textFaint);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_TYPE_HINT, theme.textFaint);
+                         IND_TYPE_HINT, theme.indHintGreen);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_FIND, theme.borderFocused);
 
@@ -905,7 +905,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         const auto& lm = result.meta[i];
         if (lm.heatLevel > 0 || isFuncPtr(lm.nodeKind) ||
             lm.nodeKind == NodeKind::Pointer32 ||
-            lm.nodeKind == NodeKind::Pointer64)
+            lm.nodeKind == NodeKind::Pointer64 ||
+            lm.lineKind == LineKind::Footer ||
+            lm.typeHintStart >= 0)
             lineTexts[i] = getLineText(m_sci, i);
     }
     applyHeatmapHighlight(result.meta, lineTexts);
@@ -915,7 +917,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // Footer buttons — pill styling
     for (int i = 0; i < result.meta.size(); i++) {
         if (result.meta[i].lineKind != LineKind::Footer) continue;
-        QString ft = getLineText(m_sci, i);
+        const QString& ft = lineTexts[i];
         // Struct footer: +10h +100h +1000h Trim (search longest first)
         int p1000 = ft.indexOf(QStringLiteral("+1000h"));
         if (p1000 >= 0)
@@ -933,6 +935,15 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         int trimStart = ft.indexOf(QStringLiteral("Trim"));
         if (trimStart >= 0)
             fillIndicatorCols(IND_CMD_PILL, i, trimStart, trimStart + 4);
+    }
+
+    // Apply type inference hint coloring (green, same as comment annotations)
+    for (int i = 0; i < result.meta.size(); i++) {
+        const auto& lm = result.meta[i];
+        if (lm.typeHintStart < 0) continue;
+        const QString& ft = lineTexts[i];
+        if (lm.typeHintStart < ft.size())
+            fillIndicatorCols(IND_TYPE_HINT, i, lm.typeHintStart, ft.size());
     }
 
     // Reset hint line - applySelectionOverlay will repaint indicators
@@ -2562,6 +2573,8 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         ColumnSpan cs = commentSpanFor(*lm, 9999, lm->effectiveTypeW, lm->effectiveNameW);
         m_editState.commentCol = cs.valid ? cs.start : -1;
         m_editState.lastValidationOk = true;  // original value is always valid
+    } else if (target == EditTarget::BaseAddress) {
+        m_editState.commentCol = norm.end + 2;  // command row has no column layout
     } else {
         m_editState.commentCol = -1;
     }
@@ -2575,7 +2588,8 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
 
     // For value editing: extend line with trailing spaces for the edit comment area
     // (comment padding is no longer baked into every line to avoid unnecessary scroll width)
-    if (target == EditTarget::Value && m_editState.commentCol >= 0) {
+    if ((target == EditTarget::Value || target == EditTarget::BaseAddress)
+        && m_editState.commentCol >= 0) {
         int commentStart = norm.end + 2;
         int neededLen = commentStart + kColComment;
         int currentLen = (int)lineText.size();
@@ -2624,6 +2638,8 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     // Show initial edit hint in comment column
     if (target == EditTarget::Value)
         setEditComment(QStringLiteral("Enter=Save Esc=Cancel"));
+    else if (target == EditTarget::BaseAddress)
+        setEditComment(QStringLiteral("e.g. <mod.exe> + 0xFF | [0x1000 + 0x10] | 7ff6`1234ABCD"));
 
     // Note: Type, ArrayElementType, PointerTarget are handled by TypeSelectorPopup
     // and exit early above (never reach here).

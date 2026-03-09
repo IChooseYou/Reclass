@@ -661,8 +661,10 @@ QString validateValue(NodeKind kind, const QString& text) {
         QString digits = hasHexPrefix ? s.mid(2) : s;
 
         if (hasHexPrefix || isHexKind) {
-            // Hex mode: only 0-9, a-f, A-F
+            // Hex mode: only 0-9, a-f, A-F (spaces allowed for multi-byte hex kinds)
+            bool isMultiByteHex = (kind >= NodeKind::Hex16 && kind <= NodeKind::Hex64);
             for (QChar c : digits) {
+                if (c == ' ' && isMultiByteHex) continue;
                 if (!c.isDigit() && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F'))
                     return QStringLiteral("invalid hex '%1'").arg(c);
             }

@@ -10,13 +10,24 @@
 
 namespace rcx {
 
+static constexpr int kMaxReadBuffer = 10 * 1024 * 1024; // 10 MB
+
 // ════════════════════════════════════════════════════════════════════
 // Construction / lifecycle
 // ════════════════════════════════════════════════════════════════════
 
 McpBridge::McpBridge(MainWindow* mainWindow, QObject* parent)
     : QObject(parent), m_mainWindow(mainWindow)
-{}
+{
+    m_notifyTimer = new QTimer(this);
+    m_notifyTimer->setSingleShot(true);
+    m_notifyTimer->setInterval(100);
+    connect(m_notifyTimer, &QTimer::timeout, this, [this]() {
+        if (m_client && m_initialized)
+            sendNotification("notifications/resources/updated",
+                             QJsonObject{{"uri", "project://tree"}});
+    });
+}
 
 McpBridge::~McpBridge() {
     stop();
@@ -84,15 +95,24 @@ void McpBridge::onNewConnection() {
 void McpBridge::onReadyRead() {
     m_readBuffer.append(m_client->readAll());
 
-    // Newline-delimited JSON framing
+    if (m_readBuffer.size() > kMaxReadBuffer) {
+        qWarning() << "[MCP] Read buffer exceeded 10MB, disconnecting client";
+        m_client->disconnectFromServer();
+        return;
+    }
+
+    // Newline-delimited JSON framing (cursor approach avoids quadratic shifting)
+    int consumed = 0;
     while (true) {
-        int idx = m_readBuffer.indexOf('\n');
+        int idx = m_readBuffer.indexOf('\n', consumed);
         if (idx < 0) break;
-        QByteArray line = m_readBuffer.left(idx).trimmed();
-        m_readBuffer.remove(0, idx + 1);
+        QByteArray line = m_readBuffer.mid(consumed, idx - consumed).trimmed();
+        consumed = idx + 1;
         if (!line.isEmpty())
             processLine(line);
     }
+    if (consumed > 0)
+        m_readBuffer.remove(0, consumed);
 }
 
 void McpBridge::onDisconnected() {
@@ -153,6 +173,7 @@ QJsonObject McpBridge::makeTextResult(const QString& text, bool isError) {
 // ════════════════════════════════════════════════════════════════════
 
 void McpBridge::processLine(const QByteArray& line) {
+  try {
     qDebug() << "[MCP] <<" << line.trimmed().left(200);
     auto doc = QJsonDocument::fromJson(line);
     if (!doc.isObject()) {
@@ -172,12 +193,10 @@ void McpBridge::processLine(const QByteArray& line) {
 
     if (method == "initialize") {
         m_mainWindow->setMcpStatus(QStringLiteral("MCP: client connected"));
-        QCoreApplication::processEvents();
         sendJson(handleInitialize(id, req.value("params").toObject()));
         m_mainWindow->clearMcpStatus();
     } else if (method == "tools/list") {
         m_mainWindow->setMcpStatus(QStringLiteral("MCP: tools/list"));
-        QCoreApplication::processEvents();
         sendJson(handleToolsList(id));
         m_mainWindow->clearMcpStatus();
     } else if (method == "tools/call") {
@@ -185,6 +204,14 @@ void McpBridge::processLine(const QByteArray& line) {
     } else {
         sendJson(errReply(id, -32601, "Method not found: " + method));
     }
+  } catch (const std::exception& e) {
+    qWarning() << "[MCP] Exception:" << e.what();
+    sendJson(errReply(QJsonValue(), -32603,
+        QStringLiteral("Internal error: %1").arg(e.what())));
+  } catch (...) {
+    qWarning() << "[MCP] Unknown exception";
+    sendJson(errReply(QJsonValue(), -32603, "Internal error"));
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -476,7 +503,7 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
 
     // Show tool activity in status bar (with shimmer)
     m_mainWindow->setMcpStatus(QStringLiteral("MCP: %1").arg(toolName));
-    QCoreApplication::processEvents();  // paint immediately
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     QJsonObject result;
     if      (toolName == "project.state")  result = toolProjectState(args);
@@ -501,11 +528,15 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
 // ════════════════════════════════════════════════════════════════════
 
 QString McpBridge::resolvePlaceholder(const QString& ref,
-                                       const QHash<QString, uint64_t>& placeholderMap) {
+                                       const QHash<QString, uint64_t>& placeholderMap,
+                                       bool* ok) {
+    if (ok) *ok = true;
     if (ref.startsWith('$')) {
         auto it = placeholderMap.find(ref);
         if (it != placeholderMap.end())
             return QString::number(it.value());
+        if (ok) *ok = false;
+        return ref;  // unresolved placeholder
     }
     return ref;  // not a placeholder — return as-is
 }
@@ -514,26 +545,36 @@ QString McpBridge::resolvePlaceholder(const QString& ref,
 // Smart tab resolution
 // ════════════════════════════════════════════════════════════════════
 
-MainWindow::TabState* McpBridge::resolveTab(const QJsonObject& args) {
+MainWindow::TabState* McpBridge::resolveTab(const QJsonObject& args, int* resolvedIndex) {
+    if (resolvedIndex) *resolvedIndex = -1;
+
     // 1) Explicit tab index from args
     if (args.contains("tabIndex")) {
         int idx = args.value("tabIndex").toInt();
         auto* t = m_mainWindow->tabByIndex(idx);
-        if (t) return t;
+        if (t) { if (resolvedIndex) *resolvedIndex = idx; return t; }
     }
 
     // 2) Active sub-window (user clicked on it)
     auto* t = m_mainWindow->activeTab();
-    if (t) return t;
+    if (t) {
+        if (resolvedIndex) {
+            for (int i = 0; i < m_mainWindow->tabCount(); i++) {
+                if (m_mainWindow->tabByIndex(i) == t) { *resolvedIndex = i; break; }
+            }
+        }
+        return t;
+    }
 
     // 3) Fall back to first available tab
     if (m_mainWindow->tabCount() > 0) {
         t = m_mainWindow->tabByIndex(0);
-        if (t) return t;
+        if (t) { if (resolvedIndex) *resolvedIndex = 0; return t; }
     }
 
     // 4) No tabs at all — auto-create a project
     m_mainWindow->project_new();
+    if (resolvedIndex) *resolvedIndex = 0;
     return m_mainWindow->tabByIndex(0);
 }
 
@@ -725,8 +766,11 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
     QStringList skippedOps;
     for (int i = 0; i < ops.size(); i++) {
         // Safety valve: keep paint events flowing for large batches
-        if (i % 100 == 0 && ops.size() > 200)
+        if (i % 100 == 0 && ops.size() > 200) {
+            m_mainWindow->setMcpStatus(
+                QStringLiteral("MCP: tree.apply %1/%2").arg(i).arg(ops.size()));
             QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
+        }
 
         QJsonObject op = ops[i].toObject();
         QString opType = op.value("op").toString();
@@ -736,15 +780,29 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             n.id = placeholders.value(QStringLiteral("$%1").arg(i), tree.reserveId());
             n.kind = kindFromString(op.value("kind").toString("Hex64"));
             n.name = op.value("name").toString();
-            QString pid = resolvePlaceholder(op.value("parentId").toString("0"), placeholders);
+            bool pidOk;
+            QString pid = resolvePlaceholder(op.value("parentId").toString("0"), placeholders, &pidOk);
+            if (!pidOk) {
+                skippedOps.append(QStringLiteral("op[%1]: unresolved placeholder for parentId").arg(i));
+                continue;
+            }
             n.parentId = pid.toULongLong();
+            if (n.parentId != 0 && tree.indexOfId(n.parentId) < 0) {
+                skippedOps.append(QStringLiteral("op[%1]: parentId '%2' not found").arg(i).arg(pid));
+                continue;
+            }
             n.offset = op.value("offset").toInt(0);
             n.structTypeName = op.value("structTypeName").toString();
             n.classKeyword = op.value("classKeyword").toString();
-            n.strLen = op.value("strLen").toInt(64);
+            n.strLen = qBound(1, op.value("strLen").toInt(64), 1000000);
             n.elementKind = kindFromString(op.value("elementKind").toString("UInt8"));
-            n.arrayLen = op.value("arrayLen").toInt(1);
-            QString refStr = resolvePlaceholder(op.value("refId").toString("0"), placeholders);
+            n.arrayLen = qBound(1, op.value("arrayLen").toInt(1), 1000000);
+            bool refOk;
+            QString refStr = resolvePlaceholder(op.value("refId").toString("0"), placeholders, &refOk);
+            if (!refOk) {
+                skippedOps.append(QStringLiteral("op[%1]: unresolved placeholder for refId").arg(i));
+                continue;
+            }
             n.refId = refStr.toULongLong();
 
             // Auto-place: offset -1 means "after last sibling"
@@ -870,7 +928,7 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             int idx = tree.indexOfId(nid.toULongLong());
             if (idx >= 0) {
                 NodeKind newElemKind = kindFromString(op.value("elementKind").toString());
-                int newLen = op.value("arrayLen").toInt(1);
+                int newLen = qBound(1, op.value("arrayLen").toInt(1), 1000000);
                 doc->undoStack.push(new RcxCommand(ctrl,
                     cmd::ChangeArrayMeta{tree.nodes[idx].id,
                         tree.nodes[idx].elementKind, newElemKind,
@@ -1383,8 +1441,7 @@ QJsonObject McpBridge::toolProcessInfo(const QJsonObject& args) {
 
 void McpBridge::notifyTreeChanged() {
     if (!m_client || !m_initialized) return;
-    sendNotification("notifications/resources/updated",
-                     QJsonObject{{"uri", "project://tree"}});
+    m_notifyTimer->start();  // debounce 100ms
 }
 
 void McpBridge::notifyDataChanged() {

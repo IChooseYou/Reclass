@@ -38,6 +38,7 @@ static void buildSmallTree(NodeTree& tree) {
     root.name = "root";
     root.parentId = 0;
     root.offset = 0;
+    root.collapsed = false;
     int ri = tree.addNode(root);
     uint64_t rootId = tree.nodes[ri].id;
 

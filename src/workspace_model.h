@@ -95,7 +95,8 @@ inline QStandardItem* makeTypeItem(const Node* node, const NodeTree* tree,
 
 // Full rebuild — used by benchmarks and first build.
 inline void buildProjectExplorer(QStandardItemModel* model,
-                                 const QVector<TabInfo>& tabs) {
+                                 const QVector<TabInfo>& tabs,
+                                 const QSet<uint64_t>& pinnedIds = {}) {
     model->clear();
     model->setHorizontalHeaderLabels({QStringLiteral("Name")});
 
@@ -113,18 +114,32 @@ inline void buildProjectExplorer(QStandardItemModel* model,
         }
     }
 
-    for (const auto& e : types)
+    // Pinned items at the very top, then structs, then enums
+    QVector<Entry> pinned;
+    QVector<Entry> unpinnedTypes, unpinnedEnums;
+    for (const auto& e : types) {
+        if (pinnedIds.contains(e.node->id)) pinned.append(e);
+        else unpinnedTypes.append(e);
+    }
+    for (const auto& e : enums) {
+        if (pinnedIds.contains(e.node->id)) pinned.append(e);
+        else unpinnedEnums.append(e);
+    }
+    for (const auto& e : pinned)
         model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
-    for (const auto& e : enums)
+    for (const auto& e : unpinnedTypes)
+        model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
+    for (const auto& e : unpinnedEnums)
         model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
 }
 
 // Incremental sync — preserves tree expansion/scroll state.
 inline void syncProjectExplorer(QStandardItemModel* model,
-                                const QVector<TabInfo>& tabs) {
+                                const QVector<TabInfo>& tabs,
+                                const QSet<uint64_t>& pinnedIds = {}) {
     // First call — full build
     if (model->rowCount() == 0 && !tabs.isEmpty()) {
-        buildProjectExplorer(model, tabs);
+        buildProjectExplorer(model, tabs, pinnedIds);
         return;
     }
 
@@ -276,27 +291,39 @@ public:
             QString name = (dashPos > 1) ? fullText.left(dashPos - 1) : fullText;
             QString count = (dashPos > 1) ? fullText.mid(dashPos + 2).trimmed() : QString();
 
+            bool pinned = index.data(Qt::UserRole + 4).toBool();
+
+            // Reserve right side for pin icon + count pill
+            int rightEdge = textRect.right();
             if (!count.isEmpty()) {
                 int cw = opt.fontMetrics.horizontalAdvance(count) + 10;
                 int ch = opt.fontMetrics.height();
                 int cy = textRect.y() + (textRect.height() - ch) / 2;
-                QRect pill(textRect.right() - cw, cy, cw, ch);
-                // Draw name clipped before pill
-                if (pill.left() > textRect.left() + 4) {
-                    QRect nameRect = textRect;
-                    nameRect.setRight(pill.left() - 4);
-                    QString elided = opt.fontMetrics.elidedText(name, Qt::ElideRight, nameRect.width());
-                    painter->setPen(m_text);
-                    painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elided);
-                }
+                QRect pill(rightEdge - cw, cy, cw, ch);
+                rightEdge = pill.left() - 2;
+
                 painter->setPen(Qt::NoPen);
                 painter->setBrush(m_badgeBg);
                 painter->drawRect(pill);
                 painter->setPen(m_textMuted);
                 painter->drawText(pill, Qt::AlignCenter, count);
-            } else {
+            }
+            if (pinned) {
+                static const QIcon pinIcon(":/vsicons/pin.svg");
+                int isz = opt.fontMetrics.height() - 2;
+                int iy = textRect.y() + (textRect.height() - isz) / 2;
+                QRect pinRect(rightEdge - isz, iy, isz, isz);
+                pinIcon.paint(painter, pinRect);
+                rightEdge = pinRect.left() - 2;
+            }
+
+            // Draw name clipped before right-side elements
+            if (rightEdge > textRect.left() + 4) {
+                QRect nameRect = textRect;
+                nameRect.setRight(rightEdge);
+                QString elided = opt.fontMetrics.elidedText(name, Qt::ElideRight, nameRect.width());
                 painter->setPen(m_text);
-                painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, name);
+                painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elided);
             }
         } else {
             // Child: "TypeName fieldName"

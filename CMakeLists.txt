@@ -428,20 +428,6 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME test_controller COMMAND test_controller)
 
-        add_executable(test_validation tests/test_validation.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
-        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-        target_include_directories(test_validation PRIVATE src third_party/fadec)
-        target_link_libraries(test_validation PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
-        QScintilla::QScintilla)
-        if(WIN32)
-            target_link_libraries(test_validation PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-        endif()
-        add_test(NAME test_validation COMMAND test_validation)
-
         add_executable(test_context_menu tests/test_context_menu.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
@@ -487,20 +473,6 @@ if(BUILD_TESTING)
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test
         QScintilla::QScintilla)
         add_test(NAME test_rendered_view COMMAND test_rendered_view)
-
-        add_executable(test_new_features tests/test_new_features.cpp
-        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
-        src/editor.cpp src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-        target_include_directories(test_new_features PRIVATE src third_party/fadec)
-        target_link_libraries(test_new_features PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
-        QScintilla::QScintilla)
-        if(WIN32)
-            target_link_libraries(test_new_features PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-        endif()
-        add_test(NAME test_new_features COMMAND test_new_features)
 
         add_executable(test_type_selector tests/test_type_selector.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp

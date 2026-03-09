@@ -261,14 +261,17 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 ? prov.readBytes(absAddr, sz) : QByteArray(sz, '\0');
             auto suggestions = inferTypes(
                 reinterpret_cast<const uint8_t*>(b.constData()), sz);
-            if (!suggestions.isEmpty() && suggestions[0].strength >= 2) {
+            if (!suggestions.isEmpty() && suggestions[0].strength >= 3) {
                 lm.typeHintStart = lineText.size() + 2; // after "  " gap
                 lm.typeHintKinds = suggestions[0].kinds;
-                lm.typeHint = formatHint(suggestions[0]);
+                QString typeName = formatHint(suggestions[0]);
                 QString preview = formatPreview(
                     reinterpret_cast<const uint8_t*>(b.constData()), sz, suggestions[0]);
+                // Value-first with bracketed type: "0x7ff718570000 [ptr64]"
                 if (!preview.isEmpty())
-                    lm.typeHint += QStringLiteral("  ") + preview;
+                    lm.typeHint = preview + QStringLiteral(" [") + typeName + QStringLiteral("]");
+                else
+                    lm.typeHint = QStringLiteral("[") + typeName + QStringLiteral("]");
                 lineText += QStringLiteral("  ") + lm.typeHint;
             }
         }

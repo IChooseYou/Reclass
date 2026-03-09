@@ -604,6 +604,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     createWorkspaceDock();
     createScannerDock();
+
+    // Hidden sentinel dock — never visible, only used to force Qt to create a
+    // QTabBar when the first document dock is added (Qt only creates tab bars
+    // via tabifyDockWidget).  Immediately hidden after tabification so it takes
+    // zero layout space.  An event filter on the QTabBar keeps it visible.
+    {
+        m_sentinelDock = new QDockWidget(this);
+        m_sentinelDock->setObjectName(QStringLiteral("_sentinel"));
+        m_sentinelDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
+        auto* sw = new QWidget(m_sentinelDock);
+        sw->setFixedSize(0, 0);
+        m_sentinelDock->setWidget(sw);
+        auto* stb = new QWidget(m_sentinelDock);
+        stb->setFixedHeight(0);
+        m_sentinelDock->setTitleBarWidget(stb);
+        addDockWidget(Qt::TopDockWidgetArea, m_sentinelDock);
+        m_sentinelDock->hide();  // hidden = zero layout space
+    }
+
     createMenus();
     createStatusBar();
 
@@ -1644,6 +1663,16 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     else
         addDockWidget(Qt::TopDockWidgetArea, dock);
 
+    // Bootstrap: tabify the hidden sentinel with the first doc dock so Qt
+    // creates a QTabBar.  Then hide sentinel (zero layout space).  The event
+    // filter in eventFilter() keeps the tab bar visible even at count==1.
+    if (m_sentinelDock && m_docDocks.isEmpty()) {
+        m_sentinelDock->show();
+        tabifyDockWidget(dock, m_sentinelDock);
+        m_sentinelDock->hide();
+        dock->raise();
+    }
+
     m_docDocks.append(dock);
     m_tabs[dock] = { doc, ctrl, splitter, {}, 0 };
     m_activeDocDock = dock;
@@ -1698,7 +1727,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             m_activeDocDock = m_docDocks.isEmpty() ? nullptr : m_docDocks.last();
         rebuildAllDocs();
         rebuildWorkspaceModel();
-        if (m_tabs.isEmpty())
+        if (m_tabs.isEmpty() && !m_closingAll)
             project_new();
     });
 
@@ -1779,6 +1808,10 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 rebuildWorkspaceModel();
                 updateWindowTitle();
             });
+    });
+    // Notify MCP clients of tree changes
+    connect(doc, &RcxDocument::documentChanged, this, [this]() {
+        if (m_mcp) m_mcp->notifyTreeChanged();
     });
     connect(&doc->undoStack, &QUndoStack::indexChanged,
             this, [this, dockGuard](int) {
@@ -1874,6 +1907,9 @@ void MainWindow::setupDockTabBars() {
                 "QToolButton:hover { background: %3; }")
                 .arg(theme.background.name(), theme.border.name(), theme.hover.name()));
         }
+
+        // Force tab bar visible (event filter keeps it alive, belt-and-suspenders)
+        tabBar->show();
 
         // Install tab buttons for any tab that doesn't have them yet
         for (int i = 0; i < tabBar->count(); ++i) {
@@ -2010,6 +2046,25 @@ void MainWindow::setupDockTabBars() {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    // Keep dock tab bars visible even when Qt wants to hide them (count==1).
+    // Qt's QMainWindowLayout calls setVisible(false) on the QTabBar when only
+    // one dock remains in a tab group.  We catch the resulting Hide event and
+    // immediately re-show the tab bar, provided at least one doc dock is docked.
+    if (event->type() == QEvent::Hide && !m_tabBarShowGuard) {
+        if (auto* tabBar = qobject_cast<QTabBar*>(obj)) {
+            if (tabBar->parent() == this && tabBar->count() >= 1) {
+                bool hasDockedDoc = false;
+                for (auto* d : m_docDocks)
+                    if (!d->isFloating() && d->isVisible()) { hasDockedDoc = true; break; }
+                if (hasDockedDoc) {
+                    m_tabBarShowGuard = true;
+                    tabBar->show();
+                    m_tabBarShowGuard = false;
+                    return true;
+                }
+            }
+        }
+    }
     if (event->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(event);
         if (me->button() == Qt::MiddleButton) {
@@ -3107,8 +3162,10 @@ void MainWindow::importReclassXml() {
     auto* doc = new RcxDocument(this);
     doc->tree = std::move(tree);
 
-    closeAllDocDocks();
-    createTab(doc);
+    { ClosingGuard guard(m_closingAll);
+      closeAllDocDocks();
+      createTab(doc);
+    }
     rebuildWorkspaceModel();
     setAppStatus(QStringLiteral("Imported %1 classes from %2")
         .arg(classCount).arg(QFileInfo(filePath).fileName()));
@@ -3156,8 +3213,10 @@ void MainWindow::importFromSource() {
     auto* doc = new RcxDocument(this);
     doc->tree = std::move(tree);
 
-    closeAllDocDocks();
-    createTab(doc);
+    { ClosingGuard guard(m_closingAll);
+      closeAllDocDocks();
+      createTab(doc);
+    }
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
@@ -3210,8 +3269,10 @@ void MainWindow::importPdb() {
     auto* doc = new rcx::RcxDocument(this);
     doc->tree = std::move(tree);
 
-    closeAllDocDocks();
-    createTab(doc);
+    { ClosingGuard guard(m_closingAll);
+      closeAllDocDocks();
+      createTab(doc);
+    }
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
@@ -3408,8 +3469,11 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         }
         auto* doc = new RcxDocument(this);
         doc->tree = std::move(tree);
-        closeAllDocDocks();
-        auto* dock = createTab(doc);
+        QDockWidget* dock;
+        { ClosingGuard guard(m_closingAll);
+          closeAllDocDocks();
+          dock = createTab(doc);
+        }
         rebuildWorkspaceModel();
         if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
@@ -3433,9 +3497,11 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     }
 
     // Close all existing tabs so the project replaces the current state
-    closeAllDocDocks();
-
-    auto* dock = createTab(doc);
+    QDockWidget* dock;
+    { ClosingGuard guard(m_closingAll);
+      closeAllDocDocks();
+      dock = createTab(doc);
+    }
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
@@ -3750,6 +3816,16 @@ void MainWindow::createWorkspaceDock() {
                 actConvert = menu.addAction("Convert to Class");
         }
 
+        // Pin/Unpin
+        bool allPinned = true;
+        for (const auto& item : items)
+            if (!m_pinnedIds.contains(item.structId)) { allPinned = false; break; }
+        auto* actPin = menu.addAction(
+            QIcon(QStringLiteral(":/vsicons/pin.svg")),
+            allPinned ? QStringLiteral("Unpin") : QStringLiteral("Pin"));
+
+        menu.addSeparator();
+
         // Delete: works for single or multi
         QString delLabel = items.size() == 1
             ? QStringLiteral("Delete")
@@ -3941,6 +4017,17 @@ void MainWindow::createWorkspaceDock() {
             tab.doc->undoStack.push(new rcx::RcxCommand(tab.ctrl,
                 rcx::cmd::ChangeClassKeyword{item.structId, item.keyword, newKw}));
             rebuildWorkspaceModel();
+
+        } else if (chosen && chosen == actPin) {
+            for (const auto& item : items) {
+                if (allPinned)
+                    m_pinnedIds.remove(item.structId);
+                else
+                    m_pinnedIds.insert(item.structId);
+            }
+            // Full rebuild to reorder pinned items to top
+            m_workspaceModel->removeRows(0, m_workspaceModel->rowCount());
+            rebuildWorkspaceModelNow();
         }
     });
 
@@ -4244,9 +4331,9 @@ void MainWindow::rebuildWorkspaceModelNow() {
         QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
         tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
-    rcx::syncProjectExplorer(m_workspaceModel, tabs);
+    rcx::syncProjectExplorer(m_workspaceModel, tabs, m_pinnedIds);
 
-    // Mark items that are currently viewed in a tab
+    // Mark items that are currently viewed in a tab + pinned state
     QSet<uint64_t> viewedIds;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
         viewedIds.insert(it->ctrl->viewRootId());
@@ -4255,6 +4342,7 @@ void MainWindow::rebuildWorkspaceModelNow() {
         if (!item) continue;
         uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
         item->setData(viewedIds.contains(id), Qt::UserRole + 3);
+        item->setData(m_pinnedIds.contains(id), Qt::UserRole + 4);
     }
 
     if (m_dockTitleLabel) {

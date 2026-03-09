@@ -120,7 +120,15 @@ private:
     QMap<QDockWidget*, TabState> m_tabs;
     QVector<QDockWidget*> m_docDocks;       // ordered list for tabByIndex
     QDockWidget* m_activeDocDock = nullptr;  // tracks active document dock
+    QDockWidget* m_sentinelDock  = nullptr;  // hidden dock to bootstrap tab bar creation
     QVector<RcxDocument*> m_allDocs;  // all open docs, shared with controllers
+    bool m_closingAll = false;        // guards spurious project_new during batch close
+    bool m_tabBarShowGuard = false;   // prevents recursion in event filter re-show
+    struct ClosingGuard {
+        bool& flag;
+        ClosingGuard(bool& f) : flag(f) { flag = true; }
+        ~ClosingGuard() { flag = false; }
+    };
     void rebuildAllDocs();
 
     void createMenus();
@@ -165,6 +173,7 @@ private:
     QLabel*               m_dockTitleLabel  = nullptr;
     QToolButton*          m_dockCloseBtn    = nullptr;
     DockGripWidget*       m_dockGrip        = nullptr;
+    QSet<uint64_t>        m_pinnedIds;
     void createWorkspaceDock();
     void rebuildWorkspaceModel();       // debounced — safe to call frequently
     void rebuildWorkspaceModelNow();    // immediate rebuild

@@ -570,13 +570,13 @@ static constexpr int      kCommandRowLine = 0;
 static constexpr int      kFirstDataLine  = 1;
 static constexpr uint64_t kFooterIdBit    = 0x8000000000000000ULL;
 static constexpr uint64_t kArrayElemBit   = 0x4000000000000000ULL;  // marks array element selection
-static constexpr uint64_t kArrayElemShift = 48;                     // bits 48-61 hold element index
-static constexpr uint64_t kArrayElemMask  = 0x3FFF000000000000ULL;  // 14 bits → max 16383 elements
+static constexpr uint64_t kArrayElemShift = 42;                     // bits 42-61 hold element index
+static constexpr uint64_t kArrayElemMask  = 0x3FFFFC0000000000ULL;  // 20 bits → max 1048575 elements
 
-// Encode an array element selection ID: nodeId | kArrayElemBit | (elemIdx << 48)
+// Encode an array element selection ID: nodeId | kArrayElemBit | (elemIdx << 42)
 inline uint64_t makeArrayElemSelId(uint64_t nodeId, int elemIdx) {
     Q_ASSERT(elemIdx >= 0);
-    return nodeId | kArrayElemBit | ((uint64_t)(elemIdx & 0x3FFF) << kArrayElemShift);
+    return nodeId | kArrayElemBit | ((uint64_t)(elemIdx & 0xFFFFF) << kArrayElemShift);
 }
 inline int arrayElemIdxFromSelId(uint64_t selId) {
     return (int)((selId & kArrayElemMask) >> kArrayElemShift);
@@ -584,11 +584,11 @@ inline int arrayElemIdxFromSelId(uint64_t selId) {
 
 // Member selection encoding (enum/bitfield members) — mirrors array element pattern
 static constexpr uint64_t kMemberBit      = 0x2000000000000000ULL;
-static constexpr uint64_t kMemberSubShift = 48;
-static constexpr uint64_t kMemberSubMask  = 0x3FFF000000000000ULL;
+static constexpr uint64_t kMemberSubShift = 42;
+static constexpr uint64_t kMemberSubMask  = 0x3FFFFC0000000000ULL;
 
 inline uint64_t makeMemberSelId(uint64_t nodeId, int subLine) {
-    return nodeId | kMemberBit | ((uint64_t)(subLine & 0x3FFF) << kMemberSubShift);
+    return nodeId | kMemberBit | ((uint64_t)(subLine & 0xFFFFF) << kMemberSubShift);
 }
 inline int memberSubFromSelId(uint64_t selId) {
     return (int)((selId & kMemberSubMask) >> kMemberSubShift);

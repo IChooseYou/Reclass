@@ -190,9 +190,10 @@ RcxEditor* RcxController::addSplitEditor(QWidget* parent) {
 
     // Eagerly pre-warm the type popup so first click isn't slow (~350ms cold start).
     if (!m_cachedPopup) {
-        QTimer::singleShot(0, this, [this, editor]() {
-            if (!m_cachedPopup && !m_editors.isEmpty())
-                ensurePopup(editor);
+        QPointer<RcxEditor> safeEditor = editor;
+        QTimer::singleShot(0, this, [this, safeEditor]() {
+            if (!m_cachedPopup && !m_editors.isEmpty() && safeEditor)
+                ensurePopup(safeEditor);
         });
     }
     return editor;
@@ -200,7 +201,7 @@ RcxEditor* RcxController::addSplitEditor(QWidget* parent) {
 
 void RcxController::removeSplitEditor(RcxEditor* editor) {
     m_editors.removeOne(editor);
-    // Caller (MainWindow) owns the parent QTabWidget and handles widget destruction.
+    editor->disconnect(this);
 }
 
 void RcxController::connectEditor(RcxEditor* editor) {

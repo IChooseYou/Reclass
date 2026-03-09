@@ -34,15 +34,13 @@ QVector<TypeSuggestion> inferTypes(
     const InferHints& hints = {},
     int maxResults = 3);
 
-// Format top suggestion as short display string (e.g. "ptr64 strong", "float×2 moderate")
+// Format top suggestion as short type label (e.g. "ptr64", "int32_t×2")
 inline QString formatHint(const TypeSuggestion& s) {
     if (s.kinds.isEmpty()) return {};
     const char* name = kindMeta(s.kinds[0])->typeName;
-    QString base = (s.kinds.size() == 1)
+    return (s.kinds.size() == 1)
         ? QString::fromLatin1(name)
         : QStringLiteral("%1\u00D7%2").arg(QString::fromLatin1(name)).arg(s.kinds.size());
-    const char* conf = s.strength >= 3 ? " strong" : " moderate";
-    return base + QLatin1String(conf);
 }
 
 // ── Implementation (header-only) ──
@@ -258,7 +256,7 @@ inline FeatureResult countInt16Features(uint16_t val,
     int passed = 0, checked = 2;
     int16_t sv = (int16_t)val;
     passed += (val != 0) ? 1 : 0;
-    passed += (sv >= -4096 && sv <= 4096) ? 1 : 0;
+    passed += (sv >= -16384 && sv <= 16384) ? 1 : 0;
 
     if (h.sampleCount > 0 && minP && maxP) {
         checked += 2;
@@ -373,7 +371,6 @@ inline void tryWhole1(const uint8_t* data, QVector<Candidate>& out) {
     uint8_t v = data[0];
     int score = (v == 0 || v == 1) ? 50 : 25;
     addCandidate(out, NodeKind::UInt8, score);
-    if (v <= 1) addCandidate(out, NodeKind::Bool, 60);
 }
 
 // ── Try uniform splits ──
