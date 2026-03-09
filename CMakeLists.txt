@@ -559,6 +559,11 @@ if(BUILD_TESTING)
         ${QT}::Widgets ${QT}::Concurrent ${QT}::Test)
         add_test(NAME test_scanner_ui COMMAND test_scanner_ui)
 
+        add_executable(test_mcp tests/test_mcp.cpp)
+        target_include_directories(test_mcp PRIVATE src)
+        target_link_libraries(test_mcp PRIVATE ${QT}::Core ${QT}::Network ${QT}::Test)
+        add_test(NAME test_mcp COMMAND test_mcp)
+
         if(WIN32)
             add_executable(test_windbg_provider tests/test_windbg_provider.cpp
             plugins/WinDbgMemory/WinDbgMemoryPlugin.cpp

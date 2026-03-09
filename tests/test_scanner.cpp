@@ -1507,7 +1507,7 @@ private slots:
         data[0x8100] = char(0xFF);
         QVector<MemoryRegion> regions;
         regions.append({0x8000, 0x1000, true, true, false, {}});
-        auto prov = std::make_shared<RegionProvider>(data2, regions);
+        auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
         ScanRequest req;
