@@ -2574,7 +2574,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         m_editState.commentCol = cs.valid ? cs.start : -1;
         m_editState.lastValidationOk = true;  // original value is always valid
     } else if (target == EditTarget::BaseAddress) {
-        m_editState.commentCol = norm.end + 2;  // command row has no column layout
+        m_editState.commentCol = (int)lineText.size() + 2;  // after full command row content
     } else {
         m_editState.commentCol = -1;
     }
@@ -2590,8 +2590,9 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     // (comment padding is no longer baked into every line to avoid unnecessary scroll width)
     if ((target == EditTarget::Value || target == EditTarget::BaseAddress)
         && m_editState.commentCol >= 0) {
-        int commentStart = norm.end + 2;
-        int neededLen = commentStart + kColComment;
+        int commentStart = m_editState.commentCol;
+        int commentWidth = (target == EditTarget::BaseAddress) ? 60 : kColComment;
+        int neededLen = commentStart + commentWidth;
         int currentLen = (int)lineText.size();
         if (currentLen < neededLen) {
             int extend = neededLen - currentLen;
@@ -3540,7 +3541,7 @@ void RcxEditor::setEditComment(const QString& comment) {
 
     // Place comment 2 spaces after current value, prefixed with //
     int valueEnd = editEndCol();
-    int startCol = valueEnd + 2;  // 2 spaces after value
+    int startCol = qMax(valueEnd + 2, m_editState.commentCol);
     int endCol = lineText.size();
     int availWidth = endCol - startCol;
     if (availWidth <= 0) { m_updatingComment = false; return; }
@@ -3589,7 +3590,12 @@ void RcxEditor::validateEditLive() {
     if (isValid) {
         m_sci->markerDelete(m_editState.line, M_ERR);
         if (isSelected) m_sci->markerAdd(m_editState.line, M_SELECTED);
-        if (stateChanged) setEditComment("Enter=Save Esc=Cancel");
+        if (stateChanged) {
+            if (m_editState.target == EditTarget::BaseAddress)
+                setEditComment(QStringLiteral("e.g. <mod.exe> + 0xFF | [0x1000 + 0x10] | 7ff6`1234ABCD"));
+            else
+                setEditComment("Enter=Save Esc=Cancel");
+        }
     } else {
         if (isSelected) m_sci->markerDelete(m_editState.line, M_SELECTED);
         m_sci->markerAdd(m_editState.line, M_ERR);

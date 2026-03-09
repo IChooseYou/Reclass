@@ -120,10 +120,9 @@ private:
     QMap<QDockWidget*, TabState> m_tabs;
     QVector<QDockWidget*> m_docDocks;       // ordered list for tabByIndex
     QDockWidget* m_activeDocDock = nullptr;  // tracks active document dock
-    QDockWidget* m_sentinelDock  = nullptr;  // hidden dock to bootstrap tab bar creation
+    QVector<QDockWidget*> m_sentinelDocks;    // permanent sentinels for always-visible tab bars
     QVector<RcxDocument*> m_allDocs;  // all open docs, shared with controllers
     bool m_closingAll = false;        // guards spurious project_new during batch close
-    bool m_tabBarShowGuard = false;   // prevents recursion in event filter re-show
     struct ClosingGuard {
         bool& flag;
         ClosingGuard(bool& f) : flag(f) { flag = true; }
@@ -144,6 +143,7 @@ private:
     TabState* activeTab();
     TabState* tabByIndex(int index);
     int tabCount() const { return m_tabs.size(); }
+    QDockWidget* createSentinelDock();
     QDockWidget* createTab(RcxDocument* doc);
     QString tabTitle(const TabState& tab) const;
     void setupDockTabBars();

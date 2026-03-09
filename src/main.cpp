@@ -605,24 +605,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createWorkspaceDock();
     createScannerDock();
 
-    // Hidden sentinel dock — never visible, only used to force Qt to create a
-    // QTabBar when the first document dock is added (Qt only creates tab bars
-    // via tabifyDockWidget).  Immediately hidden after tabification so it takes
-    // zero layout space.  An event filter on the QTabBar keeps it visible.
-    {
-        m_sentinelDock = new QDockWidget(this);
-        m_sentinelDock->setObjectName(QStringLiteral("_sentinel"));
-        m_sentinelDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
-        auto* sw = new QWidget(m_sentinelDock);
-        sw->setFixedSize(0, 0);
-        m_sentinelDock->setWidget(sw);
-        auto* stb = new QWidget(m_sentinelDock);
-        stb->setFixedHeight(0);
-        m_sentinelDock->setTitleBarWidget(stb);
-        addDockWidget(Qt::TopDockWidgetArea, m_sentinelDock);
-        m_sentinelDock->hide();  // hidden = zero layout space
-    }
-
     createMenus();
     createStatusBar();
 
@@ -779,13 +761,22 @@ void MainWindow::createMenus() {
     // View
     auto* view = m_menuBar->addMenu("&View");
     Qt5Qt6AddAction(view, "&Reset Windows", QKeySequence::UnknownKey, QIcon(), this, [this](bool) {
-        // Re-tabify all doc docks into a single group
-        if (m_docDocks.size() < 2) return;
+        // Re-tabify all doc docks into a single group (collapses splits)
+        if (m_docDocks.isEmpty()) return;
         auto* first = m_docDocks.first();
         for (int i = 1; i < m_docDocks.size(); ++i) {
             tabifyDockWidget(first, m_docDocks[i]);
             m_docDocks[i]->show();
         }
+        // Merge all sentinels back; keep only the first, delete extras
+        for (int i = 0; i < m_sentinelDocks.size(); ++i) {
+            if (i == 0)
+                tabifyDockWidget(first, m_sentinelDocks[i]);
+            else
+                delete m_sentinelDocks[i];
+        }
+        if (m_sentinelDocks.size() > 1)
+            m_sentinelDocks.resize(1);
         if (m_activeDocDock) m_activeDocDock->raise();
         QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
     });
@@ -1538,6 +1529,21 @@ QString MainWindow::tabTitle(const TabState& tab) const {
     return name;
 }
 
+// Create a sentinel dock — invisible tab that keeps Qt's tab bar on-screen
+// when only 1 real dock remains in a group.
+QDockWidget* MainWindow::createSentinelDock() {
+    auto* sentinel = new QDockWidget(this);
+    sentinel->setObjectName(QStringLiteral("_sentinel_%1").arg(quintptr(sentinel), 0, 16));
+    sentinel->setFeatures(QDockWidget::NoDockWidgetFeatures);
+    sentinel->setWidget(new QWidget(sentinel));
+    auto* stb = new QWidget(sentinel);
+    stb->setFixedHeight(0);
+    sentinel->setTitleBarWidget(stb);
+    sentinel->setWindowTitle(QStringLiteral("\u200B"));
+    m_sentinelDocks.append(sentinel);
+    return sentinel;
+}
+
 QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     auto* splitter = new QSplitter(Qt::Horizontal);
     splitter->setHandleWidth(1);
@@ -1658,19 +1664,22 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     });
 
     // Tabify with existing doc docks, or add to top area
-    if (!m_docDocks.isEmpty())
+    if (!m_docDocks.isEmpty()) {
         tabifyDockWidget(m_docDocks.last(), dock);
-    else
+    } else {
         addDockWidget(Qt::TopDockWidgetArea, dock);
-
-    // Bootstrap: tabify the hidden sentinel with the first doc dock so Qt
-    // creates a QTabBar.  Then hide sentinel (zero layout space).  The event
-    // filter in eventFilter() keeps the tab bar visible even at count==1.
-    if (m_sentinelDock && m_docDocks.isEmpty()) {
-        m_sentinelDock->show();
-        tabifyDockWidget(dock, m_sentinelDock);
-        m_sentinelDock->hide();
-        dock->raise();
+        // Deferred sentinel — must wait for Qt to finish laying out the
+        // first doc dock before tabifyDockWidget can merge them into tabs.
+        QTimer::singleShot(0, this, [this, dock]() {
+            if (!dock->isVisible()) return;
+            // Check if this dock already has a sentinel (e.g. second createTab raced)
+            for (auto* td : tabifiedDockWidgets(dock))
+                if (m_sentinelDocks.contains(static_cast<QDockWidget*>(td))) return;
+            auto* sentinel = createSentinelDock();
+            tabifyDockWidget(dock, sentinel);
+            dock->raise();
+            setupDockTabBars();
+        });
     }
 
     m_docDocks.append(dock);
@@ -1908,11 +1917,19 @@ void MainWindow::setupDockTabBars() {
                 .arg(theme.background.name(), theme.border.name(), theme.hover.name()));
         }
 
-        // Force tab bar visible (event filter keeps it alive, belt-and-suspenders)
-        tabBar->show();
+        // Hide sentinel tabs so user sees only real doc tabs.
+        // Qt's updateTabBar() rebuilds tabs each layout pass, resetting
+        // visibility, so we must re-hide every call.
+        static const QString sentinelTitle = QStringLiteral("\u200B");
+        for (int i = 0; i < tabBar->count(); ++i) {
+            if (tabBar->tabText(i) == sentinelTitle)
+                tabBar->setTabVisible(i, false);
+        }
 
         // Install tab buttons for any tab that doesn't have them yet
         for (int i = 0; i < tabBar->count(); ++i) {
+            if (tabBar->tabText(i) == sentinelTitle)
+                continue;
             auto* existing = qobject_cast<DockTabButtons*>(
                 tabBar->tabButton(i, QTabBar::RightSide));
             if (existing) continue;
@@ -1996,8 +2013,11 @@ void MainWindow::setupDockTabBars() {
 
             menu.addSeparator();
 
-            // New Document Groups (only if >1 tab)
-            if (tabBar->count() > 1) {
+            // New Document Groups (only if >1 visible tab — excludes sentinels)
+            int visibleTabs = 0;
+            for (int i = 0; i < tabBar->count(); ++i)
+                if (tabBar->isTabVisible(i)) ++visibleTabs;
+            if (visibleTabs > 1) {
                 menu.addAction(makeIcon(":/vsicons/split-horizontal.svg"),
                                "New Horizontal Document Group",
                                [this, target]() {
@@ -2016,7 +2036,12 @@ void MainWindow::setupDockTabBars() {
                     }
                     if (docks.size() >= 2)
                         resizeDocks(docks, sizes, Qt::Horizontal);
-                    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                    QTimer::singleShot(0, this, [this, target]() {
+                        auto* s = createSentinelDock();
+                        tabifyDockWidget(target, s);
+                        target->raise();
+                        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                    });
                 });
                 menu.addAction(makeIcon(":/vsicons/split-vertical.svg"),
                                "New Vertical Document Group",
@@ -2036,7 +2061,12 @@ void MainWindow::setupDockTabBars() {
                     }
                     if (docks.size() >= 2)
                         resizeDocks(docks, sizes, Qt::Vertical);
-                    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                    QTimer::singleShot(0, this, [this, target]() {
+                        auto* s = createSentinelDock();
+                        tabifyDockWidget(target, s);
+                        target->raise();
+                        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                    });
                 });
             }
 
@@ -2046,25 +2076,6 @@ void MainWindow::setupDockTabBars() {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
-    // Keep dock tab bars visible even when Qt wants to hide them (count==1).
-    // Qt's QMainWindowLayout calls setVisible(false) on the QTabBar when only
-    // one dock remains in a tab group.  We catch the resulting Hide event and
-    // immediately re-show the tab bar, provided at least one doc dock is docked.
-    if (event->type() == QEvent::Hide && !m_tabBarShowGuard) {
-        if (auto* tabBar = qobject_cast<QTabBar*>(obj)) {
-            if (tabBar->parent() == this && tabBar->count() >= 1) {
-                bool hasDockedDoc = false;
-                for (auto* d : m_docDocks)
-                    if (!d->isFloating() && d->isVisible()) { hasDockedDoc = true; break; }
-                if (hasDockedDoc) {
-                    m_tabBarShowGuard = true;
-                    tabBar->show();
-                    m_tabBarShowGuard = false;
-                    return true;
-                }
-            }
-        }
-    }
     if (event->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(event);
         if (me->button() == Qt::MiddleButton) {
