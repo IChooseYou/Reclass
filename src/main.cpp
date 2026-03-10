@@ -733,6 +733,8 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(exportMenu, "&C++ Header...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportCpp);
     Qt5Qt6AddAction(exportMenu, "&Rust Structs...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportRust);
     Qt5Qt6AddAction(exportMenu, "#&define Offsets...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportDefines);
+    Qt5Qt6AddAction(exportMenu, "C&# Structs...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportCSharp);
+    Qt5Qt6AddAction(exportMenu, "&Python ctypes...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportPython);
     Qt5Qt6AddAction(exportMenu, "ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportReclassXmlAction);
     // Examples submenu — scan once at init
     {
@@ -3281,6 +3283,51 @@ void MainWindow::exportDefines() {
     if (path.isEmpty()) return;
 
     QString text = renderDefinesAll(tab->doc->tree);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Export Failed",
+            "Could not write to: " + path);
+        return;
+    }
+    file.write(text.toUtf8());
+    setAppStatus("Exported to " + QFileInfo(path).fileName());
+}
+
+// ── Export C# structs ──
+
+void MainWindow::exportCSharp() {
+    auto* tab = activeTab();
+    if (!tab) return;
+
+    QString path = QFileDialog::getSaveFileName(this,
+        "Export C# Structs", {}, "C# Source (*.cs);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    const QHash<NodeKind, QString>* aliases =
+        tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
+    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    QString text = renderCSharpAll(tab->doc->tree, aliases, asserts);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Export Failed",
+            "Could not write to: " + path);
+        return;
+    }
+    file.write(text.toUtf8());
+    setAppStatus("Exported to " + QFileInfo(path).fileName());
+}
+
+// ── Export Python ctypes ──
+
+void MainWindow::exportPython() {
+    auto* tab = activeTab();
+    if (!tab) return;
+
+    QString path = QFileDialog::getSaveFileName(this,
+        "Export Python ctypes", {}, "Python Source (*.py);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    QString text = renderPythonAll(tab->doc->tree);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QMessageBox::warning(this, "Export Failed",

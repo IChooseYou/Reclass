@@ -16,8 +16,10 @@
 #include <QLineEdit>
 #include <QMap>
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QPushButton>
 #include <QTimer>
+#include <QToolButton>
 #include <Qsci/qsciscintilla.h>
 
 namespace rcx {
@@ -58,6 +60,10 @@ private slots:
     void toggleMcp();
     void setEditorFont(const QString& fontName);
     void exportCpp();
+    void exportRust();
+    void exportDefines();
+    void exportCSharp();
+    void exportPython();
     void exportReclassXmlAction();
     void importFromSource();
     void importReclassXml();
@@ -65,6 +71,7 @@ private slots:
     void showTypeAliasesDialog();
     void editTheme();
     void showOptionsDialog();
+    void showOptionsDialog(int initialPage);
 
 public:
     // Status bar helpers — separate app / MCP channels
@@ -106,6 +113,9 @@ private:
         QLineEdit*     findBar   = nullptr;
         QWidget*       findContainer = nullptr;
         QWidget*       renderedContainer = nullptr;
+        QComboBox*     fmtCombo   = nullptr;
+        QComboBox*     scopeCombo = nullptr;
+        QToolButton*   fmtGear    = nullptr;
         ViewMode       viewMode  = VM_Reclass;
         uint64_t       lastRenderedRootId = 0;
     };
