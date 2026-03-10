@@ -207,6 +207,16 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
 
 }
 
+void OptionsDialog::selectPage(int index) {
+    for (auto it = m_itemPageIndex.begin(); it != m_itemPageIndex.end(); ++it) {
+        if (it.value() == index) {
+            m_tree->setCurrentItem(it.key());
+            m_pages->setCurrentIndex(index);
+            break;
+        }
+    }
+}
+
 OptionsResult OptionsDialog::result() const {
     OptionsResult r;
     r.themeIndex = m_themeCombo->currentIndex();

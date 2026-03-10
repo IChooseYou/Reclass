@@ -27,6 +27,7 @@ public:
     explicit OptionsDialog(const OptionsResult& current, QWidget* parent = nullptr);
 
     OptionsResult result() const;
+    void selectPage(int index);
 
 private:
     void filterTree(const QString& text);
