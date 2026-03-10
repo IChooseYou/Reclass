@@ -731,6 +731,8 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(importMenu, "&PDB...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importPdb);
     auto* exportMenu = file->addMenu("E&xport");
     Qt5Qt6AddAction(exportMenu, "&C++ Header...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportCpp);
+    Qt5Qt6AddAction(exportMenu, "&Rust Structs...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportRust);
+    Qt5Qt6AddAction(exportMenu, "#&define Offsets...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportDefines);
     Qt5Qt6AddAction(exportMenu, "ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportReclassXmlAction);
     // Examples submenu — scan once at init
     {
@@ -872,7 +874,8 @@ void MainWindow::createMenus() {
     const auto mcpName = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
     m_mcpAction = Qt5Qt6AddAction(tools, mcpName, QKeySequence::UnknownKey, QIcon(), this, &MainWindow::toggleMcp);
     tools->addSeparator();
-    Qt5Qt6AddAction(tools, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this, &MainWindow::showOptionsDialog);
+    Qt5Qt6AddAction(tools, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this,
+        static_cast<void(MainWindow::*)()>(&MainWindow::showOptionsDialog));
 
     // Plugins
     auto* plugins = m_menuBar->addMenu("&Plugins");
@@ -1194,7 +1197,7 @@ void MainWindow::createStatusBar() {
     m_statusLabel->setContentsMargins(0, 0, 0, 0);
     m_statusLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
 
-    // View toggle is now per-pane via QTabWidget tab bar (Reclass / C/C++ tabs)
+    // View toggle is now per-pane via QTabWidget tab bar (Reclass / Code tabs)
     sb->tabRow = nullptr;
     sb->label  = m_statusLabel;
 
@@ -1414,7 +1417,87 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         sci->setFocus();
     });
 
-    pane.tabWidget->addTab(pane.renderedContainer, "C/C++");     // index 1
+    pane.tabWidget->addTab(pane.renderedContainer, "Code");     // index 1
+
+    // Corner widget: format combo + gear icon
+    {
+        const auto& ct = ThemeManager::instance().current();
+        QSettings cs("Reclass", "Reclass");
+        QString ef = cs.value("font", "JetBrains Mono").toString();
+
+        auto* cornerWidget = new QWidget;
+        auto* cornerLayout = new QHBoxLayout(cornerWidget);
+        cornerLayout->setContentsMargins(0, 0, 4, 0);
+        cornerLayout->setSpacing(2);
+
+        pane.fmtCombo = new QComboBox;
+        for (int fi = 0; fi < static_cast<int>(CodeFormat::_Count); ++fi)
+            pane.fmtCombo->addItem(codeFormatName(static_cast<CodeFormat>(fi)));
+        pane.fmtCombo->setCurrentIndex(cs.value("codeFormat", 0).toInt());
+        pane.fmtCombo->setFixedHeight(22);
+        pane.fmtCombo->setStyleSheet(QStringLiteral(
+            "QComboBox { background: %1; color: %2; border: 1px solid %3;"
+            " padding: 1px 6px; font-family: '%6'; font-size: 9pt; }"
+            "QComboBox::drop-down { border: none; width: 14px; }"
+            "QComboBox::down-arrow { image: url(:/vsicons/chevron-down.svg);"
+            " width: 10px; height: 10px; }"
+            "QComboBox QAbstractItemView { background: %4; color: %2;"
+            " selection-background-color: %5; border: 1px solid %3; }")
+            .arg(ct.background.name(), ct.textMuted.name(), ct.border.name(),
+                 ct.backgroundAlt.name(), ct.hover.name(), ef));
+
+        pane.fmtGear = new QToolButton;
+        pane.fmtGear->setIcon(QIcon(":/vsicons/settings-gear.svg"));
+        pane.fmtGear->setFixedSize(22, 22);
+        pane.fmtGear->setToolTip("Generator Options");
+        pane.fmtGear->setStyleSheet(QStringLiteral(
+            "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
+            "QToolButton:hover { background: %4; }")
+            .arg(ct.background.name(), ct.textMuted.name(), ct.border.name(),
+                 ct.hover.name()));
+
+        pane.scopeCombo = new QComboBox;
+        for (int si = 0; si < static_cast<int>(CodeScope::_Count); ++si)
+            pane.scopeCombo->addItem(codeScopeName(static_cast<CodeScope>(si)));
+        pane.scopeCombo->setCurrentIndex(cs.value("codeScope", 0).toInt());
+        pane.scopeCombo->setFixedHeight(22);
+        pane.scopeCombo->setStyleSheet(pane.fmtCombo->styleSheet());
+
+        cornerLayout->addWidget(pane.fmtCombo);
+        cornerLayout->addWidget(pane.scopeCombo);
+        cornerLayout->addWidget(pane.fmtGear);
+        pane.tabWidget->setCornerWidget(cornerWidget, Qt::BottomRightCorner);
+        cornerWidget->setVisible(false);  // hidden until Code tab selected
+
+        auto refreshAllRendered = [this]() {
+            for (auto& tab : m_tabs)
+                for (auto& p : tab.panes)
+                    if (p.viewMode == VM_Rendered)
+                        updateRenderedView(tab, p);
+        };
+
+        connect(pane.fmtCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this, refreshAllRendered](int idx) {
+            QSettings("Reclass", "Reclass").setValue("codeFormat", idx);
+            refreshAllRendered();
+            for (auto& tab : m_tabs)
+                for (auto& p : tab.panes)
+                    if (p.fmtCombo && p.fmtCombo->currentIndex() != idx)
+                        p.fmtCombo->setCurrentIndex(idx);
+        });
+        connect(pane.scopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this, refreshAllRendered](int idx) {
+            QSettings("Reclass", "Reclass").setValue("codeScope", idx);
+            refreshAllRendered();
+            for (auto& tab : m_tabs)
+                for (auto& p : tab.panes)
+                    if (p.scopeCombo && p.scopeCombo->currentIndex() != idx)
+                        p.scopeCombo->setCurrentIndex(idx);
+        });
+        connect(pane.fmtGear, &QToolButton::clicked, this, [this]() {
+            showOptionsDialog(2); // Generator page
+        });
+    }
 
     pane.tabWidget->setCurrentIndex(0);
     pane.viewMode = VM_Reclass;
@@ -1427,6 +1510,10 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     connect(tw, &QTabWidget::currentChanged, this, [this, tw](int index) {
         SplitPane* p = findPaneByTabWidget(tw);
         if (!p) return;
+
+        // Show/hide corner controls (format combo, scope combo, gear)
+        if (auto* cw = tw->cornerWidget(Qt::BottomRightCorner))
+            cw->setVisible(index == 1);
 
         p->viewMode = (index == 1) ? VM_Rendered : VM_Reclass;
 
@@ -2553,7 +2640,7 @@ void MainWindow::applyTheme(const Theme& theme) {
         }
     }
 
-    // Restyle per-pane view tab bars (Reclass / C++)
+    // Restyle per-pane view tab bars (Reclass / Code)
     {
         QString editorFont = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
         QString paneTabStyle = QStringLiteral(
@@ -2569,10 +2656,31 @@ void MainWindow::applyTheme(const Theme& theme) {
             .arg(theme.background.name(), theme.textMuted.name(), theme.text.name(),
                  theme.backgroundAlt.name(), theme.hover.name(), theme.indHoverSpan.name(),
                  editorFont);
+        QString comboStyle = QStringLiteral(
+            "QComboBox { background: %1; color: %2; border: 1px solid %3;"
+            " padding: 1px 6px; font-family: '%6'; font-size: 9pt; }"
+            "QComboBox::drop-down { border: none; width: 14px; }"
+            "QComboBox::down-arrow { image: url(:/vsicons/chevron-down.svg);"
+            " width: 10px; height: 10px; }"
+            "QComboBox QAbstractItemView { background: %4; color: %2;"
+            " selection-background-color: %5; border: 1px solid %3; }")
+            .arg(theme.background.name(), theme.textMuted.name(), theme.border.name(),
+                 theme.backgroundAlt.name(), theme.hover.name(), editorFont);
+        QString gearStyle = QStringLiteral(
+            "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
+            "QToolButton:hover { background: %4; }")
+            .arg(theme.background.name(), theme.textMuted.name(), theme.border.name(),
+                 theme.hover.name());
         for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
             for (auto& pane : it->panes) {
                 if (pane.tabWidget)
                     pane.tabWidget->setStyleSheet(paneTabStyle);
+                if (pane.fmtCombo)
+                    pane.fmtCombo->setStyleSheet(comboStyle);
+                if (pane.scopeCombo)
+                    pane.scopeCombo->setStyleSheet(comboStyle);
+                if (pane.fmtGear)
+                    pane.fmtGear->setStyleSheet(gearStyle);
             }
         }
     }
@@ -2717,7 +2825,7 @@ void MainWindow::applyTheme(const Theme& theme) {
         }
     }
 
-    // Rendered C/C++ views: update lexer colors, paper, margins
+    // Rendered Code views: update lexer colors, paper, margins
     for (auto& tab : m_tabs) {
         for (auto& pane : tab.panes) {
             auto* sci = pane.rendered;
@@ -2763,7 +2871,9 @@ void MainWindow::editTheme() {
 }
 
 // TODO: when adding more and more options, this func becomes very clunky. Fix
-void MainWindow::showOptionsDialog() {
+void MainWindow::showOptionsDialog() { showOptionsDialog(-1); }
+
+void MainWindow::showOptionsDialog(int initialPage) {
     auto& tm = ThemeManager::instance();
     OptionsResult current;
     current.themeIndex = tm.currentIndex();
@@ -2778,7 +2888,9 @@ void MainWindow::showOptionsDialog() {
     current.braceWrap = QSettings("Reclass", "Reclass").value("braceWrap", false).toBool();
 
     OptionsDialog dlg(current, this);
-    if (dlg.exec() != QDialog::Accepted) return; // OptionsDialog doesn't apply anything. Only apply on OK
+    if (initialPage >= 0)
+        dlg.selectPage(initialPage);
+    if (dlg.exec() != QDialog::Accepted) return;
 
     auto r = dlg.result();
 
@@ -2874,7 +2986,7 @@ void MainWindow::setEditorFont(const QString& fontName) {
                 tabBar->update();
             }
         }
-        // Pane tab bars (Reclass / C++) — re-apply stylesheet with new font
+        // Pane tab bars (Reclass / Code) — re-apply stylesheet with new font
         // (stylesheet overrides setFont, so font must be in the CSS)
         applyTheme(ThemeManager::instance().current());
     }
@@ -3049,11 +3161,21 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     const QHash<NodeKind, QString>* aliases =
         tab.doc->typeAliases.isEmpty() ? nullptr : &tab.doc->typeAliases;
     bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    CodeFormat fmt = static_cast<CodeFormat>(
+        QSettings("Reclass", "Reclass").value("codeFormat", 0).toInt());
+    CodeScope scope = static_cast<CodeScope>(
+        QSettings("Reclass", "Reclass").value("codeScope", 0).toInt());
     QString text;
-    if (rootId != 0)
-        text = renderCpp(tab.doc->tree, rootId, aliases, asserts);
-    else
-        text = renderCppAll(tab.doc->tree, aliases, asserts);
+    if (scope == CodeScope::FullSdk) {
+        text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
+    } else if (rootId != 0) {
+        if (scope == CodeScope::WithChildren)
+            text = renderCodeTree(fmt, tab.doc->tree, rootId, aliases, asserts);
+        else
+            text = renderCode(fmt, tab.doc->tree, rootId, aliases, asserts);
+    } else {
+        text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
+    }
 
     // Scroll restoration: save if same root, reset if different
     int restoreLine = 0;
@@ -3114,6 +3236,51 @@ void MainWindow::exportCpp() {
         tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
     bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
     QString text = renderCppAll(tab->doc->tree, aliases, asserts);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Export Failed",
+            "Could not write to: " + path);
+        return;
+    }
+    file.write(text.toUtf8());
+    setAppStatus("Exported to " + QFileInfo(path).fileName());
+}
+
+// ── Export Rust structs ──
+
+void MainWindow::exportRust() {
+    auto* tab = activeTab();
+    if (!tab) return;
+
+    QString path = QFileDialog::getSaveFileName(this,
+        "Export Rust Structs", {}, "Rust Source (*.rs);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    const QHash<NodeKind, QString>* aliases =
+        tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
+    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    QString text = renderRustAll(tab->doc->tree, aliases, asserts);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Export Failed",
+            "Could not write to: " + path);
+        return;
+    }
+    file.write(text.toUtf8());
+    setAppStatus("Exported to " + QFileInfo(path).fileName());
+}
+
+// ── Export #define offsets ──
+
+void MainWindow::exportDefines() {
+    auto* tab = activeTab();
+    if (!tab) return;
+
+    QString path = QFileDialog::getSaveFileName(this,
+        "Export #define Offsets", {}, "C Header (*.h);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    QString text = renderDefinesAll(tab->doc->tree);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QMessageBox::warning(this, "Export Failed",
