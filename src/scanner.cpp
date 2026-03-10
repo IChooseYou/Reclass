@@ -473,14 +473,14 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
              << " filterExec:" << req.filterExecutable
              << " filterWrite:" << req.filterWritable;
 
-    // Fallback for providers that don't enumerate regions (file/buffer)
+    // Fallback for providers that don't enumerate regions (file/buffer/syscall without modules)
     if (regions.isEmpty()) {
         MemoryRegion fallback;
         fallback.base = 0;
         fallback.size = (uint64_t)prov->size();
         fallback.readable = true;
         fallback.writable = true;
-        fallback.executable = false;
+        fallback.executable = true;  // unknown; include so filters don't exclude the only region
         regions.append(fallback);
     }
 
@@ -491,6 +491,41 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
     const int valSize = isUnknown ? req.valueSize : patternLen;
     const bool hasRange = (req.startAddress != 0 || req.endAddress != 0) &&
                            req.endAddress > req.startAddress;
+
+    // If constrainRegions specified, intersect with provider regions
+    if (!req.constrainRegions.isEmpty()) {
+        // Sort and merge overlapping/adjacent constraints to avoid duplicate sub-regions
+        auto constraints = req.constrainRegions;
+        std::sort(constraints.begin(), constraints.end(),
+                  [](const AddressRange& a, const AddressRange& b) { return a.start < b.start; });
+        QVector<AddressRange> merged;
+        for (const auto& c : constraints) {
+            if (c.end <= c.start) continue;  // skip degenerate ranges
+            if (!merged.isEmpty() && c.start <= merged.last().end)
+                merged.last().end = qMax(merged.last().end, c.end);
+            else
+                merged.append(c);
+        }
+
+        QVector<MemoryRegion> clipped;
+        for (const auto& region : regions) {
+            uint64_t rEnd = region.base + region.size;
+            for (const auto& c : merged) {
+                if (c.end <= region.base || c.start >= rEnd) continue;
+                uint64_t iStart = qMax(region.base, c.start);
+                uint64_t iEnd   = qMin(rEnd, c.end);
+                if (iEnd <= iStart) continue;
+                MemoryRegion sub = region;
+                sub.base = iStart;
+                sub.size = iEnd - iStart;
+                clipped.append(sub);
+            }
+        }
+        regions = std::move(clipped);
+        qDebug() << "[scan] constrained to" << regions.size() << "sub-regions from"
+                 << req.constrainRegions.size() << "address ranges ("
+                 << merged.size() << "after merge)";
+    }
 
     // Pre-compute total bytes for progress
     uint64_t totalBytes = 0;
@@ -515,7 +550,8 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
 
     constexpr int kChunk = 256 * 1024;
 
-    for (const auto& region : regions) {
+    for (int regionIndex = 0; regionIndex < regions.size(); ++regionIndex) {
+        const auto& region = regions[regionIndex];
         if (m_abort.load()) break;
 
         if (req.filterExecutable && !region.executable) continue;
@@ -552,6 +588,8 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
 
             if (!prov->read(regStart + off, chunk.data(), readLen)) {
                 // Skip unreadable chunk
+                qDebug() << "[scan] read failed region" << regionIndex << "addr" << Qt::showbase << Qt::hex
+                         << (region.base + off) << "base" << region.base << "off" << off << "len" << readLen << Qt::dec;
                 off += readLen;
                 scannedBytes += readLen;
                 continue;
@@ -594,9 +632,12 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                 }
             }
 
-            // Advance with overlap to catch patterns that straddle chunks
+            // Advance with overlap to catch patterns that straddle chunks.
+            // Skip overlap on the final chunk -- nothing follows to overlap into.
             uint64_t advance;
-            if (readLen > overlap)
+            if ((uint64_t)readLen >= remaining)
+                advance = remaining;  // last chunk, no overlap needed
+            else if (readLen > overlap)
                 advance = (uint64_t)(readLen - overlap);
             else
                 advance = 1; // prevent infinite loop on tiny regions

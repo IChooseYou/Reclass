@@ -1,16 +1,41 @@
 #include "mcp_bridge.h"
+#include "addressparser.h"
 #include "core.h"
 #include "controller.h"
 #include "generator.h"
 #include "mainwindow.h"
+#include "scanner.h"
 #include <QCoreApplication>
 #include <QSettings>
+#include <QTimer>
 #include <QDebug>
 #include <cstring>
+#include <algorithm>
 
 namespace rcx {
 
 static constexpr int kMaxReadBuffer = 10 * 1024 * 1024; // 10 MB
+
+// Parse a number from JSON; accepts string (hex "0x..." or decimal) or number.
+// Use for offset, length, pid, limit, tabIndex, etc. to avoid double precision loss
+// and to allow clients to send exact values as decimal/hex strings.
+static int64_t parseInteger(const QJsonValue& v, int64_t defaultVal = 0) {
+    if (v.isUndefined() || v.isNull())
+        return defaultVal;
+    if (v.isString()) {
+        QString s = v.toString().trimmed();
+        if (s.isEmpty())
+            return defaultVal;
+        bool ok;
+        qint64 val = s.startsWith(QLatin1String("0x"), Qt::CaseInsensitive)
+            ? s.mid(2).toLongLong(&ok, 16)
+            : s.toLongLong(&ok, 10);
+        return ok ? val : defaultVal;
+    }
+    if (v.isDouble())
+        return static_cast<int64_t>(v.toDouble());
+    return defaultVal;
+}
 
 // ════════════════════════════════════════════════════════════════════
 // Construction / lifecycle
@@ -23,7 +48,7 @@ McpBridge::McpBridge(MainWindow* mainWindow, QObject* parent)
     m_notifyTimer->setSingleShot(true);
     m_notifyTimer->setInterval(100);
     connect(m_notifyTimer, &QTimer::timeout, this, [this]() {
-        if (m_client && m_initialized)
+        if (!m_clients.isEmpty())
             sendNotification("notifications/resources/updated",
                              QJsonObject{{"uri", "project://tree"}});
     });
@@ -55,10 +80,15 @@ void McpBridge::start() {
 }
 
 void McpBridge::stop() {
-    if (m_client) {
-        m_client->disconnectFromServer();
-        m_client = nullptr;
+    for (auto& c : m_clients) {
+        c.socket->disconnect(this);
+        c.socket->disconnectFromServer();
+        c.socket->deleteLater();
     }
+    m_clients.clear();
+    m_currentSender = nullptr;
+    m_processing = false;
+    m_pendingRequests.clear();
     if (m_server) {
         m_server->close();
         delete m_server;
@@ -70,55 +100,95 @@ void McpBridge::stop() {
 // Connection handling
 // ════════════════════════════════════════════════════════════════════
 
+McpBridge::ClientState* McpBridge::findClient(QLocalSocket* sock) {
+    for (auto& c : m_clients)
+        if (c.socket == sock) return &c;
+    return nullptr;
+}
+
+void McpBridge::removeClient(QLocalSocket* sock) {
+    for (int i = 0; i < m_clients.size(); ++i) {
+        if (m_clients[i].socket == sock) {
+            sock->disconnect(this);
+            sock->deleteLater();
+            m_clients.removeAt(i);
+            return;
+        }
+    }
+}
+
 void McpBridge::onNewConnection() {
     auto* pending = m_server->nextPendingConnection();
     if (!pending) return;
 
-    // Single client — disconnect previous
-    if (m_client) {
-        m_client->disconnectFromServer();
-        m_client->deleteLater();
-    }
+    m_clients.append({pending, {}, false});
 
-    m_client = pending;
-    m_readBuffer.clear();
-    m_initialized = false;
-
-    connect(m_client, &QLocalSocket::readyRead,
+    connect(pending, &QLocalSocket::readyRead,
             this, &McpBridge::onReadyRead);
-    connect(m_client, &QLocalSocket::disconnected,
+    connect(pending, &QLocalSocket::disconnected,
             this, &McpBridge::onDisconnected);
 
-    qDebug() << "[MCP] Client connected";
+    qDebug() << "[MCP] Client connected (" << m_clients.size() << "total)";
 }
 
 void McpBridge::onReadyRead() {
-    m_readBuffer.append(m_client->readAll());
+    auto* sock = qobject_cast<QLocalSocket*>(sender());
+    auto* cs = findClient(sock);
+    if (!cs) return;
+    cs->readBuffer.append(sock->readAll());
 
-    if (m_readBuffer.size() > kMaxReadBuffer) {
+    if (cs->readBuffer.size() > kMaxReadBuffer) {
         qWarning() << "[MCP] Read buffer exceeded 10MB, disconnecting client";
-        m_client->disconnectFromServer();
+        sock->disconnectFromServer();
         return;
     }
 
-    // Newline-delimited JSON framing (cursor approach avoids quadratic shifting)
-    int consumed = 0;
-    while (true) {
-        int idx = m_readBuffer.indexOf('\n', consumed);
+    // Extract complete lines from this client's buffer.
+    // If a request is already in flight (m_processing), queue the line
+    // instead of processing it -- nested event loops in scanner/tree.apply
+    // would otherwise let interleaved requests clobber m_currentSender.
+    while (findClient(sock)) {
+        cs = findClient(sock);
+        int idx = cs->readBuffer.indexOf('\n');
         if (idx < 0) break;
-        QByteArray line = m_readBuffer.mid(consumed, idx - consumed).trimmed();
-        consumed = idx + 1;
-        if (!line.isEmpty())
-            processLine(line);
+        QByteArray line = cs->readBuffer.left(idx).trimmed();
+        cs->readBuffer.remove(0, idx + 1);
+        if (line.isEmpty()) continue;
+
+        if (m_processing) {
+            m_pendingRequests.append({sock, line});
+            continue;
+        }
+        m_processing = true;
+        m_currentSender = sock;
+        processLine(line);
+        m_currentSender = nullptr;
+        m_processing = false;
+        drainPendingRequests();
     }
-    if (consumed > 0)
-        m_readBuffer.remove(0, consumed);
+}
+
+void McpBridge::drainPendingRequests() {
+    while (!m_pendingRequests.isEmpty()) {
+        auto req = m_pendingRequests.takeFirst();
+        if (!findClient(req.socket)) continue;  // client disconnected while queued
+        m_processing = true;
+        m_currentSender = req.socket;
+        processLine(req.line);
+        m_currentSender = nullptr;
+        m_processing = false;
+    }
 }
 
 void McpBridge::onDisconnected() {
-    qDebug() << "[MCP] Client disconnected";
-    m_client = nullptr;
-    m_initialized = false;
+    auto* sock = qobject_cast<QLocalSocket*>(sender());
+    qDebug() << "[MCP] Client disconnected (" << m_clients.size() - 1 << "remaining)";
+    // Purge any queued requests from this client
+    m_pendingRequests.erase(
+        std::remove_if(m_pendingRequests.begin(), m_pendingRequests.end(),
+            [sock](const PendingRequest& r) { return r.socket == sock; }),
+        m_pendingRequests.end());
+    removeClient(sock);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -142,18 +212,26 @@ QJsonObject McpBridge::errReply(const QJsonValue& id, int code, const QString& m
 }
 
 void McpBridge::sendJson(const QJsonObject& obj) {
-    if (!m_client) return;
+    QLocalSocket* target = m_currentSender;
+    if (!target || !findClient(target)) return;
     QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
     qDebug() << "[MCP] >>" << data.left(200);
     data.append('\n');
-    m_client->write(data);
-    m_client->flush();
+    target->write(data);
+    target->flush();
 }
 
 void McpBridge::sendNotification(const QString& method, const QJsonObject& params) {
     QJsonObject n{{"jsonrpc", "2.0"}, {"method", method}};
     if (!params.isEmpty()) n["params"] = params;
-    sendJson(n);
+    QByteArray data = QJsonDocument(n).toJson(QJsonDocument::Compact);
+    data.append('\n');
+    for (auto& c : m_clients) {
+        if (c.initialized) {
+            c.socket->write(data);
+            c.socket->flush();
+        }
+    }
 }
 
 QJsonObject McpBridge::makeTextResult(const QString& text, bool isError) {
@@ -219,7 +297,7 @@ void McpBridge::processLine(const QByteArray& line) {
 // ════════════════════════════════════════════════════════════════════
 
 QJsonObject McpBridge::handleInitialize(const QJsonValue& id, const QJsonObject&) {
-    m_initialized = true;
+    if (auto* cs = findClient(m_currentSender)) cs->initialized = true;
 
     QJsonObject caps;
     caps["tools"] = QJsonObject{{"listChanged", false}};
@@ -352,6 +430,21 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // 3b. source.modules
+    tools.append(QJsonObject{
+        {"name", "source.modules"},
+        {"description", "List modules for the current data source. Returns name, base (hex), and size for each module. "
+                        "Only available when the provider reports module info (e.g. after attaching to a process). "
+                        "Use these names in baseAddressFormula for tree base, e.g. '<Module.exe> + 0x1000'."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }}
+        }}
+    });
+
     // 4. hex.read
     tools.append(QJsonObject{
         {"name", "hex.read"},
@@ -474,6 +567,73 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // 10. scanner.scan
+    tools.append(QJsonObject{
+        {"name", "scanner.scan"},
+        {"description", "Run a value scan on the active tab's provider and wait for completion. "
+                        "Use after source.switch (e.g. attach to process). Value type: int8, int16, int32, int64, "
+                        "uint8, uint16, uint32, uint64, float, double. Results appear in the Scanner panel. "
+                        "For value scans (e.g. float 120) prefer scanning readable/writable (data) regions, not executable: "
+                        "set filterWritable: true and filterExecutable: false. "
+                        "Use 'regions' to restrict scan to specific address ranges (intersected with provider regions)."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}},
+                {"valueType", QJsonObject{{"type", "string"},
+                    {"description", "Value type: float, double, int32, uint32, int64, uint64, int16, uint16, int8, uint8."}}},
+                {"value", QJsonObject{{"type", "string"},
+                    {"description", "Value to search for (e.g. \"120\" for float 120)."}}},
+                {"filterExecutable", QJsonObject{{"type", "boolean"},
+                    {"description", "Only scan executable regions (default false). For value scans use false; use writable instead."}}},
+                {"filterWritable", QJsonObject{{"type", "boolean"},
+                    {"description", "Only scan writable regions (default false). Recommended true for value scans to hit data/heap, not code."}}},
+                {"regions", QJsonObject{{"type", "array"},
+                    {"description", "Restrict scan to these address ranges. Each element is [startHex, endHex], e.g. [[\"0x10000\",\"0x20000\"],[\"0x50000\",\"0x60000\"]]. Ranges are intersected with the provider's real memory regions."},
+                    {"items", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}}}}}}
+            }},
+            {"required", QJsonArray{"valueType", "value"}}
+        }}
+    });
+
+    // 10. scanner.scan_pattern
+    tools.append(QJsonObject{
+        {"name", "scanner.scan_pattern"},
+        {"description", "Run a pattern/signature scan on the active tab's provider and wait for completion. "
+                        "Pattern is space-separated hex bytes, e.g. '00 00 20 42 00 00 20 42'. Use ?? for wildcards. "
+                        "Results appear in the Scanner panel. Uses the same region list as value scans. "
+                        "Use 'regions' to restrict scan to specific address ranges (intersected with provider regions)."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}},
+                {"pattern", QJsonObject{{"type", "string"},
+                    {"description", "Hex pattern, e.g. '00 00 20 42 00 00 20 42 00 00 00 00 00 00 00 00'. Use ?? for wildcard bytes."}}},
+                {"filterExecutable", QJsonObject{{"type", "boolean"},
+                    {"description", "Only scan executable regions (default false)."}}},
+                {"filterWritable", QJsonObject{{"type", "boolean"},
+                    {"description", "Only scan writable regions (default false)."}}},
+                {"regions", QJsonObject{{"type", "array"},
+                    {"description", "Restrict scan to these address ranges. Each element is [startHex, endHex], e.g. [[\"0x10000\",\"0x20000\"],[\"0x50000\",\"0x60000\"]]. Ranges are intersected with the provider's real memory regions."},
+                    {"items", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}}}}}}
+            }},
+            {"required", QJsonArray{"pattern"}}
+        }}
+    });
+
+    // 11. mcp.reconnect
+    tools.append(QJsonObject{
+        {"name", "mcp.reconnect"},
+        {"description", "Disconnect the current MCP client so it can reconnect to Reclass (e.g. after Reclass was restarted or to reset connection state). "
+                        "The client process will exit; your IDE may restart it automatically, reconnecting to Reclass like at startup."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{}}
+        }}
+    });
+
 
     // process.info
     tools.append(QJsonObject{
@@ -509,12 +669,16 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     if      (toolName == "project.state")  result = toolProjectState(args);
     else if (toolName == "tree.apply")     result = toolTreeApply(args);
     else if (toolName == "source.switch")  result = toolSourceSwitch(args);
+    else if (toolName == "source.modules") result = toolSourceModules(args);
     else if (toolName == "hex.read")       result = toolHexRead(args);
     else if (toolName == "hex.write")      result = toolHexWrite(args);
     else if (toolName == "status.set")     result = toolStatusSet(args);
     else if (toolName == "ui.action")      result = toolUiAction(args);
     else if (toolName == "tree.search")   result = toolTreeSearch(args);
     else if (toolName == "node.history")  result = toolNodeHistory(args);
+    else if (toolName == "scanner.scan")  result = toolScannerScan(args);
+    else if (toolName == "scanner.scan_pattern") result = toolScannerScanPattern(args);
+    else if (toolName == "mcp.reconnect") result = toolReconnect(args);
     else if (toolName == "process.info") result = toolProcessInfo(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
@@ -550,7 +714,7 @@ MainWindow::TabState* McpBridge::resolveTab(const QJsonObject& args, int* resolv
 
     // 1) Explicit tab index from args
     if (args.contains("tabIndex")) {
-        int idx = args.value("tabIndex").toInt();
+        int idx = (int)parseInteger(args.value("tabIndex"));
         auto* t = m_mainWindow->tabByIndex(idx);
         if (t) { if (resolvedIndex) *resolvedIndex = idx; return t; }
     }
@@ -590,16 +754,18 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
     auto* ctrl = tab->ctrl;
     const auto& tree = doc->tree;
 
-    int maxDepth = args.value("depth").toInt(1);
+    int maxDepth = (int)parseInteger(args.value("depth"), 1);
     bool includeTree = args.contains("includeTree") ? args.value("includeTree").toBool() : true;
     bool includeMembers = args.value("includeMembers").toBool(false);
-    int limit = qBound(1, args.value("limit").toInt(50), 500);
-    int offset = qMax(0, args.value("offset").toInt(0));
+    int limit = qBound(1, (int)parseInteger(args.value("limit"), 50), 500);
+    int offset = qMax(0, (int)parseInteger(args.value("offset"), 0));
     QString parentIdStr = args.value("parentId").toString();
     uint64_t filterParentId = parentIdStr.isEmpty() ? 0 : parentIdStr.toULongLong();
 
     QJsonObject state;
     state["baseAddress"] = "0x" + QString::number(tree.baseAddress, 16).toUpper();
+    if (!tree.baseAddressFormula.isEmpty())
+        state["baseAddressFormula"] = tree.baseAddressFormula;
     state["viewRootId"] = QString::number(ctrl->viewRootId());
     state["nodeCount"] = tree.nodes.size();
 
@@ -715,6 +881,8 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
 
         QJsonObject treeObj;
         treeObj["baseAddress"] = QString::number(tree.baseAddress, 16);
+        if (!tree.baseAddressFormula.isEmpty())
+            treeObj["baseAddressFormula"] = tree.baseAddressFormula;
         treeObj["nextId"] = QString::number(tree.m_nextId);
         treeObj["nodes"] = nodeArr;
         treeObj["returned"] = emitted;
@@ -791,12 +959,12 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
                 skippedOps.append(QStringLiteral("op[%1]: parentId '%2' not found").arg(i).arg(pid));
                 continue;
             }
-            n.offset = op.value("offset").toInt(0);
+            n.offset = (int)parseInteger(op.value("offset"), 0);
             n.structTypeName = op.value("structTypeName").toString();
             n.classKeyword = op.value("classKeyword").toString();
-            n.strLen = qBound(1, op.value("strLen").toInt(64), 1000000);
+            n.strLen = qBound(1, (int)parseInteger(op.value("strLen"), 64), 1000000);
             n.elementKind = kindFromString(op.value("elementKind").toString("UInt8"));
-            n.arrayLen = qBound(1, op.value("arrayLen").toInt(1), 1000000);
+            n.arrayLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), 1000000);
             bool refOk;
             QString refStr = resolvePlaceholder(op.value("refId").toString("0"), placeholders, &refOk);
             if (!refOk) {
@@ -868,7 +1036,7 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
             int idx = tree.indexOfId(nid.toULongLong());
             if (idx >= 0) {
-                int newOff = op.value("offset").toInt();
+                int newOff = (int)parseInteger(op.value("offset"));
                 doc->undoStack.push(new RcxCommand(ctrl,
                     cmd::ChangeOffset{tree.nodes[idx].id, tree.nodes[idx].offset, newOff}));
                 applied++;
@@ -928,7 +1096,7 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             int idx = tree.indexOfId(nid.toULongLong());
             if (idx >= 0) {
                 NodeKind newElemKind = kindFromString(op.value("elementKind").toString());
-                int newLen = qBound(1, op.value("arrayLen").toInt(1), 1000000);
+                int newLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), 1000000);
                 doc->undoStack.push(new RcxCommand(ctrl,
                     cmd::ChangeArrayMeta{tree.nodes[idx].id,
                         tree.nodes[idx].elementKind, newElemKind,
@@ -997,7 +1165,7 @@ QJsonObject McpBridge::toolSourceSwitch(const QJsonObject& args) {
     auto* doc = tab->doc;
 
     if (args.contains("sourceIndex")) {
-        int idx = args.value("sourceIndex").toInt();
+        int idx = (int)parseInteger(args.value("sourceIndex"));
         const auto& sources = ctrl->savedSources();
         if (idx < 0 || idx >= sources.size())
             return makeTextResult("Source index out of range: " + QString::number(idx), true);
@@ -1014,11 +1182,17 @@ QJsonObject McpBridge::toolSourceSwitch(const QJsonObject& args) {
     }
 
     if (args.contains("pid")) {
-        uint32_t pid = (uint32_t)args.value("pid").toInt();
+        uint32_t pid = (uint32_t)parseInteger(args.value("pid"));
         QString name = args.value("processName").toString();
         if (name.isEmpty()) name = QString("PID %1").arg(pid);
         QString target = QString("%1:%2").arg(pid).arg(name);
         ctrl->attachViaPlugin(QStringLiteral("processmemory"), target);
+        // attachViaPlugin does not set tree.baseAddress; set it from the new provider (like selectSource does).
+        if (doc->provider && doc->provider->base() != 0) {
+            doc->tree.baseAddress = doc->provider->base();
+            doc->tree.baseAddressFormula.clear();
+            ctrl->refresh();
+        }
         return makeTextResult("Attached to process " + name + " (PID " + QString::number(pid) + ")");
     }
 
@@ -1033,6 +1207,54 @@ QJsonObject McpBridge::toolSourceSwitch(const QJsonObject& args) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// TOOL: source.modules
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolSourceModules(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    auto* prov = tab->doc->provider.get();
+    if (!prov) return makeTextResult("No data source attached", true);
+
+    QVector<MemoryRegion> regions = prov->enumerateRegions();
+    // Build unique modules: name -> { minBase, maxEnd }
+    QHash<QString, QPair<uint64_t, uint64_t>> moduleMap;
+    for (const auto& r : regions) {
+        if (r.moduleName.isEmpty()) continue;
+        uint64_t end = r.base + r.size;
+        auto it = moduleMap.find(r.moduleName);
+        if (it == moduleMap.end()) {
+            moduleMap[r.moduleName] = qMakePair(r.base, end);
+        } else {
+            it->first = qMin(it->first, r.base);
+            it->second = qMax(it->second, end);
+        }
+    }
+
+    QJsonArray arr;
+    QStringList names = moduleMap.keys();
+    std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
+        return QString::compare(a, b, Qt::CaseInsensitive) < 0;
+    });
+    for (const QString& name : names) {
+        const auto& p = moduleMap[name];
+        uint64_t base = p.first;
+        uint64_t size = p.second - p.first;
+        arr.append(QJsonObject{
+            {"name", name},
+            {"base", "0x" + QString::number(base, 16).toUpper()},
+            {"size", QJsonValue(static_cast<qint64>(size))}
+        });
+    }
+
+    QJsonObject out;
+    out["modules"] = arr;
+    out["count"] = arr.size();
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
 // TOOL: hex.read
 // ════════════════════════════════════════════════════════════════════
 
@@ -1043,10 +1265,11 @@ QJsonObject McpBridge::toolHexRead(const QJsonObject& args) {
     auto* prov = tab->doc->provider.get();
     if (!prov) return makeTextResult("No provider", true);
 
-    int64_t offset = static_cast<int64_t>(args.value("offset").toDouble());
-    int length = qMin(args.value("length").toInt(64), 4096);
+    int64_t offset = parseInteger(args.value("offset"));
+    int length = qBound(1, (int)parseInteger(args.value("length"), 64), 4096);
+    bool baseRel = args.value("baseRelative").toBool();
 
-    if (!args.value("baseRelative").toBool())
+    if (baseRel)
         offset += (int64_t)tab->doc->tree.baseAddress;
 
     if (offset < 0 || !prov->isReadable((uint64_t)offset, length))
@@ -1125,10 +1348,10 @@ QJsonObject McpBridge::toolHexWrite(const QJsonObject& args) {
     auto* doc = tab->doc;
     auto* prov = doc->provider.get();
 
-    int64_t offset = static_cast<int64_t>(args.value("offset").toDouble());
+    int64_t offset = parseInteger(args.value("offset"));
     QString hexStr = args.value("hexBytes").toString().remove(' ');
 
-    if (!args.value("baseRelative").toBool())
+    if (args.value("baseRelative").toBool())
         offset += (int64_t)doc->tree.baseAddress;
 
     if (hexStr.size() % 2 != 0)
@@ -1312,7 +1535,7 @@ QJsonObject McpBridge::toolTreeSearch(const QJsonObject& args) {
     const auto& tree = tab->doc->tree;
     QString query = args.value("query").toString();
     QString kindFilter = args.value("kindFilter").toString();
-    int limit = qBound(1, args.value("limit").toInt(20), 100);
+    int limit = qBound(1, (int)parseInteger(args.value("limit"), 20), 100);
 
     if (query.isEmpty() && kindFilter.isEmpty())
         return makeTextResult("Provide 'query' (name substring) and/or 'kindFilter' (e.g. 'Struct')", true);
@@ -1402,6 +1625,168 @@ QJsonObject McpBridge::toolNodeHistory(const QJsonObject& args) {
         QJsonDocument(result).toJson(QJsonDocument::Compact)));
 }
 
+// TOOL: scanner.scan
+// ════════════════════════════════════════════════════════════════════
+
+static ValueType valueTypeFromString(const QString& s) {
+    QString lower = s.trimmed().toLower();
+    if (lower == QStringLiteral("int8"))   return ValueType::Int8;
+    if (lower == QStringLiteral("int16"))  return ValueType::Int16;
+    if (lower == QStringLiteral("int32"))  return ValueType::Int32;
+    if (lower == QStringLiteral("int64"))  return ValueType::Int64;
+    if (lower == QStringLiteral("uint8"))  return ValueType::UInt8;
+    if (lower == QStringLiteral("uint16")) return ValueType::UInt16;
+    if (lower == QStringLiteral("uint32")) return ValueType::UInt32;
+    if (lower == QStringLiteral("uint64")) return ValueType::UInt64;
+    if (lower == QStringLiteral("float"))  return ValueType::Float;
+    if (lower == QStringLiteral("double")) return ValueType::Double;
+    return ValueType::Float; // default
+}
+
+static QVector<AddressRange> parseRegionsArg(const QJsonObject& args, QString* errOut = nullptr) {
+    QVector<AddressRange> out;
+    QJsonArray arr = args.value("regions").toArray();
+    if (arr.isEmpty()) return out;
+    out.reserve(arr.size());
+    for (int i = 0; i < arr.size(); i++) {
+        QJsonArray pair = arr[i].toArray();
+        if (pair.size() != 2) {
+            if (errOut) *errOut = QStringLiteral("regions[%1]: expected [startHex, endHex]").arg(i);
+            return {};
+        }
+        bool ok1 = false, ok2 = false;
+        uint64_t start = pair[0].toString().toULongLong(&ok1, 0);
+        uint64_t end   = pair[1].toString().toULongLong(&ok2, 0);
+        if (!ok1 || !ok2) {
+            if (errOut) *errOut = QStringLiteral("regions[%1]: invalid hex address").arg(i);
+            return {};
+        }
+        if (end <= start) {
+            if (errOut) *errOut = QStringLiteral("regions[%1]: end must be > start").arg(i);
+            return {};
+        }
+        out.append({start, end});
+    }
+    return out;
+}
+
+QJsonObject McpBridge::toolScannerScan(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    ScannerPanel* panel = m_mainWindow->m_scannerPanel;
+    if (!panel) return makeTextResult("Scanner panel not available", true);
+
+    QString valueTypeStr = args.value("valueType").toString();
+    QString value = args.value("value").toString();
+    bool filterExec = args.value("filterExecutable").toBool();
+    bool filterWrite = args.value("filterWritable").toBool();
+
+    if (value.isEmpty())
+        return makeTextResult("Missing 'value' (e.g. \"120\")", true);
+
+    QString regErr;
+    auto constrainRegions = parseRegionsArg(args, &regErr);
+    if (!regErr.isEmpty())
+        return makeTextResult(regErr, true);
+
+    ValueType vt = valueTypeFromString(valueTypeStr);
+    QVector<ScanResult> results = panel->runValueScanAndWait(vt, value, filterExec, filterWrite, constrainRegions);
+
+    QString msg = QStringLiteral("Scan (%1 = %2): %3 result(s).")
+        .arg(valueTypeStr.isEmpty() ? QStringLiteral("float") : valueTypeStr)
+        .arg(value)
+        .arg(results.size());
+    if (!constrainRegions.isEmpty()) {
+        uint64_t totalConstrained = 0;
+        for (const auto& r : constrainRegions) totalConstrained += r.end - r.start;
+        msg += QStringLiteral("\nRegion constraint: %1 range(s), %2 bytes total requested.")
+            .arg(constrainRegions.size()).arg(totalConstrained);
+    }
+    const int showAddrs = 15;
+    if (!results.isEmpty()) {
+        msg += QStringLiteral("\nFirst addresses:");
+        for (int i = 0; i < qMin(results.size(), showAddrs); i++) {
+            msg += QStringLiteral("\n  0x%1").arg(results[i].address, 16, 16, QChar('0'));
+            if (!results[i].regionModule.isEmpty())
+                msg += QStringLiteral(" (%1)").arg(results[i].regionModule);
+        }
+        if (results.size() > showAddrs)
+            msg += QStringLiteral("\n  ... and %1 more").arg(results.size() - showAddrs);
+    }
+    return makeTextResult(msg);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: scanner.scan_pattern
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolScannerScanPattern(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    ScannerPanel* panel = m_mainWindow->m_scannerPanel;
+    if (!panel) return makeTextResult("Scanner panel not available", true);
+
+    QString pattern = args.value("pattern").toString().trimmed();
+    bool filterExec = args.value("filterExecutable").toBool();
+    bool filterWrite = args.value("filterWritable").toBool();
+
+    if (pattern.isEmpty())
+        return makeTextResult("Missing 'pattern' (e.g. \"00 00 20 42 00 00 20 42\")", true);
+
+    QString regErr;
+    auto constrainRegions = parseRegionsArg(args, &regErr);
+    if (!regErr.isEmpty())
+        return makeTextResult(regErr, true);
+
+    // Use the resolved tab's provider so the scan runs on the same tab we attached to (source_switch).
+    // If we used the panel's default getter we'd get the *active* tab's provider, which may be different.
+    std::shared_ptr<rcx::Provider> provider = (tab->doc && tab->doc->provider) ? tab->doc->provider : nullptr;
+    if (!provider) {
+        return makeTextResult("No provider on this tab — the scan did not run. Use source_switch to attach to a process (or open a file), then run the pattern scan again. If you already ran source_switch, ensure the tab that was switched is the one used (e.g. pass tabIndex: 0 for the first tab).", true);
+    }
+
+    QVector<ScanResult> results = panel->runPatternScanAndWait(provider, pattern, filterExec, filterWrite, constrainRegions);
+
+    QString msg = QStringLiteral("Pattern scan (%1): %2 result(s).")
+        .arg(pattern)
+        .arg(results.size());
+    if (!constrainRegions.isEmpty()) {
+        uint64_t totalConstrained = 0;
+        for (const auto& r : constrainRegions) totalConstrained += r.end - r.start;
+        msg += QStringLiteral("\nRegion constraint: %1 range(s), %2 bytes total requested.")
+            .arg(constrainRegions.size()).arg(totalConstrained);
+    }
+    const int showAddrs = 15;
+    if (!results.isEmpty()) {
+        msg += QStringLiteral("\nFirst addresses:");
+        for (int i = 0; i < qMin(results.size(), showAddrs); i++) {
+            msg += QStringLiteral("\n  0x%1").arg(results[i].address, 16, 16, QChar('0'));
+            if (!results[i].regionModule.isEmpty())
+                msg += QStringLiteral(" (%1)").arg(results[i].regionModule);
+        }
+        if (results.size() > showAddrs)
+            msg += QStringLiteral("\n  ... and %1 more").arg(results.size() - showAddrs);
+    }
+    return makeTextResult(msg);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: mcp.reconnect
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolReconnect(const QJsonObject&) {
+    QLocalSocket* sock = m_currentSender;
+    if (!sock)
+        return makeTextResult("No client connected.", true);
+    // Disconnect after this response is sent so the client receives the result
+    QTimer::singleShot(0, this, [this, sock]() {
+        if (findClient(sock))
+            sock->disconnectFromServer();
+    });
+    return makeTextResult("Disconnected. The MCP client will exit; your IDE may restart it and reconnect to Reclass.");
+}
 
 // ════════════════════════════════════════════════════════════════════
 // TOOL: process.info — PEB address + TEB enumeration
@@ -1440,12 +1825,13 @@ QJsonObject McpBridge::toolProcessInfo(const QJsonObject& args) {
 // ════════════════════════════════════════════════════════════════════
 
 void McpBridge::notifyTreeChanged() {
-    if (!m_client || !m_initialized) return;
-    m_notifyTimer->start();  // debounce 100ms
+    if (m_clients.isEmpty()) return;
+    sendNotification("notifications/resources/updated",
+                     QJsonObject{{"uri", "project://tree"}});
 }
 
 void McpBridge::notifyDataChanged() {
-    if (!m_client || !m_initialized) return;
+    if (m_clients.isEmpty()) return;
     sendNotification("notifications/resources/updated",
                      QJsonObject{{"uri", "project://data"}});
 }

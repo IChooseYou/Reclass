@@ -283,9 +283,10 @@ function Find-MinGWDirectory {
     $toolsDir = Join-Path $qtRoot "Tools"
     
     if (Test-Path $toolsDir) {
+        # Prefer GCC-based MinGW (has g++.exe); exclude llvm-mingw. Prefer 64-bit, then newest.
         $mingwToolDirs = Get-ChildItem -Path $toolsDir -Directory -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match 'mingw'
-        }
+            $_.Name -match '^mingw\d+_\d+$'
+        } | Sort-Object -Property @{ Expression = { if ($_.Name -match '_64$') { 1 } else { 0 } }; Descending = $true }, Name -Descending
         
         foreach ($dir in $mingwToolDirs) {
             $testBin = Join-Path $dir.FullName "bin\g++.exe"

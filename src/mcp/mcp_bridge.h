@@ -29,13 +29,31 @@ public:
     void notifyDataChanged();
 
 private:
+    struct ClientState {
+        QLocalSocket* socket = nullptr;
+        QByteArray    readBuffer;
+        bool          initialized = false;
+    };
+
     MainWindow*    m_mainWindow;
     QLocalServer*  m_server    = nullptr;
-    QLocalSocket*  m_client    = nullptr;  // single client for v1
-    QByteArray     m_readBuffer;
-    bool           m_initialized = false;
+    QVector<ClientState> m_clients;
+    QLocalSocket*  m_currentSender = nullptr;  // set during request processing
     bool           m_slowMode    = false;
     QTimer*        m_notifyTimer = nullptr;
+
+    // Serial request queue. Some tool calls (scanner, tree.apply) spin nested
+    // event loops which would let another client's readyRead interleave and
+    // clobber m_currentSender. Simplest fix without refactoring those tools:
+    // queue incoming lines while a request is in flight, drain after.
+    bool m_processing = false;
+    struct PendingRequest { QLocalSocket* socket; QByteArray line; };
+    QVector<PendingRequest> m_pendingRequests;
+
+
+    ClientState* findClient(QLocalSocket* sock);
+    void removeClient(QLocalSocket* sock);
+    void drainPendingRequests();
 
     // JSON-RPC plumbing
     void onNewConnection();
@@ -56,12 +74,16 @@ private:
     QJsonObject toolProjectState(const QJsonObject& args);
     QJsonObject toolTreeApply(const QJsonObject& args);
     QJsonObject toolSourceSwitch(const QJsonObject& args);
+    QJsonObject toolSourceModules(const QJsonObject& args);
     QJsonObject toolHexRead(const QJsonObject& args);
     QJsonObject toolHexWrite(const QJsonObject& args);
     QJsonObject toolStatusSet(const QJsonObject& args);
     QJsonObject toolUiAction(const QJsonObject& args);
     QJsonObject toolTreeSearch(const QJsonObject& args);
     QJsonObject toolNodeHistory(const QJsonObject& args);
+    QJsonObject toolScannerScan(const QJsonObject& args);
+    QJsonObject toolScannerScanPattern(const QJsonObject& args);
+    QJsonObject toolReconnect(const QJsonObject& args);
     QJsonObject toolProcessInfo(const QJsonObject& args);
 
     // Helpers
