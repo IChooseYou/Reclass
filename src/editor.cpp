@@ -515,7 +515,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     connect(m_sci, &QsciScintilla::textChanged, this, [this]() {
         if (!m_editState.active) return;
         if (m_updatingComment) return;  // Skip queuing during comment update
-        if (m_editState.target == EditTarget::Value)
+        if (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite)
             QTimer::singleShot(0, this, &RcxEditor::validateEditLive);
 
         // Autocomplete for static field expressions — show field names as user types
@@ -1605,7 +1605,8 @@ RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
     // Dismiss any open user list / autocomplete popup
     m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCCANCEL);
     // Clear edit comment and error marker before deactivating
-    if (m_editState.target == EditTarget::Value) {
+    if (m_editState.target == EditTarget::Value
+        || (m_editState.hexOverwrite && m_editState.target == EditTarget::Name)) {
         setEditComment({});  // Clear to spaces
         m_sci->markerDelete(m_editState.line, M_ERR);
     }
@@ -2341,6 +2342,10 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
 // ── Edit mode key handling ──
 
 bool RcxEditor::handleEditKey(QKeyEvent* ke) {
+    // Hex/ASCII overwrite mode: fully custom key handling
+    if (m_editState.hexOverwrite)
+        return handleHexEditKey(ke);
+
     // User list is handled via userListActivated signal, not here
     // SCI_AUTOCACTIVE is for autocomplete, not user lists
 
@@ -2440,6 +2445,219 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
     }
 }
 
+// ── Hex/ASCII overwrite-mode key handling ──
+
+bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
+    const bool isHexMode = (m_editState.target == EditTarget::Value);
+    // isHexMode = true: editing "00 00 00 00 00 00 00 00" (hex bytes)
+    // isHexMode = false: editing "........" (ASCII preview)
+
+    int line, col;
+    m_sci->getCursorPosition(&line, &col);
+    const int spanStart = m_editState.spanStart;
+    const int spanEnd = spanStart + m_editState.original.size();
+
+    // Helper: replace a single character and re-apply hex dimming indicator
+    // (SCI_REPLACETARGET can clear indicators at the replacement position)
+    auto replaceCharAt = [this](long pos, char ch) {
+        QByteArray buf(1, ch);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, pos);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, pos + 1);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
+                             (uintptr_t)1, buf.constData());
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HEX_DIM);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, 1);
+    };
+
+    switch (ke->key()) {
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+        commitInlineEdit();
+        return true;
+    case Qt::Key_Escape:
+        cancelInlineEdit();
+        return true;
+    case Qt::Key_Tab:
+    case Qt::Key_Up:
+    case Qt::Key_Down:
+    case Qt::Key_PageUp:
+    case Qt::Key_PageDown:
+        return true;  // block
+
+    case Qt::Key_Home:
+        m_sci->setCursorPosition(line, spanStart);
+        return true;
+    case Qt::Key_End: {
+        // Last data position (last char of span)
+        int endCol = spanEnd - 1;
+        if (endCol < spanStart) endCol = spanStart;
+        m_sci->setCursorPosition(line, endCol);
+        return true;
+    }
+
+    case Qt::Key_Left: {
+        if (col <= spanStart) return true;
+        int newCol = col - 1;
+        // In hex mode, skip over space separators
+        if (isHexMode) {
+            QString lineText = getLineText(m_sci, line);
+            if (newCol >= spanStart && newCol < lineText.size() && lineText[newCol] == ' ')
+                newCol--;
+        }
+        if (newCol < spanStart) newCol = spanStart;
+        m_sci->setCursorPosition(line, newCol);
+        return true;
+    }
+
+    case Qt::Key_Right: {
+        if (col >= spanEnd - 1) return true;
+        int newCol = col + 1;
+        if (isHexMode) {
+            QString lineText = getLineText(m_sci, line);
+            if (newCol < spanEnd && newCol < lineText.size() && lineText[newCol] == ' ')
+                newCol++;
+        }
+        if (newCol >= spanEnd) newCol = spanEnd - 1;
+        m_sci->setCursorPosition(line, newCol);
+        return true;
+    }
+
+    case Qt::Key_Backspace: {
+        if (col <= spanStart) return true;
+        int prevCol = col - 1;
+        if (isHexMode) {
+            QString lineText = getLineText(m_sci, line);
+            if (prevCol >= spanStart && prevCol < lineText.size() && lineText[prevCol] == ' ')
+                prevCol--;
+        }
+        if (prevCol < spanStart) return true;
+        // Replace previous char with reset value
+        long pos = posFromCol(m_sci, line, prevCol);
+        replaceCharAt(pos, isHexMode ? '0' : '.');
+        m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, pos);
+        return true;
+    }
+
+    case Qt::Key_Delete: {
+        if (col >= spanEnd) return true;
+        // Skip space separators in hex mode
+        if (isHexMode) {
+            QString lineText = getLineText(m_sci, line);
+            if (col < lineText.size() && lineText[col] == ' ') return true;
+        }
+        // Reset current char
+        long pos = posFromCol(m_sci, line, col);
+        replaceCharAt(pos, isHexMode ? '0' : '.');
+        m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, pos);
+        return true;
+    }
+
+    case Qt::Key_Z:
+        if (ke->modifiers() & Qt::ControlModifier)
+            return true;  // block Ctrl+Z during hex overwrite
+        break;
+
+    case Qt::Key_V:
+        if (ke->modifiers() & Qt::ControlModifier) {
+            QString clip = QApplication::clipboard()->text();
+            clip.remove('\n');
+            clip.remove('\r');
+            if (!clip.isEmpty()) {
+                QString lineText = getLineText(m_sci, line);
+                int writeCol = col;
+                for (int i = 0; i < clip.size() && writeCol < spanEnd; i++) {
+                    QChar ch = clip[i];
+                    if (isHexMode) {
+                        // Skip spaces in paste content
+                        if (ch == ' ') continue;
+                        // Skip over space separators in the target
+                        if (writeCol < lineText.size() && lineText[writeCol] == ' ')
+                            writeCol++;
+                        if (writeCol >= spanEnd) break;
+                        // Only accept hex digits
+                        if (!ch.isDigit() && !(ch >= 'a' && ch <= 'f') && !(ch >= 'A' && ch <= 'F'))
+                            continue;
+                        ch = ch.toUpper();
+                    } else {
+                        // Only accept printable ASCII
+                        if (ch.unicode() < 0x20 || ch.unicode() > 0x7E) continue;
+                    }
+                    long pos = posFromCol(m_sci, line, writeCol);
+                    replaceCharAt(pos, (char)ch.toLatin1());
+                    writeCol++;
+                    // Re-read after each replace for hex space skip
+                    if (isHexMode) lineText = getLineText(m_sci, line);
+                }
+                int finalCol = qMin(writeCol, spanEnd - 1);
+                // In hex mode, if we landed on a space, advance past it
+                if (isHexMode) {
+                    lineText = getLineText(m_sci, line);
+                    if (finalCol < spanEnd && finalCol < lineText.size() && lineText[finalCol] == ' ')
+                        finalCol++;
+                    if (finalCol >= spanEnd) finalCol = spanEnd - 1;
+                }
+                m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
+                                     posFromCol(m_sci, line, finalCol));
+            }
+            return true;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    // Character input: overwrite current position and advance
+    QString text = ke->text();
+    if (text.isEmpty() || text[0].unicode() < 0x20)
+        return true;  // consume non-printable (block default Scintilla handling)
+
+    QChar ch = text[0];
+
+    if (isHexMode) {
+        // Only accept hex digits
+        if (!ch.isDigit() && !(ch >= 'a' && ch <= 'f') && !(ch >= 'A' && ch <= 'F'))
+            return true;
+        ch = ch.toUpper();
+
+        // If cursor is on a space, skip to next byte
+        QString lineText = getLineText(m_sci, line);
+        int writeCol = col;
+        if (writeCol < lineText.size() && lineText[writeCol] == ' ')
+            writeCol++;
+        if (writeCol >= spanEnd) return true;
+
+        // Overwrite current digit
+        long pos = posFromCol(m_sci, line, writeCol);
+        replaceCharAt(pos, (char)ch.toLatin1());
+
+        // Advance cursor, skip over spaces
+        int nextCol = writeCol + 1;
+        lineText = getLineText(m_sci, line);
+        if (nextCol < spanEnd && nextCol < lineText.size() && lineText[nextCol] == ' ')
+            nextCol++;
+        if (nextCol >= spanEnd) nextCol = spanEnd - 1;
+        m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
+                             posFromCol(m_sci, line, nextCol));
+    } else {
+        // ASCII mode: only printable ASCII
+        if (ch.unicode() < 0x20 || ch.unicode() > 0x7E)
+            return true;
+        if (col >= spanEnd) return true;
+
+        // Overwrite current char
+        long pos = posFromCol(m_sci, line, col);
+        replaceCharAt(pos, (char)ch.toLatin1());
+
+        // Advance cursor
+        int nextCol = col + 1;
+        if (nextCol >= spanEnd) nextCol = spanEnd - 1;
+        m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
+                             posFromCol(m_sci, line, nextCol));
+    }
+    return true;
+}
+
 // ── Begin inline edit ──
 
 bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
@@ -2490,14 +2708,39 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         (target == EditTarget::BaseAddress || target == EditTarget::Source
          || target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
         return false;
-    // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
-    // Exception: static field names are always editable (they're function names, not hex labels)
-    if ((target == EditTarget::Name || target == EditTarget::Value) && isHexNode(lm->nodeKind) && !lm->isStaticLine)
+    // Hex nodes: only Type is editable via normal flow (double-click, F2, Enter)
+    // Exception: context-menu-initiated hex/ASCII edits bypass this via m_hexEditPending
+    bool isHexEdit = m_hexEditPending && isHexNode(lm->nodeKind) && !lm->isStaticLine
+        && (target == EditTarget::Name || target == EditTarget::Value);
+    m_hexEditPending = false;
+    if ((target == EditTarget::Name || target == EditTarget::Value)
+        && isHexNode(lm->nodeKind) && !lm->isStaticLine && !isHexEdit)
         return false;
 
     QString lineText;
     NormalizedSpan norm;
-    if (!resolvedSpanFor(line, target, norm, &lineText)) return false;
+
+    if (isHexEdit) {
+        // Compute hex spans directly (bypasses resolvedSpanFor which also blocks hex)
+        lineText = getLineText(m_sci, line);
+        int typeW = lm->effectiveTypeW;
+        int nameW = lm->effectiveNameW;
+        int byteCount = sizeForKind(lm->nodeKind);
+        if (target == EditTarget::Name) {
+            // ASCII preview: exactly byteCount chars (no trailing-space trim)
+            ColumnSpan s = nameSpanFor(*lm, typeW, nameW);
+            if (!s.valid) return false;
+            norm = {s.start, s.start + byteCount, true};
+        } else {
+            // Hex bytes: "XX XX XX..." = byteCount*3-1 chars
+            ColumnSpan s = valueSpanFor(*lm, lineText.size(), typeW, nameW);
+            if (!s.valid) return false;
+            int hexWidth = byteCount * 3 - 1;
+            norm = {s.start, s.start + hexWidth, true};
+        }
+    } else {
+        if (!resolvedSpanFor(line, target, norm, &lineText)) return false;
+    }
 
     QString trimmed = lineText.mid(norm.start, norm.end - norm.start);
 
@@ -2558,6 +2801,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     m_editState.original = trimmed;
     m_editState.linelenAfterReplace = lineText.size();
     m_editState.editKind = lm->nodeKind;
+    m_editState.hexOverwrite = isHexEdit;
     if (isVectorKind(lm->nodeKind)) {
         m_editState.subLine = vecComponent;
         m_editState.editKind = NodeKind::Float;
@@ -2567,9 +2811,9 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         m_editState.editKind = NodeKind::Float;
     }
 
-    // Store fixed comment column position for value editing
+    // Store fixed comment column position for value editing (and hex ASCII edits)
     // Use large lineLength so commentCol is always computed (padding added dynamically)
-    if (target == EditTarget::Value) {
+    if (target == EditTarget::Value || (isHexEdit && target == EditTarget::Name)) {
         ColumnSpan cs = commentSpanFor(*lm, 9999, lm->effectiveTypeW, lm->effectiveNameW);
         m_editState.commentCol = cs.valid ? cs.start : -1;
         m_editState.lastValidationOk = true;  // original value is always valid
@@ -2586,9 +2830,10 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETWIDTH, 1);
     m_sci->setReadOnly(false);
 
-    // For value editing: extend line with trailing spaces for the edit comment area
+    // For value/hex editing: extend line with trailing spaces for the edit comment area
     // (comment padding is no longer baked into every line to avoid unnecessary scroll width)
-    if ((target == EditTarget::Value || target == EditTarget::BaseAddress)
+    if ((target == EditTarget::Value || target == EditTarget::BaseAddress
+         || (isHexEdit && target == EditTarget::Name))
         && m_editState.commentCol >= 0) {
         int commentStart = m_editState.commentCol;
         int commentWidth = (target == EditTarget::BaseAddress) ? 60 : kColComment;
@@ -2636,10 +2881,19 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     }
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL, selStart, m_editState.posEnd);
 
+    // Hex overwrite: place cursor at start, no selection
+    if (m_editState.hexOverwrite)
+        m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, m_editState.posStart);
+
     // Show initial edit hint in comment column
-    if (target == EditTarget::Value)
-        setEditComment(QStringLiteral("Enter=Save Esc=Cancel"));
-    else if (target == EditTarget::BaseAddress)
+    if (target == EditTarget::Value) {
+        if (m_editState.hexOverwrite)
+            setEditComment(QStringLiteral("Hex edit: Enter=Save Esc=Cancel"));
+        else
+            setEditComment(QStringLiteral("Enter=Save Esc=Cancel"));
+    } else if (target == EditTarget::Name && m_editState.hexOverwrite) {
+        setEditComment(QStringLiteral("ASCII edit: Enter=Save Esc=Cancel"));
+    } else if (target == EditTarget::BaseAddress)
         setEditComment(QStringLiteral("e.g. <mod.exe> + 0xFF | [0x1000 + 0x10] | 7ff6`1234ABCD"));
 
     // Note: Type, ArrayElementType, PointerTarget are handled by TypeSelectorPopup
@@ -2664,6 +2918,19 @@ void RcxEditor::clampEditSelection() {
 
     if (m_clampingSelection) return;
     m_clampingSelection = true;
+
+    // Hex overwrite: collapse any selection to cursor (no selection allowed)
+    if (m_editState.hexOverwrite) {
+        int sL, sC, eL, eC;
+        m_sci->getSelection(&sL, &sC, &eL, &eC);
+        if (sL != eL || sC != eC) {
+            int curLine, curCol;
+            m_sci->getCursorPosition(&curLine, &curCol);
+            m_sci->setCursorPosition(m_editState.line, curCol);
+        }
+        m_clampingSelection = false;
+        return;
+    }
 
     int selStartLine, selStartCol, selEndLine, selEndCol;
     m_sci->getSelection(&selStartLine, &selStartCol, &selEndLine, &selEndCol);
@@ -2710,8 +2977,11 @@ void RcxEditor::commitInlineEdit() {
     int editedLen = m_editState.original.size() + delta;
 
     QString editedText;
-    if (editedLen > 0)
-        editedText = lineText.mid(m_editState.spanStart, editedLen).trimmed();
+    if (editedLen > 0) {
+        editedText = lineText.mid(m_editState.spanStart, editedLen);
+        if (!m_editState.hexOverwrite)
+            editedText = editedText.trimmed();
+    }
 
     // For Type edits: if nothing changed, commit original
     if (m_editState.target == EditTarget::Type && editedText.isEmpty())

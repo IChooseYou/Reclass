@@ -51,6 +51,7 @@ public:
     bool isEditing() const { return m_editState.active; }
     bool beginInlineEdit(EditTarget target, int line = -1, int col = -1);
     void cancelInlineEdit();
+    void setHexEditPending(bool v) { m_hexEditPending = v; }
     void setStaticCompletions(const QStringList& words) { m_staticCompletions = words; }
 
     void applySelectionOverlay(const QSet<uint64_t>& selIds);
@@ -143,6 +144,7 @@ private:
         NodeKind   editKind = NodeKind::Int32;
         int        commentCol = -1;  // fixed comment column (stored at edit start)
         bool       lastValidationOk = true;  // track state to avoid redundant updates
+        bool       hexOverwrite = false;  // true for hex-byte / ASCII-preview fixed-length editing
     };
     InlineEditState m_editState;
     QStringList m_staticCompletions;  // autocomplete words for StaticExpr editing
@@ -171,6 +173,9 @@ private:
     long       m_findPos = 0;
     void hideFindBar();
 
+    // ── Hex inline edit ──
+    bool m_hexEditPending = false;  // set by context menu before calling beginInlineEdit
+
     // ── Reentrancy guards ──
     bool m_applyingDocument = false;
     bool m_clampingSelection = false;
@@ -195,6 +200,7 @@ private:
     int  editEndCol() const;
     bool handleNormalKey(QKeyEvent* ke);
     bool handleEditKey(QKeyEvent* ke);
+    bool handleHexEditKey(QKeyEvent* ke);
     void showTypeAutocomplete();
     void showSourcePicker();
     void showTypeListFiltered(const QString& filter);
