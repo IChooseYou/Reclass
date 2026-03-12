@@ -1321,10 +1321,6 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].isStatic = isUndo ? c.oldVal : c.newVal;
-        } else if constexpr (std::is_same_v<T, cmd::ToggleRelative>) {
-            int idx = tree.indexOfId(c.nodeId);
-            if (idx >= 0)
-                tree.nodes[idx].isRelative = isUndo ? c.oldVal : c.newVal;
         }
     }, command);
 
@@ -2103,21 +2099,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     && node.refId == 0)) {
                 convertMenu->addAction("Change to ptr*", [this, nodeId]() {
                     convertToTypedPointer(nodeId);
-                });
-                hasConvert = true;
-            }
-
-            // Toggle relative pointer (RVA: target = base + value)
-            if (node.kind == NodeKind::Pointer64 || node.kind == NodeKind::Pointer32) {
-                QString label = node.isRelative
-                    ? QStringLiteral("Pointer is Absolute")
-                    : QStringLiteral("Pointer is &Relative (base + value)");
-                convertMenu->addAction(label, [this, nodeId]() {
-                    int ni = m_doc->tree.indexOfId(nodeId);
-                    if (ni < 0) return;
-                    const Node& n = m_doc->tree.nodes[ni];
-                    m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::ToggleRelative{n.id, n.isRelative, !n.isRelative}));
                 });
                 hasConvert = true;
             }
@@ -3495,10 +3476,6 @@ void RcxController::collectPointerRanges(
             ? (uint64_t)m_snapshotProv->readU32(ptrAddr)
             : m_snapshotProv->readU64(ptrAddr);
         if (ptrVal == 0 || ptrVal == UINT64_MAX) continue;
-
-        // Relative pointer (RVA): target = base + value
-        if (child.isRelative)
-            ptrVal += memBase;
 
         uint64_t pBase = ptrVal;
         collectPointerRanges(child.refId, pBase, depth + 1, maxDepth,
