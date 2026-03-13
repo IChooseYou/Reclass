@@ -134,16 +134,6 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
         return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF16), name).arg(node.strLen) + oc;
     case NodeKind::Pointer32:
     case NodeKind::Pointer64: {
-        // Relative pointer (RVA): emit as integer with comment, not a C pointer
-        if (node.isRelative) {
-            QString rvaComment = QStringLiteral(" // rva");
-            if (node.refId != 0) {
-                int refIdx = tree.indexOfId(node.refId);
-                if (refIdx >= 0)
-                    rvaComment += QStringLiteral(" -> ") + ctx.structName(tree.nodes[refIdx]);
-            }
-            return ind + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name) + rvaComment + oc;
-        }
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
@@ -514,15 +504,6 @@ static QString emitRustField(GenContext& ctx, const Node& node, int depth, int b
         return ind + QStringLiteral("pub %1: [u16; %2],").arg(name).arg(node.strLen) + oc;
     case NodeKind::Pointer32:
     case NodeKind::Pointer64: {
-        if (node.isRelative) {
-            QString comment = QStringLiteral(" // rva");
-            if (node.refId != 0) {
-                int refIdx = tree.indexOfId(node.refId);
-                if (refIdx >= 0)
-                    comment += QStringLiteral(" -> ") + ctx.structName(tree.nodes[refIdx]);
-            }
-            return ind + QStringLiteral("pub %1: %2,").arg(name, rustType(ctx, node.kind)) + comment + oc;
-        }
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
