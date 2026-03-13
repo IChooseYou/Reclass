@@ -1,15 +1,42 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
-set MSVC=C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\14.39.33519
-set WDK=C:\Program Files (x86)\Windows Kits\10
-set WDKVER=10.0.22621.0
+:: ── Auto-detect MSVC ──
+set "VSBASE=C:\Program Files\Microsoft Visual Studio\2022"
+set MSVC=
+for %%E in (Enterprise Professional Community BuildTools) do (
+    if exist "%VSBASE%\%%E\VC\Tools\MSVC" (
+        for /f "delims=" %%V in ('dir /b /ad /o-n "%VSBASE%\%%E\VC\Tools\MSVC" 2^>nul') do (
+            if not defined MSVC set "MSVC=%VSBASE%\%%E\VC\Tools\MSVC\%%V"
+        )
+    )
+)
+if not defined MSVC (
+    echo ERROR: Could not find MSVC toolchain under %VSBASE%
+    exit /b 1
+)
 
-set CL_EXE=%MSVC%\bin\Hostx64\x64\cl.exe
-set LINK_EXE=%MSVC%\bin\Hostx64\x64\link.exe
+:: ── Auto-detect WDK ──
+set "WDK=C:\Program Files (x86)\Windows Kits\10"
+set WDKVER=
+for /f "delims=" %%V in ('dir /b /ad /o-n "%WDK%\Include" 2^>nul') do (
+    if exist "%WDK%\Include\%%V\km\ntddk.h" (
+        if not defined WDKVER set "WDKVER=%%V"
+    )
+)
+if not defined WDKVER (
+    echo ERROR: Could not find WDK headers under %WDK%\Include
+    exit /b 1
+)
 
-set SRCDIR=%~dp0
-set OUTDIR=%SRCDIR%build
+echo Using MSVC: %MSVC%
+echo Using WDK:  %WDK% (%WDKVER%)
+
+set "CL_EXE=%MSVC%\bin\Hostx64\x64\cl.exe"
+set "LINK_EXE=%MSVC%\bin\Hostx64\x64\link.exe"
+
+set "SRCDIR=%~dp0"
+set "OUTDIR=%SRCDIR%build"
 
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
