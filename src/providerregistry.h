@@ -7,6 +7,13 @@
 // Forward declarations
 namespace rcx { class Provider; }
 class QWidget;
+class QMenu;
+
+// Lightweight struct for saved source display in menus
+struct SavedSourceDisplay {
+    QString text;
+    bool active = false;
+};
 
 /**
  * Global registry for data source providers
@@ -56,7 +63,13 @@ public:
     
     // Clear all providers
     void clear();
-    
+
+    // Populate a QMenu with source items (File, providers with icons/dll names,
+    // plugin actions, saved sources). Used by both the main window Data Source
+    // menu and the RcxEditor inline source picker.
+    static void populateSourceMenu(QMenu* menu,
+                                   const QVector<SavedSourceDisplay>& savedSources = {});
+
 private:
     ProviderRegistry() = default;
     QList<ProviderInfo> m_providers;

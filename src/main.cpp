@@ -58,6 +58,7 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <dbghelp.h>
+#include <shellapi.h>
 #include <cstdio>
 
 static void setDarkTitleBar(QWidget* widget) {
@@ -552,7 +553,7 @@ void applyMacTitleBarTheme(QWidget* window, const Theme& theme);
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Reclass");
-    resize(1200, 800);
+    resize(1080, 720);
 
 #ifndef __APPLE__
     // Frameless window with system menu (Alt+Space) and min/max/close support.
@@ -755,6 +756,52 @@ void MainWindow::createMenus() {
     file->addSeparator();
     Qt5Qt6AddAction(file, "&Close Project", QKeySequence(Qt::CTRL | Qt::Key_W), QIcon(), this, &MainWindow::closeFile);
     file->addSeparator();
+#ifdef _WIN32
+    {
+        // "Relaunch as Administrator" — hidden when already elevated
+        bool elevated = false;
+        HANDLE token = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            TOKEN_ELEVATION elev{};
+            DWORD sz = sizeof(elev);
+            if (GetTokenInformation(token, TokenElevation, &elev, sizeof(elev), &sz))
+                elevated = (elev.TokenIsElevated != 0);
+            CloseHandle(token);
+        }
+        if (!elevated) {
+            Qt5Qt6AddAction(file, "Relaunch as &Administrator",
+                QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A),
+                makeIcon(":/vsicons/shield.svg"), this, [this]() {
+                    wchar_t exePath[MAX_PATH];
+                    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+                    SHELLEXECUTEINFOW sei{};
+                    sei.cbSize = sizeof(sei);
+                    sei.lpVerb = L"runas";
+                    sei.lpFile = exePath;
+                    sei.nShow  = SW_SHOWNORMAL;
+                    if (ShellExecuteExW(&sei))
+                        QCoreApplication::quit();
+                    // If UAC was cancelled, do nothing
+                });
+            file->addSeparator();
+        }
+    }
+#endif
+    m_sourceMenu = file->addMenu("&Data Source");
+    connect(m_sourceMenu, &QMenu::aboutToShow, this, &MainWindow::populateSourceMenu);
+    connect(m_sourceMenu, &QMenu::triggered, this, [this](QAction* act) {
+        auto* c = activeController();
+        if (!c) return;
+        QString data = act->data().toString();
+        if (data.isEmpty()) return;  // plugin actions handle themselves via lambda
+        if (data == QStringLiteral("#clear"))
+            c->clearSources();
+        else if (data.startsWith(QStringLiteral("#saved:")))
+            c->switchSource(data.mid(7).toInt());
+        else
+            c->selectSource(data);
+    });
+    file->addSeparator();
     Qt5Qt6AddAction(file, "E&xit", QKeySequence(Qt::Key_Close), makeIcon(":/vsicons/close.svg"), this, &QMainWindow::close);
 
     // Edit
@@ -784,9 +831,6 @@ void MainWindow::createMenus() {
         if (m_activeDocDock) m_activeDocDock->raise();
         QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
     });
-    view->addSeparator();
-    m_sourceMenu = view->addMenu("&Data Source");
-    connect(m_sourceMenu, &QMenu::aboutToShow, this, &MainWindow::populateSourceMenu);
     view->addSeparator();
     auto* fontMenu = view->addMenu(makeIcon(":/vsicons/text-size.svg"), "&Font");
     auto* fontGroup = new QActionGroup(this);
@@ -1886,6 +1930,33 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             dock->setFloating(!dock->isFloating());
         });
         menu->addAction("Close Tab", [dock]() { dock->close(); });
+    });
+
+    // Open a new tab with a plugin-provided provider (e.g. kernel physical memory)
+    connect(ctrl, &RcxController::requestOpenProviderTab,
+            this, [this](const QString& pluginId, const QString& target,
+                         const QString& title) {
+        auto* newDoc = new RcxDocument(this);
+        QByteArray data(4096, '\0');
+        newDoc->loadData(data);
+        newDoc->tree.baseAddress = 0;
+
+        auto* newDock = createTab(newDoc);
+        auto it = m_tabs.find(newDock);
+        if (it != m_tabs.end()) {
+            it->ctrl->attachViaPlugin(pluginId, target);
+            // Try to load PageTables.rcx template for physical kernel tabs
+            QString examplesPath = QCoreApplication::applicationDirPath()
+                + QStringLiteral("/examples/PageTables.rcx");
+            if (QFile::exists(examplesPath))
+                newDoc->load(examplesPath);
+            // Set base address from provider (template has baseAddress=0,
+            // but we want to start at the target physical address)
+            if (newDoc->provider)
+                newDoc->tree.baseAddress = newDoc->provider->base();
+        }
+        newDock->setWindowTitle(title);
+        rebuildWorkspaceModelNow();
     });
 
     // Update rendered panes and workspace on document changes and undo/redo
@@ -4633,63 +4704,19 @@ void MainWindow::populateSourceMenu() {
     m_sourceMenu->clear();
     auto* ctrl = activeController();
 
-    // Icon map for known provider identifiers
-    static const QHash<QString, QString> s_providerIcons = {
-        {QStringLiteral("processmemory"),          QStringLiteral(":/vsicons/server-process.svg")},
-        {QStringLiteral("remoteprocessmemory"),    QStringLiteral(":/vsicons/remote.svg")},
-        {QStringLiteral("windbgmemory"),           QStringLiteral(":/vsicons/debug.svg")},
-        {QStringLiteral("reclass.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
-    };
-
-    auto addSourceAction = [this](const QString& text, const QIcon& icon, auto&& slot) {
-        auto* act = m_sourceMenu->addAction(icon, text);
-        act->setIconVisibleInMenu(true);
-        connect(act, &QAction::triggered, this, std::forward<decltype(slot)>(slot));
-        return act;
-    };
-
-    addSourceAction(QStringLiteral("File"),
-                    makeIcon(QStringLiteral(":/vsicons/file-binary.svg")),
-                    [this]() {
-        if (auto* c = activeController()) c->selectSource(QStringLiteral("File"));
-    });
-
-    const auto& providers = ProviderRegistry::instance().providers();
-    for (const auto& prov : providers) {
-        QString name = prov.name;
-        auto it = s_providerIcons.constFind(prov.identifier);
-        QIcon icon = makeIcon(it != s_providerIcons.constEnd() ? *it
-                              : QStringLiteral(":/vsicons/extensions.svg"));
-
-        QString label = prov.dllFileName.isEmpty()
-            ? name
-            : QStringLiteral("%1  (%2)").arg(name, prov.dllFileName);
-
-        addSourceAction(label, icon, [this, name]() {
-            if (auto* c = activeController()) c->selectSource(name);
-        });
-    }
-
-    if (ctrl && !ctrl->savedSources().isEmpty()) {
-        m_sourceMenu->addSeparator();
-        for (int i = 0; i < ctrl->savedSources().size(); i++) {
-            const auto& e = ctrl->savedSources()[i];
-            auto* act = m_sourceMenu->addAction(
-                QStringLiteral("%1 '%2'").arg(e.kind, e.displayName));
-            act->setCheckable(true);
-            act->setChecked(i == ctrl->activeSourceIndex());
-            connect(act, &QAction::triggered, this, [this, i]() {
-                if (auto* c = activeController()) c->switchSource(i);
-            });
+    // Build saved sources for the shared menu builder
+    QVector<SavedSourceDisplay> saved;
+    if (ctrl) {
+        const auto& ss = ctrl->savedSources();
+        for (int i = 0; i < ss.size(); i++) {
+            SavedSourceDisplay d;
+            d.text = QStringLiteral("%1 '%2'").arg(ss[i].kind, ss[i].displayName);
+            d.active = (i == ctrl->activeSourceIndex());
+            saved.append(d);
         }
-        m_sourceMenu->addSeparator();
-        auto* clearAct = addSourceAction(QStringLiteral("Clear All"),
-                        makeIcon(QStringLiteral(":/vsicons/clear-all.svg")),
-                        [this]() {
-            if (auto* c = activeController()) c->clearSources();
-        });
-        Q_UNUSED(clearAct);
     }
+
+    ProviderRegistry::populateSourceMenu(m_sourceMenu, saved);
 }
 
 void MainWindow::showPluginsDialog() {

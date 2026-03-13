@@ -163,6 +163,8 @@ signals:
     void nodeSelected(int nodeIdx);
     void selectionChanged(int count);
     void contextMenuAboutToShow(QMenu* menu, int line);
+    void requestOpenProviderTab(const QString& pluginId, const QString& target,
+                                const QString& title);
 
 private:
     RcxDocument*       m_doc;

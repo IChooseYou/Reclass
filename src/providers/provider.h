@@ -16,6 +16,13 @@ struct MemoryRegion {
     QString  moduleName;
 };
 
+struct VtopResult {
+    uint64_t physical = 0;
+    uint64_t pml4e = 0, pdpte = 0, pde = 0, pte = 0;
+    uint8_t  pageSize = 0;  // 0=4KB, 1=2MB, 2=1GB
+    bool     valid = false;
+};
+
 class Provider {
 public:
     virtual ~Provider() = default;
@@ -79,6 +86,19 @@ public:
 
     struct ThreadInfo { uint64_t tebAddress; uint32_t threadId; };
     virtual QVector<ThreadInfo> tebs() const { return {}; }
+
+    // --- Kernel paging capabilities (override in kernel providers) ---
+    virtual bool hasKernelPaging() const { return false; }
+    virtual uint64_t getCr3() const { return 0; }
+    virtual VtopResult translateAddress(uint64_t va) const {
+        Q_UNUSED(va); return {};
+    }
+    virtual QVector<uint64_t> readPageTable(uint64_t physAddr,
+                                            int startIdx = 0,
+                                            int count = 512) const {
+        Q_UNUSED(physAddr); Q_UNUSED(startIdx); Q_UNUSED(count);
+        return {};
+    }
 
     // --- Derived convenience (non-virtual, never override) ---
 

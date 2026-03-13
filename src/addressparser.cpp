@@ -273,6 +273,7 @@ private:
     // Identifier or hex literal disambiguation.
     // Scan [a-zA-Z_][a-zA-Z0-9_]*. If it contains any non-hex char → identifier.
     // Otherwise → backtrack and parse as hex number.
+    // If the identifier is followed by '(', try to parse as a built-in function call.
     bool parseIdentifierOrHex(uint64_t& result) {
         int start = m_pos;
         bool hasNonHex = false;
@@ -292,6 +293,11 @@ private:
             return parseHexNumber(result);
         }
 
+        // Check for function call syntax: identifier '(' args ')'
+        skipSpaces();
+        if (peek() == '(')
+            return parseFunctionCall(token, result);
+
         // It's an identifier — resolve via callback
         if (!m_callbacks || !m_callbacks->resolveIdentifier) {
             result = 0;
@@ -303,6 +309,71 @@ private:
         if (!ok)
             return fail(QStringLiteral("unknown identifier '%1'").arg(token));
         return true;
+    }
+
+    // Built-in function call: vtop(pid, va), cr3(pid), phys(addr)
+    bool parseFunctionCall(const QString& name, uint64_t& result) {
+        advance(); // skip '('
+
+        if (name == QStringLiteral("vtop")) {
+            // vtop(pid, virtualAddress) → physical address
+            uint64_t pid = 0;
+            if (!parseBitwiseOr(pid)) return false;
+            skipSpaces();
+            if (peek() != ',')
+                return fail("vtop() requires 2 arguments: vtop(pid, va)");
+            advance(); // skip ','
+            uint64_t va = 0;
+            if (!parseBitwiseOr(va)) return false;
+            if (!expect(')')) return false;
+
+            if (!m_callbacks || !m_callbacks->vtop) {
+                result = 0;
+                return true;
+            }
+            bool ok = false;
+            result = m_callbacks->vtop((uint32_t)pid, va, &ok);
+            if (!ok)
+                return fail(QStringLiteral("vtop(0x%1, 0x%2) failed")
+                    .arg(pid, 0, 16).arg(va, 0, 16));
+            return true;
+        }
+
+        if (name == QStringLiteral("cr3")) {
+            // cr3(pid) → CR3 value
+            uint64_t pid = 0;
+            if (!parseBitwiseOr(pid)) return false;
+            if (!expect(')')) return false;
+
+            if (!m_callbacks || !m_callbacks->cr3) {
+                result = 0;
+                return true;
+            }
+            bool ok = false;
+            result = m_callbacks->cr3((uint32_t)pid, &ok);
+            if (!ok)
+                return fail(QStringLiteral("cr3(%1) failed").arg(pid));
+            return true;
+        }
+
+        if (name == QStringLiteral("phys")) {
+            // phys(addr) → read 8 bytes from physical address
+            uint64_t addr = 0;
+            if (!parseBitwiseOr(addr)) return false;
+            if (!expect(')')) return false;
+
+            if (!m_callbacks || !m_callbacks->physRead) {
+                result = 0;
+                return true;
+            }
+            bool ok = false;
+            result = m_callbacks->physRead(addr, &ok);
+            if (!ok)
+                return fail(QStringLiteral("phys(0x%1) failed").arg(addr, 0, 16));
+            return true;
+        }
+
+        return fail(QStringLiteral("unknown function '%1'").arg(name));
     }
 
     // '[' bitwiseOr ']' — read the pointer value at the computed address

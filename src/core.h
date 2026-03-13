@@ -197,6 +197,7 @@ struct Node {
     int      offset     = 0;
     bool     isStatic   = false;   // static field — excluded from struct layout
     QString  offsetExpr;           // C/C++ expression → absolute address (static fields only)
+    bool     isRelative = false;   // Pointer: target = base + value (RVA) instead of absolute
     int      arrayLen   = 1;   // Array: element count
     int      strLen     = 64;
     bool     collapsed  = true;
@@ -242,6 +243,8 @@ struct Node {
             o["isStatic"] = true;
         if (!offsetExpr.isEmpty())
             o["offsetExpr"] = offsetExpr;
+        if (isRelative)
+            o["isRelative"] = true;
         o["arrayLen"]  = arrayLen;
         o["strLen"]    = strLen;
         o["collapsed"] = collapsed;
@@ -283,6 +286,7 @@ struct Node {
         n.offset    = o["offset"].toInt(0);
         n.isStatic  = o["isStatic"].toBool(o["isHelper"].toBool(false));
         n.offsetExpr = o["offsetExpr"].toString();
+        n.isRelative = o["isRelative"].toBool(false);
         n.arrayLen  = qBound(1, o["arrayLen"].toInt(1), 1000000);
         n.strLen    = qBound(1, o["strLen"].toInt(64), 1000000);
         n.collapsed = o["collapsed"].toBool(true);
@@ -677,6 +681,7 @@ namespace cmd {
                                QVector<QPair<QString, int64_t>> oldMembers, newMembers; };
     struct ChangeOffsetExpr { uint64_t nodeId; QString oldExpr, newExpr; };
     struct ToggleStatic     { uint64_t nodeId; bool oldVal, newVal; };
+    struct ToggleRelative   { uint64_t nodeId; bool oldVal, newVal; };
 }
 
 using Command = std::variant<
@@ -684,7 +689,7 @@ using Command = std::variant<
     cmd::Insert, cmd::Remove, cmd::ChangeBase, cmd::WriteBytes,
     cmd::ChangeArrayMeta, cmd::ChangePointerRef, cmd::ChangeStructTypeName,
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
-    cmd::ChangeOffsetExpr, cmd::ToggleStatic
+    cmd::ChangeOffsetExpr, cmd::ToggleStatic, cmd::ToggleRelative
 >;
 
 // ── Column spans (for inline editing) ──

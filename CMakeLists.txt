@@ -544,6 +544,17 @@ if(BUILD_TESTING)
             target_link_libraries(test_windbg_provider PRIVATE
             ${QT}::Widgets ${QT}::Concurrent ${QT}::Test dbgeng ole32)
             add_test(NAME test_windbg_provider COMMAND test_windbg_provider)
+
+            add_executable(test_kernel_provider tests/test_kernel_provider.cpp
+            plugins/KernelMemory/KernelMemoryPlugin.cpp
+            src/processpicker.cpp src/processpicker.ui
+            src/scanner.cpp)
+            target_include_directories(test_kernel_provider PRIVATE
+            src plugins/KernelMemory)
+            target_link_libraries(test_kernel_provider PRIVATE
+            ${QT}::Widgets ${QT}::Concurrent ${QT}::Test
+            psapi shell32 advapi32 ${_QT_WINEXTRAS})
+            add_test(NAME test_kernel_provider COMMAND test_kernel_provider)
         endif()
 
         add_executable(bench_large_class tests/bench_large_class.cpp
@@ -587,6 +598,7 @@ if(NOT APPLE)
     add_subdirectory(plugins/RemoteProcessMemory)
 endif()
 if(WIN32)
+    add_subdirectory(plugins/KernelMemory)
     add_subdirectory(plugins/WinDbgMemory)
     add_subdirectory(plugins/RcNetPluginCompatLayer)
 endif()

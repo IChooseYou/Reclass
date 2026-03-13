@@ -10,8 +10,9 @@
     #define RCX_PLUGIN_EXPORT __attribute__((visibility("default")))
 #endif
 
-// Forward declaration
+// Forward declarations
 namespace rcx { class Provider; }
+class QMenu;
 
 /**
  * Plugin interface for Reclass
@@ -129,6 +130,13 @@ public:
      * @return true if enumerateProcesses() should be called
      */
     virtual bool providesProcessList() const { return false; }
+
+    /**
+     * Add plugin-specific actions to the source menu (optional).
+     * Called each time the source menu is shown. Only add items when relevant
+     * (e.g., "Unload Driver" only when the driver is loaded).
+     */
+    virtual void populatePluginMenu(QMenu*) {}
 };
 
 // Plugin factory function signature

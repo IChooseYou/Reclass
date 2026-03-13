@@ -695,6 +695,11 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                     *ok = false;
                     return 0;
                 };
+                cbs.resolveModule = [&prov](const QString& name, bool* ok) -> uint64_t {
+                    uint64_t base = prov.symbolToAddress(name);
+                    *ok = (base != 0);
+                    return base;
+                };
                 return cbs;
             };
 
@@ -827,6 +832,43 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                         }
                     }
 
+                    // Static pointer: read pointer value at evaluated addr, expand ref struct
+                    if (exprOk && sf.refId != 0
+                        && (sf.kind == NodeKind::Pointer64 || sf.kind == NodeKind::Pointer32)) {
+                        int psz = sf.byteSize();
+                        uint64_t ptrVal = 0;
+                        if (prov.isValid() && psz > 0 && prov.isReadable(staticAddr, psz)) {
+                            ptrVal = (sf.kind == NodeKind::Pointer32)
+                                ? (uint64_t)prov.readU32(staticAddr) : prov.readU64(staticAddr);
+                            if (ptrVal == UINT64_MAX || (sf.kind == NodeKind::Pointer32 && ptrVal == 0xFFFFFFFF))
+                                ptrVal = 0;
+                        }
+                        // Relative pointer (RVA): target = base + value
+                        if (sf.isRelative && ptrVal != 0)
+                            ptrVal += absAddr;
+
+                        if (ptrVal != 0) {
+                            uint64_t pBase = ptrVal;
+                            bool ptrReadable = prov.isReadable(pBase, 1);
+                            static NullProvider s_nullProv2;
+                            const Provider& childProv = ptrReadable ? prov : static_cast<const Provider&>(s_nullProv2);
+                            if (!ptrReadable) pBase = 0;
+
+                            int refIdx = tree.indexOfId(sf.refId);
+                            if (refIdx >= 0) {
+                                const Node& ref = tree.nodes[refIdx];
+                                if (ref.kind == NodeKind::Struct || ref.kind == NodeKind::Array) {
+                                    uint64_t savedPtrBase = state.currentPtrBase;
+                                    state.currentPtrBase = pBase;
+                                    composeParent(state, tree, childProv, refIdx,
+                                                  childDepth, pBase, ref.id,
+                                                  /*isArrayChild=*/true);
+                                    state.currentPtrBase = savedPtrBase;
+                                }
+                            }
+                        }
+                    }
+
                     // Footer line: "};"
                     {
                         LineMeta flm;
@@ -893,6 +935,8 @@ void composeNode(ComposeState& state, const NodeTree& tree,
         && node.refId != 0) {
         QString ptrTargetName = resolvePointerTarget(tree, node.refId);
         QString ptrTypeOverride = fmt::pointerTypeName(node.kind, ptrTargetName);
+        if (node.isRelative)
+            ptrTypeOverride += QStringLiteral(" rva");
 
         // Check if this pointer has materialized children (from materializeRefChildren)
         const QVector<int>& ptrChildren = childIndices(state, node.id);
@@ -961,7 +1005,10 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 }
             }
 
-            // Pointer target address is used directly (absolute)
+            // Relative pointer (RVA): target = base + value
+            if (node.isRelative && ptrVal != 0)
+                ptrVal += base;
+
             uint64_t pBase = ptrVal;
             bool ptrReadable = (ptrVal != 0) && prov.isReadable(pBase, 1);
 

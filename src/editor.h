@@ -1,5 +1,6 @@
 #pragma once
 #include "core.h"
+#include "providerregistry.h"
 #include "themes/theme.h"
 #include <QWidget>
 #include <QSet>
@@ -11,11 +12,6 @@ class QsciScintilla;
 class QsciLexerCPP;
 
 namespace rcx {
-
-struct SavedSourceDisplay {
-    QString text;
-    bool active = false;
-};
 
 class RcxEditor : public QWidget {
     Q_OBJECT

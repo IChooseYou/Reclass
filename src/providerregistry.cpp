@@ -1,5 +1,8 @@
 #include "providerregistry.h"
 #include <QDebug>
+#include <QMenu>
+#include <QIcon>
+#include <QHash>
 
 ProviderRegistry& ProviderRegistry::instance() {
     static ProviderRegistry s_instance;
@@ -55,4 +58,58 @@ const ProviderRegistry::ProviderInfo* ProviderRegistry::findProvider(const QStri
 
 void ProviderRegistry::clear() {
     m_providers.clear();
+}
+
+void ProviderRegistry::populateSourceMenu(QMenu* menu,
+                                          const QVector<SavedSourceDisplay>& savedSources)
+{
+    static const QHash<QString, QString> s_providerIcons = {
+        {QStringLiteral("processmemory"),          QStringLiteral(":/vsicons/server-process.svg")},
+        {QStringLiteral("remoteprocessmemory"),    QStringLiteral(":/vsicons/remote.svg")},
+        {QStringLiteral("windbgmemory"),           QStringLiteral(":/vsicons/debug.svg")},
+        {QStringLiteral("reclass.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
+    };
+
+    // File source
+    auto* fileAct = menu->addAction(QIcon(QStringLiteral(":/vsicons/file-binary.svg")),
+                                    QStringLiteral("File"));
+    fileAct->setIconVisibleInMenu(true);
+    fileAct->setData(QStringLiteral("File"));
+
+    // Registered providers
+    const auto& providers = instance().providers();
+    for (const auto& prov : providers) {
+        auto it = s_providerIcons.constFind(prov.identifier);
+        QIcon icon(it != s_providerIcons.constEnd() ? *it
+                   : QStringLiteral(":/vsicons/extensions.svg"));
+
+        QString label = prov.dllFileName.isEmpty()
+            ? prov.name
+            : QStringLiteral("%1  (%2)").arg(prov.name, prov.dllFileName);
+
+        auto* act = menu->addAction(icon, label);
+        act->setIconVisibleInMenu(true);
+        act->setData(prov.name);  // routing key for selectSource()
+
+        // Plugin-specific actions (e.g. "Unload Driver" when loaded)
+        if (prov.plugin)
+            prov.plugin->populatePluginMenu(menu);
+    }
+
+    // Saved sources
+    if (!savedSources.isEmpty()) {
+        menu->addSeparator();
+        for (int i = 0; i < savedSources.size(); i++) {
+            auto* act = menu->addAction(savedSources[i].text);
+            act->setCheckable(true);
+            act->setChecked(savedSources[i].active);
+            act->setData(QStringLiteral("#saved:%1").arg(i));
+        }
+        menu->addSeparator();
+        auto* clearAct = menu->addAction(
+            QIcon(QStringLiteral(":/vsicons/clear-all.svg")),
+            QStringLiteral("Clear All"));
+        clearAct->setIconVisibleInMenu(true);
+        clearAct->setData(QStringLiteral("#clear"));
+    }
 }

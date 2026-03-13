@@ -16,6 +16,11 @@ struct AddressParserCallbacks {
     std::function<uint64_t(const QString& name, bool* ok)> resolveModule;
     std::function<uint64_t(uint64_t addr, bool* ok)>       readPointer;
     std::function<uint64_t(const QString& name, bool* ok)> resolveIdentifier;
+
+    // Kernel paging functions (optional — only wired when kernel provider active)
+    std::function<uint64_t(uint32_t pid, uint64_t va, bool* ok)> vtop;
+    std::function<uint64_t(uint32_t pid, bool* ok)>               cr3;
+    std::function<uint64_t(uint64_t physAddr, bool* ok)>          physRead;
 };
 
 class AddressParser {

@@ -17,6 +17,7 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QSettings>
+#include <QRegularExpression>
 #include <QtConcurrent/QtConcurrentRun>
 #include <limits>
 
@@ -441,13 +442,35 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     *ok = prov->read(addr, &val, ptrSz);
                     return val;
                 };
+                // Wire kernel paging callbacks if provider supports it
+                if (prov->hasKernelPaging()) {
+                    cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
+                        Q_UNUSED(pid);
+                        auto r = prov->translateAddress(va);
+                        *ok = r.valid;
+                        return r.physical;
+                    };
+                    cbs.cr3 = [prov](uint32_t pid, bool* ok) -> uint64_t {
+                        Q_UNUSED(pid);
+                        uint64_t cr3 = prov->getCr3();
+                        *ok = (cr3 != 0);
+                        return cr3;
+                    };
+                    cbs.physRead = [prov](uint64_t physAddr, bool* ok) -> uint64_t {
+                        auto entries = prov->readPageTable(physAddr, 0, 1);
+                        *ok = !entries.isEmpty();
+                        return entries.isEmpty() ? 0 : entries[0];
+                    };
+                }
             }
             auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
             if (result.ok && result.value != m_doc->tree.baseAddress) {
                 uint64_t oldBase = m_doc->tree.baseAddress;
                 QString oldFormula = m_doc->tree.baseAddressFormula;
-                // Store formula if input uses module/deref syntax, otherwise clear
-                QString newFormula = (s.contains('<') || s.contains('[')) ? s : QString();
+                // Store formula if input uses module/deref/kernel-function syntax
+                static const QRegularExpression formulaRx(
+                    QStringLiteral("[<\\[]|\\b(?:vtop|cr3|phys)\\s*\\("));
+                QString newFormula = formulaRx.match(s).hasMatch() ? s : QString();
                 m_doc->undoStack.push(new RcxCommand(this,
                     cmd::ChangeBase{oldBase, result.value, oldFormula, newFormula}));
             }
@@ -2440,6 +2463,103 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         QTimer::singleShot(0, editor, &RcxEditor::showFindBar);
     });
 
+    // ── Kernel paging menu items ──
+    if (m_doc->provider && m_doc->provider->hasKernelPaging()) {
+        menu.addSeparator();
+        auto* kernelMenu = menu.addMenu(icon("symbol-key.svg"), "Kernel");
+
+        // Show Physical Address — translate the node's VA to physical
+        if (hasNode) {
+            uint64_t nodeAddr = m_doc->tree.baseAddress
+                + m_doc->tree.computeOffset(nodeIdx);
+            kernelMenu->addAction("Show Physical Address", [this, nodeAddr, &menu]() {
+                auto result = m_doc->provider->translateAddress(nodeAddr);
+                if (result.valid) {
+                    const char* pageSz = result.pageSize == 2 ? "1 GB"
+                                       : result.pageSize == 1 ? "2 MB" : "4 KB";
+                    QString msg = QStringLiteral(
+                        "Virtual:   0x%1\n"
+                        "Physical:  0x%2\n"
+                        "Page Size: %3\n\n"
+                        "PML4E:  0x%4\n"
+                        "PDPTE:  0x%5\n"
+                        "PDE:    0x%6\n"
+                        "PTE:    0x%7")
+                        .arg(nodeAddr, 16, 16, QChar('0'))
+                        .arg(result.physical, 16, 16, QChar('0'))
+                        .arg(pageSz)
+                        .arg(result.pml4e, 16, 16, QChar('0'))
+                        .arg(result.pdpte, 16, 16, QChar('0'))
+                        .arg(result.pde, 16, 16, QChar('0'))
+                        .arg(result.pte, 16, 16, QChar('0'));
+                    QMessageBox::information(
+                        qobject_cast<QWidget*>(parent()),
+                        QStringLiteral("Physical Address"), msg);
+                } else {
+                    QMessageBox::warning(
+                        qobject_cast<QWidget*>(parent()),
+                        QStringLiteral("Translation Failed"),
+                        QStringLiteral("Address 0x%1 is not mapped")
+                            .arg(nodeAddr, 16, 16, QChar('0')));
+                }
+            });
+        }
+
+        // Browse Page Tables — open PML4 in a new physical tab
+        kernelMenu->addAction("Browse Page Tables", [this]() {
+            uint64_t cr3 = m_doc->provider->getCr3();
+            if (cr3 == 0) {
+                QMessageBox::warning(qobject_cast<QWidget*>(parent()),
+                    QStringLiteral("Error"),
+                    QStringLiteral("Failed to read CR3"));
+                return;
+            }
+            emit requestOpenProviderTab(
+                QStringLiteral("kernelmemory"),
+                QStringLiteral("phys:%1").arg(cr3, 0, 16),
+                QStringLiteral("PML4 @ 0x%1").arg(cr3, 0, 16));
+        });
+
+        // Follow Physical Frame — on a PTE bitfield, extract PhysAddr and open
+        if (hasNode) {
+            const auto& node = m_doc->tree.nodes[nodeIdx];
+            if (node.classKeyword == QStringLiteral("bitfield")) {
+                for (const auto& bf : node.bitfieldMembers) {
+                    if (bf.name == QStringLiteral("PhysAddr")) {
+                        int bitOff = bf.bitOffset;
+                        int bitWid = bf.bitWidth;
+                        uint64_t nodeAddr = m_doc->tree.baseAddress
+                            + m_doc->tree.computeOffset(nodeIdx);
+                        kernelMenu->addAction("Follow Physical Frame",
+                            [this, nodeAddr, bitOff, bitWid]() {
+                            uint64_t pteValue = 0;
+                            if (!m_doc->provider->read(nodeAddr, &pteValue, 8)) {
+                                QMessageBox::warning(qobject_cast<QWidget*>(parent()),
+                                    QStringLiteral("Error"),
+                                    QStringLiteral("Failed to read PTE at 0x%1")
+                                        .arg(nodeAddr, 0, 16));
+                                return;
+                            }
+                            uint64_t mask = (1ULL << bitWid) - 1;
+                            uint64_t frame = ((pteValue >> bitOff) & mask) << bitOff;
+                            if (frame == 0) {
+                                QMessageBox::warning(qobject_cast<QWidget*>(parent()),
+                                    QStringLiteral("Error"),
+                                    QStringLiteral("Physical frame is zero (not present?)"));
+                                return;
+                            }
+                            emit requestOpenProviderTab(
+                                QStringLiteral("kernelmemory"),
+                                QStringLiteral("phys:%1").arg(frame, 0, 16),
+                                QStringLiteral("PT @ 0x%1").arg(frame, 0, 16));
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     emit contextMenuAboutToShow(&menu, line);
     menu.exec(globalPos);
 }
@@ -3208,6 +3328,26 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
             *ok = prov->read(addr, &val, ptrSz);
             return val;
         };
+        // Wire kernel paging callbacks if provider supports it
+        if (prov->hasKernelPaging()) {
+            cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
+                Q_UNUSED(pid); // current provider already targets a specific process
+                auto r = prov->translateAddress(va);
+                *ok = r.valid;
+                return r.physical;
+            };
+            cbs.cr3 = [prov](uint32_t pid, bool* ok) -> uint64_t {
+                Q_UNUSED(pid);
+                uint64_t cr3 = prov->getCr3();
+                *ok = (cr3 != 0);
+                return cr3;
+            };
+            cbs.physRead = [prov](uint64_t physAddr, bool* ok) -> uint64_t {
+                auto entries = prov->readPageTable(physAddr, 0, 1);
+                *ok = !entries.isEmpty();
+                return entries.isEmpty() ? 0 : entries[0];
+            };
+        }
         auto result = AddressParser::evaluate(m_doc->tree.baseAddressFormula, ptrSz, &cbs);
         if (result.ok)
             m_doc->tree.baseAddress = result.value;
@@ -3330,6 +3470,26 @@ void RcxController::selectSource(const QString& text) {
                             *ok = prov->read(addr, &val, ptrSz);
                             return val;
                         };
+                        // Wire kernel paging callbacks if provider supports it
+                        if (prov->hasKernelPaging()) {
+                            cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
+                                Q_UNUSED(pid);
+                                auto r = prov->translateAddress(va);
+                                *ok = r.valid;
+                                return r.physical;
+                            };
+                            cbs.cr3 = [prov](uint32_t pid, bool* ok) -> uint64_t {
+                                Q_UNUSED(pid);
+                                uint64_t cr3 = prov->getCr3();
+                                *ok = (cr3 != 0);
+                                return cr3;
+                            };
+                            cbs.physRead = [prov](uint64_t physAddr, bool* ok) -> uint64_t {
+                                auto entries = prov->readPageTable(physAddr, 0, 1);
+                                *ok = !entries.isEmpty();
+                                return entries.isEmpty() ? 0 : entries[0];
+                            };
+                        }
                         auto result = AddressParser::evaluate(
                             m_doc->tree.baseAddressFormula, ptrSz, &cbs);
                         if (result.ok)

@@ -2377,12 +2377,6 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
         int line, col;
         m_sci->getCursorPosition(&line, &col);
         int minCol = m_editState.spanStart;
-        // Don't allow backing into "0x" prefix
-        if (m_editState.target == EditTarget::Value || m_editState.target == EditTarget::BaseAddress) {
-            QString lineText = getLineText(m_sci, m_editState.line);
-            if (lineText.mid(m_editState.spanStart, 2).startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
-                minCol = m_editState.spanStart + 2;
-        }
         // If there's an active selection, collapse it to the left end (Left only, not Backspace)
         if (ke->key() == Qt::Key_Left) {
             int sL, sC, eL, eC;
@@ -2410,17 +2404,9 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
         if (col >= editEndCol()) return true;  // block past end
         return false;
     }
-    case Qt::Key_Home: {
-        int home = m_editState.spanStart;
-        // Skip "0x" prefix for hex values
-        if (m_editState.target == EditTarget::Value || m_editState.target == EditTarget::BaseAddress) {
-            QString lineText = getLineText(m_sci, m_editState.line);
-            if (lineText.mid(m_editState.spanStart, 2).startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
-                home = m_editState.spanStart + 2;
-        }
-        m_sci->setCursorPosition(m_editState.line, home);
+    case Qt::Key_Home:
+        m_sci->setCursorPosition(m_editState.line, m_editState.spanStart);
         return true;
-    }
     case Qt::Key_End:
         m_sci->setCursorPosition(m_editState.line, editEndCol());
         return true;
@@ -2865,21 +2851,21 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
                      || target == EditTarget::PointerTarget
                      || target == EditTarget::RootClassType);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELFORE, (long)0, (long)0);
-    if (!isPicker)
-        m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELBACK, (long)1,
-                             ThemeManager::instance().current().selection);
+    if (!isPicker) {
+        // Subtle tint derived from theme background (neutral, not blue)
+        const auto& bg = ThemeManager::instance().current().background;
+        int shift = (bg.lightness() < 128) ? 25 : -25;
+        QColor tint(qBound(0, bg.red() + shift, 255),
+                    qBound(0, bg.green() + shift, 255),
+                    qBound(0, bg.blue() + shift, 255));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELBACK, (long)1, tint);
+    }
 
     // Use correct UTF-8 position conversion (not lineStart + col!)
     m_editState.posStart = posFromCol(m_sci, line, norm.start);
     m_editState.posEnd = posFromCol(m_sci, line, norm.end);
 
-    // For Value/BaseAddress: skip 0x prefix in selection (select only the number)
-    long selStart = m_editState.posStart;
-    if ((target == EditTarget::Value || target == EditTarget::BaseAddress) &&
-        trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
-        selStart = m_editState.posStart + 2;  // Skip "0x"
-    }
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL, selStart, m_editState.posEnd);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL, m_editState.posStart, m_editState.posEnd);
 
     // Hex overwrite: place cursor at start, no selection
     if (m_editState.hexOverwrite)
@@ -3062,26 +3048,8 @@ void RcxEditor::showSourcePicker() {
     int zoom = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
     menuFont.setPointSize(menuFont.pointSize() + zoom);
     menu.setFont(menuFont);
-    menu.addAction("File");
 
-    // Add all registered providers from global registry
-    const auto& providers = ProviderRegistry::instance().providers();
-    for (const auto& provider : providers)
-        menu.addAction(provider.name);
-
-    // Saved sources below separator (with checkmarks)
-    if (!m_savedSourceDisplay.isEmpty()) {
-        menu.addSeparator();
-        for (int i = 0; i < m_savedSourceDisplay.size(); i++) {
-            auto* act = menu.addAction(m_savedSourceDisplay[i].text);
-            act->setCheckable(true);
-            act->setChecked(m_savedSourceDisplay[i].active);
-            act->setData(i);
-        }
-        menu.addSeparator();
-        auto* clearAct = menu.addAction("Clear All");
-        clearAct->setData(QStringLiteral("#clear"));
-    }
+    ProviderRegistry::populateSourceMenu(&menu, m_savedSourceDisplay);
 
     int lineH = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
     int x = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION,
@@ -3095,11 +3063,13 @@ void RcxEditor::showSourcePicker() {
         const LineMeta* lm = metaForLine(m_editState.line);
         uint64_t addr = lm ? lm->offsetAddr : 0;
         auto info = endInlineEdit();
-        QString text = sel->text();
-        if (sel->data().toString() == QStringLiteral("#clear"))
-            text = QStringLiteral("#clear");
-        else if (sel->data().isValid())
-            text = QStringLiteral("#saved:") + QString::number(sel->data().toInt());
+        // Route via action data (set by populateSourceMenu)
+        QString text = sel->data().toString();
+        if (text.isEmpty()) {
+            // Plugin action (e.g. "Unload Driver") — already handled by its own lambda
+            cancelInlineEdit();
+            return;
+        }
         emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text, addr);
     } else {
         cancelInlineEdit();
