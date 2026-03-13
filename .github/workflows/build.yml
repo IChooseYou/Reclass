@@ -41,6 +41,10 @@ jobs:
           export PATH="$IQTA_TOOLS/mingw1310_64/bin:$PATH"
           cmake --build build
 
+      - name: Build kernel driver
+        shell: cmd
+        run: call plugins\KernelMemory\driver\build_driver.bat
+
       - name: Test
         shell: bash
         run: |
@@ -62,6 +66,7 @@ jobs:
           windeployqt --no-translations --no-system-d3d-compiler --no-opengl-sw release/Reclass.exe
           mkdir -p release/Plugins
           cp build/Plugins/*.dll release/Plugins/ 2>/dev/null || true
+          cp plugins/KernelMemory/driver/build/rcxdrv.sys release/Plugins/ 2>/dev/null || true
           cp -r build/themes release/ 2>/dev/null || true
           cp -r build/examples release/ 2>/dev/null || true
           cp build/screenshot.png release/ 2>/dev/null || true
