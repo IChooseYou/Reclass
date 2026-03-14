@@ -41,6 +41,26 @@ jobs:
           export PATH="$IQTA_TOOLS/mingw1310_64/bin:$PATH"
           cmake --build build
 
+      - name: Install WDK NuGet
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Windows.WDK.x64 -OutputDirectory wdk_pkg
+          $ntddk = Get-ChildItem wdk_pkg -Recurse -Filter "ntddk.h" |
+                   Where-Object { $_.DirectoryName -like "*km*" } |
+                   Select-Object -First 1
+          if (!$ntddk) { throw "ntddk.h not found in WDK NuGet package" }
+          $kmDir = $ntddk.DirectoryName
+          $incRoot = Split-Path $kmDir -Parent
+          Write-Host "WDK include root: $incRoot"
+          echo "WDK_INC_ROOT=$incRoot" >> $env:GITHUB_ENV
+          $ntos = Get-ChildItem wdk_pkg -Recurse -Filter "ntoskrnl.lib" |
+                  Where-Object { $_.DirectoryName -like "*x64*" } |
+                  Select-Object -First 1
+          if (!$ntos) { throw "ntoskrnl.lib not found in WDK NuGet package" }
+          $libRoot = Split-Path (Split-Path $ntos.DirectoryName -Parent) -Parent
+          Write-Host "WDK lib root: $libRoot"
+          echo "WDK_LIB_ROOT=$libRoot" >> $env:GITHUB_ENV
+
       - name: Build kernel driver
         shell: cmd
         run: call plugins\KernelMemory\driver\build_driver.bat
