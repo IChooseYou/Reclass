@@ -17,6 +17,7 @@
         <file alias="file-binary.svg">vsicons/file-binary.svg</file>
         <file alias="debug.svg">vsicons/debug.svg</file>
         <file alias="close.svg">vsicons/close.svg</file>
+        <file alias="cloud-download.svg">vsicons/cloud-download.svg</file>
         <file alias="arrow-left.svg">vsicons/arrow-left.svg</file>
         <file alias="arrow-right.svg">vsicons/arrow-right.svg</file>
         <file alias="split-horizontal.svg">vsicons/split-horizontal.svg</file>
@@ -55,6 +56,7 @@
         <file alias="symbol-enum.svg">vsicons/symbol-enum.svg</file>
         <file alias="symbol-class.svg">vsicons/symbol-class.svg</file>
         <file alias="symbol-variable.svg">vsicons/symbol-variable.svg</file>
+        <file alias="symbol-method.svg">vsicons/symbol-method.svg</file>
         <file alias="server-process.svg">vsicons/server-process.svg</file>
         <file alias="remote.svg">vsicons/remote.svg</file>
         <file alias="plug.svg">vsicons/plug.svg</file>

@@ -42,7 +42,8 @@ public:
 
     ComposeResult compose(uint64_t viewRootId = 0, bool compactColumns = false,
                           bool treeLines = false, bool braceWrap = false,
-                          bool typeHints = false) const;
+                          bool typeHints = false,
+                          SymbolLookupFn symbolLookup = {}) const;
     bool save(const QString& path);
     bool load(const QString& path);
     void loadData(const QString& binaryPath);

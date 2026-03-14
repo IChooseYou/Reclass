@@ -87,6 +87,9 @@ public:
     struct ThreadInfo { uint64_t tebAddress; uint32_t threadId; };
     virtual QVector<ThreadInfo> tebs() const { return {}; }
 
+    struct ModuleEntry { QString name; QString fullPath; uint64_t base; uint64_t size; };
+    virtual QVector<ModuleEntry> enumerateModules() const { return {}; }
+
     // --- Kernel paging capabilities (override in kernel providers) ---
     virtual bool hasKernelPaging() const { return false; }
     virtual uint64_t getCr3() const { return 0; }

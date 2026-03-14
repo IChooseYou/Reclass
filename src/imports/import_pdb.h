@@ -5,6 +5,25 @@
 
 namespace rcx {
 
+// ── PDB Symbol Extraction ──
+
+struct PdbSymbol {
+    QString name;
+    uint32_t rva;
+};
+
+struct PdbSymbolResult {
+    QString moduleName;          // derived from PDB filename (e.g. "ntoskrnl")
+    QVector<PdbSymbol> symbols;
+};
+
+// Extract public/global symbols (name → RVA) from a PDB file.
+// This reads the DBI stream's public and global symbol sub-streams.
+PdbSymbolResult extractPdbSymbols(const QString& pdbPath,
+                                   QString* errorMsg = nullptr);
+
+// ── PDB Type Import ──
+
 struct PdbTypeInfo {
     uint32_t typeIndex;      // TPI type index
     QString  name;           // struct/class/union/enum name

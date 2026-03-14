@@ -273,16 +273,31 @@ private:
     // Identifier or hex literal disambiguation.
     // Scan [a-zA-Z_][a-zA-Z0-9_]*. If it contains any non-hex char → identifier.
     // Otherwise → backtrack and parse as hex number.
+    // WinDbg-style "module!symbol" is scanned as a single identifier token.
     // If the identifier is followed by '(', try to parse as a built-in function call.
     bool parseIdentifierOrHex(uint64_t& result) {
         int start = m_pos;
         bool hasNonHex = false;
 
-        // Scan full token
+        // Scan full token, including "module!symbol" as one token
         while (!atEnd() && isIdentChar(peek())) {
             if (!isHexDigit(peek()))
                 hasNonHex = true;
             advance();
+        }
+        // If we hit '!' and the next char is an identifier start, extend the token
+        // to include the second part (WinDbg module!symbol syntax)
+        if (!atEnd() && peek() == '!' && m_pos > start) {
+            int bangPos = m_pos;
+            advance(); // skip '!'
+            if (!atEnd() && isIdentStart(peek())) {
+                hasNonHex = true;
+                while (!atEnd() && isIdentChar(peek())) {
+                    advance();
+                }
+            } else {
+                m_pos = bangPos; // backtrack — '!' at end isn't module!symbol
+            }
         }
 
         QString token = m_input.mid(start, m_pos - start);

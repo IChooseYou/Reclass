@@ -71,6 +71,7 @@ struct ComposeState {
     bool               treeLines      = false;  // draw Unicode tree connectors in indentation
     bool               braceWrap      = false;  // opening brace on its own line
     bool               typeHints      = false;  // show type inference hints on hex nodes
+    SymbolLookupFn     symbolLookup;             // optional PDB symbol lookup callback
     QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
 
@@ -262,7 +263,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             auto suggestions = inferTypes(
                 reinterpret_cast<const uint8_t*>(b.constData()), sz);
             if (!suggestions.isEmpty() && suggestions[0].strength >= 3) {
-                lm.typeHintStart = lineText.size() + 2; // after "  " gap
+                lm.typeHintStart = kFoldCol + lineText.size() + 2; // after fold prefix + "  " gap
                 lm.typeHintKinds = suggestions[0].kinds;
                 QString typeName = formatHint(suggestions[0]);
                 QString preview = formatPreview(
@@ -274,6 +275,13 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                     lm.typeHint = QStringLiteral("[") + typeName + QStringLiteral("]");
                 lineText += QStringLiteral("  ") + lm.typeHint;
             }
+        }
+
+        // PDB symbol annotation: show symbol name if this address matches a loaded symbol
+        if (sub == 0 && state.symbolLookup) {
+            QString sym = state.symbolLookup(absAddr);
+            if (!sym.isEmpty())
+                lineText += QStringLiteral("  // ") + sym;
         }
 
         state.emitLine(lineText, std::move(lm));
@@ -1087,12 +1095,13 @@ void composeNode(ComposeState& state, const NodeTree& tree,
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId,
                       bool compactColumns, bool treeLines, bool braceWrap,
-                      bool typeHints) {
+                      bool typeHints, SymbolLookupFn symbolLookup) {
     ComposeState state;
     state.compactColumns = compactColumns;
     state.treeLines = treeLines;
     state.braceWrap = braceWrap;
     state.typeHints = typeHints;
+    state.symbolLookup = std::move(symbolLookup);
 
     // Precompute parent→children map
     for (int i = 0; i < tree.nodes.size(); i++)

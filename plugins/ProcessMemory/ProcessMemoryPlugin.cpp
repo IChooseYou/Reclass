@@ -185,13 +185,28 @@ void ProcessMemoryProvider::cacheModules()
             if ( i == 0 )
                 m_base = (uint64_t)mi.lpBaseOfDll;
 
+            WCHAR modPath[MAX_PATH];
+            QString fullPath;
+            if (GetModuleFileNameExW(m_handle, mods[i], modPath, MAX_PATH))
+                fullPath = QString::fromWCharArray(modPath);
+
             m_modules.append({
                 QString::fromWCharArray(modName),
+                fullPath,
                 (uint64_t)mi.lpBaseOfDll,
                 (uint64_t)mi.SizeOfImage
             });
         }
     }
+}
+
+QVector<rcx::Provider::ModuleEntry> ProcessMemoryProvider::enumerateModules() const
+{
+    QVector<ModuleEntry> result;
+    result.reserve(m_modules.size());
+    for (const auto& m : m_modules)
+        result.append({m.name, m.fullPath, m.base, m.size});
+    return result;
 }
 
 QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const

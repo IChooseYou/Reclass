@@ -43,6 +43,7 @@ public:
     void refreshModules() { m_modules.clear(); cacheModules(); }
     uint64_t peb() const override { return m_peb; }
     QVector<ThreadInfo> tebs() const override;
+    QVector<ModuleEntry> enumerateModules() const override;
 
 private:
     void cacheModules();
@@ -62,6 +63,7 @@ private:
 
     struct ModuleInfo {
         QString  name;
+        QString  fullPath;
         uint64_t base;
         uint64_t size;
     };

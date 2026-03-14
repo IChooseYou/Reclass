@@ -5165,12 +5165,40 @@ void MainWindow::createSymbolsDock() {
         m_symbolsTree->setExpandsOnDoubleClick(false);
         styleTree(m_symbolsTree);
 
-        // Debounced search
+        // Populate a module item's children (replaces sentinel with real symbols)
+        auto populateModuleItem = [this](QStandardItem* item) {
+            if (!item || item->parent()) return;
+            if (item->rowCount() == 1 && item->child(0)->text().isEmpty()) {
+                item->removeRows(0, 1);
+                QString moduleName = item->data(Qt::UserRole).toString();
+                const auto* set = rcx::SymbolStore::instance().moduleData(moduleName);
+                if (set) {
+                    static const QIcon symIcon(":/vsicons/symbol-method.svg");
+                    for (const auto& sym : set->rvaToName) {
+                        auto* child = new QStandardItem(symIcon,
+                            QStringLiteral("%1  [0x%2]")
+                                .arg(sym.second)
+                                .arg(sym.first, 8, 16, QLatin1Char('0')));
+                        child->setData(moduleName, Qt::UserRole);
+                        child->setData(sym.first, Qt::UserRole + 1);
+                        child->setData(sym.second, Qt::UserRole + 2);
+                        item->appendRow(child);
+                    }
+                }
+            }
+        };
+
+        // Debounced search — force-populate all modules so filter can match children
         auto* searchTimer = new QTimer(this);
         searchTimer->setSingleShot(true);
         searchTimer->setInterval(150);
-        connect(searchTimer, &QTimer::timeout, this, [this]() {
+        connect(searchTimer, &QTimer::timeout, this, [this, populateModuleItem]() {
             QString text = m_symbolsSearch->text();
+            if (!text.isEmpty()) {
+                // Force-populate all modules that still have sentinels
+                for (int i = 0; i < m_symbolsModel->rowCount(); i++)
+                    populateModuleItem(m_symbolsModel->item(i));
+            }
             m_symbolsProxy->setFilterFixedString(text);
             if (!text.isEmpty())
                 m_symbolsTree->expandAll();
@@ -5184,30 +5212,9 @@ void MainWindow::createSymbolsDock() {
         symLayout->addWidget(m_symbolsTree);
 
         // Lazy-load children when a module node is expanded
-        connect(m_symbolsTree, &QTreeView::expanded, this, [this](const QModelIndex& proxyIdx) {
+        connect(m_symbolsTree, &QTreeView::expanded, this, [this, populateModuleItem](const QModelIndex& proxyIdx) {
             QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
-            auto* item = m_symbolsModel->itemFromIndex(srcIdx);
-            if (!item || item->parent()) return;
-
-            if (item->rowCount() == 1 && item->child(0)->text().isEmpty()) {
-                item->removeRows(0, 1);
-                QString moduleName = item->data(Qt::UserRole).toString();
-                const auto* set = rcx::SymbolStore::instance().moduleData(moduleName);
-                if (set) {
-                    for (const auto& sym : set->rvaToName) {
-                        auto* child = new QStandardItem(
-                            QStringLiteral("%1  [0x%2]")
-                                .arg(sym.second)
-                                .arg(sym.first, 8, 16, QLatin1Char('0')));
-                        child->setData(moduleName, Qt::UserRole);
-                        child->setData(sym.first, Qt::UserRole + 1);
-                        child->setData(sym.second, Qt::UserRole + 2);
-                        static const QIcon symIcon(":/vsicons/symbol-method.svg");
-                        child->setIcon(symIcon);
-                        item->appendRow(child);
-                    }
-                }
-            }
+            populateModuleItem(m_symbolsModel->itemFromIndex(srcIdx));
         });
 
         // Double-click symbol → navigate to moduleBase + RVA
