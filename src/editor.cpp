@@ -1,6 +1,7 @@
 #include "editor.h"
 #include "disasm.h"
 #include "providerregistry.h"
+#include "rcxtooltip.h"
 #include <QDebug>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
@@ -1397,6 +1398,7 @@ void RcxEditor::dismissAllPopups() {
     if (m_historyPopup)       static_cast<HoverPopup*>(m_historyPopup)->dismiss();
     if (m_disasmPopup)        static_cast<HoverPopup*>(m_disasmPopup)->dismiss();
     if (m_structPreviewPopup) static_cast<HoverPopup*>(m_structPreviewPopup)->dismiss();
+    if (m_arrowTooltip)       static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
 }
 
 void RcxEditor::hideFindBar() {
@@ -3762,6 +3764,74 @@ void RcxEditor::applyHoverCursor() {
             }
         }
         // else: desired stays Arrow (hovering over column padding)
+    }
+
+    // ── Arrow tooltip on command row spans ──
+    {
+        bool showTip = false;
+        if (tokenHit && h.line == 0 && h.line < m_meta.size()
+            && m_meta[0].lineKind == LineKind::CommandRow) {
+            NormalizedSpan span;
+            QString lineText;
+            if (resolvedSpanFor(0, t, span, &lineText)
+                && h.col >= span.start && h.col < span.end) {
+                QString tipTitle, tipBody;
+                switch (t) {
+                case EditTarget::Source:
+                    tipTitle = QStringLiteral("Data Source");
+                    tipBody = QStringLiteral("Click to change the attached\nmemory source (process, file)");
+                    break;
+                case EditTarget::BaseAddress:
+                    tipTitle = QStringLiteral("Base Address");
+                    tipBody = QStringLiteral("Click to edit the struct base address\nSupports: hex, <module> + offset, [deref]");
+                    break;
+                case EditTarget::RootClassName:
+                    tipTitle = QStringLiteral("Class Name");
+                    tipBody = QStringLiteral("Click to rename this type");
+                    break;
+                case EditTarget::TypeSelector:
+                    tipTitle = QStringLiteral("Type Selector");
+                    tipBody = QStringLiteral("Open the type picker to switch\nbetween structs in this project");
+                    break;
+                default: break;
+                }
+                if (!tipTitle.isEmpty()) {
+                    if (!m_arrowTooltip) {
+                        m_arrowTooltip = new RcxTooltip(this);
+                        static_cast<RcxTooltip*>(m_arrowTooltip)->onMouseMove =
+                            [this](QMouseEvent* e) {
+                            QPoint gp = e->globalPosition().toPoint();
+                            QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
+                            m_lastHoverPos = vp;
+                            m_hoverInside = m_sci->viewport()->rect().contains(vp);
+                            applyHoverCursor();
+                        };
+                    }
+                    auto* tip = static_cast<RcxTooltip*>(m_arrowTooltip);
+                    const auto& theme = ThemeManager::instance().current();
+                    tip->setTheme(theme.backgroundAlt, theme.border,
+                                  theme.text, theme.textDim, theme.border);
+                    tip->populate(tipTitle, tipBody, editorFont());
+                    // Anchor at center of the hovered span, bottom edge of line
+                    long posA = posFromCol(m_sci, 0, span.start);
+                    long posB = posFromCol(m_sci, 0, span.end);
+                    int xA = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posA);
+                    int xB = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posB);
+                    int py = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, posA);
+                    int lh = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+                    QPoint anchor = m_sci->viewport()->mapToGlobal(
+                        QPoint((xA + xB) / 2, py + lh));
+                    tip->showAt(anchor);
+                    showTip = true;
+                }
+            }
+        }
+        if (!showTip && m_arrowTooltip && m_arrowTooltip->isVisible())
+            static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
     }
 
     m_sci->viewport()->setCursor(desired);

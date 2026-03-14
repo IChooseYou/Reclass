@@ -159,6 +159,7 @@ private:
     QWidget* m_historyPopup = nullptr;  // ValueHistoryPopup (file-local class in editor.cpp)
     QWidget* m_disasmPopup = nullptr;        // TitleBodyPopup (file-local class in editor.cpp)
     QWidget* m_structPreviewPopup = nullptr; // TitleBodyPopup (file-local class in editor.cpp)
+    QWidget* m_arrowTooltip = nullptr;       // RcxTooltip (arrow callout)
     const Provider* m_disasmProvider = nullptr;   // snapshot or real — for reading tree data
     const Provider* m_disasmRealProv = nullptr;   // real process provider — for reading code at arbitrary addresses
     const NodeTree* m_disasmTree = nullptr;
