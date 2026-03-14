@@ -7,7 +7,7 @@
 
 **A structured binary editor for reverse engineering — inspect raw bytes as typed structs, arrays, and pointers.<p>Built from scratch as a modern replacement for ReClass.NET and ReClassEx**
 
-[Download](https://github.com/IChooseYou/Reclass/releases) · [Build Instructions](#build) · [Kernel Driver](#kernel-driver) · [MCP Integration](#mcp-integration) · [Alternatives](#alternatives)
+[Download](https://github.com/IChooseYou/Reclass/releases) · [Build Instructions](#build) · [MCP Integration](#mcp-integration) · [Alternatives](#alternatives)
 
 [![Build](https://github.com/IChooseYou/Reclass/actions/workflows/build.yml/badge.svg)](https://github.com/IChooseYou/Reclass/actions/workflows/build.yml)
 [![License](https://img.shields.io/github/license/IChooseYou/Reclass)](LICENSE)
@@ -81,7 +81,7 @@ Full command stack with 15 undoable operations: ChangeKind, Rename, Collapse, In
 
 - **File** — open any binary file and inspect its contents as structured data
 - **Process** — attach to a live process and read its memory in real time (Windows/Linux)
-- **Kernel driver** — Windows kernel driver (IOCTL) for process memory, physical memory, page table walking, and CR3/VTOP translation (see [Kernel Driver](#kernel-driver) below)
+- **Kernel driver** — Windows kernel driver (IOCTL) for process memory, physical memory, page table walking, and CR3/VTOP translation
 - **Remote Process** — read another process's memory over TCP with cross-architecture 32/64-bit support
 - **WinDbg** — connect to live WinDbg debugging sessions or load crash dumps
 - **Saved sources** — quick-switch between recently used data sources per tab
@@ -132,50 +132,6 @@ A standalone stdio-to-pipe bridge binary is built alongside the main application
   }
 }
 ```
-
-## Kernel Driver
-
-The **Kernel Memory** plugin (`plugins/KernelMemory`) provides a Windows kernel driver for low-level memory access via IOCTL. It bypasses user-mode API limitations and works on protected/anti-cheat processes.
-
-### Capabilities
-
-- **Process memory** — read/write via `MmCopyVirtualMemory()` (no `KeAttachProcess` deadlock risk), up to 1 MB per operation
-- **Physical memory** — read/write via MDL-based safe mapping with proper cache type handling (RAM and MMIO), up to 4 KB per operation
-- **CR3 query** — read DirectoryTableBase from EPROCESS for any process
-- **Virtual-to-physical (VTOP)** — full 4-level page table walk (PML4 → PDPT → PD → PT) with 4 KB, 2 MB, and 1 GB page support
-- **Page table reading** — read arbitrary page table entries from physical addresses
-- **Process enumeration** — list running processes with module paths
-- **Module enumeration** — walk PEB→Ldr InLoadOrderModuleList for any process
-- **Thread enumeration** — query all TEBs for a process
-- **Region enumeration** — `ZwQueryVirtualMemory()` for virtual memory layout
-
-### Building the Driver
-
-Requires Visual Studio 2022 and the Windows Driver Kit (WDK 10.0.19041+). Test signing must be enabled:
-
-```
-bcdedit /set testsigning on
-```
-
-Build with the included script:
-
-```bash
-cd plugins/KernelMemory/driver
-build_driver.bat
-```
-
-This produces `driver/build/rcxdrv.sys`. Copy it to `Plugins/rcxdrv.sys` next to the plugin DLL. The plugin manages the kernel service (`RcxDrv`) automatically via SCM — it creates, starts, and stops the service as needed.
-
-### Architecture
-
-```
-Reclass.exe
-  └─ KernelMemoryPlugin.dll     (user-mode plugin)
-       └─ DeviceIoControl()      (\\.\RcxDrv)
-            └─ rcxdrv.sys        (kernel-mode WDM driver)
-```
-
-The driver creates `\Device\RcxDrv` and communicates exclusively through `METHOD_BUFFERED` IOCTLs. All kernel operations use SEH and validated input/output buffers.
 
 ## Build
 
