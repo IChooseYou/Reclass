@@ -241,14 +241,13 @@ class MenuBarStyle : public QProxyStyle {
 public:
     using QProxyStyle::QProxyStyle;
     void polish(QWidget* w) override {
+#ifdef _WIN32
         if (qobject_cast<QMenu*>(w)) {
             w->setWindowFlag(Qt::FramelessWindowHint, true);
             // Layered window — gives full pixel control; DWM won't clip edges.
-            // (The DwmSetWindowAttribute conflict noted in RcxTooltip doesn't
-            //  apply here: DarkApp::notify only fires on WindowActivate, which
-            //  popups never receive.)
             w->setAttribute(Qt::WA_TranslucentBackground);
         }
+#endif
         QProxyStyle::polish(w);
     }
     using QProxyStyle::polish;
@@ -676,7 +675,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 QIcon MainWindow::makeIcon(const QString& svgPath) {
-    return QIcon(svgPath);
+    // Render SVG to pixmap explicitly — avoids dependency on qsvgicon plugin
+    // which may not be deployed on Linux.
+    QSvgRenderer renderer(svgPath);
+    if (!renderer.isValid()) return QIcon(svgPath);
+    QPixmap pm(32, 32);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    renderer.render(&p);
+    return QIcon(pm);
 }
 
 template < typename...Args >
