@@ -5,27 +5,27 @@ setlocal enabledelayedexpansion
 set "VSBASE=C:\Program Files\Microsoft Visual Studio\2022"
 set MSVC=
 for %%E in (Enterprise Professional Community BuildTools) do (
-    if exist "%VSBASE%\%%E\VC\Tools\MSVC" (
-        for /f "delims=" %%V in ('dir /b /ad /o-n "%VSBASE%\%%E\VC\Tools\MSVC" 2^>nul') do (
-            if not defined MSVC set "MSVC=%VSBASE%\%%E\VC\Tools\MSVC\%%V"
+    if exist "!VSBASE!\%%E\VC\Tools\MSVC" (
+        for /f "delims=" %%V in ('dir /b /ad /o-n "!VSBASE!\%%E\VC\Tools\MSVC" 2^>nul') do (
+            if not defined MSVC set "MSVC=!VSBASE!\%%E\VC\Tools\MSVC\%%V"
         )
     )
 )
 if not defined MSVC (
-    echo ERROR: Could not find MSVC toolchain under %VSBASE%
+    echo ERROR: Could not find MSVC toolchain under !VSBASE!
     exit /b 1
 )
 
 :: ── Auto-detect WDK ──
 set "WDK=C:\Program Files (x86)\Windows Kits\10"
 set WDKVER=
-for /f "delims=" %%V in ('dir /b /ad /o-n "%WDK%\Include" 2^>nul') do (
-    if exist "%WDK%\Include\%%V\km\ntddk.h" (
+for /f "delims=" %%V in ('dir /b /ad /o-n "!WDK!\Include" 2^>nul') do (
+    if exist "!WDK!\Include\%%V\km\ntddk.h" (
         if not defined WDKVER set "WDKVER=%%V"
     )
 )
 if not defined WDKVER (
-    echo ERROR: Could not find WDK headers under %WDK%\Include
+    echo ERROR: Could not find WDK headers under !WDK!\Include
     exit /b 1
 )
 
