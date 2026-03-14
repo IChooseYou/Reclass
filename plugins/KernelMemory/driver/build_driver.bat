@@ -18,6 +18,8 @@ if not defined MSVC (
 )
 
 :: ── Auto-detect WDK (override with WDK_INC_ROOT and WDK_LIB_ROOT env vars) ──
+:: SDK_INC_ROOT is optional; when WDK is installed traditionally, SDK shared
+:: headers live alongside WDK headers. NuGet splits them into a separate package.
 if not defined WDK_INC_ROOT (
     set "WDK=C:\Program Files (x86)\Windows Kits\10"
     set WDKVER=
@@ -33,10 +35,15 @@ if not defined WDK_INC_ROOT (
     )
     set "WDK_INC_ROOT=!WDK!\Include\!WDKVER!"
     set "WDK_LIB_ROOT=!WDK!\Lib\!WDKVER!"
+    set "SDK_INC_ROOT=!WDK!\Include\!WDKVER!"
 )
+
+:: If SDK_INC_ROOT not set, default to WDK_INC_ROOT (traditional install has both)
+if not defined SDK_INC_ROOT set "SDK_INC_ROOT=%WDK_INC_ROOT%"
 
 echo Using MSVC:    %MSVC%
 echo Using WDK inc: %WDK_INC_ROOT%
+echo Using SDK inc: %SDK_INC_ROOT%
 echo Using WDK lib: %WDK_LIB_ROOT%
 
 set "CL_EXE=%MSVC%\bin\Hostx64\x64\cl.exe"
@@ -54,6 +61,8 @@ echo === Compiling rcxdrv.c ===
   /I "%WDK_INC_ROOT%\km" ^
   /I "%WDK_INC_ROOT%\km\crt" ^
   /I "%WDK_INC_ROOT%\shared" ^
+  /I "%SDK_INC_ROOT%\shared" ^
+  /I "%SDK_INC_ROOT%\ucrt" ^
   /kernel ^
   /Fo"%OUTDIR%\rcxdrv.obj" ^
   "%SRCDIR%rcxdrv.c"

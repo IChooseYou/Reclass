@@ -60,6 +60,12 @@ jobs:
           $libRoot = Split-Path (Split-Path $ntos.DirectoryName -Parent) -Parent
           Write-Host "WDK lib root: $libRoot"
           echo "WDK_LIB_ROOT=$libRoot" >> $env:GITHUB_ENV
+          $specstr = Get-ChildItem wdk_pkg -Recurse -Filter "specstrings.h" |
+                     Select-Object -First 1
+          if (!$specstr) { throw "specstrings.h not found in SDK NuGet package" }
+          $sdkIncRoot = Split-Path $specstr.DirectoryName -Parent
+          Write-Host "SDK include root: $sdkIncRoot"
+          echo "SDK_INC_ROOT=$sdkIncRoot" >> $env:GITHUB_ENV
 
       - name: Build kernel driver
         shell: cmd
