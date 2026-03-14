@@ -5,6 +5,7 @@
 #include "scannerpanel.h"
 #include "startpage.h"
 #include "workspace_model.h"
+namespace rcx { class SymbolDownloader; }
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -198,6 +199,28 @@ private:
     QToolButton*          m_scanDockCloseBtn = nullptr;
     DockGripWidget*       m_scanDockGrip     = nullptr;
     void createScannerDock();
+
+    // Modules/Symbols dock
+    QDockWidget*           m_symbolsDock      = nullptr;
+    QTabWidget*            m_symTabWidget     = nullptr;
+    // Modules tab
+    QTreeView*             m_modulesTree      = nullptr;
+    QStandardItemModel*    m_modulesModel     = nullptr;
+    // Symbols tab
+    QTreeView*             m_symbolsTree      = nullptr;
+    QStandardItemModel*    m_symbolsModel     = nullptr;
+    QSortFilterProxyModel* m_symbolsProxy     = nullptr;
+    QLineEdit*             m_symbolsSearch    = nullptr;
+    // Title bar
+    QLabel*                m_symDockTitle     = nullptr;
+    QToolButton*           m_symDockCloseBtn  = nullptr;
+    QToolButton*           m_symDownloadBtn   = nullptr;
+    DockGripWidget*        m_symDockGrip      = nullptr;
+    rcx::SymbolDownloader* m_symDownloader    = nullptr;
+    void createSymbolsDock();
+    void rebuildSymbolsModel();
+    void rebuildModulesModel();
+    void downloadSymbolsForProcess();
 
     // Start page
     StartPageWidget*      m_startPage        = nullptr;
