@@ -2881,8 +2881,9 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
             setEditComment(QStringLiteral("Enter=Save Esc=Cancel"));
     } else if (target == EditTarget::Name && m_editState.hexOverwrite) {
         setEditComment(QStringLiteral("ASCII edit: Enter=Save Esc=Cancel"));
-    } else if (target == EditTarget::BaseAddress)
-        setEditComment(QStringLiteral("e.g. <mod.exe> + 0xFF | [0x1000 + 0x10] | 7ff6`1234ABCD"));
+    } else if (target == EditTarget::BaseAddress) {
+        // No inline hint — the hover tooltip already shows examples
+    }
 
     // Note: Type, ArrayElementType, PointerTarget are handled by TypeSelectorPopup
     // and exit early above (never reach here).
@@ -3783,15 +3784,23 @@ void RcxEditor::applyHoverCursor() {
                     break;
                 case EditTarget::BaseAddress:
                     tipTitle = QStringLiteral("Base Address");
-                    tipBody = QStringLiteral("Click to edit the struct base address\nSupports: hex, <module> + offset, [deref]");
+                    tipBody = QStringLiteral(
+                        "0x7FF61234ABCD          hex address\n"
+                        "<app.exe>               module base\n"
+                        "<app.exe> + 0x1A0       module + offset\n"
+                        "[<app.exe> + 0x58]      follow pointer\n"
+                        "ntdll!SymbolName        PDB symbol\n"
+                        "\n"
+                        "Operators: + - * << >> & | ^\n"
+                        "All numbers are hexadecimal");
                     break;
                 case EditTarget::RootClassName:
                     tipTitle = QStringLiteral("Class Name");
                     tipBody = QStringLiteral("Click to rename this type");
                     break;
                 case EditTarget::TypeSelector:
-                    tipTitle = QStringLiteral("Type Selector");
-                    tipBody = QStringLiteral("Open the type picker to switch\nbetween structs in this project");
+                    tipTitle = QStringLiteral("Switch View");
+                    tipBody = QStringLiteral("View a different struct in this tab");
                     break;
                 default: break;
                 }
@@ -3900,12 +3909,8 @@ void RcxEditor::validateEditLive() {
     if (isValid) {
         m_sci->markerDelete(m_editState.line, M_ERR);
         if (isSelected) m_sci->markerAdd(m_editState.line, M_SELECTED);
-        if (stateChanged) {
-            if (m_editState.target == EditTarget::BaseAddress)
-                setEditComment(QStringLiteral("e.g. <mod.exe> + 0xFF | [0x1000 + 0x10] | 7ff6`1234ABCD"));
-            else
-                setEditComment("Enter=Save Esc=Cancel");
-        }
+        if (stateChanged)
+            setEditComment("Enter=Save Esc=Cancel");
     } else {
         if (isSelected) m_sci->markerDelete(m_editState.line, M_SELECTED);
         m_sci->markerAdd(m_editState.line, M_ERR);

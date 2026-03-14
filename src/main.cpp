@@ -1986,6 +1986,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                     dockGuard->setWindowTitle(tabTitle(*it2));
                 }
                 rebuildWorkspaceModel();
+                rebuildModulesModel();
                 updateWindowTitle();
             });
     });
@@ -2937,6 +2938,30 @@ void MainWindow::applyTheme(const Theme& theme) {
     if (auto* sep = m_symbolsDock ? m_symbolsDock->findChild<QFrame*>("symbolsSep") : nullptr) {
         sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
     }
+    if (m_modulesTree) {
+        QPalette tp = m_modulesTree->palette();
+        tp.setColor(QPalette::Text, theme.textDim);
+        tp.setColor(QPalette::Highlight, theme.selected);
+        tp.setColor(QPalette::HighlightedText, theme.text);
+        m_modulesTree->setPalette(tp);
+        m_modulesTree->setStyleSheet(QStringLiteral(
+            "QTreeView { background: %1; border: none; padding-left: 4px; }"
+            "QAbstractScrollArea::corner { background: %1; border: none; }"
+            "QHeaderView { background: %1; border: none; }"
+            "QHeaderView::section { background: %1; border: none; }")
+            .arg(theme.background.name()));
+    }
+    if (m_symTabWidget) {
+        m_symTabWidget->setStyleSheet(QStringLiteral(
+            "QTabWidget::pane { border: none; }"
+            "QTabBar { background: %1; }"
+            "QTabBar::tab { background: %1; color: %2; border: none;"
+            " border-bottom: 2px solid transparent; padding: 4px 12px; }"
+            "QTabBar::tab:selected { color: %3; border-bottom: 2px solid %4; }"
+            "QTabBar::tab:hover { color: %3; }")
+            .arg(theme.backgroundAlt.name(), theme.textMuted.name(),
+                 theme.text.name(), theme.borderFocused.name()));
+    }
 
     // Doc dock floating title bars
     for (auto* dock : m_docDocks) {
@@ -3117,6 +3142,10 @@ void MainWindow::setEditorFont(const QString& fontName) {
         m_symbolsSearch->setFont(f);
     if (m_symbolsTree)
         m_symbolsTree->setFont(f);
+    if (m_modulesTree)
+        m_modulesTree->setFont(f);
+    if (m_symTabWidget)
+        m_symTabWidget->setFont(f);
     // Sync doc dock float title fonts
     for (auto* dock : m_docDocks) {
         if (auto* lbl = dock->findChild<QLabel*>("dockFloatTitle"))
@@ -4690,7 +4719,7 @@ void MainWindow::createScannerDock() {
 }
 
 void MainWindow::createSymbolsDock() {
-    m_symbolsDock = new QDockWidget("Symbols", this);
+    m_symbolsDock = new QDockWidget("Modules", this);
     m_symbolsDock->setObjectName("SymbolsDock");
     m_symbolsDock->setAllowedAreas(
         Qt::BottomDockWidgetArea | Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
@@ -4698,10 +4727,13 @@ void MainWindow::createSymbolsDock() {
         QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
         QDockWidget::DockWidgetFloatable);
 
+    const auto& t = ThemeManager::instance().current();
+    QSettings s("Reclass", "Reclass");
+    QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
+    monoFont.setFixedPitch(true);
+
     // Custom titlebar (matches scanner dock)
     {
-        const auto& t = ThemeManager::instance().current();
-
         auto* titleBar = new QWidget(m_symbolsDock);
         titleBar->setFixedHeight(24);
         titleBar->setAutoFillBackground(true);
@@ -4717,9 +4749,10 @@ void MainWindow::createSymbolsDock() {
         m_symDockGrip = new DockGripWidget(titleBar);
         layout->addWidget(m_symDockGrip);
 
-        m_symDockTitle = new QLabel("Symbols", titleBar);
+        m_symDockTitle = new QLabel("Modules", titleBar);
         m_symDockTitle->setStyleSheet(
             QStringLiteral("color: %1;").arg(t.textDim.name()));
+        m_symDockTitle->setFont(monoFont);
         layout->addWidget(m_symDockTitle);
 
         layout->addStretch();
@@ -4729,7 +4762,7 @@ void MainWindow::createSymbolsDock() {
         m_symDownloadBtn->setIconSize(QSize(14, 14));
         m_symDownloadBtn->setAutoRaise(true);
         m_symDownloadBtn->setCursor(Qt::PointingHandCursor);
-        m_symDownloadBtn->setToolTip(QStringLiteral("Download symbols for attached process"));
+        m_symDownloadBtn->setToolTip(QStringLiteral("Load/Download all symbols"));
         m_symDownloadBtn->setStyleSheet(QStringLiteral(
             "QToolButton { border: none; padding: 2px 4px; }"
             "QToolButton:hover { background: %1; }")
@@ -4751,59 +4784,257 @@ void MainWindow::createSymbolsDock() {
         m_symbolsDock->setTitleBarWidget(titleBar);
     }
 
-    {
-        const auto& t = ThemeManager::instance().current();
-        m_symbolsDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
-    }
+    m_symbolsDock->setStyleSheet(QStringLiteral(
+        "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
 
-    // Container: search box + tree view
+    // Helper: style a tree view to match theme
+    auto styleTree = [&](QTreeView* tree) {
+        tree->setFont(monoFont);
+        QPalette tp = tree->palette();
+        tp.setColor(QPalette::Text, t.textDim);
+        tp.setColor(QPalette::Highlight, t.selected);
+        tp.setColor(QPalette::HighlightedText, t.text);
+        tree->setPalette(tp);
+        tree->setStyleSheet(QStringLiteral(
+            "QTreeView { background: %1; border: none; padding-left: 4px; }"
+            "QTreeView::branch:has-children:closed { image: url(:/vsicons/chevron-right.svg); }"
+            "QTreeView::branch:has-children:open { image: url(:/vsicons/chevron-down.svg); }"
+            "QTreeView::branch { width: 12px; }"
+            "QAbstractScrollArea::corner { background: %1; border: none; }"
+            "QHeaderView { background: %1; border: none; }"
+            "QHeaderView::section { background: %1; border: none; }")
+            .arg(t.background.name()));
+        tree->setHeaderHidden(true);
+        tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        tree->setMouseTracking(true);
+        tree->setSelectionMode(QAbstractItemView::SingleSelection);
+        tree->setIndentation(12);
+    };
+
+    // Container with tab widget
     auto* container = new QWidget(m_symbolsDock);
     auto* containerLayout = new QVBoxLayout(container);
     containerLayout->setContentsMargins(0, 0, 0, 0);
     containerLayout->setSpacing(0);
 
-    // Search/filter box
-    m_symbolsSearch = new QLineEdit(container);
-    m_symbolsSearch->setPlaceholderText(QStringLiteral("Filter symbols..."));
+    m_symTabWidget = new QTabWidget(container);
+    m_symTabWidget->setObjectName(QStringLiteral("symTabWidget"));
+    m_symTabWidget->setDocumentMode(true);
+    m_symTabWidget->setFont(monoFont);
+    m_symTabWidget->setStyleSheet(QStringLiteral(
+        "QTabWidget::pane { border: none; }"
+        "QTabBar { background: %1; }"
+        "QTabBar::tab { background: %1; color: %2; border: none;"
+        " border-bottom: 2px solid transparent; padding: 4px 12px; }"
+        "QTabBar::tab:selected { color: %3; border-bottom: 2px solid %4; }"
+        "QTabBar::tab:hover { color: %3; }")
+        .arg(t.backgroundAlt.name(), t.textMuted.name(),
+             t.text.name(), t.borderFocused.name()));
+
+    // ── Modules tab ──
     {
-        QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
-        f.setFixedPitch(true);
-        m_symbolsSearch->setFont(f);
-        m_symDockTitle->setFont(f);
-    }
-    {
-        auto* searchAction = m_symbolsSearch->addAction(
-            QIcon(QStringLiteral(":/vsicons/search.svg")),
-            QLineEdit::LeadingPosition);
-        for (auto* btn : m_symbolsSearch->findChildren<QToolButton*>()) {
-            if (btn->defaultAction() == searchAction) {
-                btn->setIconSize(QSize(14, 14));
-                break;
-            }
-        }
-    }
-    {
-        auto* clearAction = m_symbolsSearch->addAction(
-            QIcon(QStringLiteral(":/vsicons/close.svg")),
-            QLineEdit::TrailingPosition);
-        clearAction->setVisible(false);
-        connect(clearAction, &QAction::triggered,
-                m_symbolsSearch, &QLineEdit::clear);
-        connect(m_symbolsSearch, &QLineEdit::textChanged,
-                clearAction, [clearAction](const QString& text) {
-            clearAction->setVisible(!text.isEmpty());
+        m_modulesTree = new QTreeView();
+        m_modulesModel = new QStandardItemModel(this);
+        m_modulesTree->setModel(m_modulesModel);
+        styleTree(m_modulesTree);
+        m_modulesTree->setExpandsOnDoubleClick(false);
+
+        // Context menu for modules
+        m_modulesTree->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(m_modulesTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+            QModelIndex idx = m_modulesTree->indexAt(pos);
+            if (!idx.isValid()) return;
+            auto* item = m_modulesModel->itemFromIndex(idx);
+            if (!item) return;
+
+            uint64_t base = item->data(Qt::UserRole).toULongLong();
+            QString name = item->data(Qt::UserRole + 1).toString();
+
+            QString fullPath = item->data(Qt::UserRole + 2).toString();
+
+            QMenu menu;
+            auto* actCopyBase = menu.addAction("Copy Base Address");
+            connect(actCopyBase, &QAction::triggered, this, [base]() {
+                QApplication::clipboard()->setText(
+                    QStringLiteral("0x%1").arg(base, 16, 16, QLatin1Char('0')));
+            });
+            auto* actGoTo = menu.addAction("Go to Address");
+            connect(actGoTo, &QAction::triggered, this, [this, base]() {
+                auto* ctrl = activeController();
+                if (!ctrl) return;
+                ctrl->document()->tree.baseAddress = base;
+                ctrl->document()->tree.baseAddressFormula.clear();
+                ctrl->resetChangeTracking();
+                ctrl->refresh();
+            });
+            menu.addSeparator();
+            auto* actDownload = menu.addAction("Download Symbols");
+            connect(actDownload, &QAction::triggered, this, [this, name, base, fullPath]() {
+                auto* ctrl = activeController();
+                if (!ctrl || !ctrl->document()->provider) return;
+                auto prov = ctrl->document()->provider;
+
+                auto info = rcx::extractPdbDebugInfo(*prov, base);
+                if (!info.valid) {
+                    setAppStatus(QStringLiteral("No debug info found in %1").arg(name));
+                    return;
+                }
+
+                // Check local first
+                QString localPdb = rcx::SymbolDownloader::findLocal(fullPath, info.pdbName);
+                if (!localPdb.isEmpty()) {
+                    QString symErr;
+                    auto result = rcx::extractPdbSymbols(localPdb, &symErr);
+                    if (!result.symbols.isEmpty()) {
+                        QVector<QPair<QString, uint32_t>> pairs;
+                        pairs.reserve(result.symbols.size());
+                        for (const auto& s : result.symbols)
+                            pairs.append({s.name, s.rva});
+                        int count = rcx::SymbolStore::instance().addModule(
+                            result.moduleName, localPdb, pairs);
+                        setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (local)")
+                            .arg(count).arg(name));
+                    }
+                    rebuildSymbolsModel();
+                    if (auto* c = activeController()) c->refresh();
+                    return;
+                }
+
+                // Download from MS symbol server
+                if (!m_symDownloader) {
+                    m_symDownloader = new rcx::SymbolDownloader(this);
+                    connect(m_symDownloader, &rcx::SymbolDownloader::progress,
+                            this, [this](const QString& mod, int received, int total) {
+                        if (total > 0)
+                            setAppStatus(QStringLiteral("Downloading %1... %2/%3 KB")
+                                .arg(mod).arg(received/1024).arg(total/1024));
+                        else
+                            setAppStatus(QStringLiteral("Downloading %1... %2 KB")
+                                .arg(mod).arg(received/1024));
+                    });
+                    connect(m_symDownloader, &rcx::SymbolDownloader::finished,
+                            this, [this](const QString& mod, const QString& localPath,
+                                         bool success, const QString& error) {
+                        if (!success) {
+                            setAppStatus(QStringLiteral("Failed to download %1: %2").arg(mod, error));
+                            return;
+                        }
+                        QString symErr;
+                        auto result = rcx::extractPdbSymbols(localPath, &symErr);
+                        if (!result.symbols.isEmpty()) {
+                            QVector<QPair<QString, uint32_t>> pairs;
+                            pairs.reserve(result.symbols.size());
+                            for (const auto& s : result.symbols)
+                                pairs.append({s.name, s.rva});
+                            int count = rcx::SymbolStore::instance().addModule(
+                                result.moduleName, localPath, pairs);
+                            setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
+                                .arg(count).arg(mod));
+                        }
+                        rebuildSymbolsModel();
+                        if (auto* c = activeController()) c->refresh();
+                    });
+                }
+
+                rcx::SymbolDownloader::DownloadRequest req;
+                req.moduleName = name;
+                req.pdbName = info.pdbName;
+                req.guidString = info.guidString;
+                req.age = info.age;
+
+                QString cached = m_symDownloader->findCached(req);
+                if (!cached.isEmpty()) {
+                    QString symErr;
+                    auto result = rcx::extractPdbSymbols(cached, &symErr);
+                    if (!result.symbols.isEmpty()) {
+                        QVector<QPair<QString, uint32_t>> pairs;
+                        pairs.reserve(result.symbols.size());
+                        for (const auto& s : result.symbols)
+                            pairs.append({s.name, s.rva});
+                        int count = rcx::SymbolStore::instance().addModule(
+                            result.moduleName, cached, pairs);
+                        setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (cached)")
+                            .arg(count).arg(name));
+                    }
+                    rebuildSymbolsModel();
+                    if (auto* c = activeController()) c->refresh();
+                    return;
+                }
+
+                m_symDownloader->download(req);
+            });
+            auto* actBrowse = menu.addAction("Load PDB...");
+            connect(actBrowse, &QAction::triggered, this, [this, name]() {
+                QString path = QFileDialog::getOpenFileName(this,
+                    QStringLiteral("Select PDB for %1").arg(name), {},
+                    "PDB Files (*.pdb);;All Files (*)");
+                if (path.isEmpty()) return;
+
+                QString symErr;
+                auto result = rcx::extractPdbSymbols(path, &symErr);
+                if (result.symbols.isEmpty()) {
+                    setAppStatus(symErr.isEmpty()
+                        ? QStringLiteral("No symbols found in PDB")
+                        : symErr);
+                    return;
+                }
+                QVector<QPair<QString, uint32_t>> pairs;
+                pairs.reserve(result.symbols.size());
+                for (const auto& s : result.symbols)
+                    pairs.append({s.name, s.rva});
+                int count = rcx::SymbolStore::instance().addModule(
+                    result.moduleName, path, pairs);
+                setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
+                    .arg(count).arg(name));
+                rebuildSymbolsModel();
+                if (auto* c = activeController()) c->refresh();
+            });
+            menu.exec(m_modulesTree->viewport()->mapToGlobal(pos));
         });
-        for (auto* btn : m_symbolsSearch->findChildren<QToolButton*>()) {
-            if (btn->defaultAction() == clearAction) {
-                btn->setIconSize(QSize(14, 14));
-                break;
+
+        m_symTabWidget->addTab(m_modulesTree, "Modules");
+    }
+
+    // ── Symbols tab ──
+    {
+        auto* symbolsPage = new QWidget();
+        auto* symLayout = new QVBoxLayout(symbolsPage);
+        symLayout->setContentsMargins(0, 0, 0, 0);
+        symLayout->setSpacing(0);
+
+        // Search/filter box
+        m_symbolsSearch = new QLineEdit(symbolsPage);
+        m_symbolsSearch->setPlaceholderText(QStringLiteral("Filter symbols..."));
+        m_symbolsSearch->setFont(monoFont);
+        {
+            auto* searchAction = m_symbolsSearch->addAction(
+                QIcon(QStringLiteral(":/vsicons/search.svg")),
+                QLineEdit::LeadingPosition);
+            for (auto* btn : m_symbolsSearch->findChildren<QToolButton*>()) {
+                if (btn->defaultAction() == searchAction) {
+                    btn->setIconSize(QSize(14, 14));
+                    break;
+                }
             }
         }
-    }
-    {
-        const auto& t = ThemeManager::instance().current();
+        {
+            auto* clearAction = m_symbolsSearch->addAction(
+                QIcon(QStringLiteral(":/vsicons/close.svg")),
+                QLineEdit::TrailingPosition);
+            clearAction->setVisible(false);
+            connect(clearAction, &QAction::triggered,
+                    m_symbolsSearch, &QLineEdit::clear);
+            connect(m_symbolsSearch, &QLineEdit::textChanged,
+                    clearAction, [clearAction](const QString& text) {
+                clearAction->setVisible(!text.isEmpty());
+            });
+            for (auto* btn : m_symbolsSearch->findChildren<QToolButton*>()) {
+                if (btn->defaultAction() == clearAction) {
+                    btn->setIconSize(QSize(14, 14));
+                    break;
+                }
+            }
+        }
         m_symbolsSearch->setStyleSheet(QStringLiteral(
             "QLineEdit { background: %1; color: %2;"
             " border: 1px solid %4;"
@@ -4814,150 +5045,116 @@ void MainWindow::createSymbolsDock() {
             .arg(t.background.name(), t.textDim.name(),
                  t.hover.name(), t.border.name(),
                  t.borderFocused.name()));
-    }
-    m_symbolsSearch->setContentsMargins(6, 6, 6, 6);
-    containerLayout->addWidget(m_symbolsSearch);
+        m_symbolsSearch->setContentsMargins(6, 6, 6, 6);
+        symLayout->addWidget(m_symbolsSearch);
 
-    // Separator
-    {
-        const auto& t = ThemeManager::instance().current();
-        auto* sep = new QFrame(container);
+        // Separator
+        auto* sep = new QFrame(symbolsPage);
         sep->setObjectName(QStringLiteral("symbolsSep"));
         sep->setFrameShape(QFrame::HLine);
         sep->setFixedHeight(1);
         sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
-        containerLayout->addWidget(sep);
-    }
+        symLayout->addWidget(sep);
 
-    // Tree view
-    m_symbolsTree = new QTreeView(container);
-    m_symbolsModel = new QStandardItemModel(this);
-    m_symbolsModel->setHorizontalHeaderLabels({"Name"});
+        // Symbols tree
+        m_symbolsTree = new QTreeView(symbolsPage);
+        m_symbolsModel = new QStandardItemModel(this);
+        m_symbolsModel->setHorizontalHeaderLabels({"Name"});
 
-    m_symbolsProxy = new QSortFilterProxyModel(this);
-    m_symbolsProxy->setSourceModel(m_symbolsModel);
-    m_symbolsProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    m_symbolsProxy->setRecursiveFilteringEnabled(true);
+        m_symbolsProxy = new QSortFilterProxyModel(this);
+        m_symbolsProxy->setSourceModel(m_symbolsModel);
+        m_symbolsProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+        m_symbolsProxy->setRecursiveFilteringEnabled(true);
 
-    m_symbolsTree->setModel(m_symbolsProxy);
-    m_symbolsTree->setHeaderHidden(true);
-    m_symbolsTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_symbolsTree->setExpandsOnDoubleClick(true);
-    m_symbolsTree->setMouseTracking(true);
-    m_symbolsTree->setSelectionMode(QAbstractItemView::SingleSelection);
-    {
-        QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
-        f.setFixedPitch(true);
-        m_symbolsTree->setFont(f);
-    }
+        m_symbolsTree->setModel(m_symbolsProxy);
+        m_symbolsTree->setExpandsOnDoubleClick(true);
+        styleTree(m_symbolsTree);
 
-    // Debounced search
-    auto* searchTimer = new QTimer(this);
-    searchTimer->setSingleShot(true);
-    searchTimer->setInterval(150);
-    connect(searchTimer, &QTimer::timeout, this, [this]() {
-        QString text = m_symbolsSearch->text();
-        m_symbolsProxy->setFilterFixedString(text);
-        if (!text.isEmpty())
-            m_symbolsTree->expandAll();
-        else
-            m_symbolsTree->collapseAll();
-    });
-    connect(m_symbolsSearch, &QLineEdit::textChanged, this, [searchTimer]() {
-        searchTimer->start();
-    });
+        // Debounced search
+        auto* searchTimer = new QTimer(this);
+        searchTimer->setSingleShot(true);
+        searchTimer->setInterval(150);
+        connect(searchTimer, &QTimer::timeout, this, [this]() {
+            QString text = m_symbolsSearch->text();
+            m_symbolsProxy->setFilterFixedString(text);
+            if (!text.isEmpty())
+                m_symbolsTree->expandAll();
+            else
+                m_symbolsTree->collapseAll();
+        });
+        connect(m_symbolsSearch, &QLineEdit::textChanged, this, [searchTimer]() {
+            searchTimer->start();
+        });
 
-    // Tree styling
-    {
-        const auto& t = ThemeManager::instance().current();
-        QPalette tp = m_symbolsTree->palette();
-        tp.setColor(QPalette::Text, t.textDim);
-        tp.setColor(QPalette::Highlight, t.selected);
-        tp.setColor(QPalette::HighlightedText, t.text);
-        m_symbolsTree->setPalette(tp);
+        symLayout->addWidget(m_symbolsTree);
 
-        m_symbolsTree->setStyleSheet(QStringLiteral(
-            "QTreeView { background: %1; border: none; padding-left: 4px; }"
-            "QTreeView::branch:has-children:closed { image: url(:/vsicons/chevron-right.svg); }"
-            "QTreeView::branch:has-children:open { image: url(:/vsicons/chevron-down.svg); }"
-            "QTreeView::branch { width: 12px; }"
-            "QAbstractScrollArea::corner { background: %1; border: none; }"
-            "QHeaderView { background: %1; border: none; }"
-            "QHeaderView::section { background: %1; border: none; }")
-            .arg(t.background.name()));
-    }
-    m_symbolsTree->setIndentation(12);
-    containerLayout->addWidget(m_symbolsTree);
+        // Lazy-load children when a module node is expanded
+        connect(m_symbolsTree, &QTreeView::expanded, this, [this](const QModelIndex& proxyIdx) {
+            QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
+            auto* item = m_symbolsModel->itemFromIndex(srcIdx);
+            if (!item || item->parent()) return;
 
-    // Lazy-load children when a module node is expanded
-    connect(m_symbolsTree, &QTreeView::expanded, this, [this](const QModelIndex& proxyIdx) {
-        QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
-        auto* item = m_symbolsModel->itemFromIndex(srcIdx);
-        if (!item || item->parent()) return; // only top-level (module) items
-
-        // Check if already populated (sentinel child with empty text)
-        if (item->rowCount() == 1 && item->child(0)->text().isEmpty()) {
-            item->removeRows(0, 1); // remove sentinel
-
-            QString moduleName = item->data(Qt::UserRole).toString();
-            const auto* set = rcx::SymbolStore::instance().moduleData(moduleName);
-            if (set) {
-                for (const auto& sym : set->rvaToName) {
-                    auto* child = new QStandardItem(
-                        QStringLiteral("%1  [0x%2]")
-                            .arg(sym.second)
-                            .arg(sym.first, 8, 16, QLatin1Char('0')));
-                    child->setData(moduleName, Qt::UserRole);      // module name
-                    child->setData(sym.first, Qt::UserRole + 1);   // RVA
-                    child->setData(sym.second, Qt::UserRole + 2);  // symbol name
-                    item->appendRow(child);
+            if (item->rowCount() == 1 && item->child(0)->text().isEmpty()) {
+                item->removeRows(0, 1);
+                QString moduleName = item->data(Qt::UserRole).toString();
+                const auto* set = rcx::SymbolStore::instance().moduleData(moduleName);
+                if (set) {
+                    for (const auto& sym : set->rvaToName) {
+                        auto* child = new QStandardItem(
+                            QStringLiteral("%1  [0x%2]")
+                                .arg(sym.second)
+                                .arg(sym.first, 8, 16, QLatin1Char('0')));
+                        child->setData(moduleName, Qt::UserRole);
+                        child->setData(sym.first, Qt::UserRole + 1);
+                        child->setData(sym.second, Qt::UserRole + 2);
+                        item->appendRow(child);
+                    }
                 }
             }
-        }
-    });
+        });
 
-    // Context menu
-    m_symbolsTree->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_symbolsTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
-        QModelIndex proxyIdx = m_symbolsTree->indexAt(pos);
-        if (!proxyIdx.isValid()) return;
-        QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
-        auto* item = m_symbolsModel->itemFromIndex(srcIdx);
-        if (!item) return;
+        // Context menu for symbols
+        m_symbolsTree->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(m_symbolsTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+            QModelIndex proxyIdx = m_symbolsTree->indexAt(pos);
+            if (!proxyIdx.isValid()) return;
+            QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
+            auto* item = m_symbolsModel->itemFromIndex(srcIdx);
+            if (!item) return;
 
-        QMenu menu;
-        if (!item->parent()) {
-            // Module-level item
-            QString moduleName = item->data(Qt::UserRole).toString();
-            auto* actUnload = menu.addAction("Unload Module");
-            connect(actUnload, &QAction::triggered, this, [this, moduleName]() {
-                rcx::SymbolStore::instance().unloadModule(moduleName);
-                rebuildSymbolsModel();
-                // Refresh active view to clear stale annotations
-                if (auto* ctrl = activeController())
-                    ctrl->refresh();
-            });
-        } else {
-            // Symbol-level item
-            QString moduleName = item->data(Qt::UserRole).toString();
-            QString symName = item->data(Qt::UserRole + 2).toString();
-            uint32_t rva = item->data(Qt::UserRole + 1).toUInt();
-            QString fullName = moduleName + QStringLiteral("!") + symName;
+            QMenu menu;
+            if (!item->parent()) {
+                QString moduleName = item->data(Qt::UserRole).toString();
+                auto* actUnload = menu.addAction("Unload Module");
+                connect(actUnload, &QAction::triggered, this, [this, moduleName]() {
+                    rcx::SymbolStore::instance().unloadModule(moduleName);
+                    rebuildSymbolsModel();
+                    if (auto* ctrl = activeController())
+                        ctrl->refresh();
+                });
+            } else {
+                QString moduleName = item->data(Qt::UserRole).toString();
+                QString symName = item->data(Qt::UserRole + 2).toString();
+                uint32_t rva = item->data(Qt::UserRole + 1).toUInt();
+                QString fullName = moduleName + QStringLiteral("!") + symName;
 
-            auto* actCopyName = menu.addAction("Copy Symbol Name");
-            connect(actCopyName, &QAction::triggered, this, [fullName]() {
-                QApplication::clipboard()->setText(fullName);
-            });
-            auto* actCopyRva = menu.addAction("Copy RVA");
-            connect(actCopyRva, &QAction::triggered, this, [rva]() {
-                QApplication::clipboard()->setText(
-                    QStringLiteral("0x%1").arg(rva, 8, 16, QLatin1Char('0')));
-            });
-        }
-        menu.exec(m_symbolsTree->viewport()->mapToGlobal(pos));
-    });
+                auto* actCopyName = menu.addAction("Copy Symbol Name");
+                connect(actCopyName, &QAction::triggered, this, [fullName]() {
+                    QApplication::clipboard()->setText(fullName);
+                });
+                auto* actCopyRva = menu.addAction("Copy RVA");
+                connect(actCopyRva, &QAction::triggered, this, [rva]() {
+                    QApplication::clipboard()->setText(
+                        QStringLiteral("0x%1").arg(rva, 8, 16, QLatin1Char('0')));
+                });
+            }
+            menu.exec(m_symbolsTree->viewport()->mapToGlobal(pos));
+        });
 
+        m_symTabWidget->addTab(symbolsPage, "Symbols");
+    }
+
+    containerLayout->addWidget(m_symTabWidget);
     m_symbolsDock->setWidget(container);
     addDockWidget(Qt::RightDockWidgetArea, m_symbolsDock);
     m_symbolsDock->hide();
@@ -4965,7 +5162,7 @@ void MainWindow::createSymbolsDock() {
     // Border overlay and resize grip for floating state
     {
         auto* border = new BorderOverlay(m_symbolsDock);
-        border->color = ThemeManager::instance().current().borderFocused;
+        border->color = t.borderFocused;
         border->hide();
         auto* grip = new ResizeGrip(m_symbolsDock);
         grip->hide();
@@ -5008,6 +5205,30 @@ void MainWindow::rebuildSymbolsModel() {
         moduleItem->appendRow(new QStandardItem());
 
         m_symbolsModel->appendRow(moduleItem);
+    }
+}
+
+void MainWindow::rebuildModulesModel() {
+    if (!m_modulesModel) return;
+    m_modulesModel->clear();
+
+    auto* ctrl = activeController();
+    if (!ctrl || !ctrl->document()->provider) return;
+
+    auto modules = ctrl->document()->provider->enumerateModules();
+    if (modules.isEmpty()) return;
+
+    for (const auto& mod : modules) {
+        auto* item = new QStandardItem(
+            QStringLiteral("%1  [0x%2]  (%3 KB)")
+                .arg(mod.name)
+                .arg(mod.base, 0, 16)
+                .arg(mod.size / 1024));
+        item->setData(mod.base, Qt::UserRole);
+        item->setData(mod.name, Qt::UserRole + 1);
+        item->setData(mod.fullPath, Qt::UserRole + 2);
+        item->setToolTip(mod.fullPath.isEmpty() ? mod.name : mod.fullPath);
+        m_modulesModel->appendRow(item);
     }
 }
 

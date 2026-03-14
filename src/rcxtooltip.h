@@ -60,7 +60,9 @@ public:
         if (title == m_title && body == m_body && isVisible()) return;
         m_title = title; m_body = body;
         m_lines = body.split('\n');
-        m_font = font; m_bold = font; m_bold.setBold(true);
+        m_font = font;
+        m_font.setPointSizeF(font.pointSizeF() * 0.9);
+        m_bold = m_font; m_bold.setBold(true);
         recalc();
     }
 
