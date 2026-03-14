@@ -108,9 +108,9 @@ inline void buildProjectExplorer(QStandardItemModel* model,
             const Node& n = tab.tree->nodes[idx];
             if (n.kind != NodeKind::Struct) continue;
             if (n.resolvedClassKeyword() == QStringLiteral("enum"))
-                enums.append({&n, tab.subPtr, tab.tree});
+                enums.push_back(Entry{&n, tab.subPtr, tab.tree});
             else
-                types.append({&n, tab.subPtr, tab.tree});
+                types.push_back(Entry{&n, tab.subPtr, tab.tree});
         }
     }
 
@@ -152,7 +152,7 @@ inline void syncProjectExplorer(QStandardItemModel* model,
             const Node& n = tab.tree->nodes[idx];
             if (n.kind != NodeKind::Struct) continue;
             bool ie = n.resolvedClassKeyword() == QStringLiteral("enum");
-            desired.append({n.id, &n, tab.subPtr, tab.tree, ie});
+            desired.push_back(Entry{n.id, &n, tab.subPtr, tab.tree, ie});
         }
     }
 

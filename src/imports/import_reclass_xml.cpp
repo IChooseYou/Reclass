@@ -294,7 +294,7 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointe
 
                     // Defer ref resolution if array references a class
                     if (!arrayClassName.isEmpty()) {
-                        pendingRefs.append({arrId, arrayClassName});
+                        pendingRefs.push_back(PendingRef{arrId, arrayClassName});
                     }
 
                     childOffset += nodeSize > 0 ? nodeSize : 0;
@@ -321,7 +321,7 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointe
                     n.collapsed = true; // Start collapsed to avoid recursive expansion freeze
                     int nodeIdx = tree.addNode(n);
                     uint64_t nodeId = tree.nodes[nodeIdx].id;
-                    pendingRefs.append({nodeId, ptrClass});
+                    pendingRefs.push_back(PendingRef{nodeId, ptrClass});
                     childOffset += nodeSize > 0 ? nodeSize : sizeForKind(kind);
                     continue;
                 }
@@ -335,7 +335,7 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointe
                     if (!n.structTypeName.isEmpty()) {
                         int nodeIdx = tree.addNode(n);
                         uint64_t nodeId = tree.nodes[nodeIdx].id;
-                        pendingRefs.append({nodeId, n.structTypeName});
+                        pendingRefs.push_back(PendingRef{nodeId, n.structTypeName});
                     } else {
                         tree.addNode(n);
                     }

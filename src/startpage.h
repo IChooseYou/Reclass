@@ -171,8 +171,8 @@ private:
         for (const auto& path : s.value("recentFiles").toStringList()) {
             QFileInfo fi(path);
             if (!fi.exists()) continue;
-            m_all.append({fi.absoluteFilePath(), fi.fileName(), fi.absolutePath(),
-                          fi.lastModified(), false});
+            m_all.push_back(Entry{fi.absoluteFilePath(), fi.fileName(), fi.absolutePath(),
+                                 fi.lastModified(), false});
         }
 #ifdef __APPLE__
         QDir exDir(QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../Resources/examples"));
@@ -180,8 +180,8 @@ private:
         QDir exDir(QCoreApplication::applicationDirPath() + "/examples");
 #endif
         for (const auto& fn : exDir.entryList({"*.rcx"}, QDir::Files, QDir::Name))
-            m_all.append({exDir.absoluteFilePath(fn), fn, exDir.absolutePath(),
-                          QFileInfo(exDir.filePath(fn)).lastModified(), true});
+            m_all.push_back(Entry{exDir.absoluteFilePath(fn), fn, exDir.absolutePath(),
+                                 QFileInfo(exDir.filePath(fn)).lastModified(), true});
     }
 
     void buildGroups() {
@@ -207,7 +207,7 @@ private:
         static const char* names[] = {"Today","Yesterday","This week","This month","Older","Examples"};
         m_groups.clear();
         for (int i = 0; i < 6; i++)
-            if (!bk[i].isEmpty()) m_groups.append({names[i], true, bk[i]});
+            if (!bk[i].isEmpty()) m_groups.push_back(Group{names[i], true, bk[i]});
         m_scrollY = 0;
     }
 
@@ -223,13 +223,11 @@ private:
             {":/vsicons/debug.svg",            "Import PDB",         "Import types from a .pdb symbol file"}
         };
 
-        const int N = 5, CH = 84, R = 6, panelH = N * CH;
+        const int N = 5, CH = 84, panelH = N * CH;
 
-        // Rounded panel background
-        QPainterPath clip;
-        clip.addRoundedRect(QRectF(x, y, w, panelH), R, R);
+        // Sharp-cornered panel background
         p.save();
-        p.setClipPath(clip);
+        p.setClipRect(QRectF(x, y, w, panelH));
         p.fillRect(x, y, w, panelH, m_t.background);
 
         for (int i = 0; i < N; i++) {
@@ -289,7 +287,7 @@ private:
             if (gi > 0) fy += 15;
 
             // Group header
-            m_grpRects.append({gi, QRectF(x, fy, w, 28)});
+            m_grpRects.emplaceBack(gi, QRectF(x, fy, w, 28));
             p.setPen(Qt::NoPen); p.setBrush(m_t.text);
             int triX = x + 8, triY = fy + 11;
             QPolygonF tri;
@@ -307,7 +305,7 @@ private:
             for (int ei : g.entries) {
                 auto& e = m_filtered[ei];
                 QRectF er(x, fy, w, 52);
-                m_entRects.append({ei, er});
+                m_entRects.emplaceBack(ei, er);
                 if (m_hz == HZ_Entry && m_hi == ei) p.fillRect(er, m_t.hover);
 
                 drawIcon(p, e.isExample ? ":/vsicons/book.svg" : ":/vsicons/symbol-structure.svg",

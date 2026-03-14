@@ -200,10 +200,10 @@ struct Tokenizer {
             case '=': tk = TokKind::Equals;   break;
             default:  tk = TokKind::Other;    break;
             }
-            tokens.append({tk, QString(c), line});
+            tokens.push_back(Token{tk, QString(c), line});
             pos++;
         }
-        tokens.append({TokKind::Eof, {}, line});
+        tokens.push_back(Token{TokKind::Eof, {}, line});
     }
 
 private:
@@ -241,7 +241,7 @@ private:
             bool ok;
             int val = m.captured(1).toInt(&ok, 16);
             if (ok) {
-                offsets.append({commentLine, val});
+                offsets.push_back(LineOffset{commentLine, val});
             }
         }
     }
@@ -259,7 +259,7 @@ private:
     void parseIdent() {
         int start = pos;
         while (pos < src.size() && (src[pos].isLetterOrNumber() || src[pos] == '_')) pos++;
-        tokens.append({TokKind::Ident, src.mid(start, pos - start), line});
+        tokens.push_back(Token{TokKind::Ident, src.mid(start, pos - start), line});
     }
 
     void parseNumber() {
@@ -276,7 +276,7 @@ private:
         // Skip integer suffixes (U, L, LL, ULL, etc.)
         while (pos < src.size() && (src[pos] == 'u' || src[pos] == 'U' ||
                                      src[pos] == 'l' || src[pos] == 'L')) pos++;
-        tokens.append({TokKind::Number, src.mid(start, pos - start), line});
+        tokens.push_back(Token{TokKind::Number, src.mid(start, pos - start), line});
     }
 };
 
@@ -1034,7 +1034,7 @@ struct Parser {
                 }
             }
 
-            ps.enumValues.append({memberName, memberValue});
+            ps.enumValues.emplaceBack(memberName, memberValue);
             nextValue = memberValue + 1;
 
             // Skip comma between members
@@ -1312,7 +1312,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
 
             if (!field.pointerTarget.isEmpty() &&
                 field.pointerTarget != QStringLiteral("void")) {
-                ctx.pendingRefs.append({nodeId, field.pointerTarget});
+                ctx.pendingRefs.push_back(PendingRef{nodeId, field.pointerTarget});
             }
 
             computedOffset = fieldOffset + ctx.ptrSize;
@@ -1342,7 +1342,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
                 n.offset = fieldOffset;
                 int nodeIdx = ctx.tree.addNode(n);
                 uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
-                ctx.pendingRefs.append({nodeId, field.typeName});
+                ctx.pendingRefs.push_back(PendingRef{nodeId, field.typeName});
                 computedOffset = fieldOffset + elemSize;
             }
             continue;
@@ -1461,7 +1461,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
 
                 int nodeIdx = ctx.tree.addNode(n);
                 uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
-                ctx.pendingRefs.append({nodeId, field.typeName});
+                ctx.pendingRefs.push_back(PendingRef{nodeId, field.typeName});
                 if (elemSize > 0)
                     computedOffset = fieldOffset + totalElements * elemSize;
                 continue;
@@ -1477,7 +1477,7 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
 
             int nodeIdx = ctx.tree.addNode(n);
             uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
-            ctx.pendingRefs.append({nodeId, field.typeName});
+            ctx.pendingRefs.push_back(PendingRef{nodeId, field.typeName});
             if (elemSize > 0)
                 computedOffset = fieldOffset + elemSize;
             continue;

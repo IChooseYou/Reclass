@@ -1,5 +1,6 @@
 #include "controller.h"
 #include "addressparser.h"
+#include "symbolstore.h"
 #include "typeselectorpopup.h"
 #include "providerregistry.h"
 #include "themes/thememanager.h"
@@ -74,8 +75,10 @@ RcxDocument::RcxDocument(QObject* parent)
 }
 
 ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
-                                   bool treeLines, bool braceWrap, bool typeHints) const {
-    return rcx::compose(tree, *provider, viewRootId, compactColumns, treeLines, braceWrap, typeHints);
+                                   bool treeLines, bool braceWrap, bool typeHints,
+                                   SymbolLookupFn symbolLookup) const {
+    return rcx::compose(tree, *provider, viewRootId, compactColumns, treeLines, braceWrap, typeHints,
+                        std::move(symbolLookup));
 }
 
 bool RcxDocument::save(const QString& path) {
@@ -269,6 +272,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // Footer "Trim" button — remove trailing hex nodes from end of struct
     connect(editor, &RcxEditor::trimHexRequested,
             this, [this](uint64_t structId) {
+        // Unions don't have trailing padding — all members overlap at offset 0
+        int si = m_doc->tree.indexOfId(structId);
+        if (si >= 0 && m_doc->tree.nodes[si].classKeyword == QStringLiteral("union"))
+            return;
         QVector<int> children = m_doc->tree.childrenOf(structId);
         if (children.isEmpty()) return;
 
@@ -304,7 +311,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         int64_t nextVal = members.isEmpty() ? 0 : members.last().second + 1;
         auto oldMembers = members;
         for (int i = 0; i < count; i++)
-            members.append({QStringLiteral("Member%1").arg(nextVal + i), nextVal + i});
+            members.emplaceBack(QStringLiteral("Member%1").arg(nextVal + i), nextVal + i);
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeEnumMembers{enumId, oldMembers, members}));
     });
@@ -442,6 +449,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     *ok = prov->read(addr, &val, ptrSz);
                     return val;
                 };
+                cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
+                    return SymbolStore::instance().resolve(name, prov, ok);
+                };
                 // Wire kernel paging callbacks if provider supports it
                 if (prov->hasKernelPaging()) {
                     cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
@@ -467,9 +477,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
             if (result.ok && result.value != m_doc->tree.baseAddress) {
                 uint64_t oldBase = m_doc->tree.baseAddress;
                 QString oldFormula = m_doc->tree.baseAddressFormula;
-                // Store formula if input uses module/deref/kernel-function syntax
+                // Store formula if input uses module/deref/kernel-function/symbol syntax
                 static const QRegularExpression formulaRx(
-                    QStringLiteral("[<\\[]|\\b(?:vtop|cr3|phys)\\s*\\("));
+                    QStringLiteral("[<\\[]|\\b(?:vtop|cr3|phys)\\s*\\(|\\w+!\\w+"));
                 QString newFormula = formulaRx.match(s).hasMatch() ? s : QString();
                 m_doc->undoStack.push(new RcxCommand(this,
                     cmd::ChangeBase{oldBase, result.value, oldFormula, newFormula}));
@@ -631,11 +641,20 @@ void RcxController::refresh() {
     // Bracket compose with thread-local doc pointer for type name resolution
     s_composeDoc = m_doc;
 
+    // Build symbol lookup callback if PDB symbols are loaded
+    SymbolLookupFn symLookup;
+    if (SymbolStore::instance().hasSymbols() && m_doc->provider) {
+        auto* prov = m_doc->provider.get();
+        symLookup = [prov](uint64_t addr) -> QString {
+            return SymbolStore::instance().getSymbolForAddress(addr, prov);
+        };
+    }
+
     // Compose against snapshot provider if active, otherwise real provider
     if (m_snapshotProv)
-        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints);
+        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, symLookup);
     else
-        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints);
+        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, symLookup);
 
     s_composeDoc = nullptr;
 
@@ -836,7 +855,7 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
                 if (si == nodeIdx) continue;
                 auto& sib = m_doc->tree.nodes[si];
                 if (sib.offset >= oldEnd)
-                    adjs.append({sib.id, sib.offset, sib.offset + delta});
+                    adjs.push_back(cmd::OffsetAdj{sib.id, sib.offset, sib.offset + delta});
             }
         }
         bool needsRename = isHexNode(node.kind) && !isHexNode(newKind);
@@ -910,7 +929,7 @@ void RcxController::insertNodeAbove(int beforeIdx, NodeKind kind, const QString&
     for (int si : siblings) {
         auto& sib = m_doc->tree.nodes[si];
         if (sib.offset >= before.offset)
-            adjs.append({sib.id, sib.offset, sib.offset + insertSize});
+            adjs.push_back(cmd::OffsetAdj{sib.id, sib.offset, sib.offset + insertSize});
     }
 
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, adjs}));
@@ -935,7 +954,7 @@ void RcxController::removeNode(int nodeIdx) {
             if (si == nodeIdx) continue;
             auto& sib = m_doc->tree.nodes[si];
             if (sib.offset >= deletedEnd) {
-                adjs.append({sib.id, sib.offset, sib.offset - deletedSize});
+                adjs.push_back(cmd::OffsetAdj{sib.id, sib.offset, sib.offset - deletedSize});
             }
         }
     }
@@ -1442,7 +1461,7 @@ void RcxController::duplicateNode(int nodeIdx) {
             if (si == nodeIdx) continue;
             auto& sib = m_doc->tree.nodes[si];
             if (sib.offset >= copyOffset)
-                adjs.append({sib.id, sib.offset, sib.offset + copySize});
+                adjs.push_back(cmd::OffsetAdj{sib.id, sib.offset, sib.offset + copySize});
         }
     }
 
@@ -1762,14 +1781,24 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         // ── Insert ► submenu ──
         {
+            // Find earliest selected node (lowest offset) for insert-above
+            int firstIdx = -1;
+            int lowestOff = INT_MAX;
+            for (uint64_t id : ids) {
+                int idx = m_doc->tree.indexOfId(id);
+                if (idx >= 0 && m_doc->tree.nodes[idx].offset < lowestOff) {
+                    lowestOff = m_doc->tree.nodes[idx].offset;
+                    firstIdx = idx;
+                }
+            }
             auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
-            insertMenu->addAction("Insert 4", [this]() {
-                uint64_t target = m_viewRootId ? m_viewRootId : 0;
-                insertNode(target, -1, NodeKind::Hex32, QStringLiteral("field"));
+            insertMenu->addAction("Insert 4 Above", [this, firstIdx]() {
+                if (firstIdx >= 0)
+                    insertNodeAbove(firstIdx, NodeKind::Hex32, QStringLiteral("field"));
             });
-            insertMenu->addAction("Insert 8", [this]() {
-                uint64_t target = m_viewRootId ? m_viewRootId : 0;
-                insertNode(target, -1, NodeKind::Hex64, QStringLiteral("field"));
+            insertMenu->addAction("Insert 8 Above", [this, firstIdx]() {
+                if (firstIdx >= 0)
+                    insertNodeAbove(firstIdx, NodeKind::Hex64, QStringLiteral("field"));
             });
         }
 
@@ -1919,7 +1948,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 auto members = m_doc->tree.nodes[ni].enumMembers;
                 int64_t nextVal = members.isEmpty() ? 0 : members.last().second + 1;
                 auto oldMembers = members;
-                members.append({QStringLiteral("NewMember"), nextVal});
+                members.emplaceBack(QStringLiteral("NewMember"), nextVal);
                 m_doc->undoStack.push(new RcxCommand(this,
                     cmd::ChangeEnumMembers{nodeId, oldMembers, members}));
             });
@@ -3328,6 +3357,9 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
             *ok = prov->read(addr, &val, ptrSz);
             return val;
         };
+        cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
+            return SymbolStore::instance().resolve(name, prov, ok);
+        };
         // Wire kernel paging callbacks if provider supports it
         if (prov->hasKernelPaging()) {
             cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
@@ -3469,6 +3501,9 @@ void RcxController::selectSource(const QString& text) {
                             uint64_t val = 0;
                             *ok = prov->read(addr, &val, ptrSz);
                             return val;
+                        };
+                        cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
+                            return SymbolStore::instance().resolve(name, prov, ok);
                         };
                         // Wire kernel paging callbacks if provider supports it
                         if (prov->hasKernelPaging()) {
@@ -3616,7 +3651,7 @@ void RcxController::collectPointerRanges(
 
     int span = m_doc->tree.structSpan(structId);
     if (span <= 0) return;
-    ranges.append({memBase, span});
+    ranges.emplaceBack(memBase, span);
 
     if (!m_snapshotProv) return;
 
@@ -3664,7 +3699,7 @@ void RcxController::onRefreshTick() {
 
     // Collect all needed ranges: main struct + pointer targets (absolute addresses)
     QVector<QPair<uint64_t,int>> ranges;
-    ranges.append({m_doc->tree.baseAddress, extent});
+    ranges.emplaceBack(m_doc->tree.baseAddress, extent);
 
     if (m_snapshotProv) {
         QSet<QPair<uint64_t,uint64_t>> visited;

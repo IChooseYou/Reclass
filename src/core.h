@@ -297,8 +297,8 @@ struct Node {
             QJsonArray arr = o["enumMembers"].toArray();
             for (const auto& v : arr) {
                 QJsonObject em = v.toObject();
-                n.enumMembers.append({em["name"].toString(),
-                                      em["value"].toString("0").toLongLong()});
+                n.enumMembers.emplaceBack(em["name"].toString(),
+                                        em["value"].toString("0").toLongLong());
             }
         }
         if (o.contains("bitfieldMembers")) {
@@ -1043,8 +1043,13 @@ namespace fmt {
 
 // ── Compose function forward declaration ──
 
+// Optional callback: given an absolute address, return a symbol name (e.g. "nt!PsActiveProcessHead")
+// or empty string if no symbol matches. Used for PDB symbol annotations on rows.
+using SymbolLookupFn = std::function<QString(uint64_t addr)>;
+
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId = 0,
                       bool compactColumns = false, bool treeLines = false,
-                      bool braceWrap = false, bool typeHints = false);
+                      bool braceWrap = false, bool typeHints = false,
+                      SymbolLookupFn symbolLookup = {});
 
 } // namespace rcx

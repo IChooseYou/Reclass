@@ -396,7 +396,7 @@ uint64_t PdbCtx::importEnum(uint32_t typeIndex) {
                 field->data.LF_ENUMERATE.value,
                 field->data.LF_ENUMERATE.lfEasy.kind);
             if (eName)
-                s.enumMembers.append({QString::fromUtf8(eName), val});
+                s.enumMembers.emplaceBack(QString::fromUtf8(eName), val);
 
             i += static_cast<size_t>(eName - reinterpret_cast<const char*>(field));
             i += strnlen(eName, maxSize - i - 1) + 1;
@@ -880,7 +880,7 @@ void PdbCtx::importMemberType(uint32_t typeIndex, int offset, const QString& nam
         n.name = name;
         n.parentId = parentId;
         n.offset = offset;
-        n.bitfieldMembers.append({name, bitPos, bitLen});
+        n.bitfieldMembers.push_back(BitfieldMember{name, bitPos, bitLen});
         tree.addNode(n);
         break;
     }
@@ -942,6 +942,118 @@ struct PdbFile {
         return true;
     }
 };
+
+// ── Public API: extractPdbSymbols ──
+
+PdbSymbolResult extractPdbSymbols(const QString& pdbPath, QString* errorMsg) {
+    auto setErr = [&](const QString& msg) { if (errorMsg) *errorMsg = msg; };
+
+    MappedFile mapped;
+    if (!QFile::exists(pdbPath)) {
+        setErr(QStringLiteral("PDB file not found: ") + pdbPath);
+        return {};
+    }
+    if (!mapped.open(pdbPath)) {
+        setErr(QStringLiteral("Failed to memory-map PDB file: ") + pdbPath);
+        return {};
+    }
+    if (PDB::ValidateFile(mapped.base, mapped.size) != PDB::ErrorCode::Success) {
+        setErr(QStringLiteral("Invalid PDB file: ") + pdbPath);
+        return {};
+    }
+
+    PDB::RawFile rawFile = PDB::CreateRawFile(mapped.base);
+    if (PDB::HasValidDBIStream(rawFile) != PDB::ErrorCode::Success) {
+        setErr(QStringLiteral("PDB has no valid DBI stream: ") + pdbPath);
+        return {};
+    }
+
+    const PDB::DBIStream dbiStream = PDB::CreateDBIStream(rawFile);
+
+    // Validate required sub-streams
+    if (dbiStream.HasValidSymbolRecordStream(rawFile) != PDB::ErrorCode::Success ||
+        dbiStream.HasValidPublicSymbolStream(rawFile) != PDB::ErrorCode::Success ||
+        dbiStream.HasValidImageSectionStream(rawFile) != PDB::ErrorCode::Success) {
+        setErr(QStringLiteral("PDB DBI stream missing required sub-streams"));
+        return {};
+    }
+
+    const PDB::ImageSectionStream imageSectionStream = dbiStream.CreateImageSectionStream(rawFile);
+    const PDB::CoalescedMSFStream symbolRecordStream = dbiStream.CreateSymbolRecordStream(rawFile);
+
+    PdbSymbolResult result;
+
+    // Derive module name from PDB filename (e.g. "ntoskrnl.pdb" → "ntoskrnl")
+    QFileInfo fi(pdbPath);
+    result.moduleName = fi.completeBaseName();
+
+    // Read public symbols (S_PUB32)
+    const PDB::PublicSymbolStream publicSymbolStream = dbiStream.CreatePublicSymbolStream(rawFile);
+    {
+        const PDB::ArrayView<PDB::HashRecord> hashRecords = publicSymbolStream.GetRecords();
+        const size_t count = hashRecords.GetLength();
+        result.symbols.reserve(static_cast<int>(count));
+
+        for (const PDB::HashRecord& hashRecord : hashRecords) {
+            const PDB::CodeView::DBI::Record* record =
+                publicSymbolStream.GetRecord(symbolRecordStream, hashRecord);
+            if (record->header.kind != PDB::CodeView::DBI::SymbolRecordKind::S_PUB32)
+                continue;
+
+            const uint32_t rva = imageSectionStream.ConvertSectionOffsetToRVA(
+                record->data.S_PUB32.section, record->data.S_PUB32.offset);
+            if (rva == 0u)
+                continue;
+
+            result.symbols.push_back(PdbSymbol{QString::fromUtf8(record->data.S_PUB32.name), rva});
+        }
+    }
+
+    // Read global symbols (S_GDATA32, S_GTHREAD32, S_LDATA32, S_LTHREAD32, S_GPROC32, S_LPROC32)
+    if (dbiStream.HasValidGlobalSymbolStream(rawFile) == PDB::ErrorCode::Success) {
+        const PDB::GlobalSymbolStream globalSymbolStream = dbiStream.CreateGlobalSymbolStream(rawFile);
+        const PDB::ArrayView<PDB::HashRecord> hashRecords = globalSymbolStream.GetRecords();
+
+        result.symbols.reserve(result.symbols.size() + static_cast<int>(hashRecords.GetLength()));
+
+        for (const PDB::HashRecord& hashRecord : hashRecords) {
+            const PDB::CodeView::DBI::Record* record =
+                globalSymbolStream.GetRecord(symbolRecordStream, hashRecord);
+
+            const char* name = nullptr;
+            uint32_t rva = 0u;
+
+            if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_GDATA32) {
+                name = record->data.S_GDATA32.name;
+                rva = imageSectionStream.ConvertSectionOffsetToRVA(
+                    record->data.S_GDATA32.section, record->data.S_GDATA32.offset);
+            } else if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_GTHREAD32) {
+                name = record->data.S_GTHREAD32.name;
+                rva = imageSectionStream.ConvertSectionOffsetToRVA(
+                    record->data.S_GTHREAD32.section, record->data.S_GTHREAD32.offset);
+            } else if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_LDATA32) {
+                name = record->data.S_LDATA32.name;
+                rva = imageSectionStream.ConvertSectionOffsetToRVA(
+                    record->data.S_LDATA32.section, record->data.S_LDATA32.offset);
+            } else if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_LTHREAD32) {
+                name = record->data.S_LTHREAD32.name;
+                rva = imageSectionStream.ConvertSectionOffsetToRVA(
+                    record->data.S_LTHREAD32.section, record->data.S_LTHREAD32.offset);
+            }
+
+            if (rva == 0u)
+                continue;
+            if (!name || name[0] == '\0')
+                continue;
+
+            result.symbols.push_back(PdbSymbol{QString::fromUtf8(name), rva});
+        }
+    }
+
+    qDebug() << "[PDB] extractPdbSymbols:" << result.symbols.size() << "symbols from"
+             << result.moduleName;
+    return result;
+}
 
 // ── Public API: enumeratePdbTypes ──
 
@@ -1125,6 +1237,11 @@ NodeTree importPdb(const QString& pdbPath, const QString& structFilter, QString*
 #else // !_WIN32
 
 namespace rcx {
+
+PdbSymbolResult extractPdbSymbols(const QString&, QString* errorMsg) {
+    if (errorMsg) *errorMsg = QStringLiteral("PDB import requires Windows");
+    return {};
+}
 
 QVector<PdbTypeInfo> enumeratePdbTypes(const QString&, QString* errorMsg) {
     if (errorMsg) *errorMsg = QStringLiteral("PDB import requires Windows");

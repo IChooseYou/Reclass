@@ -121,7 +121,7 @@ void McpBridge::onNewConnection() {
     auto* pending = m_server->nextPendingConnection();
     if (!pending) return;
 
-    m_clients.append({pending, {}, false});
+    m_clients.push_back(ClientState{pending, {}, false});
 
     connect(pending, &QLocalSocket::readyRead,
             this, &McpBridge::onReadyRead);
@@ -156,7 +156,7 @@ void McpBridge::onReadyRead() {
         if (line.isEmpty()) continue;
 
         if (m_processing) {
-            m_pendingRequests.append({sock, line});
+            m_pendingRequests.push_back(PendingRequest{sock, line});
             continue;
         }
         m_processing = true;
@@ -819,7 +819,7 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
         QJsonArray nodeArr;
         struct QueueEntry { uint64_t parentId; int depth; };
         QVector<QueueEntry> queue;
-        queue.append({filterParentId, 0});
+        queue.push_back(QueueEntry{filterParentId, 0});
 
         int totalCount = 0;  // total nodes that match depth filter
         int emitted = 0;
@@ -839,13 +839,13 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
                 if (totalCount <= offset) {
                     // Still skipping — but enqueue children for counting
                     if (entry.depth + 1 <= maxDepth)
-                        queue.append({n.id, entry.depth + 1});
+                        queue.push_back(QueueEntry{n.id, entry.depth + 1});
                     continue;
                 }
                 if (emitted >= limit) {
                     // Past limit — just keep counting total
                     if (entry.depth + 1 <= maxDepth)
-                        queue.append({n.id, entry.depth + 1});
+                        queue.push_back(QueueEntry{n.id, entry.depth + 1});
                     continue;
                 }
 
@@ -875,7 +875,7 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
 
                 // Enqueue children if we haven't hit depth limit
                 if (entry.depth + 1 <= maxDepth)
-                    queue.append({n.id, entry.depth + 1});
+                    queue.push_back(QueueEntry{n.id, entry.depth + 1});
             }
         }
 
@@ -1665,7 +1665,7 @@ static QVector<AddressRange> parseRegionsArg(const QJsonObject& args, QString* e
             if (errOut) *errOut = QStringLiteral("regions[%1]: end must be > start").arg(i);
             return {};
         }
-        out.append({start, end});
+        out.push_back(AddressRange{start, end});
     }
     return out;
 }

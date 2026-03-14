@@ -191,23 +191,26 @@ inline FeatureResult countFlagFeatures(uint32_t val,
 // ── Pointer feature checker ──
 
 inline FeatureResult countPtrFeatures64(uint64_t val) {
-    // Hard reject: common sentinel values are never pointers
+    // Hard reject: common sentinel values
     if (val == 0 || val == 0xFFFFFFFFFFFFFFFFULL || val == 0x00000000FFFFFFFFULL)
-        return {0, 6};
+        return {0, 5};
 
-    int passed = 0, checked = 6;
-    // Feature 1: canonical 48-bit address (sign-extended from bit 47)
-    passed += (val <= 0x00007FFFFFFFFFFFULL
-               || val >= 0xFFFF800000000000ULL) ? 1 : 0;
-    // Feature 2: aligned to 8 (heap/vtable allocations)
+    // Hard reject: non-canonical address — impossible to dereference on x64
+    // User-mode: 0x0000000000000000 – 0x00007FFFFFFFFFFF
+    // Kernel:    0xFFFF800000000000 – 0xFFFFFFFFFFFFFFFF
+    if (val > 0x00007FFFFFFFFFFFULL && val < 0xFFFF800000000000ULL)
+        return {0, 5};
+
+    int passed = 0, checked = 5;
+    // Feature 1: aligned to 8 (heap/vtable allocations)
     passed += ((val & 7) == 0) ? 1 : 0;
-    // Feature 3: above null guard pages (real addresses >= 64KB)
+    // Feature 2: above null guard pages (real addresses >= 64KB)
     passed += (val >= 0x10000) ? 1 : 0;
-    // Feature 4: has upper 32 bits (real 64-bit address, not a small constant)
+    // Feature 3: has upper 32 bits (real 64-bit address, not a small constant)
     passed += ((val >> 32) != 0) ? 1 : 0;
-    // Feature 5: above 4GB (in real 64-bit address space, not a 32-bit value)
+    // Feature 4: above 4GB (in real 64-bit address space)
     passed += (val > 0x100000000ULL) ? 1 : 0;
-    // Feature 6: user-mode address range (not kernel 0xFFFF800000000000+)
+    // Feature 5: user-mode address range (not kernel)
     passed += (val < 0xFFFF800000000000ULL) ? 1 : 0;
     return {passed, checked};
 }
@@ -289,13 +292,13 @@ struct Candidate {
 };
 
 inline void addCandidate(QVector<Candidate>& out, NodeKind k, int score) {
-    if (score >= 25) out.append({{k}, score});
+    if (score >= 25) out.push_back(Candidate{{k}, score});
 }
 
 inline void addSplitCandidate(QVector<Candidate>& out, NodeKind k, int count, int score) {
     if (score >= 25) {
         QVector<NodeKind> kinds(count, k);
-        out.append({std::move(kinds), score});
+        out.push_back(Candidate{std::move(kinds), score});
     }
 }
 
@@ -308,32 +311,43 @@ inline void tryWhole8(const uint8_t* data, const InferHints& h, QVector<Candidat
     if (h.ptrSize == 8)
         addCandidate(out, NodeKind::Pointer64, featureScore(countPtrFeatures64(u64)));
 
-    // Double
+    // Double — rare in RE work; require strong evidence
     {
         double d; std::memcpy(&d, data, 8);
-        uint64_t exp = (u64 >> 52) & 0x7FF;
-        int passed = 0, checked = 3;
-        passed += std::isfinite(d) ? 1 : 0;
-        passed += (exp > 0 || (u64 & 0x7FFFFFFFFFFFFFFFull) == 0) ? 1 : 0;
         double ad = std::fabs(d);
-        passed += (d == 0.0 || (ad >= 1e-6 && ad <= 1e12)) ? 1 : 0;
-        addCandidate(out, NodeKind::Double, featureScore({passed, checked}));
+        uint64_t mantissa = u64 & 0x000FFFFFFFFFFFFFull;
+        // Hard reject: outside plausible range [1e-6, 1e7] (matches float checker)
+        bool inRange = (d == 0.0 || (ad >= 1e-6 && ad <= 1e7));
+        // Hard reject: lower 32 zero with non-zero mantissa (two 32-bit fields)
+        bool splitField = ((u64 & 0xFFFFFFFF) == 0 && mantissa != 0);
+        if (inRange && !splitField) {
+            uint64_t exp = (u64 >> 52) & 0x7FF;
+            int passed = 0, checked = 4;
+            // Feature 1: finite
+            passed += std::isfinite(d) ? 1 : 0;
+            // Feature 2: non-denormal
+            passed += (exp > 0 || (u64 & 0x7FFFFFFFFFFFFFFFull) == 0) ? 1 : 0;
+            // Feature 3: has fractional part or is a small special value
+            double ip; double frac = std::fabs(std::modf(d, &ip));
+            passed += (frac > 0.001 || ad <= 1.0) ? 1 : 0;
+            // Feature 4: not a large exact integer (likely reinterpreted binary data)
+            passed += !(ad > 1000.0 && frac < 0.001) ? 1 : 0;
+            addCandidate(out, NodeKind::Double, featureScore({passed, checked}));
+        }
     }
 
     // UTF8
     addCandidate(out, NodeKind::UTF8, featureScore(countStringFeatures(data, 8)));
 
-    // UInt64 / Int64
-    {
-        int passed = 0, checked = 4;
-        // Feature 1: fits in 32 bits (small constant, not an address)
-        passed += (u64 <= 0xFFFFFFFFull) ? 1 : 0;
-        // Feature 2: upper 32 bits are zero (confirms it's a small value, not a pointer)
-        passed += ((u64 >> 32) == 0) ? 1 : 0;
-        // Feature 3: non-zero
-        passed += (u64 != 0) ? 1 : 0;
-        // Feature 4: monotonic or very small (< 0x10000)
-        passed += (h.monotonic || u64 < 0x10000) ? 1 : 0;
+    // UInt64 / Int64 — only meaningful when value exceeds 32-bit range
+    if ((u64 >> 32) != 0) {
+        int passed = 0, checked = 3;
+        // Feature 1: non-zero (always true after guard)
+        passed += 1;
+        // Feature 2: reasonable magnitude (below kernel range)
+        passed += (u64 < 0x0000FFFFFFFFFFFFULL) ? 1 : 0;
+        // Feature 3: monotonic or page-aligned
+        passed += (h.monotonic || (u64 & 0xFFF) == 0) ? 1 : 0;
         addCandidate(out, NodeKind::UInt64, featureScore({passed, checked}));
     }
 }
@@ -467,7 +481,7 @@ inline QVector<TypeSuggestion> pruneAndRank(QVector<Candidate>& cands, int maxRe
     for (const auto& c : deduped) {
         int str = strengthFromScore(c.score);
         if (str > 0)
-            result.append({c.kinds, c.score, str});
+            result.push_back(TypeSuggestion{c.kinds, c.score, str});
     }
     return result;
 }

@@ -41,6 +41,11 @@ void PluginManager::LoadPlugins()
     
     for (const QFileInfo& fileInfo : files)
     {
+        // Skip the remote-inject payload binary — it's not a plugin and
+        // loading it (especially on Linux) spawns a rogue thread.
+        if (fileInfo.baseName().startsWith("rcx_payload"))
+            continue;
+
         LoadPlugin(fileInfo.absoluteFilePath());
     }
     
@@ -83,7 +88,7 @@ bool PluginManager::LoadPlugin(const QString& path)
     qDebug() << "PluginManager: Loaded plugin:" << plugin->Name().c_str() << plugin->Version().c_str() << "by" << plugin->Author().c_str();
     
     // Store plugin entry
-    m_entries.append({library, plugin});
+    m_entries.push_back(PluginEntry{library, plugin});
     m_plugins.append(plugin);
     
     // Auto-register providers in global registry

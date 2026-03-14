@@ -31,7 +31,7 @@ int SymbolStore::addModule(const QString& moduleName, const QString& pdbPath,
         if (set.nameToRva.contains(sym.first))
             continue;
         set.nameToRva.insert(sym.first, sym.second);
-        set.rvaToName.append({sym.second, sym.first});
+        set.rvaToName.emplaceBack(sym.second, sym.first);
     }
 
     set.sortRvaIndex();

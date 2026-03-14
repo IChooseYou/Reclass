@@ -570,6 +570,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_titleBar->applyTheme(ThemeManager::instance().current());
     setMenuWidget(m_titleBar);
     m_menuBar = m_titleBar->menuBar();
+#ifdef __linux__
+    m_menuBar->setNativeMenuBar(false);
+#endif
 #else
     setWindowTitle(QStringLiteral("Reclass"));
     setUnifiedTitleAndToolBarOnMac(true);
@@ -3640,7 +3643,7 @@ void MainWindow::importPdb() {
             QVector<QPair<QString, uint32_t>> symPairs;
             symPairs.reserve(symResult.symbols.size());
             for (const auto& s : symResult.symbols)
-                symPairs.append({s.name, s.rva});
+                symPairs.emplaceBack(s.name, s.rva);
             int symCount = rcx::SymbolStore::instance().addModule(
                 symResult.moduleName, pdbPath, symPairs);
             if (symCount > 0)
@@ -4207,7 +4210,7 @@ void MainWindow::createWorkspaceDock() {
             const auto& nd = m_tabs[dk].doc->tree.nodes[ni];
             QString tn = nd.structTypeName.isEmpty() ? nd.name : nd.structTypeName;
             if (tn.isEmpty()) tn = QStringLiteral("(unnamed)");
-            items.append({sid, dk, ni, nd.resolvedClassKeyword(), tn});
+            items.push_back(SelItem{sid, dk, ni, nd.resolvedClassKeyword(), tn});
         }
         if (items.isEmpty()) return;
 
@@ -4888,7 +4891,7 @@ void MainWindow::createSymbolsDock() {
                 QVector<QPair<QString, uint32_t>> pairs;
                 pairs.reserve(result.symbols.size());
                 for (const auto& s : result.symbols)
-                    pairs.append({s.name, s.rva});
+                    pairs.emplaceBack(s.name, s.rva);
                 int count = rcx::SymbolStore::instance().addModule(
                     result.moduleName, pdbPath, pairs);
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2").arg(count).arg(name));
@@ -4981,7 +4984,7 @@ void MainWindow::createSymbolsDock() {
                         QVector<QPair<QString, uint32_t>> pairs;
                         pairs.reserve(result.symbols.size());
                         for (const auto& s : result.symbols)
-                            pairs.append({s.name, s.rva});
+                            pairs.emplaceBack(s.name, s.rva);
                         int count = rcx::SymbolStore::instance().addModule(
                             result.moduleName, localPdb, pairs);
                         setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (local)")
@@ -5017,7 +5020,7 @@ void MainWindow::createSymbolsDock() {
                             QVector<QPair<QString, uint32_t>> pairs;
                             pairs.reserve(result.symbols.size());
                             for (const auto& s : result.symbols)
-                                pairs.append({s.name, s.rva});
+                                pairs.emplaceBack(s.name, s.rva);
                             int count = rcx::SymbolStore::instance().addModule(
                                 result.moduleName, localPath, pairs);
                             setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
@@ -5042,7 +5045,7 @@ void MainWindow::createSymbolsDock() {
                         QVector<QPair<QString, uint32_t>> pairs;
                         pairs.reserve(result.symbols.size());
                         for (const auto& s : result.symbols)
-                            pairs.append({s.name, s.rva});
+                            pairs.emplaceBack(s.name, s.rva);
                         int count = rcx::SymbolStore::instance().addModule(
                             result.moduleName, cached, pairs);
                         setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (cached)")
@@ -5073,7 +5076,7 @@ void MainWindow::createSymbolsDock() {
                 QVector<QPair<QString, uint32_t>> pairs;
                 pairs.reserve(result.symbols.size());
                 for (const auto& s : result.symbols)
-                    pairs.append({s.name, s.rva});
+                    pairs.emplaceBack(s.name, s.rva);
                 int count = rcx::SymbolStore::instance().addModule(
                     result.moduleName, path, pairs);
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
@@ -5159,7 +5162,7 @@ void MainWindow::createSymbolsDock() {
         m_symbolsProxy->setRecursiveFilteringEnabled(true);
 
         m_symbolsTree->setModel(m_symbolsProxy);
-        m_symbolsTree->setExpandsOnDoubleClick(true);
+        m_symbolsTree->setExpandsOnDoubleClick(false);
         styleTree(m_symbolsTree);
 
         // Debounced search
@@ -5199,10 +5202,55 @@ void MainWindow::createSymbolsDock() {
                         child->setData(moduleName, Qt::UserRole);
                         child->setData(sym.first, Qt::UserRole + 1);
                         child->setData(sym.second, Qt::UserRole + 2);
+                        static const QIcon symIcon(":/vsicons/symbol-method.svg");
+                        child->setIcon(symIcon);
                         item->appendRow(child);
                     }
                 }
             }
+        });
+
+        // Double-click symbol → navigate to moduleBase + RVA
+        connect(m_symbolsTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& proxyIdx) {
+            QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
+            auto* item = m_symbolsModel->itemFromIndex(srcIdx);
+            if (!item) return;
+
+            // Module-level: toggle expand
+            if (!item->parent()) {
+                if (m_symbolsTree->isExpanded(proxyIdx))
+                    m_symbolsTree->collapse(proxyIdx);
+                else
+                    m_symbolsTree->expand(proxyIdx);
+                return;
+            }
+
+            // Symbol-level: navigate to moduleBase + RVA
+            QString moduleName = item->data(Qt::UserRole).toString();
+            uint32_t rva = item->data(Qt::UserRole + 1).toUInt();
+
+            auto* ctrl = activeController();
+            if (!ctrl || !ctrl->document()->provider) return;
+
+            uint64_t moduleBase = ctrl->document()->provider->symbolToAddress(moduleName);
+            if (moduleBase == 0)
+                moduleBase = ctrl->document()->provider->symbolToAddress(moduleName + QStringLiteral(".dll"));
+            if (moduleBase == 0)
+                moduleBase = ctrl->document()->provider->symbolToAddress(moduleName + QStringLiteral(".exe"));
+            if (moduleBase == 0)
+                moduleBase = ctrl->document()->provider->symbolToAddress(moduleName + QStringLiteral(".sys"));
+            if (moduleBase == 0) return;
+
+            uint64_t addr = moduleBase + rva;
+            ctrl->document()->tree.baseAddress = addr;
+            ctrl->document()->tree.baseAddressFormula.clear();
+            ctrl->resetChangeTracking();
+            ctrl->refresh();
+
+            QString symName = item->data(Qt::UserRole + 2).toString();
+            setAppStatus(QStringLiteral("Navigated to %1!%2 (0x%3)")
+                .arg(moduleName, symName)
+                .arg(addr, 0, 16));
         });
 
         // Context menu for symbols
@@ -5288,7 +5336,8 @@ void MainWindow::rebuildSymbolsModel() {
         if (!set) continue;
 
         int count = set->nameToRva.size();
-        auto* moduleItem = new QStandardItem(
+        static const QIcon modIcon(":/vsicons/symbol-structure.svg");
+        auto* moduleItem = new QStandardItem(modIcon,
             QStringLiteral("%1  (%2 symbols)").arg(moduleName).arg(count));
         moduleItem->setData(moduleName, Qt::UserRole);
         moduleItem->setToolTip(set->pdbPath);
@@ -5310,8 +5359,9 @@ void MainWindow::rebuildModulesModel() {
     auto modules = ctrl->document()->provider->enumerateModules();
     if (modules.isEmpty()) return;
 
+    static const QIcon modIcon(":/vsicons/symbol-structure.svg");
     for (const auto& mod : modules) {
-        auto* item = new QStandardItem(
+        auto* item = new QStandardItem(modIcon,
             QStringLiteral("%1  [0x%2]  (%3 KB)")
                 .arg(mod.name)
                 .arg(mod.base, 0, 16)
@@ -5363,7 +5413,7 @@ void MainWindow::downloadSymbolsForProcess() {
                 QVector<QPair<QString, uint32_t>> pairs;
                 pairs.reserve(result.symbols.size());
                 for (const auto& s : result.symbols)
-                    pairs.append({s.name, s.rva});
+                    pairs.emplaceBack(s.name, s.rva);
                 int count = rcx::SymbolStore::instance().addModule(
                     result.moduleName, localPath, pairs);
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
@@ -5409,7 +5459,7 @@ void MainWindow::downloadSymbolsForProcess() {
                 QVector<QPair<QString, uint32_t>> pairs;
                 pairs.reserve(result.symbols.size());
                 for (const auto& s : result.symbols)
-                    pairs.append({s.name, s.rva});
+                    pairs.emplaceBack(s.name, s.rva);
                 int count = store.addModule(result.moduleName, localPdb, pairs);
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (local)")
                     .arg(count).arg(mod.name));
@@ -5433,7 +5483,7 @@ void MainWindow::downloadSymbolsForProcess() {
                 QVector<QPair<QString, uint32_t>> pairs;
                 pairs.reserve(result.symbols.size());
                 for (const auto& s : result.symbols)
-                    pairs.append({s.name, s.rva});
+                    pairs.emplaceBack(s.name, s.rva);
                 int count = store.addModule(result.moduleName, cached, pairs);
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (cached)")
                     .arg(count).arg(mod.name));
@@ -5442,7 +5492,7 @@ void MainWindow::downloadSymbolsForProcess() {
             continue;
         }
 
-        pending.append({mod.name, mod.fullPath, mod.base, info});
+        pending.push_back(PendingModule{mod.name, mod.fullPath, mod.base, info});
     }
 
     rebuildSymbolsModel();
@@ -5515,7 +5565,7 @@ void MainWindow::rebuildWorkspaceModelNow() {
         if (seenDocs.contains(tab.doc)) continue;
         seenDocs.insert(tab.doc);
         QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
-        tabs.append({ &tab.doc->tree, name, static_cast<void*>(it.key()) });
+        tabs.push_back(rcx::TabInfo{ &tab.doc->tree, name, static_cast<void*>(it.key()) });
     }
     rcx::syncProjectExplorer(m_workspaceModel, tabs, m_pinnedIds);
 
@@ -5843,6 +5893,9 @@ int main(int argc, char* argv[]) {
     window.setWindowIcon(QIcon(":/icons/class.png"));
 
     window.show();
+#ifdef __linux__
+    window.showMaximized();
+#endif
 
     // --screenshot <path>: open default project, grab window, save, exit
     {

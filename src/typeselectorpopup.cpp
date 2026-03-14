@@ -1030,7 +1030,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             else if (t.category == TypeEntry::CatEnum) enumCount++;
             else typeCount++;
             if (catAllowed(t))
-                scored.append({i, sc, std::move(pos)});
+                scored.push_back(Scored{i, sc, std::move(pos)});
         }
         std::sort(scored.begin(), scored.end(),
                   [](const Scored& a, const Scored& b) { return a.score > b.score; });
