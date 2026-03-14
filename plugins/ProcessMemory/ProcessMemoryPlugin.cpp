@@ -190,7 +190,7 @@ void ProcessMemoryProvider::cacheModules()
             if (GetModuleFileNameExW(m_handle, mods[i], modPath, MAX_PATH))
                 fullPath = QString::fromWCharArray(modPath);
 
-            m_modules.append({
+            m_modules.push_back(ModuleInfo{
                 QString::fromWCharArray(modName),
                 fullPath,
                 (uint64_t)mi.lpBaseOfDll,
@@ -205,7 +205,7 @@ QVector<rcx::Provider::ModuleEntry> ProcessMemoryProvider::enumerateModules() co
     QVector<ModuleEntry> result;
     result.reserve(m_modules.size());
     for (const auto& m : m_modules)
-        result.append({m.name, m.fullPath, m.base, m.size});
+        result.push_back(ModuleEntry{m.name, m.fullPath, m.base, m.size});
     return result;
 }
 
@@ -415,8 +415,9 @@ void ProcessMemoryProvider::cacheModules()
     for (auto it = moduleRanges.begin(); it != moduleRanges.end(); ++it)
     {
         QFileInfo fi(it.key());
-        m_modules.append({
+        m_modules.push_back(ModuleInfo{
             fi.fileName(),
+            it.key(),
             it->base,
             it->end - it->base
         });
@@ -545,7 +546,7 @@ QVector<rcx::Provider::ThreadInfo> ProcessMemoryProvider::tebs() const
                 ULONG tbiLen = 0;
                 NTSTATUS qitSt = pNtQIT(hThread, 0, &tbi, sizeof(tbi), &tbiLen);
                 if (qitSt >= 0 && tbi.TebBaseAddress)
-                    result.append({(uint64_t)(uintptr_t)tbi.TebBaseAddress, tid});
+                    result.push_back(ThreadInfo{(uint64_t)(uintptr_t)tbi.TebBaseAddress, tid});
                 CloseHandle(hThread);
             }
             break;

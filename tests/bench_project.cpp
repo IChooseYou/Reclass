@@ -202,7 +202,7 @@ void BenchProject::benchBuildWorkspaceModel()
     // Build TabInfo array
     QVector<TabInfo> tabs;
     for (const auto& t : trees)
-        tabs.append({ &t, QStringLiteral("test"), nullptr });
+        tabs.push_back(TabInfo{ &t, QStringLiteral("test"), nullptr });
 
     QStandardItemModel model;
     const int ITERS = 20;
@@ -244,7 +244,7 @@ void BenchProject::benchWorkspaceSearch()
 
     QVector<TabInfo> tabs;
     for (const auto& t : trees)
-        tabs.append({ &t, QStringLiteral("test"), nullptr });
+        tabs.push_back(TabInfo{ &t, QStringLiteral("test"), nullptr });
 
     QStandardItemModel model;
     buildProjectExplorer(&model, tabs);

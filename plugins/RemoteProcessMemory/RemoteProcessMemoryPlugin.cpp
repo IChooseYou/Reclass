@@ -244,7 +244,7 @@ struct IpcClient {
                 reinterpret_cast<const char*>(data + entry->nameOffset),
                 (int)entry->nameLength);
 #endif
-            result.append({modName, entry->base, entry->size});
+            result.push_back(RemoteProcessProvider::ModuleInfo{modName, entry->base, entry->size});
         }
         return result;
     }

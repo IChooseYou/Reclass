@@ -382,6 +382,30 @@ private slots:
         QCOMPARE(r.value, 0x140000000ULL);
     }
 
+    // -- Bare module.dll identifier --
+
+    void bareModuleDll() {
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            *ok = (name == "client.dll");
+            return *ok ? 0x7FF600000000ULL : 0;
+        };
+        auto r = AddressParser::evaluate("client.dll + 0xFF", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x7FF6000000FFULL);
+    }
+
+    void bareModuleExe() {
+        AddressParserCallbacks cbs;
+        cbs.resolveIdentifier = [](const QString& name, bool* ok) -> uint64_t {
+            *ok = (name == "cs2.exe");
+            return *ok ? 0x140000000ULL : 0;
+        };
+        auto r = AddressParser::evaluate("cs2.exe + 0xDE", 8, &cbs);
+        QVERIFY(r.ok);
+        QCOMPARE(r.value, 0x1400000DEULL);
+    }
+
     // -- Validate with new syntax --
 
     void validateIdentifier() {

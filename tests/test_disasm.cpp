@@ -230,7 +230,7 @@ private slots:
                 // Only include the pointer-expanded ones (near vtable at 0x100)
                 if (lm.offsetAddr >= 0x100 && lm.offsetAddr < 0x200) {
                     int nodeIdx = lm.nodeIdx;
-                    funcPtrs.append({i, lm.offsetAddr, lm.nodeKind,
+                    funcPtrs.push_back(FuncInfo{i, lm.offsetAddr, lm.nodeKind,
                                      nodeIdx >= 0 ? tree.nodes[nodeIdx].name : QString()});
                 }
             }

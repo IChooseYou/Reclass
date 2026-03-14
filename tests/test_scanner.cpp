@@ -644,8 +644,8 @@ private slots:
         data[16] = 0xAA; // in region 1 (executable)
 
         QVector<MemoryRegion> regions;
-        regions.append({0,  16, true, true, false, "heap"});
-        regions.append({16, 16, true, false, true, "code"});
+        regions.push_back(MemoryRegion{0,  16, true, true, false, "heap"});
+        regions.push_back(MemoryRegion{16, 16, true, false, true, "code"});
 
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
@@ -671,8 +671,8 @@ private slots:
         data[16] = 0xBB; // region 1 (not writable)
 
         QVector<MemoryRegion> regions;
-        regions.append({0,  16, true, true, false, "data"});
-        regions.append({16, 16, true, false, true, "code"});
+        regions.push_back(MemoryRegion{0,  16, true, true, false, "data"});
+        regions.push_back(MemoryRegion{16, 16, true, false, true, "code"});
 
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
@@ -698,9 +698,9 @@ private slots:
         data[32] = 0xCC; // region 2: +w +x
 
         QVector<MemoryRegion> regions;
-        regions.append({0,  16, true, true,  false, "data"});
-        regions.append({16, 16, true, false, true,  "code"});
-        regions.append({32, 16, true, true,  true,  "rwx"});
+        regions.push_back(MemoryRegion{0,  16, true, true,  false, "data"});
+        regions.push_back(MemoryRegion{16, 16, true, false, true,  "code"});
+        regions.push_back(MemoryRegion{32, 16, true, true,  true,  "rwx"});
 
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
@@ -726,7 +726,7 @@ private slots:
         data[0] = 0xDD;
 
         QVector<MemoryRegion> regions;
-        regions.append({0, 16, true, true, true, "Game.exe"});
+        regions.push_back(MemoryRegion{0, 16, true, true, true, "Game.exe"});
 
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
@@ -943,8 +943,8 @@ private slots:
 
     void provider_customRegions() {
         QVector<MemoryRegion> regs;
-        regs.append({0x1000, 0x2000, true, true, false, "heap"});
-        regs.append({0x3000, 0x1000, true, false, true, "code"});
+        regs.push_back(MemoryRegion{0x1000, 0x2000, true, true, false, "heap"});
+        regs.push_back(MemoryRegion{0x3000, 0x1000, true, false, true, "code"});
 
         RegionProvider p(QByteArray(0x4000, '\0'), regs);
         auto result = p.enumerateRegions();
@@ -982,9 +982,9 @@ private slots:
         data[36] = 0xEE; // region 2
 
         QVector<MemoryRegion> regions;
-        regions.append({0,  16, true, true, false, "region0"});
-        regions.append({16, 16, true, true, false, "region1"});
-        regions.append({32, 16, true, true, false, "region2"});
+        regions.push_back(MemoryRegion{0,  16, true, true, false, "region0"});
+        regions.push_back(MemoryRegion{16, 16, true, true, false, "region1"});
+        regions.push_back(MemoryRegion{32, 16, true, true, false, "region2"});
 
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
@@ -1215,7 +1215,7 @@ private slots:
         data[160] = char(0xCC);
         data[210] = char(0xCC);
         QVector<MemoryRegion> regions;
-        regions.append({100, 100, true, false, false, {}});
+        regions.push_back(MemoryRegion{100, 100, true, false, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1233,7 +1233,7 @@ private slots:
     void scan_constrainRegions_noOverlap() {
         QByteArray data(32, char(0xEE));
         QVector<MemoryRegion> regions;
-        regions.append({0, 16, true, false, false, {}});
+        regions.push_back(MemoryRegion{0, 16, true, false, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1256,8 +1256,8 @@ private slots:
         data[10] = char(0xDD);
         data[35] = char(0xDD);
         QVector<MemoryRegion> regions;
-        regions.append({0, 16, true, true, false, {}});
-        regions.append({32, 16, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 16, true, true, false, {}});
+        regions.push_back(MemoryRegion{32, 16, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1279,7 +1279,7 @@ private slots:
         data[120] = char(0xAB);
         data[160] = char(0xAB);
         QVector<MemoryRegion> regions;
-        regions.append({100, 100, true, true, false, {}});
+        regions.push_back(MemoryRegion{100, 100, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1300,8 +1300,8 @@ private slots:
         data[0x1500] = char(0xCC);
         data[0x5500] = char(0xCC);
         QVector<MemoryRegion> regions;
-        regions.append({0x1000, 0x1000, true, false, true, QString("game.exe")});
-        regions.append({0x5000, 0x1000, true, true, false, {}});
+        regions.push_back(MemoryRegion{0x1000, 0x1000, true, false, true, QString("game.exe")});
+        regions.push_back(MemoryRegion{0x5000, 0x1000, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1345,8 +1345,8 @@ private slots:
         data[12] = char(0xEF);
         data[20] = char(0xEF);
         QVector<MemoryRegion> regions;
-        regions.append({0, 16, true, true, false, {}});
-        regions.append({16, 16, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 16, true, true, false, {}});
+        regions.push_back(MemoryRegion{16, 16, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1368,8 +1368,8 @@ private slots:
         data[0x1100] = char(0xBB);
         data[0x2100] = char(0xBB);
         QVector<MemoryRegion> regions;
-        regions.append({0x1000, 0x1000, true, false, true, {}});
-        regions.append({0x2000, 0x1000, true, true, false, {}});
+        regions.push_back(MemoryRegion{0x1000, 0x1000, true, false, true, {}});
+        regions.push_back(MemoryRegion{0x2000, 0x1000, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1394,7 +1394,7 @@ private slots:
         data[15] = char(0xAA);  // inside region, should be found
         data[25] = char(0xAA);  // outside region, should NOT be found
         QVector<MemoryRegion> regions;
-        regions.append({10, 10, true, true, false, {}});
+        regions.push_back(MemoryRegion{10, 10, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1415,7 +1415,7 @@ private slots:
         data[5]  = char(0xBB);
         data[15] = char(0xBB);
         QVector<MemoryRegion> regions;
-        regions.append({0, 32, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 32, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1506,7 +1506,7 @@ private slots:
         QByteArray data(0x10000, 0);
         data[0x8100] = char(0xFF);
         QVector<MemoryRegion> regions;
-        regions.append({0x8000, 0x1000, true, true, false, {}});
+        regions.push_back(MemoryRegion{0x8000, 0x1000, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1581,7 +1581,7 @@ private slots:
         QByteArray data(64, 0);
         data[20] = char(0xFE);
         QVector<MemoryRegion> regions;
-        regions.append({0, 64, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 64, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1602,7 +1602,7 @@ private slots:
         QByteArray data(64, 0);
         data[36] = char(0xDE); data[37] = char(0xAD); data[38] = char(0xBE); data[39] = char(0xEF);
         QVector<MemoryRegion> regions;
-        regions.append({0, 64, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 64, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1624,7 +1624,7 @@ private slots:
         QByteArray data(64, 0);
         data[36] = char(0xDE); data[37] = char(0xAD); data[38] = char(0xBE); data[39] = char(0xEF);
         QVector<MemoryRegion> regions;
-        regions.append({0, 64, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 64, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1643,7 +1643,7 @@ private slots:
         // Region [0, 64). Constraint [30, 32). 4-byte pattern can't fit in 2 bytes.
         QByteArray data(64, char(0xAA));
         QVector<MemoryRegion> regions;
-        regions.append({0, 64, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 64, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1663,7 +1663,7 @@ private slots:
         QByteArray data(64, 0);
         data[30] = char(0x11); data[31] = char(0x22); data[32] = char(0x33); data[33] = char(0x44);
         QVector<MemoryRegion> regions;
-        regions.append({0, 64, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 64, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1686,8 +1686,8 @@ private slots:
         data[15] = char(0x77);  // last byte of first region
         data[16] = char(0x77);  // first byte of second region
         QVector<MemoryRegion> regions;
-        regions.append({0, 16, true, true, false, {}});
-        regions.append({16, 16, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 16, true, true, false, {}});
+        regions.push_back(MemoryRegion{16, 16, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);
@@ -1711,7 +1711,7 @@ private slots:
         QByteArray data(64, 0);
         data[10] = char(0xAA); data[11] = char(0xBB); data[12] = char(0xCC); data[13] = char(0xDD);
         QVector<MemoryRegion> regions;
-        regions.append({0, 64, true, true, false, {}});
+        regions.push_back(MemoryRegion{0, 64, true, true, false, {}});
         auto prov = std::make_shared<RegionProvider>(data, regions);
         ScanEngine engine;
         QSignalSpy finSpy(&engine, &ScanEngine::finished);

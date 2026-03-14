@@ -26,7 +26,7 @@ public:
         if (!m_server->listen(name)) return false;
         connect(m_server, &QLocalServer::newConnection, this, [this]() {
             while (auto* s = m_server->nextPendingConnection()) {
-                m_clients.append({s, {}, false});
+                m_clients.push_back(Client{s, {}, false});
                 connect(s, &QLocalSocket::readyRead, this, [this, s]() { processSocket(s); });
                 connect(s, &QLocalSocket::disconnected, this, [this, s]() {
                     for (int i = 0; i < m_clients.size(); i++)

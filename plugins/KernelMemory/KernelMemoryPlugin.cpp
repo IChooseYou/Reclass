@@ -222,7 +222,7 @@ QVector<rcx::Provider::ThreadInfo> KernelProcessProvider::tebs() const
     auto* entries = reinterpret_cast<const RcxDrvTebEntry*>(outBuf.constData());
 
     for (int i = 0; i < count; ++i)
-        result.append({entries[i].tebAddress, entries[i].threadId});
+        result.push_back(ThreadInfo{entries[i].tebAddress, entries[i].threadId});
 #endif
     return result;
 }
@@ -253,7 +253,7 @@ void KernelProcessProvider::cacheModules()
         if (i == 0)
             m_base = entries[i].base;
 
-        m_modules.append({modName, entries[i].base, entries[i].size});
+        m_modules.push_back(ModuleInfo{modName, entries[i].base, entries[i].size});
     }
 #endif
 }
