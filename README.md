@@ -22,6 +22,10 @@ Built with C++17, Qt 6 (Qt 5 also supported), and QScintilla. The entire editor 
 
 ## Screenshots
 
+![Base address tooltip with expression cheat sheet](docs/README_PIC5.png)
+
+![Data source picker with saved sources](docs/README_PIC4.png)
+
 ![Windows — VTable with value history popup](docs/README_PIC1.png)
 
 ![macOS — project tree with kernel struct inspection](docs/README_PIC2.png)

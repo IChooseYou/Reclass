@@ -4433,6 +4433,10 @@ void MainWindow::createWorkspaceDock() {
                 ? QStringLiteral("struct") : QStringLiteral("class");
             tab.doc->undoStack.push(new rcx::RcxCommand(tab.ctrl,
                 rcx::cmd::ChangeClassKeyword{item.structId, item.keyword, newKw}));
+            // Sync all dock titles that share this document
+            for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
+                if (it->doc == tab.doc)
+                    it.key()->setWindowTitle(tabTitle(*it));
             rebuildWorkspaceModel();
 
         } else if (chosen && chosen == actPin) {
@@ -4838,6 +4842,94 @@ void MainWindow::createSymbolsDock() {
         m_modulesTree->setModel(m_modulesModel);
         styleTree(m_modulesTree);
         m_modulesTree->setExpandsOnDoubleClick(false);
+
+        // Double-click: set base address and trigger PDB import
+        connect(m_modulesTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& idx) {
+            auto* item = m_modulesModel->itemFromIndex(idx);
+            if (!item) return;
+
+            uint64_t base = item->data(Qt::UserRole).toULongLong();
+            QString name = item->data(Qt::UserRole + 1).toString();
+            QString fullPath = item->data(Qt::UserRole + 2).toString();
+
+            auto* ctrl = activeController();
+            if (!ctrl) return;
+
+            // Set base address
+            ctrl->document()->tree.baseAddress = base;
+            ctrl->document()->tree.baseAddressFormula.clear();
+            ctrl->resetChangeTracking();
+            ctrl->refresh();
+
+            // Already have symbols for this module?
+            QString canonical = rcx::SymbolStore::instance().resolveAlias(name);
+            if (rcx::SymbolStore::instance().moduleData(canonical)) {
+                setAppStatus(QStringLiteral("Base set to %1 (0x%2) — symbols already loaded")
+                    .arg(name).arg(base, 0, 16));
+                return;
+            }
+
+            // Try to load symbols: local PDB → cache → download
+            auto prov = ctrl->document()->provider;
+            if (!prov) return;
+
+            auto info = rcx::extractPdbDebugInfo(*prov, base);
+            if (!info.valid) {
+                setAppStatus(QStringLiteral("Base set to %1 (0x%2) — no debug info")
+                    .arg(name).arg(base, 0, 16));
+                return;
+            }
+
+            // Helper to load a PDB file into the symbol store
+            auto loadPdb = [this, name](const QString& pdbPath) -> bool {
+                QString symErr;
+                auto result = rcx::extractPdbSymbols(pdbPath, &symErr);
+                if (result.symbols.isEmpty()) return false;
+                QVector<QPair<QString, uint32_t>> pairs;
+                pairs.reserve(result.symbols.size());
+                for (const auto& s : result.symbols)
+                    pairs.append({s.name, s.rva});
+                int count = rcx::SymbolStore::instance().addModule(
+                    result.moduleName, pdbPath, pairs);
+                setAppStatus(QStringLiteral("Loaded %1 symbols for %2").arg(count).arg(name));
+                rebuildSymbolsModel();
+                if (auto* c = activeController()) c->refresh();
+                return true;
+            };
+
+            // Check local
+            QString localPdb = rcx::SymbolDownloader::findLocal(fullPath, info.pdbName);
+            if (!localPdb.isEmpty() && loadPdb(localPdb)) return;
+
+            // Check cache
+            if (!m_symDownloader)
+                m_symDownloader = new rcx::SymbolDownloader(this);
+            rcx::SymbolDownloader::DownloadRequest req;
+            req.moduleName = name;
+            req.pdbName = info.pdbName;
+            req.guidString = info.guidString;
+            req.age = info.age;
+
+            QString cached = m_symDownloader->findCached(req);
+            if (!cached.isEmpty() && loadPdb(cached)) return;
+
+            // Download
+            setAppStatus(QStringLiteral("Downloading symbols for %1...").arg(name));
+
+            // One-shot connection for this download
+            auto conn = std::make_shared<QMetaObject::Connection>();
+            *conn = connect(m_symDownloader, &rcx::SymbolDownloader::finished,
+                    this, [this, conn, loadPdb](const QString& mod, const QString& localPath,
+                                                bool success, const QString& error) {
+                disconnect(*conn);
+                if (!success) {
+                    setAppStatus(QStringLiteral("Failed to download %1: %2").arg(mod, error));
+                    return;
+                }
+                loadPdb(localPath);
+            });
+            m_symDownloader->download(req);
+        });
 
         // Context menu for modules
         m_modulesTree->setContextMenuPolicy(Qt::CustomContextMenu);
