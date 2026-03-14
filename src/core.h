@@ -289,7 +289,7 @@ struct Node {
         n.isRelative = o["isRelative"].toBool(false);
         n.arrayLen  = qBound(1, o["arrayLen"].toInt(1), 1000000);
         n.strLen    = qBound(1, o["strLen"].toInt(64), 1000000);
-        n.collapsed = o["collapsed"].toBool(true);
+        n.collapsed = true;  // Always load collapsed; user expands as needed
         n.refId     = o["refId"].toString("0").toULongLong();
         n.elementKind = kindFromString(o["elementKind"].toString("UInt8"));
         n.ptrDepth  = qBound(0, o["ptrDepth"].toInt(0), 2);

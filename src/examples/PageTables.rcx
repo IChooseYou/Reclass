@@ -1,0 +1,126 @@
+{
+    "baseAddress": "0",
+    "nextId": "2000",
+    "nodes": [
+        {
+            "id": "100",
+            "kind": "Struct",
+            "name": "pte",
+            "structTypeName": "X64_PTE",
+            "classKeyword": "bitfield",
+            "elementKind": "UInt64",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true,
+            "arrayLen": 1,
+            "strLen": 64,
+            "bitfieldMembers": [
+                {"name": "Present",      "bitOffset": 0,  "bitWidth": 1},
+                {"name": "ReadWrite",    "bitOffset": 1,  "bitWidth": 1},
+                {"name": "UserSuper",    "bitOffset": 2,  "bitWidth": 1},
+                {"name": "WriteThrough", "bitOffset": 3,  "bitWidth": 1},
+                {"name": "CacheDisable", "bitOffset": 4,  "bitWidth": 1},
+                {"name": "Accessed",     "bitOffset": 5,  "bitWidth": 1},
+                {"name": "Dirty",        "bitOffset": 6,  "bitWidth": 1},
+                {"name": "PageSize",     "bitOffset": 7,  "bitWidth": 1},
+                {"name": "Global",       "bitOffset": 8,  "bitWidth": 1},
+                {"name": "AVL",          "bitOffset": 9,  "bitWidth": 3},
+                {"name": "PhysAddr",     "bitOffset": 12, "bitWidth": 40},
+                {"name": "Available",    "bitOffset": 52, "bitWidth": 7},
+                {"name": "ProtKey",      "bitOffset": 59, "bitWidth": 4},
+                {"name": "NX",           "bitOffset": 63, "bitWidth": 1}
+            ]
+        },
+
+        {
+            "id": "200",
+            "kind": "Struct",
+            "name": "page_table",
+            "structTypeName": "X64_PAGE_TABLE",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true
+        },
+        {
+            "id": "201",
+            "kind": "Array",
+            "name": "entries",
+            "offset": 0,
+            "parentId": "200",
+            "refId": "100",
+            "elementKind": "Struct",
+            "arrayLen": 512,
+            "strLen": 64,
+            "collapsed": true
+        },
+
+        {
+            "id": "300",
+            "kind": "Struct",
+            "name": "pde_2mb",
+            "structTypeName": "X64_PDE_LARGE",
+            "classKeyword": "bitfield",
+            "elementKind": "UInt64",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true,
+            "arrayLen": 1,
+            "strLen": 64,
+            "bitfieldMembers": [
+                {"name": "Present",      "bitOffset": 0,  "bitWidth": 1},
+                {"name": "ReadWrite",    "bitOffset": 1,  "bitWidth": 1},
+                {"name": "UserSuper",    "bitOffset": 2,  "bitWidth": 1},
+                {"name": "WriteThrough", "bitOffset": 3,  "bitWidth": 1},
+                {"name": "CacheDisable", "bitOffset": 4,  "bitWidth": 1},
+                {"name": "Accessed",     "bitOffset": 5,  "bitWidth": 1},
+                {"name": "Dirty",        "bitOffset": 6,  "bitWidth": 1},
+                {"name": "PageSize",     "bitOffset": 7,  "bitWidth": 1},
+                {"name": "Global",       "bitOffset": 8,  "bitWidth": 1},
+                {"name": "AVL",          "bitOffset": 9,  "bitWidth": 3},
+                {"name": "PAT",          "bitOffset": 12, "bitWidth": 1},
+                {"name": "Reserved",     "bitOffset": 13, "bitWidth": 8},
+                {"name": "PhysAddr",     "bitOffset": 21, "bitWidth": 31},
+                {"name": "Available",    "bitOffset": 52, "bitWidth": 7},
+                {"name": "ProtKey",      "bitOffset": 59, "bitWidth": 4},
+                {"name": "NX",           "bitOffset": 63, "bitWidth": 1}
+            ]
+        },
+
+        {
+            "id": "400",
+            "kind": "Struct",
+            "name": "pdpte_1gb",
+            "structTypeName": "X64_PDPTE_HUGE",
+            "classKeyword": "bitfield",
+            "elementKind": "UInt64",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true,
+            "arrayLen": 1,
+            "strLen": 64,
+            "bitfieldMembers": [
+                {"name": "Present",      "bitOffset": 0,  "bitWidth": 1},
+                {"name": "ReadWrite",    "bitOffset": 1,  "bitWidth": 1},
+                {"name": "UserSuper",    "bitOffset": 2,  "bitWidth": 1},
+                {"name": "WriteThrough", "bitOffset": 3,  "bitWidth": 1},
+                {"name": "CacheDisable", "bitOffset": 4,  "bitWidth": 1},
+                {"name": "Accessed",     "bitOffset": 5,  "bitWidth": 1},
+                {"name": "Dirty",        "bitOffset": 6,  "bitWidth": 1},
+                {"name": "PageSize",     "bitOffset": 7,  "bitWidth": 1},
+                {"name": "Global",       "bitOffset": 8,  "bitWidth": 1},
+                {"name": "AVL",          "bitOffset": 9,  "bitWidth": 3},
+                {"name": "PAT",          "bitOffset": 12, "bitWidth": 1},
+                {"name": "Reserved",     "bitOffset": 13, "bitWidth": 17},
+                {"name": "PhysAddr",     "bitOffset": 30, "bitWidth": 22},
+                {"name": "Available",    "bitOffset": 52, "bitWidth": 7},
+                {"name": "ProtKey",      "bitOffset": 59, "bitWidth": 4},
+                {"name": "NX",           "bitOffset": 63, "bitWidth": 1}
+            ]
+        }
+    ],
+    "rootIds": ["200"]
+}
