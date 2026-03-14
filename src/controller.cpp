@@ -663,6 +663,7 @@ void RcxController::refresh() {
         for (auto& lm : m_lastResult.meta) {
             if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
             int64_t offset = m_doc->tree.computeOffset(lm.nodeIdx);
+            if (offset < 0) continue;
             const Node& node = m_doc->tree.nodes[lm.nodeIdx];
 
             if (isHexPreview(node.kind)) {
@@ -1607,7 +1608,9 @@ void RcxController::toggleBitfieldBit(uint64_t nodeId, int memberIdx) {
     if (!m_doc->provider || !m_doc->provider->isWritable()) return;
 
     const auto& bm = node.bitfieldMembers[memberIdx];
-    uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
+    int64_t signedOff = m_doc->tree.computeOffset(ni);
+    if (signedOff < 0) return;
+    uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(signedOff);
     int containerSize = sizeForKind(node.elementKind);
     if (containerSize <= 0) containerSize = 4;
 
@@ -1635,7 +1638,9 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
     if (!m_doc->provider || !m_doc->provider->isWritable()) return;
 
     const auto& bm = node.bitfieldMembers[memberIdx];
-    uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
+    int64_t signedOff = m_doc->tree.computeOffset(ni);
+    if (signedOff < 0) return;
+    uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(signedOff);
     int containerSize = sizeForKind(node.elementKind);
     if (containerSize <= 0) containerSize = 4;
 
@@ -1864,7 +1869,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             for (uint64_t id : ids) {
                 int ni = m_doc->tree.indexOfId(id);
                 if (ni < 0) continue;
-                uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
+                int64_t off = m_doc->tree.computeOffset(ni);
+                if (off < 0) continue;
+                uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
                 addrs << QStringLiteral("0x") + QString::number(addr, 16).toUpper();
             }
             QApplication::clipboard()->setText(addrs.join('\n'));
@@ -2458,7 +2465,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         copyMenu->addAction(icon("link.svg"), "Copy &Address", [this, copyNodeId]() {
             int ni = m_doc->tree.indexOfId(copyNodeId);
             if (ni < 0) return;
-            uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(ni);
+            int64_t off = m_doc->tree.computeOffset(ni);
+            if (off < 0) return;
+            uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
             QApplication::clipboard()->setText(
                 QStringLiteral("0x") + QString::number(addr, 16).toUpper());
         });
@@ -2499,8 +2508,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         // Show Physical Address — translate the node's VA to physical
         if (hasNode) {
-            uint64_t nodeAddr = m_doc->tree.baseAddress
-                + m_doc->tree.computeOffset(nodeIdx);
+            int64_t nodeOff = m_doc->tree.computeOffset(nodeIdx);
+            uint64_t nodeAddr = (nodeOff >= 0)
+                ? m_doc->tree.baseAddress + static_cast<uint64_t>(nodeOff) : 0;
             kernelMenu->addAction("Show Physical Address", [this, nodeAddr, &menu]() {
                 auto result = m_doc->provider->translateAddress(nodeAddr);
                 if (result.valid) {
@@ -2557,8 +2567,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     if (bf.name == QStringLiteral("PhysAddr")) {
                         int bitOff = bf.bitOffset;
                         int bitWid = bf.bitWidth;
+                        int64_t nodeOff = m_doc->tree.computeOffset(nodeIdx);
+                        if (nodeOff < 0) break;
                         uint64_t nodeAddr = m_doc->tree.baseAddress
-                            + m_doc->tree.computeOffset(nodeIdx);
+                            + static_cast<uint64_t>(nodeOff);
                         kernelMenu->addAction("Follow Physical Frame",
                             [this, nodeAddr, bitOff, bitWid]() {
                             uint64_t pteValue = 0;
@@ -3802,6 +3814,7 @@ int RcxController::computeDataExtent() const {
     for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
         const Node& node = m_doc->tree.nodes[i];
         int64_t off = m_doc->tree.computeOffset(i);
+        if (off < 0) continue;
         int sz = (node.kind == NodeKind::Struct || node.kind == NodeKind::Array)
             ? m_doc->tree.structSpan(node.id) : node.byteSize();
         int64_t end = off + sz;

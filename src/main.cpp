@@ -4713,6 +4713,7 @@ void MainWindow::createScannerDock() {
             for (int i = 0; i < tree.nodes.size(); i++) {
                 const auto& n = tree.nodes[i];
                 int64_t off = tree.computeOffset(i);
+                if (off < 0) continue;
                 int sz = (n.kind == rcx::NodeKind::Struct || n.kind == rcx::NodeKind::Array)
                     ? tree.structSpan(n.id) : n.byteSize();
                 int64_t end = off + sz;
