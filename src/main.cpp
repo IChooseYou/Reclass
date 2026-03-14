@@ -5373,7 +5373,7 @@ void MainWindow::rebuildModulesModel() {
                 .arg(mod.name)
                 .arg(mod.base, 0, 16)
                 .arg(mod.size / 1024));
-        item->setData(mod.base, Qt::UserRole);
+        item->setData(QVariant::fromValue(mod.base), Qt::UserRole);
         item->setData(mod.name, Qt::UserRole + 1);
         item->setData(mod.fullPath, Qt::UserRole + 2);
         item->setToolTip(mod.fullPath.isEmpty() ? mod.name : mod.fullPath);
