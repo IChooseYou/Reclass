@@ -31,6 +31,7 @@ namespace rcx {
 //
 // All numeric literals are hexadecimal (base 16).
 // Identifiers: [a-zA-Z_][a-zA-Z0-9_]* containing at least one non-hex char.
+// Module names with extensions (e.g. "client.dll") are scanned as one token.
 // Pure hex-digit words (e.g. "DEAD") are treated as hex literals.
 
 class ExpressionParser {
@@ -284,6 +285,20 @@ private:
             if (!isHexDigit(peek()))
                 hasNonHex = true;
             advance();
+        }
+        // Handle module.dll / module.exe / module.sys extensions
+        // e.g. "client.dll + 0xFF" should parse "client.dll" as one token
+        if (!atEnd() && peek() == '.' && m_pos > start) {
+            int dotPos = m_pos;
+            advance(); // skip '.'
+            int extStart = m_pos;
+            while (!atEnd() && isIdentChar(peek()))
+                advance();
+            if (m_pos > extStart) {
+                hasNonHex = true; // '.' makes it definitively an identifier
+            } else {
+                m_pos = dotPos; // backtrack — '.' at end isn't an extension
+            }
         }
         // If we hit '!' and the next char is an identifier start, extend the token
         // to include the second part (WinDbg module!symbol syntax)
