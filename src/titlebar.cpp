@@ -4,6 +4,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QStyle>
+#include <QTimer>
 #include <QWindow>
 
 namespace rcx {
@@ -25,11 +26,23 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
     m_appLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(m_appLabel);
 
-    // Menu bar
+    // Menu bar — hidden on Linux; visible on Windows.
+    // On Linux, QMenuBar inside a custom widget collapses all items into an
+    // extension popup.  We keep it hidden and mirror its menus as QToolButtons
+    // via finalizeMenuBar() after createMenus() populates it.
     m_menuBar = new QMenuBar(this);
     m_menuBar->setNativeMenuBar(false);
+#ifdef __linux__
+    m_useToolButtons = true;
+    m_menuBar->hide();
+    m_menuBtnLayout = new QHBoxLayout;
+    m_menuBtnLayout->setContentsMargins(0, 0, 0, 0);
+    m_menuBtnLayout->setSpacing(0);
+    layout->addLayout(m_menuBtnLayout);
+#else
     m_menuBar->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
     layout->addWidget(m_menuBar);
+#endif
 
     layout->addStretch();
 
@@ -116,6 +129,17 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     m_btnMin->setStyleSheet(btnStyle);
     m_btnMax->setStyleSheet(btnStyle);
 
+    // Linux menu tool buttons
+    if (m_useToolButtons) {
+        QString menuBtnStyle = QStringLiteral(
+            "QToolButton { background: transparent; border: none; padding: 0 8px; color: %1; }"
+            "QToolButton:hover { background: %2; }"
+            "QToolButton::menu-indicator { image: none; }")
+            .arg(theme.text.name(), theme.hover.name());
+        for (auto* btn : m_menuButtons)
+            btn->setStyleSheet(menuBtnStyle);
+    }
+
     // Close button: themed red hover
     m_btnClose->setStyleSheet(QStringLiteral(
         "QToolButton { background: transparent; border: none; }"
@@ -164,6 +188,58 @@ void TitleBarWidget::setMenuBarTitleCase(bool titleCase) {
             action->setText("&" + result);
         }
     }
+    // Sync tool button labels on Linux
+    if (m_useToolButtons) {
+        auto actions = m_menuBar->actions();
+        for (int i = 0; i < m_menuButtons.size() && i < actions.size(); ++i)
+            m_menuButtons[i]->setText(actions[i]->text());
+    }
+}
+
+void TitleBarWidget::finalizeMenuBar() {
+    if (!m_useToolButtons) return;
+    // Create a QToolButton for each top-level menu in the hidden QMenuBar
+    for (auto* action : m_menuBar->actions()) {
+        if (!action->menu()) continue;
+        auto* btn = new QToolButton(this);
+        btn->setText(action->text());
+        btn->setMenu(action->menu());
+        btn->setPopupMode(QToolButton::InstantPopup);
+        btn->setAutoRaise(true);
+        btn->setFocusPolicy(Qt::NoFocus);
+        btn->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
+        btn->setStyleSheet(QStringLiteral(
+            "QToolButton { background: transparent; border: none; padding: 0 8px; }"
+            "QToolButton:hover { background: %1; }"
+            "QToolButton::menu-indicator { image: none; }")
+            .arg(m_theme.hover.name()));
+        btn->installEventFilter(this);
+        btn->menu()->installEventFilter(this);
+        m_menuBtnLayout->addWidget(btn);
+        m_menuButtons.append(btn);
+    }
+}
+
+bool TitleBarWidget::eventFilter(QObject* obj, QEvent* event) {
+    if (!m_useToolButtons) return QWidget::eventFilter(obj, event);
+
+    // Watch for mouse movement inside an open QMenu — if the cursor moves
+    // over a sibling menu button, close this menu and open the other.
+    if (event->type() == QEvent::MouseMove) {
+        auto* menu = qobject_cast<QMenu*>(obj);
+        if (!menu || !menu->isVisible()) return false;
+        QPoint globalPos = QCursor::pos();
+        for (auto* btn : m_menuButtons) {
+            if (btn->menu() == menu) continue;
+            QRect btnRect(btn->mapToGlobal(QPoint(0, 0)), btn->size());
+            if (btnRect.contains(globalPos)) {
+                menu->close();
+                QTimer::singleShot(0, btn, [btn]() { btn->showMenu(); });
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(obj, event);
 }
 
 void TitleBarWidget::updateMaximizeIcon() {

@@ -615,6 +615,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createSymbolsDock();
 
     createMenus();
+    if (m_titleBar) m_titleBar->finalizeMenuBar();
     createStatusBar();
 
     // Eliminate gap between central widget and status bar
