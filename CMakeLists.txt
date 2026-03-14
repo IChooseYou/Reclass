@@ -147,6 +147,12 @@ add_executable(Reclass
     src/mcp/mcp_bridge.cpp
     src/addressparser.h
     src/addressparser.cpp
+    src/symbolstore.h
+    src/symbolstore.cpp
+    src/symbol_downloader.h
+    src/symbol_downloader.cpp
+    src/imports/pe_debug_info.h
+    src/imports/pe_debug_info.cpp
     src/disasm.h
     src/disasm.cpp
     third_party/fadec/decode.c
@@ -415,7 +421,7 @@ if(BUILD_TESTING)
     if(BUILD_UI_TESTS)
 
         add_executable(test_controller tests/test_controller.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -429,7 +435,7 @@ if(BUILD_TESTING)
         add_test(NAME test_controller COMMAND test_controller)
 
         add_executable(test_context_menu tests/test_context_menu.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -443,7 +449,7 @@ if(BUILD_TESTING)
         add_test(NAME test_context_menu COMMAND test_context_menu)
 
         add_executable(test_source_management tests/test_source_management.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -475,7 +481,7 @@ if(BUILD_TESTING)
         add_test(NAME test_rendered_view COMMAND test_rendered_view)
 
         add_executable(test_type_selector tests/test_type_selector.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -489,7 +495,7 @@ if(BUILD_TESTING)
         add_test(NAME test_type_selector COMMAND test_type_selector)
 
         add_executable(test_type_visibility tests/test_type_visibility.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -509,7 +515,7 @@ if(BUILD_TESTING)
         add_test(NAME test_options_dialog COMMAND test_options_dialog)
 
         add_executable(test_source_provider tests/test_source_provider.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
