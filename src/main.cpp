@@ -1025,8 +1025,8 @@ protected:
         const double r = 0.75, s = 3.0;
         double cx = width() / 2.0;
         double cy = height() / 2.0;
-        // 2 columns x 3 rows, centered
-        for (int row = -1; row <= 1; row++) {
+        // 2 columns x 4 rows, centered
+        for (int row = -2; row <= 1; row++) {
             p.drawEllipse(QPointF(cx - s * 0.5, cy + row * s), r, r);
             p.drawEllipse(QPointF(cx + s * 0.5, cy + row * s), r, r);
         }
@@ -4776,6 +4776,8 @@ void MainWindow::createSymbolsDock() {
         m_symDownloadBtn = new QToolButton(titleBar);
         m_symDownloadBtn->setIcon(QIcon(QStringLiteral(":/vsicons/cloud-download.svg")));
         m_symDownloadBtn->setIconSize(QSize(14, 14));
+        m_symDownloadBtn->setText(QStringLiteral("Download All"));
+        m_symDownloadBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         m_symDownloadBtn->setAutoRaise(true);
         m_symDownloadBtn->setCursor(Qt::PointingHandCursor);
         m_symDownloadBtn->setToolTip(QStringLiteral("Load/Download all symbols"));
@@ -4892,17 +4894,10 @@ void MainWindow::createSymbolsDock() {
                 return;
             }
 
-            // Helper to load a PDB file into the symbol store
+            // Helper to load a PDB file into the symbol store (with type indices)
             auto loadPdb = [this, name](const QString& pdbPath) -> bool {
-                QString symErr;
-                auto result = rcx::extractPdbSymbols(pdbPath, &symErr);
-                if (result.symbols.isEmpty()) return false;
-                QVector<QPair<QString, uint32_t>> pairs;
-                pairs.reserve(result.symbols.size());
-                for (const auto& s : result.symbols)
-                    pairs.emplaceBack(s.name, s.rva);
-                int count = rcx::SymbolStore::instance().addModule(
-                    result.moduleName, pdbPath, pairs);
+                int count = loadPdbIntoStore(pdbPath);
+                if (count <= 0) return false;
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2").arg(count).arg(name));
                 rebuildSymbolsModel();
                 if (auto* c = activeController()) c->refresh();
@@ -5339,6 +5334,28 @@ void MainWindow::createSymbolsDock() {
         });
         m_symbolsDock->installEventFilter(new DockBorderFilter(border, grip, m_symbolsDock));
     }
+}
+
+int MainWindow::loadPdbIntoStore(const QString& pdbPath) {
+    QString symErr;
+    auto result = rcx::extractPdbSymbols(pdbPath, &symErr);
+    if (result.symbols.isEmpty()) return 0;
+
+    QVector<QPair<QString, uint32_t>> pairs;
+    QHash<QString, uint32_t> typeIndices;
+    pairs.reserve(result.symbols.size());
+    for (const auto& s : result.symbols) {
+        pairs.emplaceBack(s.name, s.rva);
+        if (s.typeIndex != 0)
+            typeIndices.insert(s.name, s.typeIndex);
+    }
+
+    int count = rcx::SymbolStore::instance().addModule(
+        result.moduleName, pdbPath, pairs);
+    if (!typeIndices.isEmpty())
+        rcx::SymbolStore::instance().addModuleTypeIndices(
+            result.moduleName, typeIndices);
+    return count;
 }
 
 void MainWindow::rebuildSymbolsModel() {

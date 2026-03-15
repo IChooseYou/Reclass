@@ -1022,21 +1022,26 @@ PdbSymbolResult extractPdbSymbols(const QString& pdbPath, QString* errorMsg) {
 
             const char* name = nullptr;
             uint32_t rva = 0u;
+            uint32_t typeIdx = 0u;
 
             if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_GDATA32) {
                 name = record->data.S_GDATA32.name;
+                typeIdx = record->data.S_GDATA32.typeIndex;
                 rva = imageSectionStream.ConvertSectionOffsetToRVA(
                     record->data.S_GDATA32.section, record->data.S_GDATA32.offset);
             } else if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_GTHREAD32) {
                 name = record->data.S_GTHREAD32.name;
+                typeIdx = record->data.S_GTHREAD32.typeIndex;
                 rva = imageSectionStream.ConvertSectionOffsetToRVA(
                     record->data.S_GTHREAD32.section, record->data.S_GTHREAD32.offset);
             } else if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_LDATA32) {
                 name = record->data.S_LDATA32.name;
+                typeIdx = record->data.S_LDATA32.typeIndex;
                 rva = imageSectionStream.ConvertSectionOffsetToRVA(
                     record->data.S_LDATA32.section, record->data.S_LDATA32.offset);
             } else if (record->header.kind == PDB::CodeView::DBI::SymbolRecordKind::S_LTHREAD32) {
                 name = record->data.S_LTHREAD32.name;
+                typeIdx = record->data.S_LTHREAD32.typeIndex;
                 rva = imageSectionStream.ConvertSectionOffsetToRVA(
                     record->data.S_LTHREAD32.section, record->data.S_LTHREAD32.offset);
             }
@@ -1046,7 +1051,7 @@ PdbSymbolResult extractPdbSymbols(const QString& pdbPath, QString* errorMsg) {
             if (!name || name[0] == '\0')
                 continue;
 
-            result.symbols.push_back(PdbSymbol{QString::fromUtf8(name), rva});
+            result.symbols.push_back(PdbSymbol{QString::fromUtf8(name), rva, typeIdx});
         }
     }
 
@@ -1232,6 +1237,119 @@ NodeTree importPdb(const QString& pdbPath, const QString& structFilter, QString*
     return ctx.tree;
 }
 
+// ── Public API: importTypeForSymbol ──
+
+NodeTree importTypeForSymbol(const QString& pdbPath,
+                             uint32_t typeIndex,
+                             QString* typeName,
+                             QString* errorMsg) {
+    auto setErr = [&](const QString& msg) { if (errorMsg) *errorMsg = msg; };
+
+    if (typeIndex == 0) {
+        setErr(QStringLiteral("Symbol has no associated type (typeIndex=0)"));
+        return {};
+    }
+
+    PdbFile pdb;
+    if (!pdb.open(pdbPath, errorMsg)) return {};
+
+    const TypeTable& tt = *pdb.typeTable;
+
+    // Walk through LF_MODIFIER and LF_POINTER chains to find the underlying UDT/enum
+    uint32_t ti = typeIndex;
+    int depth = 0;
+    while (ti >= tt.firstIndex() && depth < 16) {
+        const auto* rec = tt.get(ti);
+        if (!rec) break;
+
+        if (rec->header.kind == TRK::LF_MODIFIER) {
+            ti = rec->data.LF_MODIFIER.type;
+            depth++;
+            continue;
+        }
+        if (rec->header.kind == TRK::LF_POINTER) {
+            ti = rec->data.LF_POINTER.utype;
+            depth++;
+            continue;
+        }
+        break;  // reached a non-wrapper type
+    }
+
+    // Check if we landed on a UDT or enum
+    if (ti < tt.firstIndex()) {
+        setErr(QStringLiteral("Symbol type resolves to a primitive (typeIndex %1)")
+            .arg(typeIndex));
+        return {};
+    }
+
+    const auto* rec = tt.get(ti);
+    if (!rec) {
+        setErr(QStringLiteral("Invalid type index %1").arg(ti));
+        return {};
+    }
+
+    bool isUDT = (rec->header.kind == TRK::LF_STRUCTURE ||
+                  rec->header.kind == TRK::LF_CLASS ||
+                  rec->header.kind == TRK::LF_UNION);
+    bool isEnum = (rec->header.kind == TRK::LF_ENUM);
+
+    if (!isUDT && !isEnum) {
+        setErr(QStringLiteral("Symbol type is not a struct/class/union/enum (kind 0x%1)")
+            .arg((uint16_t)rec->header.kind, 0, 16));
+        return {};
+    }
+
+    // Extract the type name for the caller
+    if (typeName) {
+        const char* name = nullptr;
+        if (isEnum) {
+            name = rec->data.LF_ENUM.name;
+        } else if (rec->header.kind == TRK::LF_UNION) {
+            name = leafName(rec->data.LF_UNION.data, unionLeafKind(rec->data.LF_UNION.data));
+        } else {
+            name = leafName(rec->data.LF_CLASS.data, rec->data.LF_CLASS.lfEasy.kind);
+        }
+        if (name) *typeName = QString::fromUtf8(name);
+    }
+
+    // If this is a forward reference, resolve to the full definition
+    PdbCtx ctx;
+    ctx.tt = &tt;
+
+    if (isUDT) {
+        bool fwdref = false;
+        if (rec->header.kind == TRK::LF_UNION)
+            fwdref = rec->data.LF_UNION.property.fwdref;
+        else
+            fwdref = rec->data.LF_CLASS.property.fwdref;
+
+        if (fwdref) {
+            // Build the definition index to find the real definition
+            ctx.buildUdtDefinitionIndex();
+            const char* name = nullptr;
+            if (rec->header.kind == TRK::LF_UNION)
+                name = leafName(rec->data.LF_UNION.data, unionLeafKind(rec->data.LF_UNION.data));
+            else
+                name = leafName(rec->data.LF_CLASS.data, rec->data.LF_CLASS.lfEasy.kind);
+
+            if (name) {
+                uint32_t defTi = ctx.findUdtDefinitionIndex(rec->header.kind, name);
+                if (defTi != 0)
+                    ti = defTi;
+            }
+        }
+        ctx.importUDT(ti);
+    } else {
+        ctx.importEnum(ti);
+    }
+
+    if (ctx.tree.nodes.isEmpty()) {
+        setErr(QStringLiteral("Failed to import type at index %1").arg(ti));
+    }
+
+    return ctx.tree;
+}
+
 } // namespace rcx
 
 #else // !_WIN32
@@ -1255,6 +1373,11 @@ NodeTree importPdbSelected(const QString&, const QVector<uint32_t>&,
 }
 
 NodeTree importPdb(const QString&, const QString&, QString* errorMsg) {
+    if (errorMsg) *errorMsg = QStringLiteral("PDB import requires Windows");
+    return {};
+}
+
+NodeTree importTypeForSymbol(const QString&, uint32_t, QString*, QString* errorMsg) {
     if (errorMsg) *errorMsg = QStringLiteral("PDB import requires Windows");
     return {};
 }

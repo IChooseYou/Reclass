@@ -10,6 +10,7 @@ namespace rcx {
 struct PdbSymbol {
     QString name;
     uint32_t rva;
+    uint32_t typeIndex = 0;  // TPI type index (0 = unknown / public symbol)
 };
 
 struct PdbSymbolResult {
@@ -50,5 +51,13 @@ NodeTree importPdbSelected(const QString& pdbPath,
 NodeTree importPdb(const QString& pdbPath,
                    const QString& structFilter = {},
                    QString* errorMsg = nullptr);
+
+// Import the type associated with a global symbol's typeIndex.
+// Opens the PDB, resolves the typeIndex to a UDT/enum, and returns the imported tree.
+// Returns empty tree if the symbol has no associated type or the type is a simple primitive.
+NodeTree importTypeForSymbol(const QString& pdbPath,
+                             uint32_t typeIndex,
+                             QString* typeName = nullptr,
+                             QString* errorMsg = nullptr);
 
 } // namespace rcx

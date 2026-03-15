@@ -52,6 +52,26 @@ int SymbolStore::addModule(const QString& moduleName, const QString& pdbPath,
     return count;
 }
 
+void SymbolStore::addModuleTypeIndices(const QString& moduleName,
+                                       const QHash<QString, uint32_t>& nameToTypeIndex) {
+    QString canonical = resolveAlias(moduleName);
+    auto it = m_modules.find(canonical);
+    if (it == m_modules.end()) return;
+    it->nameToTypeIndex = nameToTypeIndex;
+}
+
+uint32_t SymbolStore::typeIndexForSymbol(const QString& qualifiedSymbol) const {
+    int bangIdx = qualifiedSymbol.indexOf('!');
+    if (bangIdx <= 0 || bangIdx >= qualifiedSymbol.size() - 1)
+        return 0;
+    QString modPart = qualifiedSymbol.left(bangIdx);
+    QString symPart = qualifiedSymbol.mid(bangIdx + 1);
+    QString canonical = resolveAlias(modPart);
+    auto modIt = m_modules.find(canonical);
+    if (modIt == m_modules.end()) return 0;
+    return modIt->nameToTypeIndex.value(symPart, 0);
+}
+
 void SymbolStore::unloadModule(const QString& moduleName) {
     QString canonical = resolveAlias(moduleName);
     m_modules.remove(canonical);

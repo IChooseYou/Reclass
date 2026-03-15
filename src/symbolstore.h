@@ -14,6 +14,7 @@ struct PdbSymbolSet {
     QString pdbPath;
     QString moduleName;          // canonical lowercase name (e.g. "ntoskrnl")
     QHash<QString, uint32_t> nameToRva;
+    QHash<QString, uint32_t> nameToTypeIndex; // symbol name → TPI typeIndex (0 = no type info)
     QVector<QPair<uint32_t, QString>> rvaToName;  // sorted by RVA for binary search
 
     void sortRvaIndex() {
@@ -34,6 +35,15 @@ public:
     // Returns the number of unique symbols stored.
     int addModule(const QString& moduleName, const QString& pdbPath,
                   const QVector<QPair<QString, uint32_t>>& symbols);
+
+    // Store symbol→typeIndex mapping for a previously-added module.
+    // Called after addModule with the typeIndex data from PdbSymbol records.
+    void addModuleTypeIndices(const QString& moduleName,
+                              const QHash<QString, uint32_t>& nameToTypeIndex);
+
+    // Look up the TPI typeIndex for a qualified symbol (e.g. "ntdll!g_pShimEngineModule").
+    // Returns 0 if not found or no type info available.
+    uint32_t typeIndexForSymbol(const QString& qualifiedSymbol) const;
 
     // Unload symbols for a module.
     void unloadModule(const QString& moduleName);

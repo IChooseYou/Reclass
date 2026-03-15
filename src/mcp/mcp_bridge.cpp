@@ -5,7 +5,10 @@
 #include "generator.h"
 #include "mainwindow.h"
 #include "scanner.h"
+#include "symbolstore.h"
+#include "imports/import_pdb.h"
 #include <QCoreApplication>
+#include <QFile>
 #include <QSettings>
 #include <QTimer>
 #include <QDebug>
@@ -323,8 +326,8 @@ QJsonObject McpBridge::handleInitialize(const QJsonValue& id, const QJsonObject&
             "- To detect what changed after an in-game event: call ui.action with action:'reset_tracking', "
             "then have the user perform the action, then call node.history on the relevant nodes "
             "to see which ones have new timestamped entries.\n"
-            "- hex.read offset is relative to the struct base address by default. "
-            "Use baseRelative=true for absolute virtual addresses in the process.\n"
+            "- hex.read offset is an absolute virtual address by default. "
+            "Use baseRelative=true to make it relative to the struct base address (0 = start of struct).\n"
             "- tree.apply operations are atomic (undo macro). Batch related changes into one call.\n"
             "- Use tree.search to quickly find nodes by name instead of paging through project.state.\n"
             "- project.state returns structure metadata only (kinds, names, offsets), NOT live values. "
@@ -385,7 +388,11 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                         "Operations: "
                         "remove: {op:'remove', nodeId:'ID'}. "
                         "rename: {op:'rename', nodeId:'ID', name:'newName'}. "
-                        "insert: {op:'insert', kind:'Hex64', name:'field', parentId:'ID', offset:0}. "
+                        "insert: {op:'insert', kind:'Hex64', name:'field', parentId:'ID', offset:0} — "
+                        "optional fields: structTypeName, classKeyword, strLen, elementKind, arrayLen, refId, "
+                        "ptrDepth (0=struct ptr, 1=prim*, 2=prim**), isStatic (bool), offsetExpr (string), "
+                        "isRelative (bool, RVA pointer), "
+                        "enumMembers ([{name:'X',value:0},...]), bitfieldMembers ([{name:'X',bitOffset:0,bitWidth:1},...]). "
                         "change_kind: {op:'change_kind', nodeId:'ID', kind:'UInt32'}. "
                         "change_offset: {op:'change_offset', nodeId:'ID', offset:16}. "
                         "change_base: {op:'change_base', baseAddress:'0x400000', formula:'[0x233CA80]'} — formula is optional, enables auto-resolve on provider attach. "
@@ -394,9 +401,15 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                         "change_pointer_ref: {op:'change_pointer_ref', nodeId:'ID', refId:'targetID'}. "
                         "change_array_meta: {op:'change_array_meta', nodeId:'ID', elementKind:'UInt32', arrayLen:10}. "
                         "collapse: {op:'collapse', nodeId:'ID', collapsed:true}. "
+                        "change_enum_members: {op:'change_enum_members', nodeId:'ID', members:[{name:'X',value:0},...]}. "
+                        "change_offset_expr: {op:'change_offset_expr', nodeId:'ID', offsetExpr:'base + 0x10'}. "
+                        "toggle_static: {op:'toggle_static', nodeId:'ID', isStatic:true}. "
+                        "toggle_relative: {op:'toggle_relative', nodeId:'ID', isRelative:true}. "
+                        "group_into_union: {op:'group_into_union', nodeIds:['ID1','ID2',...]} — groups siblings into a union. "
+                        "dissolve_union: {op:'dissolve_union', nodeId:'ID'} — flattens a union back to parent scope. "
                         "Insert ops get auto-assigned IDs; use $0, $1 etc. to reference them in later ops. "
                         "Kinds: Hex8 Hex16 Hex32 Hex64 Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64 "
-                        "Float Double Bool Pointer32 Pointer64 Vec2 Vec3 Vec4 Mat4x4 UTF8 UTF16 Struct Array"},
+                        "Float Double Bool Pointer32 Pointer64 FuncPtr32 FuncPtr64 Vec2 Vec3 Vec4 Mat4x4 UTF8 UTF16 Struct Array"},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
@@ -451,16 +464,20 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         {"description", "Read raw bytes from provider (live process memory). Returns hex dump, ASCII, and multi-type "
                         "interpretations (u8/u16/u32/u64/i32/f32/f64/ptr/string heuristics). "
                         "Use this to see what actual values are in memory at any offset. "
-                        "Offset is tree-relative (0-based, baseAddress added automatically) "
-                        "unless baseRelative=true (offset is absolute virtual address in the process)."},
+                        "By default offset is an absolute virtual address in the target process. "
+                        "Set baseRelative=true to make offset relative to the struct base address "
+                        "(e.g. offset=0 reads at baseAddress, offset=0x10 reads at baseAddress+0x10)."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
                 {"tabIndex", QJsonObject{{"type", "integer"},
                     {"description", "MDI tab index (0-based). Omit for active tab."}}},
-                {"offset", QJsonObject{{"type", "integer"}}},
-                {"length", QJsonObject{{"type", "integer"}}},
-                {"baseRelative", QJsonObject{{"type", "boolean"}}}
+                {"offset", QJsonObject{{"type", "integer"},
+                    {"description", "Address to read from. Absolute VA by default, or relative to struct base if baseRelative=true."}}},
+                {"length", QJsonObject{{"type", "integer"},
+                    {"description", "Number of bytes to read (1-4096, default 64)."}}},
+                {"baseRelative", QJsonObject{{"type", "boolean"},
+                    {"description", "If true, offset is relative to the tree's base address (added automatically). Default false (offset is absolute VA)."}}}
             }},
             {"required", QJsonArray{"offset", "length"}}
         }}
@@ -469,15 +486,20 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     // 5. hex.write
     tools.append(QJsonObject{
         {"name", "hex.write"},
-        {"description", "Write raw bytes to provider (through undo stack). Hex string format: '4D5A9000'"},
+        {"description", "Write raw bytes to provider (through undo stack). Hex string format: '4D5A9000'. "
+                        "By default offset is an absolute virtual address. "
+                        "Set baseRelative=true to make offset relative to the struct base address."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
                 {"tabIndex", QJsonObject{{"type", "integer"},
                     {"description", "MDI tab index (0-based). Omit for active tab."}}},
-                {"offset", QJsonObject{{"type", "integer"}}},
-                {"hexBytes", QJsonObject{{"type", "string"}}},
-                {"baseRelative", QJsonObject{{"type", "boolean"}}}
+                {"offset", QJsonObject{{"type", "integer"},
+                    {"description", "Address to write to. Absolute VA by default, or relative to struct base if baseRelative=true."}}},
+                {"hexBytes", QJsonObject{{"type", "string"},
+                    {"description", "Hex byte string to write, e.g. '4D5A9000'. Spaces allowed."}}},
+                {"baseRelative", QJsonObject{{"type", "boolean"},
+                    {"description", "If true, offset is relative to the tree's base address. Default false (absolute VA)."}}}
             }},
             {"required", QJsonArray{"offset", "hexBytes"}}
         }}
@@ -650,6 +672,86 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
             }}
         }}
     });
+
+    // symbols.load
+    tools.append(QJsonObject{
+        {"name", "symbols.load"},
+        {"description", "Load PDB symbols from a file path into the global symbol store. "
+                        "Symbols are used for address annotations (e.g. 'ntdll!RtlInitUnicodeString') "
+                        "and can be resolved via symbols.lookup. "
+                        "Returns the number of symbols loaded and the module name."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"pdbPath", QJsonObject{{"type", "string"},
+                    {"description", "Absolute path to a .pdb file."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab. Used to refresh annotations after loading."}}}
+            }},
+            {"required", QJsonArray{"pdbPath"}}
+        }}
+    });
+
+    // symbols.lookup
+    tools.append(QJsonObject{
+        {"name", "symbols.lookup"},
+        {"description", "Resolve a symbol name to an absolute virtual address in the attached process. "
+                        "Supports qualified names like 'ntdll!RtlInitUnicodeString' and bare names. "
+                        "Requires symbols to be loaded (via symbols.load or the UI) and a live provider."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"symbol", QJsonObject{{"type", "string"},
+                    {"description", "Symbol to resolve. Use 'module!name' for qualified lookup, or bare 'name' for unqualified."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }},
+            {"required", QJsonArray{"symbol"}}
+        }}
+    });
+
+    // symbols.importType
+    tools.append(QJsonObject{
+        {"name", "symbols.importType"},
+        {"description", "Import the type definition for a global symbol from its PDB into the active project. "
+                        "Given a qualified symbol like 'ntdll!g_pShimEngineModule', resolves its typeIndex from "
+                        "the PDB, follows pointer/modifier chains to find the underlying struct/class/union/enum, "
+                        "and imports it with full recursive child types. "
+                        "Requires symbols to be loaded first (via symbols.load). "
+                        "Returns the imported type name and node count, or an error if the symbol has no type info."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"symbol", QJsonObject{{"type", "string"},
+                    {"description", "Qualified symbol name (e.g. 'ntdll!g_pShimEngineModule'). Must include 'module!' prefix."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }},
+            {"required", QJsonArray{"symbol"}}
+        }}
+    });
+
+    // node.read_value
+    tools.append(QJsonObject{
+        {"name", "node.read_value"},
+        {"description", "Read the formatted typed value for one or more nodes. Unlike hex.read (which returns raw bytes), "
+                        "this returns the value as the user sees it in the editor: e.g. '120.0f' for Float, '0x7FF61234' for Pointer64, "
+                        "'true' for Bool, '1.0, 2.0, 3.0' for Vec3. "
+                        "For Hex nodes returns the hex byte preview. For Struct/Array returns the computed size. "
+                        "Requires a live provider for meaningful values."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"nodeIds", QJsonObject{{"type", "array"},
+                    {"items", QJsonObject{{"type", "string"}}},
+                    {"description", "Array of node IDs to read values for."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }},
+            {"required", QJsonArray{"nodeIds"}}
+        }}
+    });
+
     return okReply(id, QJsonObject{{"tools", tools}});
 }
 
@@ -680,6 +782,10 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "scanner.scan_pattern") result = toolScannerScanPattern(args);
     else if (toolName == "mcp.reconnect") result = toolReconnect(args);
     else if (toolName == "process.info") result = toolProcessInfo(args);
+    else if (toolName == "symbols.load") result = toolSymbolsLoad(args);
+    else if (toolName == "symbols.lookup") result = toolSymbolsLookup(args);
+    else if (toolName == "symbols.importType") result = toolSymbolsImportType(args);
+    else if (toolName == "node.read_value") result = toolNodeReadValue(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
     m_mainWindow->clearMcpStatus();
@@ -965,6 +1071,31 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             n.strLen = qBound(1, (int)parseInteger(op.value("strLen"), 64), 1000000);
             n.elementKind = kindFromString(op.value("elementKind").toString("UInt8"));
             n.arrayLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), 1000000);
+            n.ptrDepth = qBound(0, (int)parseInteger(op.value("ptrDepth"), 0), 2);
+            n.isStatic = op.value("isStatic").toBool(false);
+            n.offsetExpr = op.value("offsetExpr").toString();
+            n.isRelative = op.value("isRelative").toBool(false);
+            // Enum members
+            if (op.contains("enumMembers")) {
+                QJsonArray emArr = op.value("enumMembers").toArray();
+                for (const auto& ev : emArr) {
+                    QJsonObject eo = ev.toObject();
+                    n.enumMembers.emplaceBack(eo.value("name").toString(),
+                                              (int64_t)parseInteger(eo.value("value")));
+                }
+            }
+            // Bitfield members
+            if (op.contains("bitfieldMembers")) {
+                QJsonArray bmArr = op.value("bitfieldMembers").toArray();
+                for (const auto& bv : bmArr) {
+                    QJsonObject bo = bv.toObject();
+                    BitfieldMember bm;
+                    bm.name = bo.value("name").toString();
+                    bm.bitOffset = (uint8_t)qBound(0, (int)parseInteger(bo.value("bitOffset")), 255);
+                    bm.bitWidth = (uint8_t)qBound(1, (int)parseInteger(bo.value("bitWidth"), 1), 64);
+                    n.bitfieldMembers.append(bm);
+                }
+            }
             bool refOk;
             QString refStr = resolvePlaceholder(op.value("refId").toString("0"), placeholders, &refOk);
             if (!refOk) {
@@ -1116,6 +1247,89 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
                 applied++;
             } else {
                 skippedOps.append(QStringLiteral("op[%1]: collapse nodeId '%2' not found").arg(i).arg(nid));
+            }
+        }
+        else if (opType == "change_enum_members") {
+            QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
+            int idx = tree.indexOfId(nid.toULongLong());
+            if (idx >= 0) {
+                QVector<QPair<QString, int64_t>> newMembers;
+                QJsonArray membersArr = op.value("members").toArray();
+                for (const auto& mv : membersArr) {
+                    QJsonObject mo = mv.toObject();
+                    newMembers.emplaceBack(mo.value("name").toString(),
+                                           (int64_t)parseInteger(mo.value("value")));
+                }
+                doc->undoStack.push(new RcxCommand(ctrl,
+                    cmd::ChangeEnumMembers{tree.nodes[idx].id,
+                        tree.nodes[idx].enumMembers, newMembers}));
+                applied++;
+            } else {
+                skippedOps.append(QStringLiteral("op[%1]: change_enum_members nodeId '%2' not found").arg(i).arg(nid));
+            }
+        }
+        else if (opType == "change_offset_expr") {
+            QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
+            int idx = tree.indexOfId(nid.toULongLong());
+            if (idx >= 0) {
+                doc->undoStack.push(new RcxCommand(ctrl,
+                    cmd::ChangeOffsetExpr{tree.nodes[idx].id,
+                        tree.nodes[idx].offsetExpr,
+                        op.value("offsetExpr").toString()}));
+                applied++;
+            } else {
+                skippedOps.append(QStringLiteral("op[%1]: change_offset_expr nodeId '%2' not found").arg(i).arg(nid));
+            }
+        }
+        else if (opType == "toggle_static") {
+            QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
+            int idx = tree.indexOfId(nid.toULongLong());
+            if (idx >= 0) {
+                bool newVal = op.value("isStatic").toBool();
+                doc->undoStack.push(new RcxCommand(ctrl,
+                    cmd::ToggleStatic{tree.nodes[idx].id,
+                        tree.nodes[idx].isStatic, newVal}));
+                applied++;
+            } else {
+                skippedOps.append(QStringLiteral("op[%1]: toggle_static nodeId '%2' not found").arg(i).arg(nid));
+            }
+        }
+        else if (opType == "toggle_relative") {
+            QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
+            int idx = tree.indexOfId(nid.toULongLong());
+            if (idx >= 0) {
+                bool newVal = op.value("isRelative").toBool();
+                doc->undoStack.push(new RcxCommand(ctrl,
+                    cmd::ToggleRelative{tree.nodes[idx].id,
+                        tree.nodes[idx].isRelative, newVal}));
+                applied++;
+            } else {
+                skippedOps.append(QStringLiteral("op[%1]: toggle_relative nodeId '%2' not found").arg(i).arg(nid));
+            }
+        }
+        else if (opType == "group_into_union") {
+            QJsonArray idsArr = op.value("nodeIds").toArray();
+            QSet<uint64_t> ids;
+            for (const auto& v : idsArr) {
+                QString resolved = resolvePlaceholder(v.toString(), placeholders);
+                ids.insert(resolved.toULongLong());
+            }
+            if (ids.size() >= 2) {
+                ctrl->groupIntoUnion(ids);
+                applied++;
+            } else {
+                skippedOps.append(QStringLiteral("op[%1]: group_into_union needs >= 2 nodeIds").arg(i));
+            }
+        }
+        else if (opType == "dissolve_union") {
+            QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
+            uint64_t unionId = nid.toULongLong();
+            int idx = tree.indexOfId(unionId);
+            if (idx >= 0) {
+                ctrl->dissolveUnion(unionId);
+                applied++;
+            } else {
+                skippedOps.append(QStringLiteral("op[%1]: dissolve_union nodeId '%2' not found").arg(i).arg(nid));
             }
         }
         else {
@@ -1818,6 +2032,224 @@ QJsonObject McpBridge::toolProcessInfo(const QJsonObject& args) {
     out["tebs"] = tebArr;
     out["tebCount"] = tebArr.size();
     return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: symbols.load — load PDB symbols into the global store
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolSymbolsLoad(const QJsonObject& args) {
+    QString pdbPath = args.value("pdbPath").toString();
+    if (pdbPath.isEmpty())
+        return makeTextResult("pdbPath is required", true);
+
+    if (!QFile::exists(pdbPath))
+        return makeTextResult("File not found: " + pdbPath, true);
+
+    QString symErr;
+    auto result = extractPdbSymbols(pdbPath, &symErr);
+    if (result.symbols.isEmpty())
+        return makeTextResult(symErr.isEmpty()
+            ? QStringLiteral("No symbols found in PDB") : symErr, true);
+
+    QVector<QPair<QString, uint32_t>> pairs;
+    QHash<QString, uint32_t> typeIndices;
+    pairs.reserve(result.symbols.size());
+    for (const auto& s : result.symbols) {
+        pairs.emplaceBack(s.name, s.rva);
+        if (s.typeIndex != 0)
+            typeIndices.insert(s.name, s.typeIndex);
+    }
+
+    int count = SymbolStore::instance().addModule(result.moduleName, pdbPath, pairs);
+    if (!typeIndices.isEmpty())
+        SymbolStore::instance().addModuleTypeIndices(result.moduleName, typeIndices);
+
+    // Refresh the active tab so annotations pick up new symbols
+    auto* tab = resolveTab(args);
+    if (tab && tab->ctrl)
+        tab->ctrl->refresh();
+
+    m_mainWindow->rebuildSymbolsModel();
+
+    QJsonObject out;
+    out["moduleName"] = result.moduleName;
+    out["symbolCount"] = count;
+    out["pdbPath"] = pdbPath;
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: symbols.lookup — resolve symbol name to address
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolSymbolsLookup(const QJsonObject& args) {
+    QString symbol = args.value("symbol").toString();
+    if (symbol.isEmpty())
+        return makeTextResult("symbol is required", true);
+
+    auto* tab = resolveTab(args);
+    if (!tab || !tab->doc->provider)
+        return makeTextResult("No active tab or provider", true);
+
+    auto* prov = tab->doc->provider.get();
+    bool ok = false;
+    uint64_t addr = SymbolStore::instance().resolve(symbol, prov, &ok);
+    if (!ok || addr == 0)
+        return makeTextResult("Symbol not found: " + symbol, true);
+
+    QJsonObject out;
+    out["symbol"] = symbol;
+    out["address"] = "0x" + QString::number(addr, 16).toUpper();
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: symbols.importType — import type definition for a symbol
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolSymbolsImportType(const QJsonObject& args) {
+    QString symbol = args.value("symbol").toString();
+    if (symbol.isEmpty())
+        return makeTextResult("symbol is required", true);
+
+    int bangIdx = symbol.indexOf('!');
+    if (bangIdx <= 0 || bangIdx >= symbol.size() - 1)
+        return makeTextResult("Symbol must be qualified: 'module!name'", true);
+
+    QString modPart = symbol.left(bangIdx);
+
+    // Look up the typeIndex from the symbol store
+    uint32_t typeIdx = SymbolStore::instance().typeIndexForSymbol(symbol);
+    if (typeIdx == 0)
+        return makeTextResult("No type info for symbol '" + symbol +
+            "'. The PDB may not have been loaded with symbols.load, or this "
+            "is a public symbol (S_PUB32) without type metadata.", true);
+
+    // Find the PDB path for this module
+    QString canonical = SymbolStore::instance().resolveAlias(modPart);
+    const auto* modData = SymbolStore::instance().moduleData(canonical);
+    if (!modData || modData->pdbPath.isEmpty())
+        return makeTextResult("No PDB path found for module '" + modPart + "'", true);
+
+    // Import the type from the PDB
+    QString importedTypeName;
+    QString importErr;
+    NodeTree importedTree = importTypeForSymbol(modData->pdbPath, typeIdx,
+                                                &importedTypeName, &importErr);
+    if (importedTree.nodes.isEmpty())
+        return makeTextResult(importErr.isEmpty()
+            ? QStringLiteral("Failed to import type for typeIndex %1").arg(typeIdx)
+            : importErr, true);
+
+    // Merge imported nodes into the active document
+    auto* tab = resolveTab(args);
+    if (!tab)
+        return makeTextResult("No active tab", true);
+
+    auto& tree = tab->doc->tree;
+    tab->ctrl->setSuppressRefresh(true);
+    tab->doc->undoStack.beginMacro(
+        QStringLiteral("Import type for ") + symbol);
+
+    // Map old IDs to new IDs to preserve parent-child relationships
+    QHash<uint64_t, uint64_t> idMap;
+    for (const auto& node : importedTree.nodes) {
+        uint64_t newId = tree.reserveId();
+        idMap[node.id] = newId;
+    }
+
+    for (const auto& node : importedTree.nodes) {
+        Node copy = node;
+        copy.id = idMap.value(node.id, node.id);
+        copy.parentId = idMap.value(node.parentId, node.parentId);
+        if (copy.refId != 0)
+            copy.refId = idMap.value(node.refId, node.refId);
+        tab->doc->undoStack.push(new RcxCommand(tab->ctrl,
+            cmd::Insert{copy}));
+    }
+
+    tab->doc->undoStack.endMacro();
+    tab->ctrl->setSuppressRefresh(false);
+    tab->ctrl->refresh();
+    m_mainWindow->rebuildWorkspaceModel();
+
+    QJsonObject out;
+    out["symbol"] = symbol;
+    out["typeName"] = importedTypeName;
+    out["typeIndex"] = (int)typeIdx;
+    out["nodesImported"] = importedTree.nodes.size();
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: node.read_value — read formatted typed values for nodes
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolNodeReadValue(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    const auto& tree = tab->doc->tree;
+    auto* prov = tab->doc->provider.get();
+    if (!prov) return makeTextResult("No provider", true);
+
+    QJsonArray requestedIds = args.value("nodeIds").toArray();
+    if (requestedIds.isEmpty())
+        return makeTextResult("nodeIds array is required", true);
+
+    QJsonObject result;
+    for (const auto& idVal : requestedIds) {
+        QString idStr = idVal.toString();
+        uint64_t nodeId = idStr.toULongLong();
+        int idx = tree.indexOfId(nodeId);
+        if (idx < 0) {
+            QJsonObject entry;
+            entry["error"] = "node not found";
+            result[idStr] = entry;
+            continue;
+        }
+
+        const Node& node = tree.nodes[idx];
+
+        // Compute absolute address
+        int64_t signedOff = tree.computeOffset(idx);
+        uint64_t addr = (signedOff >= 0)
+            ? tree.baseAddress + static_cast<uint64_t>(signedOff) : 0;
+
+        QJsonObject entry;
+        entry["kind"] = kindToString(node.kind);
+        entry["name"] = node.name;
+        entry["offset"] = node.offset;
+        entry["address"] = "0x" + QString::number(addr, 16).toUpper();
+
+        if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) {
+            // Containers don't have scalar values — return computed size
+            int span = tree.structSpan(node.id);
+            entry["computedSize"] = span;
+            entry["value"] = QStringLiteral("(container, size=0x%1)")
+                .arg(QString::number(span, 16).toUpper());
+        } else if (addr != 0 && prov->isReadable(addr, node.byteSize())) {
+            // Read formatted value using the same formatting as the editor
+            int numLines = linesForKind(node.kind);
+            if (numLines <= 1) {
+                entry["value"] = fmt::readValue(node, *prov, addr, 0);
+            } else {
+                // Multi-line types (Mat4x4): return all sub-lines
+                QJsonArray lines;
+                for (int sub = 0; sub < numLines; sub++)
+                    lines.append(fmt::readValue(node, *prov, addr, sub));
+                entry["value"] = lines;
+            }
+        } else {
+            entry["value"] = QJsonValue();
+            entry["error"] = "not readable";
+        }
+
+        result[idStr] = entry;
+    }
+
+    return makeTextResult(QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented)));
 }
 
 // ════════════════════════════════════════════════════════════════════

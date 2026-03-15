@@ -85,6 +85,10 @@ private:
     QJsonObject toolScannerScanPattern(const QJsonObject& args);
     QJsonObject toolReconnect(const QJsonObject& args);
     QJsonObject toolProcessInfo(const QJsonObject& args);
+    QJsonObject toolSymbolsLoad(const QJsonObject& args);
+    QJsonObject toolSymbolsLookup(const QJsonObject& args);
+    QJsonObject toolSymbolsImportType(const QJsonObject& args);
+    QJsonObject toolNodeReadValue(const QJsonObject& args);
 
     // Helpers
     QJsonObject makeTextResult(const QString& text, bool isError = false);

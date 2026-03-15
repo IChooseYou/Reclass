@@ -221,6 +221,8 @@ private:
     void rebuildSymbolsModel();
     void rebuildModulesModel();
     void downloadSymbolsForProcess();
+    // Load PDB symbols + typeIndices into SymbolStore. Returns symbol count.
+    static int loadPdbIntoStore(const QString& pdbPath);
 
     // Start page
     StartPageWidget*      m_startPage        = nullptr;
