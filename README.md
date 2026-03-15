@@ -32,6 +32,8 @@ Built with C++17, Qt 6 (Qt 5 also supported), and QScintilla. The entire editor 
 
 ![Memory scanner](docs/README_PIC3.png)
 
+![MacOS - Process Memory scanner](docs/README_PIC6.png)
+
 ## Features
 
 ### Editor

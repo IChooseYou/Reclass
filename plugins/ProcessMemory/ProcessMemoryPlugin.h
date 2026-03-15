@@ -35,6 +35,8 @@ public:
         return m_handle && len >= 0;
 #elif defined(__linux__)
         return m_fd >= 0 && len >= 0;
+    #elif defined(__APPLE__)
+        return m_task != 0 && len >= 0;
 #endif
     }
 
@@ -53,6 +55,8 @@ private:
     void* m_handle;
 #elif defined(__linux__)
     int m_fd;
+#elif defined(__APPLE__)
+    uint32_t m_task;
 #endif
     uint32_t m_pid;
     QString m_processName;

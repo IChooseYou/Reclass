@@ -45,3 +45,12 @@ set_target_properties(ProcessMemoryPlugin PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Plugins"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Plugins"
 )
+
+if(APPLE AND TARGET Reclass)
+    add_custom_command(TARGET ProcessMemoryPlugin POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Reclass>/../PlugIns"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:ProcessMemoryPlugin>"
+            "$<TARGET_FILE_DIR:Reclass>/../PlugIns/"
+        COMMENT "Copying ProcessMemoryPlugin into Reclass.app/Contents/PlugIns")
+endif()
