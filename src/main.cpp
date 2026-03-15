@@ -448,8 +448,11 @@ public:
                     QString text = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
                     int maxW = textRect.width();
 
-                    // Middle-elide if too long
-                    if (fm.horizontalAdvance(text) > maxW) {
+                    // Middle-elide only when text needs more than 2x the available width.
+                    // Short names like "Project" or "Modules" should never be elided
+                    // in a reasonably-sized dock panel.
+                    int textW = fm.horizontalAdvance(text);
+                    if (textW > maxW && textW > maxW * 2) {
                         int ellipsisW = fm.horizontalAdvance(QStringLiteral("\u2026"));
                         int avail = maxW - ellipsisW;
                         if (avail > 0) {
@@ -4737,8 +4740,7 @@ void MainWindow::createScannerDock() {
 void MainWindow::createSymbolsDock() {
     m_symbolsDock = new QDockWidget("Modules", this);
     m_symbolsDock->setObjectName("SymbolsDock");
-    m_symbolsDock->setAllowedAreas(
-        Qt::BottomDockWidgetArea | Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+    m_symbolsDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     m_symbolsDock->setFeatures(
         QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
         QDockWidget::DockWidgetFloatable);
@@ -4967,7 +4969,12 @@ void MainWindow::createSymbolsDock() {
                 ctrl->refresh();
             });
             menu.addSeparator();
-            auto* actDownload = menu.addAction("Download Symbols");
+            // Check if symbols already loaded — change label accordingly
+            QString canonical = rcx::SymbolStore::instance().resolveAlias(name);
+            const auto* existingSyms = rcx::SymbolStore::instance().moduleData(canonical);
+            auto* actDownload = menu.addAction(existingSyms
+                ? QStringLiteral("Reload Symbols (%1 loaded)").arg(existingSyms->nameToRva.size())
+                : QStringLiteral("Download Symbols"));
             connect(actDownload, &QAction::triggered, this, [this, name, base, fullPath]() {
                 auto* ctrl = activeController();
                 if (!ctrl || !ctrl->document()->provider) return;
@@ -5306,6 +5313,16 @@ void MainWindow::createSymbolsDock() {
     }
 
     containerLayout->addWidget(m_symTabWidget);
+    // Allow free resizing — remove Qt's default minimum size constraints
+    m_modulesTree->setMinimumWidth(0);
+    m_modulesTree->setMinimumHeight(0);
+    m_symbolsTree->setMinimumWidth(0);
+    m_symbolsTree->setMinimumHeight(0);
+    m_symbolsSearch->setMinimumWidth(0);
+    m_symTabWidget->setMinimumWidth(0);
+    m_symTabWidget->setMinimumHeight(0);
+    container->setMinimumWidth(0);
+    container->setMinimumHeight(0);
     m_symbolsDock->setWidget(container);
     addDockWidget(Qt::RightDockWidgetArea, m_symbolsDock);
     m_symbolsDock->hide();
@@ -5393,12 +5410,21 @@ void MainWindow::rebuildModulesModel() {
     if (modules.isEmpty()) return;
 
     static const QIcon modIcon(":/vsicons/symbol-structure.svg");
+    static const QIcon modLoadedIcon(":/vsicons/symbol-key.svg");
+    auto& store = rcx::SymbolStore::instance();
     for (const auto& mod : modules) {
-        auto* item = new QStandardItem(modIcon,
-            QStringLiteral("%1  [0x%2]  (%3 KB)")
-                .arg(mod.name)
-                .arg(mod.base, 0, 16)
-                .arg(mod.size / 1024));
+        QString canonical = store.resolveAlias(mod.name);
+        const auto* symSet = store.moduleData(canonical);
+        bool hasSymbols = (symSet != nullptr);
+        int symCount = hasSymbols ? symSet->nameToRva.size() : 0;
+
+        QString label = hasSymbols
+            ? QStringLiteral("%1  [0x%2]  (%3 KB)  \u2713 %4 syms")
+                .arg(mod.name).arg(mod.base, 0, 16).arg(mod.size / 1024).arg(symCount)
+            : QStringLiteral("%1  [0x%2]  (%3 KB)")
+                .arg(mod.name).arg(mod.base, 0, 16).arg(mod.size / 1024);
+
+        auto* item = new QStandardItem(hasSymbols ? modLoadedIcon : modIcon, label);
         item->setData(QVariant::fromValue(mod.base), Qt::UserRole);
         item->setData(mod.name, Qt::UserRole + 1);
         item->setData(mod.fullPath, Qt::UserRole + 2);
