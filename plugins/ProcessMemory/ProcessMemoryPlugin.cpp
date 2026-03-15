@@ -10,6 +10,7 @@
 #include <QImage>
 #include <QDir>
 #include <QFileInfo>
+#include <QMap>
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0) && defined(_WIN32)
 #include <QtWin>
 #endif
@@ -82,6 +83,13 @@ typedef struct alignas(8) _THREAD_BASIC_INFORMATION {
 #include <sys/uio.h>
 #include <fstream>
 #include <sstream>
+#include <cstring>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <libproc.h>
+#include <sys/proc_info.h>
+#include <unistd.h>
 #include <cstring>
 #endif
 
@@ -476,7 +484,238 @@ QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const
     return regions;
 }
 
+#elif defined(__APPLE__)
+
+ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& processName)
+    : m_task(0)
+    , m_pid(pid)
+    , m_processName(processName)
+    , m_writable(false)
+    , m_base(0)
+{
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), static_cast<int>(pid), &task);
+    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL)
+        return;
+
+    m_task = static_cast<uint32_t>(task);
+    m_writable = true;
+
+    proc_bsdinfo bsdInfo{};
+    int infoLen = proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &bsdInfo, sizeof(bsdInfo));
+    if (infoLen == (int)sizeof(bsdInfo)) {
+#ifdef PROC_FLAG_LP64
+        m_pointerSize = (bsdInfo.pbi_flags & PROC_FLAG_LP64) ? 8 : 4;
+#else
+        m_pointerSize = 8;
+#endif
+    }
+
+    cacheModules();
+}
+
+bool ProcessMemoryProvider::read(uint64_t addr, void* buf, int len) const
+{
+    if (m_task == 0 || len <= 0)
+        return false;
+
+    mach_vm_size_t outSize = 0;
+    kern_return_t kr = mach_vm_read_overwrite(
+        static_cast<mach_port_name_t>(m_task),
+        static_cast<mach_vm_address_t>(addr),
+        static_cast<mach_vm_size_t>(len),
+        reinterpret_cast<mach_vm_address_t>(buf),
+        &outSize);
+
+    if ((int)outSize < len)
+        memset((char*)buf + outSize, 0, len - outSize);
+
+    return kr == KERN_SUCCESS && outSize > 0;
+}
+
+bool ProcessMemoryProvider::write(uint64_t addr, const void* buf, int len)
+{
+    if (m_task == 0 || !m_writable || len <= 0)
+        return false;
+
+    kern_return_t kr = mach_vm_write(
+        static_cast<mach_port_name_t>(m_task),
+        static_cast<mach_vm_address_t>(addr),
+        reinterpret_cast<vm_offset_t>(const_cast<void*>(buf)),
+        static_cast<mach_msg_type_number_t>(len));
+    return kr == KERN_SUCCESS;
+}
+
+QString ProcessMemoryProvider::getSymbol(uint64_t addr) const
+{
+    for (const auto& mod : m_modules)
+    {
+        if (addr >= mod.base && addr < mod.base + mod.size)
+        {
+            uint64_t offset = addr - mod.base;
+            return QStringLiteral("%1+0x%2")
+                .arg(mod.name)
+                .arg(offset, 0, 16, QChar('0'));
+        }
+    }
+    return {};
+}
+
+void ProcessMemoryProvider::cacheModules()
+{
+    if (m_task == 0)
+        return;
+
+    m_modules.clear();
+
+    char mainPathBuf[PROC_PIDPATHINFO_MAXSIZE] = {};
+    QString mainPath;
+    if (proc_pidpath((int)m_pid, mainPathBuf, sizeof(mainPathBuf)) > 0)
+        mainPath = QString::fromUtf8(mainPathBuf);
+
+    struct Range { uint64_t base; uint64_t end; };
+    QMap<QString, Range> moduleRanges;
+
+    mach_vm_address_t addr = 0;
+    uint32_t depth = 0;
+    for (;;) {
+        mach_vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = mach_vm_region_recurse(
+            static_cast<mach_port_name_t>(m_task),
+            &addr,
+            &size,
+            &depth,
+            reinterpret_cast<vm_region_recurse_info_t>(&info),
+            &count);
+        if (kr != KERN_SUCCESS)
+            break;
+
+        if (info.is_submap) {
+            ++depth;
+            continue;
+        }
+
+        if (size == 0) {
+            ++addr;
+            continue;
+        }
+
+        char pathBuf[PROC_PIDPATHINFO_MAXSIZE] = {};
+        int pathLen = proc_regionfilename((int)m_pid, (uint64_t)addr, pathBuf, sizeof(pathBuf));
+        if (pathLen > 0) {
+            QString fullPath = QString::fromUtf8(pathBuf);
+
+            uint64_t regionBase = (uint64_t)addr;
+            uint64_t regionEnd = regionBase + (uint64_t)size;
+            auto it = moduleRanges.find(fullPath);
+            if (it == moduleRanges.end()) {
+                moduleRanges.insert(fullPath, {regionBase, regionEnd});
+            } else {
+                if (regionBase < it->base) it->base = regionBase;
+                if (regionEnd > it->end) it->end = regionEnd;
+            }
+
+            if (m_base == 0 && !mainPath.isEmpty() && fullPath == mainPath && (info.protection & VM_PROT_EXECUTE))
+                m_base = regionBase;
+        }
+
+        uint64_t next = (uint64_t)addr + (uint64_t)size;
+        if (next <= (uint64_t)addr)
+            break;
+        addr = (mach_vm_address_t)next;
+    }
+
+    m_modules.reserve(moduleRanges.size());
+    for (auto it = moduleRanges.begin(); it != moduleRanges.end(); ++it)
+    {
+        QFileInfo fi(it.key());
+        m_modules.push_back(ModuleInfo{
+            fi.fileName(),
+            it.key(),
+            it->base,
+            it->end - it->base
+        });
+    }
+
+    if (m_base == 0 && !m_modules.isEmpty())
+        m_base = m_modules.front().base;
+}
+
+QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const
+{
+    QVector<rcx::MemoryRegion> regions;
+    if (m_task == 0)
+        return regions;
+
+    mach_vm_address_t addr = 0;
+    uint32_t depth = 0;
+    for (;;) {
+        mach_vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = mach_vm_region_recurse(
+            static_cast<mach_port_name_t>(m_task),
+            &addr,
+            &size,
+            &depth,
+            reinterpret_cast<vm_region_recurse_info_t>(&info),
+            &count);
+        if (kr != KERN_SUCCESS)
+            break;
+
+        if (info.is_submap) {
+            ++depth;
+            continue;
+        }
+
+        if (size == 0) {
+            ++addr;
+            continue;
+        }
+
+        bool readable = (info.protection & VM_PROT_READ) != 0;
+        if (readable)
+        {
+            rcx::MemoryRegion region;
+            region.base = (uint64_t)addr;
+            region.size = (uint64_t)size;
+            region.readable = readable;
+            region.writable = (info.protection & VM_PROT_WRITE) != 0;
+            region.executable = (info.protection & VM_PROT_EXECUTE) != 0;
+
+            char pathBuf[PROC_PIDPATHINFO_MAXSIZE] = {};
+            int pathLen = proc_regionfilename((int)m_pid, region.base, pathBuf, sizeof(pathBuf));
+            if (pathLen > 0) {
+                QFileInfo fi(QString::fromUtf8(pathBuf));
+                region.moduleName = fi.fileName();
+            }
+
+            regions.append(region);
+        }
+
+        uint64_t next = (uint64_t)addr + (uint64_t)size;
+        if (next <= (uint64_t)addr)
+            break;
+        addr = (mach_vm_address_t)next;
+    }
+
+    return regions;
+}
+
 #endif // platform
+
+#ifndef _WIN32
+QVector<rcx::Provider::ModuleEntry> ProcessMemoryProvider::enumerateModules() const
+{
+    QVector<ModuleEntry> result;
+    result.reserve(m_modules.size());
+    for (const auto& m : m_modules)
+        result.push_back(ModuleEntry{m.name, m.fullPath, m.base, m.size});
+    return result;
+}
+#endif
 
 uint64_t ProcessMemoryProvider::symbolToAddress(const QString& name) const
 {
@@ -495,6 +734,9 @@ ProcessMemoryProvider::~ProcessMemoryProvider()
 #elif defined(__linux__)
     if (m_fd >= 0)
         ::close(m_fd);
+#elif defined(__APPLE__)
+    if (m_task != 0)
+        mach_port_deallocate(mach_task_self(), static_cast<mach_port_name_t>(m_task));
 #endif
 }
 
@@ -504,6 +746,8 @@ int ProcessMemoryProvider::size() const
     return m_handle ? 0x10000 : 0;
 #elif defined(__linux__)
     return (m_fd >= 0) ? 0x10000 : 0;
+#elif defined(__APPLE__)
+    return (m_task != 0) ? 0x10000 : 0;
 #endif
 }
 
@@ -654,6 +898,68 @@ uint64_t ProcessMemoryPlugin::getInitialBaseAddress(const QString& target) const
         }
     }
     return 0;
+#elif defined(__APPLE__)
+    QStringList parts = target.split(':');
+    bool ok = false;
+    uint32_t pid = parts[0].toUInt(&ok);
+    if (!ok || pid == 0)
+        return 0;
+
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t tkr = task_for_pid(mach_task_self(), static_cast<int>(pid), &task);
+    if (tkr != KERN_SUCCESS || task == MACH_PORT_NULL)
+        return 0;
+
+    char mainPathBuf[PROC_PIDPATHINFO_MAXSIZE] = {};
+    QString mainPath;
+    if (proc_pidpath((int)pid, mainPathBuf, sizeof(mainPathBuf)) > 0)
+        mainPath = QString::fromUtf8(mainPathBuf);
+
+    uint64_t base = 0;
+    mach_vm_address_t addr = 0;
+    uint32_t depth = 0;
+    for (;;) {
+        mach_vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = mach_vm_region_recurse(task, &addr, &size, &depth,
+                                                  reinterpret_cast<vm_region_recurse_info_t>(&info),
+                                                  &count);
+        if (kr != KERN_SUCCESS)
+            break;
+
+        if (info.is_submap) {
+            ++depth;
+            continue;
+        }
+
+        if (size == 0) {
+            ++addr;
+            continue;
+        }
+
+        if ((info.protection & VM_PROT_EXECUTE) != 0) {
+            if (!mainPath.isEmpty()) {
+                char pathBuf[PROC_PIDPATHINFO_MAXSIZE] = {};
+                int pathLen = proc_regionfilename((int)pid, (uint64_t)addr, pathBuf, sizeof(pathBuf));
+                if (pathLen > 0 && QString::fromUtf8(pathBuf) == mainPath) {
+                    base = (uint64_t)addr;
+                    break;
+                }
+            } else {
+                base = (uint64_t)addr;
+                break;
+            }
+        }
+
+        uint64_t next = (uint64_t)addr + (uint64_t)size;
+        if (next <= (uint64_t)addr)
+            break;
+        addr = (mach_vm_address_t)next;
+    }
+
+    mach_port_deallocate(mach_task_self(), task);
+    return base;
 #else
     Q_UNUSED(target);
     return 0;
@@ -795,6 +1101,61 @@ QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
             if (::pread(exeFd, &elfClass, 1, 4) == 1 && elfClass == 1) // ELFCLASS32
                 info.is32Bit = true;
             ::close(exeFd);
+        }
+
+        processes.append(info);
+    }
+#elif defined(__APPLE__)
+    QIcon defaultIcon = qApp->style()->standardIcon(QStyle::SP_ComputerIcon);
+
+    int bytes = proc_listpids(PROC_ALL_PIDS, 0, nullptr, 0);
+    if (bytes <= 0)
+        return processes;
+
+    int count = bytes / (int)sizeof(pid_t);
+    QVector<pid_t> pids(count);
+    bytes = proc_listpids(PROC_ALL_PIDS, 0, pids.data(), count * (int)sizeof(pid_t));
+    if (bytes <= 0)
+        return processes;
+
+    count = bytes / (int)sizeof(pid_t);
+    for (int i = 0; i < count; ++i) {
+        pid_t pid = pids[i];
+        if (pid <= 0)
+            continue;
+
+        mach_port_t task = MACH_PORT_NULL;
+        if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS || task == MACH_PORT_NULL)
+            continue;
+        mach_port_deallocate(mach_task_self(), task);
+
+        char nameBuf[PROC_PIDPATHINFO_MAXSIZE] = {};
+        int nameLen = proc_name(pid, nameBuf, sizeof(nameBuf));
+        QString procName;
+        if (nameLen > 0)
+            procName = QString::fromUtf8(nameBuf);
+        if (procName.isEmpty())
+            continue;
+
+        char pathBuf[PROC_PIDPATHINFO_MAXSIZE] = {};
+        QString procPath;
+        if (proc_pidpath(pid, pathBuf, sizeof(pathBuf)) > 0)
+            procPath = QString::fromUtf8(pathBuf);
+
+        PluginProcessInfo info;
+        info.pid = static_cast<uint32_t>(pid);
+        info.name = procName;
+        info.path = procPath;
+        info.icon = defaultIcon;
+
+        proc_bsdinfo bsdInfo{};
+        int infoLen = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, sizeof(bsdInfo));
+        if (infoLen == (int)sizeof(bsdInfo)) {
+#ifdef PROC_FLAG_LP64
+            info.is32Bit = (bsdInfo.pbi_flags & PROC_FLAG_LP64) == 0;
+#else
+            info.is32Bit = false;
+#endif
         }
 
         processes.append(info);

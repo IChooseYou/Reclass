@@ -599,8 +599,8 @@ if(BUILD_TESTING)
 
     endif() # BUILD_UI_TESTS
 endif()
+add_subdirectory(plugins/ProcessMemory)
 if(NOT APPLE)
-    add_subdirectory(plugins/ProcessMemory)
     add_subdirectory(plugins/RemoteProcessMemory)
 endif()
 if(WIN32)

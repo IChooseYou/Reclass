@@ -12,17 +12,16 @@ PluginManager::~PluginManager()
 
 void PluginManager::LoadPlugins()
 {
-    // Get the Plugins directory relative to the executable
+    // Probe plugin locations relative to the executable.
     QString appDir = QCoreApplication::applicationDirPath();
-    QString pluginsDir = appDir + "/Plugins";
-    
-    QDir dir(pluginsDir);
-    if (!dir.exists())
-    {
-        qWarning() << "PluginManager: Plugins directory not found:" << pluginsDir;
-        return;
-    }
-    
+    QStringList pluginDirs;
+    pluginDirs << (appDir + "/Plugins");
+#ifdef __APPLE__
+    // In macOS app bundles, plugins may live in Contents/PlugIns or in
+    // the top-level build/Plugins directory during local development.
+    pluginDirs << QDir::cleanPath(appDir + "/../PlugIns");
+#endif
+
     // Find all DLL files
     QStringList filters;
 #ifdef _WIN32
@@ -32,22 +31,36 @@ void PluginManager::LoadPlugins()
 #else
     filters << "*.so";
 #endif
-    
-    dir.setNameFilters(filters);
-    QFileInfoList files = dir.entryInfoList(QDir::Files);
-    
-    qDebug() << "PluginManager: Scanning for plugins in:" << pluginsDir;
-    qDebug() << "PluginManager: Found" << files.count() << "potential plugin(s)";
-    
-    for (const QFileInfo& fileInfo : files)
+
+    int totalCandidates = 0;
+    bool foundAnyDir = false;
+    for (const QString& pluginsDir : pluginDirs)
     {
-        // Skip the remote-inject payload binary — it's not a plugin and
-        // loading it (especially on Linux) spawns a rogue thread.
-        if (fileInfo.baseName().startsWith("rcx_payload"))
+        QDir dir(pluginsDir);
+        if (!dir.exists())
             continue;
 
-        LoadPlugin(fileInfo.absoluteFilePath());
+        foundAnyDir = true;
+        dir.setNameFilters(filters);
+        QFileInfoList files = dir.entryInfoList(QDir::Files);
+        totalCandidates += files.count();
+
+        qDebug() << "PluginManager: Scanning for plugins in:" << pluginsDir;
+        for (const QFileInfo& fileInfo : files)
+        {
+            // Skip the remote-inject payload binary — it's not a plugin and
+            // loading it (especially on Linux) spawns a rogue thread.
+            if (fileInfo.baseName().startsWith("rcx_payload"))
+                continue;
+
+            LoadPlugin(fileInfo.absoluteFilePath());
+        }
     }
+
+    if (!foundAnyDir)
+        qWarning() << "PluginManager: Plugins directory not found. Searched:" << pluginDirs;
+    else
+        qDebug() << "PluginManager: Found" << totalCandidates << "potential plugin(s)";
     
     qDebug() << "PluginManager: Loaded" << m_plugins.count() << "plugin(s)";
 }
