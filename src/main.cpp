@@ -2112,6 +2112,15 @@ void MainWindow::setupDockTabBars() {
                 tabBar->setTabVisible(i, false);
         }
 
+        // Helper: find any dock widget by title (doc tabs + sidebar docks)
+        auto findDockByTitle = [this](const QString& title) -> QDockWidget* {
+            for (auto* d : m_docDocks)
+                if (d->windowTitle() == title) return d;
+            for (auto* d : {m_workspaceDock, m_scannerDock, m_symbolsDock})
+                if (d && d->windowTitle() == title) return d;
+            return nullptr;
+        };
+
         // Install tab buttons for any tab that doesn't have them yet
         for (int i = 0; i < tabBar->count(); ++i) {
             if (tabBar->tabText(i) == sentinelTitle)
@@ -2123,12 +2132,8 @@ void MainWindow::setupDockTabBars() {
             auto* btns = new DockTabButtons(tabBar);
             btns->applyTheme(theme.hover);
 
-            // Find dock by matching tab title
-            QString title = tabBar->tabText(i);
-            QDockWidget* target = nullptr;
-            for (auto* d : m_docDocks) {
-                if (d->windowTitle() == title) { target = d; break; }
-            }
+            // Find dock by matching tab title (doc tabs + sidebar docks)
+            QDockWidget* target = findDockByTitle(tabBar->tabText(i));
             if (target) {
                 connect(btns->closeBtn, &QToolButton::clicked,
                         target, &QDockWidget::close);
@@ -2145,115 +2150,125 @@ void MainWindow::setupDockTabBars() {
             int idx = tabBar->tabAt(pos);
             if (idx < 0) return;
 
-            // Find target dock
+            // Find target dock (doc tabs + sidebar docks)
             QString tabTitle = tabBar->tabText(idx);
             QDockWidget* target = nullptr;
             for (auto* d : m_docDocks)
                 if (d->windowTitle() == tabTitle) { target = d; break; }
+            if (!target) {
+                for (auto* d : {m_workspaceDock, m_scannerDock, m_symbolsDock})
+                    if (d && d->windowTitle() == tabTitle) { target = d; break; }
+            }
             if (!target) return;
 
-            auto tabIt = m_tabs.find(target);
+            bool isDocDock = m_docDocks.contains(target);
 
             QMenu menu;
 
             // Close
             menu.addAction(makeIcon(":/vsicons/close.svg"), "Close",
-                           QKeySequence(Qt::CTRL | Qt::Key_W),
                            [target]() { target->close(); });
 
-            menu.addSeparator();
+            // Doc-only actions
+            if (isDocDock) {
+                auto tabIt = m_tabs.find(target);
 
-            // Close All Tabs
-            menu.addAction(makeIcon(":/vsicons/close-all.svg"), "Close All Tabs",
-                           [this]() { closeAllDocDocks(); });
+                menu.addSeparator();
 
-            // Close All But This
-            if (m_docDocks.size() > 1) {
-                menu.addAction("Close All But This", [this, target]() {
-                    auto docks = m_docDocks;
-                    for (auto* d : docks)
-                        if (d != target) d->close();
-                });
+                // Close All Tabs
+                menu.addAction(makeIcon(":/vsicons/close-all.svg"), "Close All Tabs",
+                               [this]() { closeAllDocDocks(); });
+
+                // Close All But This
+                if (m_docDocks.size() > 1) {
+                    menu.addAction("Close All But This", [this, target]() {
+                        auto docks = m_docDocks;
+                        for (auto* d : docks)
+                            if (d != target) d->close();
+                    });
+                }
+
+                menu.addSeparator();
+
+                // Copy Full Path / Open Containing Folder (only if saved)
+                if (tabIt != m_tabs.end() && !tabIt->doc->filePath.isEmpty()) {
+                    QString path = tabIt->doc->filePath;
+                    menu.addAction(makeIcon(":/vsicons/clippy.svg"), "Copy Full Path",
+                                   [path]() { QGuiApplication::clipboard()->setText(path); });
+                    menu.addAction(makeIcon(":/vsicons/folder-opened.svg"),
+                                   "Open Containing Folder", [path]() {
+                        QDesktopServices::openUrl(
+                            QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+                    });
+                }
             }
 
             menu.addSeparator();
-
-            // Copy Full Path / Open Containing Folder (only if saved)
-            if (tabIt != m_tabs.end() && !tabIt->doc->filePath.isEmpty()) {
-                QString path = tabIt->doc->filePath;
-                menu.addAction(makeIcon(":/vsicons/clippy.svg"), "Copy Full Path",
-                               [path]() { QGuiApplication::clipboard()->setText(path); });
-                menu.addAction(makeIcon(":/vsicons/folder-opened.svg"),
-                               "Open Containing Folder", [path]() {
-                    QDesktopServices::openUrl(
-                        QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
-                });
-            }
 
             // Float / Dock
             menu.addAction(target->isFloating() ? "Dock" : "Float", [target]() {
                 target->setFloating(!target->isFloating());
             });
 
-            menu.addSeparator();
+            // New Document Groups (doc tabs only, >1 visible tab)
+            if (isDocDock) {
+                menu.addSeparator();
 
-            menu.addSeparator();
-
-            // New Document Groups (only if >1 visible tab — excludes sentinels)
-            int visibleTabs = 0;
-            for (int i = 0; i < tabBar->count(); ++i)
-                if (tabBar->isTabVisible(i)) ++visibleTabs;
-            if (visibleTabs > 1) {
-                menu.addAction(makeIcon(":/vsicons/split-horizontal.svg"),
-                               "New Horizontal Document Group",
-                               [this, target]() {
-                    Qt::DockWidgetArea area = dockWidgetArea(target);
-                    if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
-                    removeDockWidget(target);
-                    addDockWidget(area, target, Qt::Horizontal);
-                    target->show();
-                    QList<QDockWidget*> docks;
-                    QList<int> sizes;
-                    for (auto* d : m_docDocks) {
-                        if (!d->isFloating() && d->isVisible() && dockWidgetArea(d) == area) {
-                            docks.append(d);
-                            sizes.append(width() / 2);
+                int visibleTabs = 0;
+                for (int i = 0; i < tabBar->count(); ++i)
+                    if (tabBar->isTabVisible(i)) ++visibleTabs;
+                if (visibleTabs > 1) {
+                    menu.addAction(makeIcon(":/vsicons/split-horizontal.svg"),
+                                   "New Horizontal Document Group",
+                                   [this, target]() {
+                        Qt::DockWidgetArea area = dockWidgetArea(target);
+                        if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
+                        removeDockWidget(target);
+                        addDockWidget(area, target, Qt::Horizontal);
+                        target->show();
+                        QList<QDockWidget*> docks;
+                        QList<int> sizes;
+                        for (auto* d : m_docDocks) {
+                            if (!d->isFloating() && d->isVisible() && dockWidgetArea(d) == area) {
+                                docks.append(d);
+                                sizes.append(width() / 2);
+                            }
                         }
-                    }
-                    if (docks.size() >= 2)
-                        resizeDocks(docks, sizes, Qt::Horizontal);
-                    QTimer::singleShot(0, this, [this, target]() {
-                        auto* s = createSentinelDock();
-                        tabifyDockWidget(target, s);
-                        target->raise();
-                        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                        if (docks.size() >= 2)
+                            resizeDocks(docks, sizes, Qt::Horizontal);
+                        QTimer::singleShot(0, this, [this, target]() {
+                            auto* s = createSentinelDock();
+                            tabifyDockWidget(target, s);
+                            target->raise();
+                            QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                        });
                     });
-                });
-                menu.addAction(makeIcon(":/vsicons/split-vertical.svg"),
-                               "New Vertical Document Group",
-                               [this, target]() {
-                    Qt::DockWidgetArea area = dockWidgetArea(target);
-                    if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
-                    removeDockWidget(target);
-                    addDockWidget(area, target, Qt::Vertical);
-                    target->show();
-                    QList<QDockWidget*> docks;
-                    QList<int> sizes;
-                    for (auto* d : m_docDocks) {
-                        if (!d->isFloating() && d->isVisible() && dockWidgetArea(d) == area) {
-                            docks.append(d);
-                            sizes.append(height() / 2);
+                    menu.addAction(makeIcon(":/vsicons/split-vertical.svg"),
+                                   "New Vertical Document Group",
+                                   [this, target]() {
+                        Qt::DockWidgetArea area = dockWidgetArea(target);
+                        if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
+                        removeDockWidget(target);
+                        addDockWidget(area, target, Qt::Vertical);
+                        target->show();
+                        QList<QDockWidget*> docks;
+                        QList<int> sizes;
+                        for (auto* d : m_docDocks) {
+                            if (!d->isFloating() && d->isVisible() && dockWidgetArea(d) == area) {
+                                docks.append(d);
+                                sizes.append(height() / 2);
+                            }
                         }
-                    }
-                    if (docks.size() >= 2)
-                        resizeDocks(docks, sizes, Qt::Vertical);
-                    QTimer::singleShot(0, this, [this, target]() {
-                        auto* s = createSentinelDock();
-                        tabifyDockWidget(target, s);
-                        target->raise();
-                        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                        if (docks.size() >= 2)
+                            resizeDocks(docks, sizes, Qt::Vertical);
+                        QTimer::singleShot(0, this, [this, target]() {
+                            auto* s = createSentinelDock();
+                            tabifyDockWidget(target, s);
+                            target->raise();
+                            QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                        });
                     });
-                });
+                }
             }
 
             menu.exec(tabBar->mapToGlobal(pos));
@@ -2270,7 +2285,10 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
                 if (idx >= 0) {
                     QString title = tabBar->tabText(idx);
                     for (auto* d : m_docDocks) {
-                        if (d->windowTitle() == title) { d->close(); break; }
+                        if (d->windowTitle() == title) { d->close(); return true; }
+                    }
+                    for (auto* d : {m_workspaceDock, m_scannerDock, m_symbolsDock}) {
+                        if (d && d->windowTitle() == title) { d->close(); return true; }
                     }
                     return true;
                 }
