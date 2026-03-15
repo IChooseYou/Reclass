@@ -448,34 +448,10 @@ public:
                     QString text = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
                     int maxW = textRect.width();
 
-                    // Middle-elide only when text needs more than 2x the available width.
-                    // Short names like "Project" or "Modules" should never be elided
-                    // in a reasonably-sized dock panel.
-                    int textW = fm.horizontalAdvance(text);
-                    if (textW > maxW && textW > maxW * 2) {
-                        int ellipsisW = fm.horizontalAdvance(QStringLiteral("\u2026"));
-                        int avail = maxW - ellipsisW;
-                        if (avail > 0) {
-                            int half = avail / 2;
-                            QString left, right;
-                            for (int i = 0; i < text.size(); ++i) {
-                                if (fm.horizontalAdvance(text.left(i + 1)) > half) {
-                                    left = text.left(i);
-                                    break;
-                                }
-                            }
-                            if (left.isEmpty()) left = text.left(1);
-                            for (int i = text.size() - 1; i >= 0; --i) {
-                                if (fm.horizontalAdvance(text.mid(i)) > half) {
-                                    right = text.mid(i + 1);
-                                    break;
-                                }
-                            }
-                            if (right.isEmpty()) right = text.right(1);
-                            text = left + QStringLiteral("\u2026") + right;
-                        } else {
-                            text = QStringLiteral("\u2026");
-                        }
+                    // Elide if text overflows available width.
+                    // Middle-elide for long names (>2x), right-elide for short overflow.
+                    if (fm.horizontalAdvance(text) > maxW) {
+                        text = fm.elidedText(text, Qt::ElideRight, maxW);
                     }
 
                     bool selected = tab->state & State_Selected;
