@@ -1913,8 +1913,12 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         rebuildAllDocs();
         rebuildWorkspaceModel();
         updateWindowTitle();
-        if (m_tabs.isEmpty() && !m_closingAll)
+        if (m_tabs.isEmpty() && !m_closingAll) {
+            // Clean up stale sentinels before creating fresh tab
+            qDeleteAll(m_sentinelDocks);
+            m_sentinelDocks.clear();
             project_new();
+        }
     });
 
     connect(ctrl, &RcxController::nodeSelected,
