@@ -49,6 +49,9 @@ struct Theme {
     QColor markerCycle;     // cycle detection
     QColor markerError;     // error row bg
 
+    // ── Presentation ──
+    QColor focusGlow;       // MCP focus pulse (warm amber)
+
     QJsonObject toJson() const;
     static Theme fromJson(const QJsonObject& obj);
 };

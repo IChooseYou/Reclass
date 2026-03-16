@@ -36,6 +36,7 @@ const ThemeFieldMeta kThemeFields[] = {
     {"markerPtr",     "Pointer",        "Markers",     &Theme::markerPtr},
     {"markerCycle",   "Cycle",          "Markers",     &Theme::markerCycle},
     {"markerError",   "Error",          "Markers",     &Theme::markerError},
+    {"focusGlow",     "Focus Glow",     "Presentation", &Theme::focusGlow},
 };
 const int kThemeFieldCount = static_cast<int>(std::extent_v<decltype(kThemeFields)>);
 
@@ -62,6 +63,9 @@ Theme Theme::fromJson(const QJsonObject& o) {
         t.indHeatWarm = t.indHoverSpan.isValid() ? t.indHoverSpan : t.syntaxString;
     if (!t.indHeatHot.isValid())
         t.indHeatHot = t.markerPtr;
+
+    if (!t.focusGlow.isValid())
+        t.focusGlow = t.borderFocused.isValid() ? t.borderFocused : QColor("#4fc3f7");
 
     // Ensure hover is visually distinct from background
     if (t.hover.isValid() && t.background.isValid()) {

@@ -82,6 +82,8 @@ public:
     void setMcpStatus(const QString& text);
     void clearMcpStatus();
 
+    bool presentationMode() const { return m_presentationMode; }
+
     // Project Lifecycle API
     QDockWidget* project_new(const QString& classKeyword = QString());
     QDockWidget* project_open(const QString& path = {});
@@ -105,6 +107,8 @@ private:
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
     QAction*        m_actRelOfs = nullptr;
+    bool            m_presentationMode = false;
+    QAction*        m_actPresentationMode = nullptr;
     QMenu*          m_sourceMenu = nullptr;
     QMenu*          m_recentFilesMenu = nullptr;
 

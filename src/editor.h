@@ -6,6 +6,7 @@
 #include <QSet>
 #include <QPoint>
 #include <QHash>
+#include <QVariantAnimation>
 
 class QLineEdit;
 class QsciScintilla;
@@ -31,6 +32,11 @@ public:
     const LineMeta* metaForLine(int line) const;
     int currentNodeIndex() const;
     void scrollToNodeId(uint64_t nodeId);
+    void smoothScrollToNodeId(uint64_t nodeId);
+    void setFocusNode(uint64_t nodeId);
+    void clearFocusNode();
+    bool isFocusGlowActive() const { return m_focusNodeId != 0; }
+    void setPresentationMode(bool on) { m_presentationMode = on; }
     void showFindBar();
     void dismissHistoryPopup();
     void dismissAllPopups();
@@ -177,6 +183,17 @@ private:
     bool m_applyingDocument = false;
     bool m_clampingSelection = false;
     bool m_updatingComment = false;
+
+    // ── Presentation mode (smooth scroll + focus glow) ──
+    bool m_presentationMode = false;
+    QVariantAnimation* m_scrollAnim = nullptr;
+    bool m_scrollAnimActive = false;
+    QTimer* m_focusGlowTimer = nullptr;
+    uint64_t m_focusNodeId = 0;
+    int m_glowPhase = 0;
+    QColor m_focusGlowColor;  // cached from theme
+    QColor m_glowDim;         // pre-blended dim pulse (opaque)
+    QColor m_glowBright;      // pre-blended bright pulse (opaque)
 
     void setupScintilla();
     void setupLexer();

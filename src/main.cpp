@@ -439,10 +439,13 @@ public:
                     QString tabText = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
                     if (tabText == QStringLiteral("\u200B")) {
                         QColor fg = tab->palette.color(QPalette::WindowText);
-                        int cx = tab->rect.center().x();
-                        int cy = tab->rect.center().y() + 1;
+                        int cx = tab->rect.center().x() & ~1;
+                        int cy = (tab->rect.center().y() + 1) & ~1;
+                        bool wasAA = p->testRenderHint(QPainter::Antialiasing);
+                        p->setRenderHint(QPainter::Antialiasing, false);
                         p->fillRect(cx - 3, cy, 7, 1, fg);  // horizontal
                         p->fillRect(cx, cy - 3, 1, 7, fg);  // vertical
+                        if (wasAA) p->setRenderHint(QPainter::Antialiasing, true);
                         return;
                     }
 
@@ -931,6 +934,22 @@ void MainWindow::createMenus() {
         view->addAction(symAct);
     }
 
+    view->addSeparator();
+    {
+        m_actPresentationMode = view->addAction("&Presentation Mode");
+        m_actPresentationMode->setCheckable(true);
+        m_actPresentationMode->setChecked(false);
+        m_actPresentationMode->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
+        connect(m_actPresentationMode, &QAction::triggered, this, [this](bool checked) {
+            m_presentationMode = checked;
+            for (auto& tab : m_tabs)
+                for (auto& pane : tab.panes)
+                    if (pane.editor) pane.editor->setPresentationMode(checked);
+            if (m_mcp) m_mcp->setSlowMode(checked);
+            setAppStatus(checked ? "Presentation Mode ON" : "Presentation Mode OFF");
+        });
+    }
+
     // Tools
     auto* tools = m_menuBar->addMenu("&Tools");
     Qt5Qt6AddAction(tools, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
@@ -1371,6 +1390,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
     pane.editor->setRelativeOffsets(
         QSettings("Reclass", "Reclass").value("relativeOffsets", true).toBool());
+    pane.editor->setPresentationMode(m_presentationMode);
     // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
     connect(pane.editor, &RcxEditor::relativeOffsetsChanged, this, [this](bool rel) {
         QSettings("Reclass", "Reclass").setValue("relativeOffsets", rel);
@@ -1883,10 +1903,16 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 doc->deleteLater();
         }
         m_docDocks.removeOne(dock);
-        if (m_activeDocDock == dock)
+        if (m_activeDocDock == dock) {
             m_activeDocDock = m_docDocks.isEmpty() ? nullptr : m_docDocks.last();
+            if (m_activeDocDock) {
+                m_activeDocDock->raise();
+                m_activeDocDock->show();
+            }
+        }
         rebuildAllDocs();
         rebuildWorkspaceModel();
+        updateWindowTitle();
         if (m_tabs.isEmpty() && !m_closingAll)
             project_new();
     });
@@ -2278,7 +2304,12 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
             if (idx >= 0 && tabBar->tabText(idx) == QStringLiteral("\u200B")) {
                 // Sentinel "+" tab: left-click opens new struct, ignore others
                 if (me->button() == Qt::LeftButton) {
-                    project_new();
+                    auto* dock = project_new();
+                    if (dock) {
+                        dock->raise();
+                        dock->show();
+                        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                    }
                     return true;
                 }
                 return true;  // swallow middle-click etc.
@@ -2343,29 +2374,6 @@ static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QStri
         tree.addNode(n);
     }
 
-    // Default project: add an example enum and a class with a union
-    if (classKeyword.isEmpty()) {
-        // ── Example enum: _POOL_TYPE ──
-        {
-            Node e;
-            e.kind = NodeKind::Struct;
-            e.name = QStringLiteral("_POOL_TYPE");
-            e.structTypeName = QStringLiteral("_POOL_TYPE");
-            e.classKeyword = QStringLiteral("enum");
-            e.parentId = 0;
-            e.collapsed = false;
-            e.enumMembers = {
-                {QStringLiteral("NonPagedPool"), 0},
-                {QStringLiteral("PagedPool"), 1},
-                {QStringLiteral("NonPagedPoolMustSucceed"), 2},
-                {QStringLiteral("DontUseThisType"), 3},
-                {QStringLiteral("NonPagedPoolCacheAligned"), 4},
-                {QStringLiteral("PagedPoolCacheAligned"), 5},
-            };
-            tree.addNode(e);
-        }
-
-    }
 }
 
 MainWindow::~MainWindow() {
@@ -2472,26 +2480,6 @@ static void buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
         n.parentId = rootId;
         n.offset = off;
         tree.addNode(n);
-    }
-
-    // ── Example enum: _POOL_TYPE ──
-    {
-        Node e;
-        e.kind = NodeKind::Struct;
-        e.name = QStringLiteral("_POOL_TYPE");
-        e.structTypeName = QStringLiteral("_POOL_TYPE");
-        e.classKeyword = QStringLiteral("enum");
-        e.parentId = 0;
-        e.collapsed = false;
-        e.enumMembers = {
-            {QStringLiteral("NonPagedPool"), 0},
-            {QStringLiteral("PagedPool"), 1},
-            {QStringLiteral("NonPagedPoolMustSucceed"), 2},
-            {QStringLiteral("DontUseThisType"), 3},
-            {QStringLiteral("NonPagedPoolCacheAligned"), 4},
-            {QStringLiteral("PagedPoolCacheAligned"), 5},
-        };
-        tree.addNode(e);
     }
 
 }
@@ -3827,6 +3815,40 @@ void MainWindow::showTypeAliasesDialog() {
 // ── Project Lifecycle API ──
 
 QDockWidget* MainWindow::project_new(const QString& classKeyword) {
+    // If an active document exists, add the new struct to it and open in a new tab
+    // sharing the same document (so all structs live in one project).
+    auto* existingCtrl = activeController();
+    if (existingCtrl) {
+        auto* doc = existingCtrl->document();
+        buildEmptyStruct(doc->tree, classKeyword);
+
+        // Find the struct we just added (last root struct in tree)
+        uint64_t newId = 0;
+        for (int i = doc->tree.nodes.size() - 1; i >= 0; --i) {
+            if (doc->tree.nodes[i].parentId == 0 && doc->tree.nodes[i].kind == NodeKind::Struct) {
+                newId = doc->tree.nodes[i].id;
+                break;
+            }
+        }
+
+        // Open in a new tab sharing the same document
+        auto* dock = createTab(doc);
+        if (newId != 0) {
+            m_tabs[dock].ctrl->setViewRootId(newId);
+            m_tabs[dock].ctrl->refresh();
+            QString name = rootName(doc->tree, newId);
+            dock->setWindowTitle(name);
+        }
+        // Copy saved sources from the original controller
+        if (!existingCtrl->savedSources().isEmpty()) {
+            m_tabs[dock].ctrl->copySavedSources(existingCtrl->savedSources(),
+                                                  existingCtrl->activeSourceIndex());
+        }
+        rebuildWorkspaceModelNow();
+        return dock;
+    }
+
+    // No active document — create a fresh one
     auto* doc = new RcxDocument(this);
 
     QByteArray data(256, '\0');
@@ -3835,21 +3857,7 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
 
     buildEmptyStruct(doc->tree, classKeyword);
 
-    // Inherit source from current tab (if any)
-    auto* currentCtrl = activeController();
-    if (currentCtrl && currentCtrl->document()->provider
-        && currentCtrl->document()->provider->isValid()) {
-        doc->provider = currentCtrl->document()->provider;
-    }
-
     auto* dock = createTab(doc);
-
-    // Copy saved sources to new tab's controller
-    if (currentCtrl && !currentCtrl->savedSources().isEmpty()) {
-        auto& newTab = m_tabs[dock];
-        newTab.ctrl->copySavedSources(currentCtrl->savedSources(),
-                                       currentCtrl->activeSourceIndex());
-    }
 
     // Ensure workspace dock is split alongside editor with sensible proportions
     if (m_docDocks.size() == 1 && m_workspaceDock) {

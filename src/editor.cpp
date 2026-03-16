@@ -26,6 +26,7 @@
 #include <QDateTime>
 #include <algorithm>
 #include <functional>
+#include <cmath>
 #include "themes/thememanager.h"
 
 namespace rcx {
@@ -710,6 +711,9 @@ void RcxEditor::setupMarkers() {
 
     // M_ACCENT (9): 2px accent bar in margin 1 (selection indicator)
     m_sci->markerDefine(QsciScintilla::FullRectangle, M_ACCENT);
+
+    // M_FOCUS (10): presentation mode AI focus glow
+    m_sci->markerDefine(QsciScintilla::Background, M_FOCUS);
 }
 
 void RcxEditor::allocateMarginStyles() {
@@ -802,6 +806,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->setMarkerBackgroundColor(theme.selected, M_SELECTED);
     m_sci->setMarkerBackgroundColor(editorBg, M_CMD_ROW);
     m_sci->setMarkerBackgroundColor(theme.indHoverSpan, M_ACCENT);
+    m_sci->setMarkerBackgroundColor(theme.focusGlow, M_FOCUS);
+    m_focusGlowColor = theme.focusGlow;
 
     // Margin extended styles
     if (m_marginStyleBase >= 0) {
@@ -970,6 +976,20 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     m_prevHoveredNodeId = 0;
     m_prevHoveredLine = -1;
     applyHoverHighlight();
+
+    // Re-apply focus glow markers (setText() clears all markers)
+    if (m_focusNodeId != 0) {
+        auto fit = m_nodeLineIndex.constFind(m_focusNodeId);
+        if (fit != m_nodeLineIndex.constEnd()) {
+            for (int ln : *fit) {
+                if (ln < m_meta.size() && m_meta[ln].lineKind != LineKind::Footer)
+                    m_sci->markerAdd(ln, M_FOCUS);
+            }
+        } else {
+            // Node was removed — clear focus
+            clearFocusNode();
+        }
+    }
 
     // Re-apply find indicator (setText() clears all indicators)
     if (m_findBarContainer && m_findBarContainer->isVisible()) {
@@ -1358,8 +1378,18 @@ void RcxEditor::restoreViewState(const ViewState& vs) {
                                     (unsigned long)line,
                                     (long)std::max(0, vs.cursorCol));
     m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, (unsigned long)pos);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
-                         (unsigned long)vs.scrollLine);
+
+    // During smooth scroll animation, keep the animation's current position
+    // instead of snapping to the saved ViewState (which is pre-animation).
+    if (m_scrollAnimActive && m_scrollAnim) {
+        int animPos = m_scrollAnim->currentValue().toInt();
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                             (unsigned long)animPos);
+    } else {
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                             (unsigned long)vs.scrollLine);
+    }
+
     // Clamp xOffset so it doesn't exceed the current content width.
     // After a rename that shrinks content, the saved offset may be stale.
     int scrollW = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETSCROLLWIDTH);
@@ -1418,6 +1448,131 @@ void RcxEditor::scrollToNodeId(uint64_t nodeId) {
             return;
         }
     }
+}
+
+// ── Presentation mode: smooth scroll ──
+
+void RcxEditor::smoothScrollToNodeId(uint64_t nodeId) {
+    if (!m_presentationMode) {
+        scrollToNodeId(nodeId);
+        return;
+    }
+
+    // Find target line
+    int targetLine = -1;
+    for (int i = 0; i < m_meta.size(); i++) {
+        if (m_meta[i].nodeId == nodeId && m_meta[i].lineKind != LineKind::Footer) {
+            targetLine = i;
+            break;
+        }
+    }
+    if (targetLine < 0) return;
+
+    // Compute target firstVisibleLine (center node on screen)
+    int visibleLines = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_LINESONSCREEN);
+    int targetFirst = qMax(0, targetLine - visibleLines / 2);
+    int currentFirst = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+
+    // Already visible — just set cursor
+    if (targetLine >= currentFirst && targetLine < currentFirst + visibleLines) {
+        m_sci->setCursorPosition(targetLine, 0);
+        return;
+    }
+
+    // Long distance: snap close, then animate the last stretch
+    int distance = qAbs(targetFirst - currentFirst);
+    if (distance > 50) {
+        int snapTo = (targetFirst > currentFirst) ? targetFirst - 30 : targetFirst + 30;
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                             (unsigned long)qMax(0, snapTo));
+        currentFirst = qMax(0, snapTo);
+    }
+
+    // Create or restart animation
+    if (!m_scrollAnim) {
+        m_scrollAnim = new QVariantAnimation(this);
+        m_scrollAnim->setEasingCurve(QEasingCurve::OutExpo);
+        connect(m_scrollAnim, &QVariantAnimation::valueChanged,
+                this, [this](const QVariant& val) {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                                 (unsigned long)val.toInt());
+        });
+        connect(m_scrollAnim, &QVariantAnimation::finished,
+                this, [this]() {
+            m_scrollAnimActive = false;
+        });
+    }
+    m_scrollAnim->stop();
+    m_scrollAnim->setStartValue(currentFirst);
+    m_scrollAnim->setEndValue(targetFirst);
+    m_scrollAnim->setDuration(400);
+    m_scrollAnimActive = true;
+    m_scrollAnim->start();
+
+    // Set cursor at target (non-animated, instant)
+    m_sci->setCursorPosition(targetLine, 0);
+}
+
+// ── Presentation mode: focus node glow ──
+
+// Blend two colors: result = fg * t + bg * (1-t), fully opaque
+static QColor blendColor(const QColor& fg, const QColor& bg, double t) {
+    return QColor(
+        qBound(0, (int)(fg.red()   * t + bg.red()   * (1.0 - t)), 255),
+        qBound(0, (int)(fg.green() * t + bg.green() * (1.0 - t)), 255),
+        qBound(0, (int)(fg.blue()  * t + bg.blue()  * (1.0 - t)), 255));
+}
+
+void RcxEditor::setFocusNode(uint64_t nodeId) {
+    if (nodeId == m_focusNodeId && nodeId != 0) return;
+
+    // Clear previous
+    m_sci->markerDeleteAll(M_FOCUS);
+    m_focusNodeId = nodeId;
+    m_glowPhase = 0;
+
+    if (nodeId == 0) {
+        if (m_focusGlowTimer) m_focusGlowTimer->stop();
+        return;
+    }
+
+    // Pre-blend glow colors against editor background (fully opaque — Scintilla ignores alpha)
+    QColor editorBg = m_sci->paper();
+    m_glowDim    = blendColor(m_focusGlowColor, editorBg, 0.25);
+    m_glowBright = blendColor(m_focusGlowColor, editorBg, 0.55);
+    m_sci->setMarkerBackgroundColor(m_glowBright, M_FOCUS);
+
+    // Apply M_FOCUS on all lines for this node
+    auto it = m_nodeLineIndex.constFind(nodeId);
+    if (it != m_nodeLineIndex.constEnd()) {
+        for (int ln : *it) {
+            if (ln < m_meta.size() && m_meta[ln].lineKind != LineKind::Footer)
+                m_sci->markerAdd(ln, M_FOCUS);
+        }
+    }
+
+    // Start glow timer — cycles between dim and bright (both opaque)
+    if (!m_focusGlowTimer) {
+        m_focusGlowTimer = new QTimer(this);
+        m_focusGlowTimer->setInterval(30);
+        connect(m_focusGlowTimer, &QTimer::timeout, this, [this]() {
+            m_glowPhase++;
+            double t = 0.5 + 0.5 * std::sin(m_glowPhase * 3.14159265 / 12.0);
+            QColor c(
+                m_glowDim.red()   + (int)((m_glowBright.red()   - m_glowDim.red())   * t),
+                m_glowDim.green() + (int)((m_glowBright.green() - m_glowDim.green()) * t),
+                m_glowDim.blue()  + (int)((m_glowBright.blue()  - m_glowDim.blue())  * t));
+            m_sci->setMarkerBackgroundColor(c, M_FOCUS);
+        });
+    }
+    m_focusGlowTimer->start();
+}
+
+void RcxEditor::clearFocusNode() {
+    if (m_focusGlowTimer) m_focusGlowTimer->stop();
+    m_sci->markerDeleteAll(M_FOCUS);
+    m_focusNodeId = 0;
+    m_glowPhase = 0;
 }
 
 // ── Column span computation ──

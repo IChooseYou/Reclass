@@ -788,6 +788,28 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "node.read_value") result = toolNodeReadValue(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
+    // Presentation mode: brief focus glow for single-node tools (not tree.apply, which handles its own)
+    if (m_mainWindow->presentationMode() && toolName != "tree.apply") {
+        QString nodeIdStr = args.value("nodeId").toString();
+        if (!nodeIdStr.isEmpty()) {
+            uint64_t nid = nodeIdStr.toULongLong();
+            if (nid != 0) {
+                auto* ctrl = m_mainWindow->activeController();
+                if (ctrl) {
+                    for (auto* editor : ctrl->editors()) {
+                        editor->setFocusNode(nid);
+                        editor->smoothScrollToNodeId(nid);
+                    }
+                    QEventLoop loop;
+                    QTimer::singleShot(150, &loop, &QEventLoop::quit);
+                    loop.exec(QEventLoop::ExcludeUserInputEvents);
+                    for (auto* editor : ctrl->editors())
+                        editor->clearFocusNode();
+                }
+            }
+        }
+    }
+
     m_mainWindow->clearMcpStatus();
 
     return okReply(id, result);
@@ -1336,10 +1358,67 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             skippedOps.append(QStringLiteral("op[%1]: unknown op '%2'").arg(i).arg(opType));
         }
 
-        // Slow mode: refresh after each operation for visual feedback
+        // Slow mode / presentation mode: refresh after each operation for visual feedback
         if (m_slowMode && applied > 0) {
+            bool presentation = m_mainWindow->presentationMode();
+
+            // Un-suppress temporarily so refresh() actually runs
+            ctrl->setSuppressRefresh(false);
             ctrl->refresh();
-            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 16);
+
+            if (presentation) {
+                // Extract target node ID for glow + scroll
+                uint64_t targetNodeId = 0;
+                if (opType == "insert") {
+                    targetNodeId = placeholders.value(QStringLiteral("$%1").arg(i), 0);
+                    if (targetNodeId == 0) {
+                        // Look up the node we just inserted by scanning recent additions
+                        QString nid = op.value("nodeId").toString();
+                        if (!nid.isEmpty()) targetNodeId = nid.toULongLong();
+                    }
+                } else {
+                    bool nidOk;
+                    QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders, &nidOk);
+                    if (nidOk) targetNodeId = nid.toULongLong();
+                }
+
+                // Extract next op's target to skip animation for paired ops on same node
+                bool skipAnim = false;
+                if (i + 1 < ops.size()) {
+                    QJsonObject nextOp = ops[i + 1].toObject();
+                    QString nextNodeId = nextOp.value("nodeId").toString();
+                    QString curNodeId = op.value("nodeId").toString();
+                    if (!curNodeId.isEmpty() && curNodeId == nextNodeId)
+                        skipAnim = true;
+                }
+
+                if (!skipAnim && targetNodeId != 0) {
+                    // Apply focus glow + smooth scroll to affected node
+                    for (auto* editor : ctrl->editors()) {
+                        editor->setFocusNode(targetNodeId);
+                        editor->smoothScrollToNodeId(targetNodeId);
+                    }
+
+                    // Update status with progress
+                    m_mainWindow->setMcpStatus(
+                        QStringLiteral("MCP: %1 [%2/%3]").arg(opType).arg(i + 1).arg(ops.size()));
+
+                    // Pause to let animation play (125ms per visible op)
+                    QEventLoop loop;
+                    QTimer::singleShot(125, &loop, &QEventLoop::quit);
+                    loop.exec(QEventLoop::ExcludeUserInputEvents);
+
+                    // Clear focus glow
+                    for (auto* editor : ctrl->editors())
+                        editor->clearFocusNode();
+                } // else: skipped (paired op on same node) — no delay
+            } else {
+                // Basic slow mode: brief pause for visual feedback
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 16);
+            }
+
+            // Re-suppress for next operation
+            ctrl->setSuppressRefresh(true);
         }
     }
 
