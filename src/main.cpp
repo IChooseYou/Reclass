@@ -260,11 +260,12 @@ public:
             s = QSize(s.width() + 24, s.height() + 4);
         if (type == CT_ItemViewItem)
             s.setHeight(s.height() + 4);
-        // Dock tab bar: fixed height, reasonable padding
+        // Dock tab bar: fixed height + extra width for close button
         if (type == CT_TabBarTab) {
             if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
                 if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
                     s.setHeight(31);
+                    s.setWidth(s.width() + 24);  // room for DockTabButtons (16px icon + padding)
                 }
             }
         }
@@ -2046,6 +2047,7 @@ void MainWindow::setupDockTabBars() {
         tabBar->setAttribute(Qt::WA_Hover, true);
         tabBar->setElideMode(Qt::ElideNone);
         tabBar->setExpanding(false);
+        tabBar->setUsesScrollButtons(true);
         // Set editor font so tab width sizing matches our label painting
         {
             QSettings s("Reclass", "Reclass");
@@ -4598,8 +4600,7 @@ void MainWindow::createWorkspaceDock() {
 void MainWindow::createScannerDock() {
     m_scannerDock = new QDockWidget("Scanner", this);
     m_scannerDock->setObjectName("ScannerDock");
-    m_scannerDock->setAllowedAreas(
-        Qt::BottomDockWidgetArea | Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+    m_scannerDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     m_scannerDock->setFeatures(
         QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
         QDockWidget::DockWidgetFloatable);
