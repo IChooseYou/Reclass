@@ -3,6 +3,7 @@
 #include "titlebar.h"
 #include "pluginmanager.h"
 #include "scannerpanel.h"
+#include "imports/import_pdb.h"
 #include "startpage.h"
 #include "workspace_model.h"
 namespace rcx { class SymbolDownloader; }
@@ -217,12 +218,27 @@ private:
     QToolButton*           m_symDownloadBtn   = nullptr;
     DockGripWidget*        m_symDockGrip      = nullptr;
     rcx::SymbolDownloader* m_symDownloader    = nullptr;
+    // Types tab
+    QTreeView*             m_typesTree      = nullptr;
+    QStandardItemModel*    m_typesModel     = nullptr;
+    QSortFilterProxyModel* m_typesProxy     = nullptr;
+    QLineEdit*             m_typesSearch    = nullptr;
+    QPushButton*           m_typesImportBtn = nullptr;
+    struct CachedModuleTypes {
+        QString pdbPath;
+        QVector<rcx::PdbTypeInfo> types;
+    };
+    QHash<QString, CachedModuleTypes> m_cachedModuleTypes;
+
     void createSymbolsDock();
     void rebuildSymbolsModel();
+    void rebuildTypesModel();
+    void populateTypesModuleItem(QStandardItem* moduleItem);
     void rebuildModulesModel();
+    void importSelectedTypes();
     void downloadSymbolsForProcess();
-    // Load PDB symbols + typeIndices into SymbolStore. Returns symbol count.
-    static int loadPdbIntoStore(const QString& pdbPath);
+    // Load PDB symbols + typeIndices into SymbolStore, cache types. Returns symbol count.
+    int loadPdbAndCacheTypes(const QString& pdbPath);
 
     // Start page
     StartPageWidget*      m_startPage        = nullptr;

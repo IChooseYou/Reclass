@@ -26,7 +26,7 @@ public:
 
         m_search = new QLineEdit(this);
         m_search->setPlaceholderText("Search recent...");
-        m_search->setFixedHeight(30);
+        m_search->setFixedHeight(kSearchBarH);
         m_search->setMaximumWidth(330);
         m_search->addAction(QIcon(":/vsicons/search.svg"), QLineEdit::TrailingPosition);
         connect(m_search, &QLineEdit::textChanged, this, [this]{ buildGroups(); update(); });
@@ -60,39 +60,38 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
-        const int LX = 48, TM = 36, RM = 32, GAP = 40, RW = 340;
-        const int rpX = width() - RW - RM;
-        const int lW  = qMax(100, rpX - GAP - LX);
+        const int rpX = width() - kCardPanelW - kRightMargin;
+        const int lW  = qMax(100, rpX - kPanelGap - kLeftMargin);
 
         p.fillRect(rect(), m_t.background);
 
         // ── Title ──
-        int y = TM;
+        int y = kTopMargin;
         QFont titleF = font(); titleF.setPixelSize(30); titleF.setWeight(QFont::Light);
         p.setFont(titleF); p.setPen(m_t.text);
         QFontMetrics titleFm(titleF);
-        p.drawText(LX, y + titleFm.ascent(), "Reclass");
+        p.drawText(kLeftMargin, y + titleFm.ascent(), "Reclass");
         y += titleFm.height() + 24;
 
         // ── Headings (left + right at same y) ──
         QFont headF = font(); headF.setPixelSize(20); headF.setWeight(QFont::DemiBold);
         p.setFont(headF); QFontMetrics headFm(headF);
-        p.drawText(LX, y + headFm.ascent(), "Open recent");
+        p.drawText(kLeftMargin, y + headFm.ascent(), "Open recent");
         int ry = y;
         p.drawText(rpX, ry + headFm.ascent(), "Get started");
         ry += headFm.height() + 14;
         y  += headFm.height() + 14;
 
         // ── Search bar (only child widget) ──
-        m_search->setGeometry(LX, y, qMin(330, lW), 30);
-        y += 46;
+        m_search->setGeometry(kLeftMargin, y, qMin(330, lW), kSearchBarH);
+        y += kSearchBarH + kSearchGap;
         m_listTop = y;
 
         // ── Right panel ──
-        drawCards(p, rpX, ry, RW);
+        drawCards(p, rpX, ry, kCardPanelW);
 
         // ── File list ──
-        drawFileList(p, LX, lW);
+        drawFileList(p, kLeftMargin, lW);
 
         // ── Border ──
         p.setPen(QPen(m_t.border, 1));
@@ -145,6 +144,20 @@ private:
         bool expanded = true;
         QVector<int> entries;
     };
+
+    // ── Layout constants (single source of truth for paint + hitTest) ──
+    static constexpr int kLeftMargin   = 48;   // left inset for title + file list
+    static constexpr int kTopMargin    = 36;   // top inset for title
+    static constexpr int kRightMargin  = 32;   // right inset for cards panel
+    static constexpr int kPanelGap     = 40;   // gap between file list and cards
+    static constexpr int kCardPanelW   = 340;  // right-side cards panel width
+    static constexpr int kCardH        = 84;   // single card row height
+    static constexpr int kEntryH       = 52;   // single file entry row height
+    static constexpr int kGroupHeaderH = 28;   // group label row height
+    static constexpr int kGroupSpacing = 15;   // vertical gap between groups
+    static constexpr int kBottomPad    = 24;   // padding below file list / border inset
+    static constexpr int kSearchBarH   = 30;   // search bar fixed height
+    static constexpr int kSearchGap    = 16;   // gap below search bar before list
 
     Theme m_t;
     QLineEdit* m_search;
@@ -223,7 +236,7 @@ private:
             {":/vsicons/debug.svg",            "Import PDB",         "Import types from a .pdb symbol file"}
         };
 
-        const int N = 5, CH = 84, panelH = N * CH;
+        const int N = 5, panelH = N * kCardH;
 
         // Sharp-cornered panel background
         p.save();
@@ -231,19 +244,19 @@ private:
         p.fillRect(x, y, w, panelH, m_t.background);
 
         for (int i = 0; i < N; i++) {
-            int cy = y + i * CH;
-            QRectF cr(x, cy, w, CH);
+            int cy = y + i * kCardH;
+            QRectF cr(x, cy, w, kCardH);
             m_cardR[i] = cr;
             bool hov = (m_hz == HZ_Card && m_hi == i);
 
             if (hov) {
                 p.fillRect(cr, m_t.hover);
-                p.fillRect(QRectF(x, cy, 3, CH), m_t.indHoverSpan);
+                p.fillRect(QRectF(x, cy, 3, kCardH), m_t.indHoverSpan);
             }
 
             // Icon (32px, centered vertically)
             int iconSz = 32;
-            drawIcon(p, cards[i].icon, x + 24, cy + (CH - iconSz) / 2, iconSz);
+            drawIcon(p, cards[i].icon, x + 24, cy + (kCardH - iconSz) / 2, iconSz);
 
             // Title + description block, centered vertically
             int tx = x + 24 + iconSz + 16;
@@ -251,7 +264,7 @@ private:
             QFont df = font(); df.setPixelSize(12);
             QFontMetrics tfm(tf), dfm(df);
             int blockH = tfm.height() + 5 + dfm.height();
-            int by = cy + (CH - blockH) / 2;
+            int by = cy + (kCardH - blockH) / 2;
 
             p.setFont(tf); p.setPen(m_t.text);
             p.drawText(tx, by + tfm.ascent(), cards[i].title);
@@ -274,7 +287,7 @@ private:
     }
 
     void drawFileList(QPainter& p, int x, int w) {
-        int listH = height() - 24 - m_listTop;
+        int listH = height() - kBottomPad - m_listTop;
         p.save();
         p.setClipRect(x, m_listTop, w, listH);
 
@@ -284,10 +297,10 @@ private:
 
         for (int gi = 0; gi < m_groups.size(); gi++) {
             auto& g = m_groups[gi];
-            if (gi > 0) fy += 15;
+            if (gi > 0) fy += kGroupSpacing;
 
             // Group header
-            m_grpRects.emplaceBack(gi, QRectF(x, fy, w, 28));
+            m_grpRects.emplaceBack(gi, QRectF(x, fy, w, kGroupHeaderH));
             p.setPen(Qt::NoPen); p.setBrush(m_t.text);
             int triX = x + 8, triY = fy + 11;
             QPolygonF tri;
@@ -297,14 +310,14 @@ private:
 
             QFont gf = font(); gf.setPixelSize(13);
             p.setFont(gf); p.setPen(m_t.text);
-            p.drawText(triX + 14, fy + 14 + QFontMetrics(gf).ascent() / 2 - 1, g.name);
-            fy += 28;
+            p.drawText(triX + 14, fy + kGroupHeaderH / 2 + QFontMetrics(gf).ascent() / 2 - 1, g.name);
+            fy += kGroupHeaderH;
 
             if (!g.expanded) continue;
 
             for (int ei : g.entries) {
                 auto& e = m_filtered[ei];
-                QRectF er(x, fy, w, 52);
+                QRectF er(x, fy, w, kEntryH);
                 m_entRects.emplaceBack(ei, er);
                 if (m_hz == HZ_Entry && m_hi == ei) p.fillRect(er, m_t.hover);
 
@@ -330,7 +343,7 @@ private:
                 QFontMetrics pm(pf);
                 p.drawText(tx, ny + nm.height() + 4 + pm.ascent(),
                            pm.elidedText(e.dirPath, Qt::ElideMiddle, avail));
-                fy += 52;
+                fy += kEntryH;
             }
         }
 
@@ -345,7 +358,7 @@ private:
         for (int i = 0; i < 5; i++)
             if (m_cardR[i].contains(pos)) return {HZ_Card, i};
         if (m_contR.contains(pos)) return {HZ_Continue, 0};
-        if (pos.y() >= m_listTop && pos.y() < height() - 24) {
+        if (pos.y() >= m_listTop && pos.y() < height() - kBottomPad) {
             for (const auto& [gi, r] : m_grpRects)
                 if (r.contains(pos)) return {HZ_Group, gi};
             for (const auto& [ei, r] : m_entRects)

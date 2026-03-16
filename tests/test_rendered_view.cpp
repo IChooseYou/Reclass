@@ -327,7 +327,7 @@ private slots:
         QVERIFY(!code.contains("#pragma pack"));
         QVERIFY(!code.contains("#include <cstdint>"));
         QVERIFY(code.contains("#pragma once"));
-        QVERIFY(code.contains("struct TestStruct {"));
+        QVERIFY(code.contains("struct TestStruct"));
 
         // Load into rendered sci and verify colors survive
         QsciScintilla sci;

@@ -434,7 +434,8 @@ QIcon KernelMemoryPlugin::Icon() const
 bool KernelMemoryPlugin::canHandle(const QString& target) const
 {
     return target.startsWith(QStringLiteral("km:"))
-        || target.startsWith(QStringLiteral("phys:"));
+        || target.startsWith(QStringLiteral("phys:"))
+        || target.startsWith(QStringLiteral("msr:"));
 }
 
 std::unique_ptr<rcx::Provider> KernelMemoryPlugin::createProvider(const QString& target, QString* errorMsg)

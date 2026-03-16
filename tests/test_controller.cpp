@@ -369,10 +369,13 @@ private slots:
         QVERIFY(m_editor->isEditing());
 
         // UInt8 values display in hex (e.g., "0x42"). beginInlineEdit selects
-        // from after "0x" to end. Type "FF" to replace the hex digits.
-        for (QChar c : QString("FF")) {
-            QKeyEvent key(QEvent::KeyPress, 0, Qt::NoModifier, QString(c));
-            QApplication::sendEvent(m_editor->scintilla(), &key);
+        // the value text. Replace it directly via Scintilla API (sendEvent with
+        // key presses doesn't reliably reach QScintilla in headless test mode).
+        {
+            QByteArray replacement = QByteArrayLiteral("0xFF");
+            m_editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_REPLACESEL,
+                (uintptr_t)0, replacement.constData());
         }
         QApplication::processEvents();
 
@@ -385,8 +388,8 @@ private slots:
         QList<QVariant> args = spy.first();
         int nodeIdx = args.at(0).toInt();
         QString text = args.at(3).toString().trimmed();
-        // The committed text should contain "0xFF" (hex format for UInt8)
-        QVERIFY2(!text.isEmpty(), "Committed text should not be empty");
+        QVERIFY2(text.contains("FF", Qt::CaseInsensitive),
+                 qPrintable(QString("Expected '0xFF', got '%1'").arg(text)));
 
         // Now simulate what controller does: setNodeValue
         m_ctrl->setNodeValue(nodeIdx, 0, text);

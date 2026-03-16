@@ -196,6 +196,7 @@ private:
     PageMap         m_prevPages;
     QSet<int64_t>   m_changedOffsets;
     QHash<uint64_t, ValueHistory> m_valueHistory;
+    QHash<uint64_t, uint64_t> m_lastValueAddr;  // nodeId → last offsetAddr used for value recording
     bool            m_trackValues = true;
     int             m_valueTrackCooldown = 0; // suppress value recording for N refresh cycles after clear
     uint64_t        m_refreshGen = 0;

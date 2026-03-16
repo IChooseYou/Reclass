@@ -622,6 +622,7 @@ void RcxController::setTrackValues(bool on) {
     m_trackValues = on;
     if (!on) {
         m_valueHistory.clear();
+        m_lastValueAddr.clear();
         for (auto& lm : m_lastResult.meta)
             lm.heatLevel = 0;
         refresh();
@@ -631,6 +632,7 @@ void RcxController::setTrackValues(bool on) {
 void RcxController::resetChangeTracking() {
     m_changedOffsets.clear();
     m_valueHistory.clear();
+    m_lastValueAddr.clear();
     m_prevPages.clear();
     m_valueTrackCooldown = 5; // suppress tracking for ~1s
     for (auto& lm : m_lastResult.meta)
@@ -720,6 +722,12 @@ void RcxController::refresh() {
 
                 QString val = fmt::readValue(node, *prov, addr, lm.subLine);
                 if (!val.isEmpty()) {
+                    // Clear stale history if this node's effective address changed
+                    // (e.g. viewRoot switch, pointer expand/collapse, MCP restructure)
+                    auto addrIt = m_lastValueAddr.find(lm.nodeId);
+                    if (addrIt != m_lastValueAddr.end() && addrIt.value() != addr)
+                        m_valueHistory.remove(lm.nodeId);
+                    m_lastValueAddr[lm.nodeId] = addr;
                     m_valueHistory[lm.nodeId].record(val);
                     lm.heatLevel = m_valueHistory[lm.nodeId].heatLevel();
                 }
@@ -1221,15 +1229,20 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
     // a different memory address, so keeping them would show false heat.
     // Also invalidates any in-flight async read so that stale snapshot data
     // from before the offset change doesn't re-introduce false heat.
+    auto clearNodeHistory = [&](uint64_t id) {
+        m_valueHistory.remove(id);
+        m_lastValueAddr.remove(id);
+    };
+
     auto clearHistoryForAdjs = [&](const QVector<cmd::OffsetAdj>& adjs) {
         if (adjs.isEmpty()) return;
         m_refreshGen++;  // discard in-flight async read (stale layout)
         for (const auto& adj : adjs) {
             // Clear the adjusted node itself
-            m_valueHistory.remove(adj.nodeId);
+            clearNodeHistory(adj.nodeId);
             // Clear all descendants (their effective address also shifted)
             for (int ci : tree.subtreeIndices(adj.nodeId))
-                m_valueHistory.remove(tree.nodes[ci].id);
+                clearNodeHistory(tree.nodes[ci].id);
         }
     };
 
@@ -1248,7 +1261,7 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             // If offAdjs is empty (same-size change), still bump gen to
             // discard in-flight reads that would record the old format.
             if (c.offAdjs.isEmpty()) m_refreshGen++;
-            m_valueHistory.remove(c.nodeId);
+            clearNodeHistory(c.nodeId);
             clearHistoryForAdjs(c.offAdjs);
         } else if constexpr (std::is_same_v<T, cmd::Rename>) {
             int idx = tree.indexOfId(c.nodeId);
@@ -1299,7 +1312,7 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
                 QVector<int> indices = tree.subtreeIndices(c.nodeId);
                 std::sort(indices.begin(), indices.end(), std::greater<int>());
                 for (int idx : indices) {
-                    m_valueHistory.remove(tree.nodes[idx].id);
+                    clearNodeHistory(tree.nodes[idx].id);
                     tree.nodes.remove(idx);
                 }
                 tree.invalidateIdCache();
@@ -1349,9 +1362,9 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
                 tree.nodes[idx].offset = isUndo ? c.oldOffset : c.newOffset;
             // Node and its descendants read from a different address now
             m_refreshGen++;  // discard in-flight async read (stale layout)
-            m_valueHistory.remove(c.nodeId);
+            clearNodeHistory(c.nodeId);
             for (int ci : tree.subtreeIndices(c.nodeId))
-                m_valueHistory.remove(tree.nodes[ci].id);
+                clearNodeHistory(tree.nodes[ci].id);
         } else if constexpr (std::is_same_v<T, cmd::ChangeEnumMembers>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
@@ -1848,8 +1861,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             connect(act, &QAction::triggered, this, [this, ids]() {
                 for (uint64_t id : ids) {
                     m_valueHistory.remove(id);
-                    for (int ci : m_doc->tree.subtreeIndices(id))
+                    m_lastValueAddr.remove(id);
+                    for (int ci : m_doc->tree.subtreeIndices(id)) {
                         m_valueHistory.remove(m_doc->tree.nodes[ci].id);
+                        m_lastValueAddr.remove(m_doc->tree.nodes[ci].id);
+                    }
                 }
                 m_refreshGen++;
                 m_prevPages.clear();
@@ -2355,8 +2371,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             act->setToolTip(QStringLiteral("Reset change tracking for this node"));
             connect(act, &QAction::triggered, this, [this, nodeId]() {
                 m_valueHistory.remove(nodeId);
-                for (int ci : m_doc->tree.subtreeIndices(nodeId))
+                m_lastValueAddr.remove(nodeId);
+                for (int ci : m_doc->tree.subtreeIndices(nodeId)) {
                     m_valueHistory.remove(m_doc->tree.nodes[ci].id);
+                    m_lastValueAddr.remove(m_doc->tree.nodes[ci].id);
+                }
                 m_refreshGen++;
                 m_prevPages.clear();
                 m_changedOffsets.clear();
@@ -3834,6 +3853,7 @@ void RcxController::resetSnapshot() {
     m_prevPages.clear();
     m_changedOffsets.clear();
     m_valueHistory.clear();
+    m_lastValueAddr.clear();
 }
 
 void RcxController::handleMarginClick(RcxEditor* editor, int margin,

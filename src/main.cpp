@@ -265,6 +265,10 @@ public:
             if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
                 if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
                     s.setHeight(31);
+                    // Sentinel "+" tab: compact icon-only width
+                    if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt))
+                        if (tab->text == QStringLiteral("\u200B"))
+                            return QSize(32, 31);
                     s.setWidth(s.width() + 24);  // room for DockTabButtons (16px icon + padding)
                 }
             }
@@ -396,15 +400,16 @@ public:
             if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt)) {
                 auto* tabBar = qobject_cast<const QTabBar*>(w);
                 if (tabBar && tabBar->parent() && qobject_cast<QMainWindow*>(tabBar->parent())) {
+                    bool sentinel = (tab->text == QStringLiteral("\u200B"));
                     bool selected = tab->state & State_Selected;
                     bool hovered  = tab->state & State_MouseOver;
                     // Background
                     QColor bg = tab->palette.color(QPalette::Window);      // theme.background
-                    if (hovered && !selected)
+                    if (hovered || (sentinel && selected))
                         bg = tab->palette.color(QPalette::Mid);            // theme.hover
                     p->fillRect(tab->rect, bg);
-                    // Selected accent line on top (2px)
-                    if (selected) {
+                    // Selected accent line on top (2px) — not for sentinel "+" tab
+                    if (selected && !sentinel) {
                         p->fillRect(QRect(tab->rect.left(), tab->rect.top(),
                                           tab->rect.width(), 2),
                                     tab->palette.color(QPalette::Link));   // theme.indHoverSpan
@@ -430,6 +435,17 @@ public:
                             break;
                         }
                     }
+                    // Sentinel "+" tab — draw add icon instead of text
+                    QString tabText = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
+                    if (tabText == QStringLiteral("\u200B")) {
+                        QColor fg = tab->palette.color(QPalette::WindowText);
+                        int cx = tab->rect.center().x();
+                        int cy = tab->rect.center().y() + 1;
+                        p->fillRect(cx - 3, cy, 7, 1, fg);  // horizontal
+                        p->fillRect(cx, cy - 3, 1, 7, fg);  // vertical
+                        return;
+                    }
+
                     // Leave space for pin+close buttons on right
                     int btnWidth = 0;
                     if (tabIdx >= 0) {
@@ -446,7 +462,7 @@ public:
 
                     QFontMetrics fm(f);
                     // Get original (un-elided) text from the tab bar
-                    QString text = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
+                    QString text = tabText;
                     int maxW = textRect.width();
 
                     // Elide if text overflows available width.
@@ -2081,13 +2097,13 @@ void MainWindow::setupDockTabBars() {
                 .arg(theme.background.name(), theme.border.name(), theme.hover.name()));
         }
 
-        // Hide sentinel tabs so user sees only real doc tabs.
-        // Qt's updateTabBar() rebuilds tabs each layout pass, resetting
-        // visibility, so we must re-hide every call.
+        // Sentinel "+" tab: ensure it's always the last tab
         static const QString sentinelTitle = QStringLiteral("\u200B");
         for (int i = 0; i < tabBar->count(); ++i) {
-            if (tabBar->tabText(i) == sentinelTitle)
-                tabBar->setTabVisible(i, false);
+            if (tabBar->tabText(i) == sentinelTitle && i != tabBar->count() - 1) {
+                tabBar->moveTab(i, tabBar->count() - 1);
+                break;
+            }
         }
 
         // Helper: find any dock widget by title (doc tabs + sidebar docks)
@@ -2127,9 +2143,9 @@ void MainWindow::setupDockTabBars() {
                 this, [this, tabBar](const QPoint& pos) {
             int idx = tabBar->tabAt(pos);
             if (idx < 0) return;
-
-            // Find target dock (doc tabs + sidebar docks)
+            // No context menu on sentinel "+" tab
             QString tabTitle = tabBar->tabText(idx);
+            if (tabTitle == QStringLiteral("\u200B")) return;
             QDockWidget* target = nullptr;
             for (auto* d : m_docDocks)
                 if (d->windowTitle() == tabTitle) { target = d; break; }
@@ -2257,19 +2273,25 @@ void MainWindow::setupDockTabBars() {
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     if (event->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(event);
-        if (me->button() == Qt::MiddleButton) {
-            if (auto* tabBar = qobject_cast<QTabBar*>(obj)) {
-                int idx = tabBar->tabAt(me->pos());
-                if (idx >= 0) {
-                    QString title = tabBar->tabText(idx);
-                    for (auto* d : m_docDocks) {
-                        if (d->windowTitle() == title) { d->close(); return true; }
-                    }
-                    for (auto* d : {m_workspaceDock, m_scannerDock, m_symbolsDock}) {
-                        if (d && d->windowTitle() == title) { d->close(); return true; }
-                    }
+        if (auto* tabBar = qobject_cast<QTabBar*>(obj)) {
+            int idx = tabBar->tabAt(me->pos());
+            if (idx >= 0 && tabBar->tabText(idx) == QStringLiteral("\u200B")) {
+                // Sentinel "+" tab: left-click opens new struct, ignore others
+                if (me->button() == Qt::LeftButton) {
+                    project_new();
                     return true;
                 }
+                return true;  // swallow middle-click etc.
+            }
+            if (me->button() == Qt::MiddleButton && idx >= 0) {
+                QString title = tabBar->tabText(idx);
+                for (auto* d : m_docDocks) {
+                    if (d->windowTitle() == title) { d->close(); return true; }
+                }
+                for (auto* d : {m_workspaceDock, m_scannerDock, m_symbolsDock}) {
+                    if (d && d->windowTitle() == title) { d->close(); return true; }
+                }
+                return true;
             }
         }
     }
@@ -2917,18 +2939,20 @@ void MainWindow::applyTheme(const Theme& theme) {
             .arg(theme.hover.name()));
     if (m_symDockGrip)
         m_symDockGrip->setGripColor(theme.textFaint);
-    if (m_symbolsSearch) {
-        m_symbolsSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2;"
-            " border: 1px solid %4;"
-            " padding: 4px 8px 4px 2px; }"
-            "QLineEdit:focus { border: 1px solid %5; }"
-            "QLineEdit QToolButton { padding: 0px 8px; }"
-            "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(theme.background.name(), theme.textDim.name(),
-                 theme.hover.name(), theme.border.name(),
-                 theme.borderFocused.name()));
-    }
+    QString searchBoxStyle = QStringLiteral(
+        "QLineEdit { background: %1; color: %2;"
+        " border: 1px solid %4;"
+        " padding: 4px 8px 4px 2px; }"
+        "QLineEdit:focus { border: 1px solid %5; }"
+        "QLineEdit QToolButton { padding: 0px 8px; }"
+        "QLineEdit QToolButton:hover { background: %3; }")
+        .arg(theme.background.name(), theme.textDim.name(),
+             theme.hover.name(), theme.border.name(),
+             theme.borderFocused.name());
+    if (m_symbolsSearch)
+        m_symbolsSearch->setStyleSheet(searchBoxStyle);
+    if (m_typesSearch)
+        m_typesSearch->setStyleSheet(searchBoxStyle);
     if (m_symbolsTree) {
         QPalette tp = m_symbolsTree->palette();
         tp.setColor(QPalette::Text, theme.textDim);
@@ -2945,8 +2969,26 @@ void MainWindow::applyTheme(const Theme& theme) {
             "QHeaderView::section { background: %1; border: none; }")
             .arg(theme.background.name()));
     }
-    if (auto* sep = m_symbolsDock ? m_symbolsDock->findChild<QFrame*>("symbolsSep") : nullptr) {
+    if (auto* sep = m_symbolsDock ? m_symbolsDock->findChild<QFrame*>("symbolsSep") : nullptr)
         sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
+    if (auto* sep = m_symbolsDock ? m_symbolsDock->findChild<QFrame*>("typesSep") : nullptr)
+        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
+    if (m_typesTree) {
+        QPalette tp = m_typesTree->palette();
+        tp.setColor(QPalette::Text, theme.textDim);
+        tp.setColor(QPalette::Highlight, theme.selected);
+        tp.setColor(QPalette::HighlightedText, theme.text);
+        m_typesTree->setPalette(tp);
+        m_typesTree->setStyleSheet(m_symbolsTree->styleSheet());
+    }
+    if (m_typesImportBtn) {
+        m_typesImportBtn->setStyleSheet(QStringLiteral(
+            "QPushButton { background: %1; color: %2; border: 1px solid %3;"
+            "  padding: 4px 16px; border-radius: 3px; }"
+            "QPushButton:hover { background: %4; }"
+            "QPushButton:disabled { color: %5; }")
+            .arg(theme.background.name(), theme.text.name(), theme.border.name(),
+                 theme.hover.name(), theme.textMuted.name()));
     }
     if (m_modulesTree) {
         QPalette tp = m_modulesTree->palette();
@@ -3156,6 +3198,10 @@ void MainWindow::setEditorFont(const QString& fontName) {
         m_modulesTree->setFont(f);
     if (m_symTabWidget)
         m_symTabWidget->setFont(f);
+    if (m_typesSearch)
+        m_typesSearch->setFont(f);
+    if (m_typesTree)
+        m_typesTree->setFont(f);
     // Sync doc dock float title fonts
     for (auto* dock : m_docDocks) {
         if (auto* lbl = dock->findChild<QLabel*>("dockFloatTitle"))
@@ -3635,79 +3681,29 @@ void MainWindow::importFromSource() {
 }
 
 // ── Import PDB ──
+// Opens a file dialog, loads symbols + types into the Symbols dock,
+// and switches to the Types tab for the user to select and import.
 
 void MainWindow::importPdb() {
-    rcx::PdbImportDialog dlg(this);
-    if (dlg.exec() != QDialog::Accepted) return;
+    QString pdbPath = QFileDialog::getOpenFileName(this,
+        "Select PDB File", {},
+        "PDB Files (*.pdb);;All Files (*)");
+    if (pdbPath.isEmpty()) return;
 
-    QString pdbPath = dlg.pdbPath();
+    int symCount = loadPdbAndCacheTypes(pdbPath);
+    rebuildSymbolsModel();
 
-    // Always load symbols into the SymbolStore when importing a PDB
-    {
-        QString symErr;
-        auto symResult = rcx::extractPdbSymbols(pdbPath, &symErr);
-        if (!symResult.symbols.isEmpty()) {
-            QVector<QPair<QString, uint32_t>> symPairs;
-            symPairs.reserve(symResult.symbols.size());
-            for (const auto& s : symResult.symbols)
-                symPairs.emplaceBack(s.name, s.rva);
-            int symCount = rcx::SymbolStore::instance().addModule(
-                symResult.moduleName, pdbPath, symPairs);
-            if (symCount > 0)
-                setAppStatus(QStringLiteral("Loaded %1 symbols from %2")
-                    .arg(symCount).arg(QFileInfo(pdbPath).fileName()));
-        }
-        rebuildSymbolsModel();
-    }
+    m_symbolsDock->show();
+    if (m_symTabWidget) m_symTabWidget->setCurrentIndex(2);  // Types tab
 
-    QVector<uint32_t> indices = dlg.selectedTypeIndices();
-    if (indices.isEmpty()) return;
-
-    QProgressDialog progress("Importing types...", "Cancel", 0, indices.size(), this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(200);
-    bool cancelled = false;
-
-    QString error;
-    NodeTree tree = rcx::importPdbSelected(pdbPath, indices, &error,
-        [&](int current, int total) -> bool {
-            progress.setMaximum(total);
-            progress.setValue(current);
-            QApplication::processEvents();
-            if (progress.wasCanceled()) {
-                cancelled = true;
-                return false;
-            }
-            return true;
-        });
-    progress.close();
-
-    if (tree.nodes.isEmpty()) {
-        if (!cancelled)
-            QMessageBox::warning(this, "Import Failed", error.isEmpty()
-                ? QStringLiteral("No types imported") : error);
-        return;
-    }
-
-    int classCount = 0;
-    for (const auto& n : tree.nodes)
-        if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct) classCount++;
-
-    auto* doc = new rcx::RcxDocument(this);
-    doc->tree = std::move(tree);
-
-    { ClosingGuard guard(m_closingAll);
-      closeAllDocDocks();
-      createTab(doc);
-    }
-    rebuildWorkspaceModel();
-    if (!m_docDocks.isEmpty()) {
-        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
-    }
-    m_workspaceDock->show();
-    setAppStatus(QStringLiteral("Imported %1 classes from %2")
-        .arg(classCount).arg(QFileInfo(pdbPath).fileName()));
+    // Count types from the PDB we just loaded
+    int typeCount = 0;
+    QString baseName = QFileInfo(pdbPath).completeBaseName();
+    auto cIt = m_cachedModuleTypes.constFind(baseName);
+    if (cIt != m_cachedModuleTypes.constEnd())
+        typeCount = cIt->types.size();
+    setAppStatus(QStringLiteral("Loaded %1 symbols + %2 types from %3 — select types to import")
+        .arg(symCount).arg(typeCount).arg(QFileInfo(pdbPath).fileName()));
 }
 
 // ── Type Aliases Dialog ──
@@ -4893,7 +4889,7 @@ void MainWindow::createSymbolsDock() {
 
             // Helper to load a PDB file into the symbol store (with type indices)
             auto loadPdb = [this, name](const QString& pdbPath) -> bool {
-                int count = loadPdbIntoStore(pdbPath);
+                int count = loadPdbAndCacheTypes(pdbPath);
                 if (count <= 0) return false;
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2").arg(count).arg(name));
                 rebuildSymbolsModel();
@@ -5307,6 +5303,127 @@ void MainWindow::createSymbolsDock() {
         m_symTabWidget->addTab(symbolsPage, "Symbols");
     }
 
+    // ── Types tab (PDB type import) ──
+    {
+        auto* typesPage = new QWidget();
+        auto* typLayout = new QVBoxLayout(typesPage);
+        typLayout->setContentsMargins(0, 0, 0, 0);
+        typLayout->setSpacing(0);
+
+        // Search/filter box
+        m_typesSearch = new QLineEdit(typesPage);
+        m_typesSearch->setPlaceholderText(QStringLiteral("Filter types..."));
+        m_typesSearch->setFont(monoFont);
+        {
+            auto* sa = m_typesSearch->addAction(
+                QIcon(QStringLiteral(":/vsicons/search.svg")),
+                QLineEdit::LeadingPosition);
+            for (auto* btn : m_typesSearch->findChildren<QToolButton*>())
+                if (btn->defaultAction() == sa) { btn->setIconSize(QSize(14, 14)); break; }
+        }
+        {
+            auto* ca = m_typesSearch->addAction(
+                QIcon(QStringLiteral(":/vsicons/close.svg")),
+                QLineEdit::TrailingPosition);
+            ca->setVisible(false);
+            connect(ca, &QAction::triggered, m_typesSearch, &QLineEdit::clear);
+            connect(m_typesSearch, &QLineEdit::textChanged, ca,
+                    [ca](const QString& text) { ca->setVisible(!text.isEmpty()); });
+            for (auto* btn : m_typesSearch->findChildren<QToolButton*>())
+                if (btn->defaultAction() == ca) { btn->setIconSize(QSize(14, 14)); break; }
+        }
+        m_typesSearch->setStyleSheet(m_symbolsSearch->styleSheet());
+        m_typesSearch->setContentsMargins(6, 6, 6, 6);
+        typLayout->addWidget(m_typesSearch);
+
+        auto* typSep = new QFrame(typesPage);
+        typSep->setObjectName(QStringLiteral("typesSep"));
+        typSep->setFrameShape(QFrame::HLine);
+        typSep->setFixedHeight(1);
+        typSep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
+        typLayout->addWidget(typSep);
+
+        // Types tree (checkable items)
+        m_typesTree = new QTreeView(typesPage);
+        m_typesModel = new QStandardItemModel(this);
+        m_typesProxy = new QSortFilterProxyModel(this);
+        m_typesProxy->setSourceModel(m_typesModel);
+        m_typesProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+        m_typesProxy->setRecursiveFilteringEnabled(true);
+        m_typesTree->setModel(m_typesProxy);
+        m_typesTree->setExpandsOnDoubleClick(true);
+        styleTree(m_typesTree);
+
+        // Debounced search
+        auto* typSearchTimer = new QTimer(this);
+        typSearchTimer->setSingleShot(true);
+        typSearchTimer->setInterval(150);
+        connect(typSearchTimer, &QTimer::timeout, this, [this]() {
+            QString text = m_typesSearch->text();
+            // Force-populate all modules so filter can match children
+            if (!text.isEmpty()) {
+                for (int i = 0; i < m_typesModel->rowCount(); i++) {
+                    auto* mod = m_typesModel->item(i);
+                    if (mod && mod->rowCount() == 1 && mod->child(0)->text().isEmpty())
+                        populateTypesModuleItem(mod);
+                }
+            }
+            m_typesProxy->setFilterFixedString(text);
+            if (!text.isEmpty()) m_typesTree->expandAll();
+            else m_typesTree->collapseAll();
+        });
+        connect(m_typesSearch, &QLineEdit::textChanged, this, [typSearchTimer]() {
+            typSearchTimer->start();
+        });
+
+        // Lazy-load children on expand
+        connect(m_typesTree, &QTreeView::expanded, this, [this](const QModelIndex& proxyIdx) {
+            QModelIndex srcIdx = m_typesProxy->mapToSource(proxyIdx);
+            auto* item = m_typesModel->itemFromIndex(srcIdx);
+            if (item && !item->parent() && item->rowCount() == 1
+                && item->child(0)->text().isEmpty())
+                populateTypesModuleItem(item);
+        });
+
+        // Update import button when check states change
+        connect(m_typesModel, &QStandardItemModel::dataChanged, this,
+                [this](const QModelIndex&, const QModelIndex&, const QVector<int>& roles) {
+            if (!roles.isEmpty() && !roles.contains(Qt::CheckStateRole)) return;
+            bool anyChecked = false;
+            for (int i = 0; i < m_typesModel->rowCount() && !anyChecked; i++) {
+                auto* mod = m_typesModel->item(i);
+                if (!mod) continue;
+                for (int j = 0; j < mod->rowCount(); j++) {
+                    if (mod->child(j) && mod->child(j)->checkState() == Qt::Checked)
+                        { anyChecked = true; break; }
+                }
+            }
+            if (m_typesImportBtn) m_typesImportBtn->setEnabled(anyChecked);
+        });
+
+        typLayout->addWidget(m_typesTree);
+
+        // Import button row
+        auto* btnRow = new QHBoxLayout;
+        btnRow->setContentsMargins(6, 4, 6, 4);
+        btnRow->addStretch();
+        m_typesImportBtn = new QPushButton(QStringLiteral("Import Selected"), typesPage);
+        m_typesImportBtn->setCursor(Qt::PointingHandCursor);
+        m_typesImportBtn->setEnabled(false);
+        m_typesImportBtn->setStyleSheet(QStringLiteral(
+            "QPushButton { background: %1; color: %2; border: 1px solid %3;"
+            "  padding: 4px 16px; border-radius: 3px; }"
+            "QPushButton:hover { background: %4; }"
+            "QPushButton:disabled { color: %5; }")
+            .arg(t.background.name(), t.text.name(), t.border.name(),
+                 t.hover.name(), t.textMuted.name()));
+        connect(m_typesImportBtn, &QPushButton::clicked, this, &MainWindow::importSelectedTypes);
+        btnRow->addWidget(m_typesImportBtn);
+        typLayout->addLayout(btnRow);
+
+        m_symTabWidget->addTab(typesPage, "Types");
+    }
+
     containerLayout->addWidget(m_symTabWidget);
     // Allow free resizing — remove Qt's default minimum size constraints
     m_modulesTree->setMinimumWidth(0);
@@ -5314,6 +5431,8 @@ void MainWindow::createSymbolsDock() {
     m_symbolsTree->setMinimumWidth(0);
     m_symbolsTree->setMinimumHeight(0);
     m_symbolsSearch->setMinimumWidth(0);
+    if (m_typesTree) { m_typesTree->setMinimumWidth(0); m_typesTree->setMinimumHeight(0); }
+    if (m_typesSearch) m_typesSearch->setMinimumWidth(0);
     m_symTabWidget->setMinimumWidth(0);
     m_symTabWidget->setMinimumHeight(0);
     container->setMinimumWidth(0);
@@ -5348,7 +5467,7 @@ void MainWindow::createSymbolsDock() {
     }
 }
 
-int MainWindow::loadPdbIntoStore(const QString& pdbPath) {
+int MainWindow::loadPdbAndCacheTypes(const QString& pdbPath) {
     QString symErr;
     auto result = rcx::extractPdbSymbols(pdbPath, &symErr);
     if (result.symbols.isEmpty()) return 0;
@@ -5367,6 +5486,18 @@ int MainWindow::loadPdbIntoStore(const QString& pdbPath) {
     if (!typeIndices.isEmpty())
         rcx::SymbolStore::instance().addModuleTypeIndices(
             result.moduleName, typeIndices);
+
+    // Cache enumerated types for the Types tab
+    QString typeErr;
+    auto types = rcx::enumeratePdbTypes(pdbPath, &typeErr);
+    if (!types.isEmpty()) {
+        std::sort(types.begin(), types.end(), [](const auto& a, const auto& b) {
+            return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+        });
+        m_cachedModuleTypes[result.moduleName] = { pdbPath, types };
+        rebuildTypesModel();
+    }
+
     return count;
 }
 
@@ -5392,6 +5523,146 @@ void MainWindow::rebuildSymbolsModel() {
 
         m_symbolsModel->appendRow(moduleItem);
     }
+}
+
+void MainWindow::rebuildTypesModel() {
+    if (!m_typesModel) return;
+    m_typesModel->clear();
+
+    static const QIcon modIcon(":/vsicons/symbol-structure.svg");
+    for (auto it = m_cachedModuleTypes.constBegin(); it != m_cachedModuleTypes.constEnd(); ++it) {
+        auto* moduleItem = new QStandardItem(modIcon,
+            QStringLiteral("%1  (%2 types)").arg(it.key()).arg(it->types.size()));
+        moduleItem->setData(it.key(), Qt::UserRole);
+        moduleItem->setCheckable(false);
+        moduleItem->appendRow(new QStandardItem()); // sentinel for lazy load
+        m_typesModel->appendRow(moduleItem);
+    }
+
+    if (m_typesImportBtn) m_typesImportBtn->setEnabled(false);
+}
+
+void MainWindow::populateTypesModuleItem(QStandardItem* moduleItem) {
+    if (!moduleItem || moduleItem->parent()) return;
+    // Already populated?
+    if (!(moduleItem->rowCount() == 1 && moduleItem->child(0)->text().isEmpty()))
+        return;
+    moduleItem->removeRows(0, 1);
+
+    QString moduleName = moduleItem->data(Qt::UserRole).toString();
+    auto cacheIt = m_cachedModuleTypes.constFind(moduleName);
+    if (cacheIt == m_cachedModuleTypes.constEnd()) return;
+
+    static const QIcon typeIcon(":/vsicons/symbol-class.svg");
+    for (const auto& ti : cacheIt->types) {
+        QString label = QStringLiteral("%1  (%2 bytes, %3 fields)")
+            .arg(ti.name).arg(ti.size).arg(ti.childCount);
+        auto* child = new QStandardItem(typeIcon, label);
+        child->setCheckable(true);
+        child->setCheckState(Qt::Unchecked);
+        child->setData(moduleName, Qt::UserRole);
+        child->setData(ti.typeIndex, Qt::UserRole + 1);
+        child->setData(ti.name, Qt::UserRole + 2);
+        moduleItem->appendRow(child);
+    }
+
+    // Connect check state changes to update import button
+    // (done via model dataChanged, connected once below)
+}
+
+void MainWindow::importSelectedTypes() {
+    // Collect checked type indices grouped by module
+    QHash<QString, QVector<uint32_t>> selectedByModule;
+    for (int i = 0; i < m_typesModel->rowCount(); i++) {
+        auto* moduleItem = m_typesModel->item(i);
+        if (!moduleItem) continue;
+        QString moduleName = moduleItem->data(Qt::UserRole).toString();
+        for (int j = 0; j < moduleItem->rowCount(); j++) {
+            auto* child = moduleItem->child(j);
+            if (child && child->checkState() == Qt::Checked) {
+                uint32_t typeIdx = child->data(Qt::UserRole + 1).toUInt();
+                selectedByModule[moduleName].append(typeIdx);
+            }
+        }
+    }
+    if (selectedByModule.isEmpty()) return;
+
+    auto* tab = activeTab();
+    if (!tab) {
+        project_new();
+        tab = activeTab();
+        if (!tab) return;
+    }
+
+    int totalImported = 0;
+    for (auto it = selectedByModule.constBegin(); it != selectedByModule.constEnd(); ++it) {
+        auto cacheIt = m_cachedModuleTypes.constFind(it.key());
+        if (cacheIt == m_cachedModuleTypes.constEnd()) continue;
+
+        const auto& indices = it.value();
+        QProgressDialog progress("Importing types...", "Cancel", 0, indices.size(), this);
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(200);
+
+        QString error;
+        rcx::NodeTree importedTree = rcx::importPdbSelected(cacheIt->pdbPath, indices, &error,
+            [&](int current, int total) -> bool {
+                progress.setMaximum(total);
+                progress.setValue(current);
+                QApplication::processEvents();
+                return !progress.wasCanceled();
+            });
+        progress.close();
+        if (importedTree.nodes.isEmpty()) continue;
+
+        // Merge into active document (remap IDs to avoid collisions)
+        auto& tree = tab->doc->tree;
+        tab->ctrl->setSuppressRefresh(true);
+        tab->doc->undoStack.beginMacro(QStringLiteral("Import PDB types"));
+
+        QHash<uint64_t, uint64_t> idMap;
+        for (const auto& node : importedTree.nodes)
+            idMap[node.id] = tree.reserveId();
+
+        for (const auto& node : importedTree.nodes) {
+            rcx::Node copy = node;
+            copy.id = idMap.value(node.id, node.id);
+            copy.parentId = idMap.value(node.parentId, node.parentId);
+            if (copy.refId != 0)
+                copy.refId = idMap.value(node.refId, node.refId);
+            tab->doc->undoStack.push(new rcx::RcxCommand(tab->ctrl,
+                rcx::cmd::Insert{copy}));
+        }
+
+        tab->doc->undoStack.endMacro();
+        tab->ctrl->setSuppressRefresh(false);
+        tab->ctrl->refresh();
+
+        int classCount = 0;
+        for (const auto& n : importedTree.nodes)
+            if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct) classCount++;
+        totalImported += classCount;
+    }
+
+    rebuildWorkspaceModel();
+    if (!m_docDocks.isEmpty()) {
+        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
+    }
+    m_workspaceDock->show();
+    setAppStatus(QStringLiteral("Imported %1 types into current project").arg(totalImported));
+
+    // Uncheck all items after import
+    for (int i = 0; i < m_typesModel->rowCount(); i++) {
+        auto* mod = m_typesModel->item(i);
+        if (!mod) continue;
+        for (int j = 0; j < mod->rowCount(); j++) {
+            auto* child = mod->child(j);
+            if (child && child->isCheckable())
+                child->setCheckState(Qt::Unchecked);
+        }
+    }
+    if (m_typesImportBtn) m_typesImportBtn->setEnabled(false);
 }
 
 void MainWindow::rebuildModulesModel() {

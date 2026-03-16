@@ -128,11 +128,11 @@ inline constexpr uint32_t flagsFor(NodeKind k) {
     const auto* m = kindMeta(k);
     return m ? m->flags : 0;
 }
-inline constexpr bool isHexPreview(NodeKind k) {
-    return flagsFor(k) & KF_HexPreview;
-}
 inline constexpr bool isHexNode(NodeKind k) {
     return k >= NodeKind::Hex8 && k <= NodeKind::Hex64;
+}
+inline constexpr bool isHexPreview(NodeKind k) {
+    return isHexNode(k);
 }
 inline constexpr bool isVectorKind(NodeKind k) {
     return k == NodeKind::Vec2 || k == NodeKind::Vec3 || k == NodeKind::Vec4;
@@ -158,8 +158,6 @@ inline QStringList allTypeNamesForUI(bool /*stripBrackets*/ = false) {
     out.reserve(std::size(kKindMeta));
     for (const auto& m : kKindMeta)
         out << QString::fromLatin1(m.typeName);
-    out.sort(Qt::CaseInsensitive);
-    out.removeDuplicates();
     return out;
 }
 
@@ -175,6 +173,7 @@ enum Marker : int {
     M_SELECTED  = 7,
     M_CMD_ROW   = 8,
     M_ACCENT    = 9,
+    M_FOCUS     = 10,  // Presentation mode: AI focus glow
 };
 
 // ── Bitfield member (name + bit position + width within a container) ──
