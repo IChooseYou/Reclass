@@ -193,9 +193,7 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
-        run: |
-          brew update
-          brew install cmake ninja qt
+        run: brew install cmake ninja qt
 
       - name: Configure Qt paths
         run: |
