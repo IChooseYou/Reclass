@@ -439,13 +439,11 @@ public:
                     QString tabText = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
                     if (tabText == QStringLiteral("\u200B")) {
                         QColor fg = tab->palette.color(QPalette::WindowText);
-                        int cx = tab->rect.center().x() & ~1;
-                        int cy = (tab->rect.center().y() + 1) & ~1;
-                        bool wasAA = p->testRenderHint(QPainter::Antialiasing);
-                        p->setRenderHint(QPainter::Antialiasing, false);
+                        // Center in content area: below 2px accent zone, above 1px bottom border
+                        int cx = tab->rect.left() + tab->rect.width() / 2;
+                        int cy = tab->rect.top() + 2 + (tab->rect.height() - 3) / 2;
                         p->fillRect(cx - 3, cy, 7, 1, fg);  // horizontal
                         p->fillRect(cx, cy - 3, 1, 7, fg);  // vertical
-                        if (wasAA) p->setRenderHint(QPainter::Antialiasing, true);
                         return;
                     }
 
