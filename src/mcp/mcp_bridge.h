@@ -90,6 +90,11 @@ private:
     QJsonObject toolSymbolsImportType(const QJsonObject& args);
     QJsonObject toolNodeReadValue(const QJsonObject& args);
 
+    // Analysis tools (AI-oriented)
+    QJsonObject toolAnalysisInferTypes(const QJsonObject& args);
+    QJsonObject toolAnalysisImportHeader(const QJsonObject& args);
+    QJsonObject toolAnalysisPointerChain(const QJsonObject& args);
+
     // Helpers
     QJsonObject makeTextResult(const QString& text, bool isError = false);
     QString resolvePlaceholder(const QString& ref,

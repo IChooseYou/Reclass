@@ -7,6 +7,8 @@
 #include "scanner.h"
 #include "symbolstore.h"
 #include "imports/import_pdb.h"
+#include "imports/import_source.h"
+#include "typeinfer.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QSettings>
@@ -38,6 +40,47 @@ static int64_t parseInteger(const QJsonValue& v, int64_t defaultVal = 0) {
     if (v.isDouble())
         return static_cast<int64_t>(v.toDouble());
     return defaultVal;
+}
+
+// Format a preview value string for an inference suggestion.
+// Used by hex.read (interpret mode) and analysis.infer_types.
+static QString inferPreview(const uint8_t* data, int len, const TypeSuggestion& s) {
+    if (s.kinds.isEmpty()) return {};
+    NodeKind k = s.kinds[0];
+    if (s.kinds.size() == 1) {
+        switch (k) {
+        case NodeKind::Float:     return fmt::fmtFloat(detail::loadF32(data));
+        case NodeKind::Double:    return fmt::fmtDouble(detail::loadF64(data));
+        case NodeKind::Int32:     return fmt::fmtInt32((int32_t)detail::loadU32(data));
+        case NodeKind::UInt32:    return fmt::fmtUInt32(detail::loadU32(data));
+        case NodeKind::Int16:     return fmt::fmtInt16((int16_t)detail::loadU16(data));
+        case NodeKind::UInt16:    return fmt::fmtUInt16(detail::loadU16(data));
+        case NodeKind::Int64:     return fmt::fmtInt64((int64_t)detail::loadU64(data));
+        case NodeKind::UInt64:    return fmt::fmtUInt64(detail::loadU64(data));
+        case NodeKind::Pointer64: return fmt::fmtPointer64(detail::loadU64(data));
+        case NodeKind::Pointer32: return fmt::fmtPointer32(detail::loadU32(data));
+        case NodeKind::Bool:      return fmt::fmtBool(data[0]);
+        case NodeKind::UTF8: {
+            int n = std::min(len, 8);
+            QString out;
+            for (int i = 0; i < n && data[i] >= 0x20 && data[i] <= 0x7E; ++i)
+                out += QLatin1Char(data[i]);
+            return out.isEmpty() ? QString() : (QStringLiteral("\"") + out + QStringLiteral("\""));
+        }
+        default: return {};
+        }
+    }
+    // Split: show each part
+    int partSz = len / s.kinds.size();
+    QStringList parts;
+    for (int i = 0; i < s.kinds.size(); ++i) {
+        TypeSuggestion sub;
+        sub.kinds = {s.kinds[i]};
+        sub.score = s.score;
+        sub.strength = s.strength;
+        parts << inferPreview(data + i * partSz, partSz, sub);
+    }
+    return parts.join(QStringLiteral(", "));
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -477,7 +520,10 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                 {"length", QJsonObject{{"type", "integer"},
                     {"description", "Number of bytes to read (1-4096, default 64)."}}},
                 {"baseRelative", QJsonObject{{"type", "boolean"},
-                    {"description", "If true, offset is relative to the tree's base address (added automatically). Default false (offset is absolute VA)."}}}
+                    {"description", "If true, offset is relative to the tree's base address (added automatically). Default false (offset is absolute VA)."}}},
+                {"interpret", QJsonObject{{"type", "boolean"},
+                    {"description", "If true, append per-field type inference results (8-byte aligned chunks analyzed by the inference engine). "
+                                    "Returns scored suggestions like [float] score=80, [ptr64] score=75 for each chunk."}}}
             }},
             {"required", QJsonArray{"offset", "length"}}
         }}
@@ -752,6 +798,74 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // analysis.infer_types
+    tools.append(QJsonObject{
+        {"name", "analysis.infer_types"},
+        {"description", "Run the type inference engine on hex nodes to get scored type suggestions. "
+                        "Returns top candidates (e.g. float, ptr64, int32_t×2) with confidence scores (0-100) and "
+                        "strength levels (1=weak, 2=moderate, 3=strong). Uses value change history for better accuracy "
+                        "when available. Much more accurate than manually interpreting hex bytes."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"nodeIds", QJsonObject{{"type", "array"},
+                    {"items", QJsonObject{{"type", "string"}}},
+                    {"description", "Array of node IDs to analyze (should be Hex8/16/32/64 nodes)."}}},
+                {"useHistory", QJsonObject{{"type", "boolean"},
+                    {"description", "Feed value change history into inference for better accuracy (default true)."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }},
+            {"required", QJsonArray{"nodeIds"}}
+        }}
+    });
+
+    // analysis.import_header
+    tools.append(QJsonObject{
+        {"name", "analysis.import_header"},
+        {"description", "Import C/C++ struct definitions from source code into the active project. "
+                        "Accepts standard C/C++ struct/class/union/enum syntax with optional offset comments (// 0xNN). "
+                        "This is far more efficient than building structs field-by-field via tree.apply. "
+                        "Supports Windows types (DWORD, HANDLE, etc.), stdint types, pointers, arrays, bitfields, and nested structs."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"sourceCode", QJsonObject{{"type", "string"},
+                    {"description", "C/C++ source code containing struct/class/union/enum definitions."}}},
+                {"pointerSize", QJsonObject{{"type", "integer"},
+                    {"description", "Pointer size: 4 for 32-bit, 8 for 64-bit (default 8)."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }},
+            {"required", QJsonArray{"sourceCode"}}
+        }}
+    });
+
+    // analysis.pointer_chain
+    tools.append(QJsonObject{
+        {"name", "analysis.pointer_chain"},
+        {"description", "Follow a chain of pointers from a starting address, returning hex dump + type inference + "
+                        "vtable detection + symbol annotations at each level. Stops on null, unreadable, or maxDepth. "
+                        "Use this to explore what a pointer points to without multiple sequential hex.read calls."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"address", QJsonObject{{"type", "string"},
+                    {"description", "Starting address (hex string, e.g. '0x7FF618570000'). "
+                                    "Or use baseRelative:true with an offset from struct base."}}},
+                {"baseRelative", QJsonObject{{"type", "boolean"},
+                    {"description", "If true, address is relative to struct base address."}}},
+                {"maxDepth", QJsonObject{{"type", "integer"},
+                    {"description", "Maximum pointer levels to follow (default 3, max 8)."}}},
+                {"readLength", QJsonObject{{"type", "integer"},
+                    {"description", "Bytes to read and analyze at each level (default 64, max 512)."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }},
+            {"required", QJsonArray{"address"}}
+        }}
+    });
+
     return okReply(id, QJsonObject{{"tools", tools}});
 }
 
@@ -786,6 +900,9 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "symbols.lookup") result = toolSymbolsLookup(args);
     else if (toolName == "symbols.importType") result = toolSymbolsImportType(args);
     else if (toolName == "node.read_value") result = toolNodeReadValue(args);
+    else if (toolName == "analysis.infer_types") result = toolAnalysisInferTypes(args);
+    else if (toolName == "analysis.import_header") result = toolAnalysisImportHeader(args);
+    else if (toolName == "analysis.pointer_chain") result = toolAnalysisPointerChain(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
     // Presentation mode: brief focus glow for single-node tools (not tree.apply, which handles its own)
@@ -1626,6 +1743,31 @@ QJsonObject McpBridge::toolHexRead(const QJsonObject& args) {
             dump += "str?: " + QString::number(printable) + " printable ASCII bytes\n";
     }
 
+    // Per-field type inference (when interpret flag is set)
+    if (args.value("interpret").toBool() && data.size() >= 8) {
+        int ptrSize = tab->doc->tree.pointerSize;
+        int chunkSize = (ptrSize >= 8) ? 8 : 4;
+        dump += QStringLiteral("\n--- Per-field inference (%1-byte aligned) ---\n").arg(chunkSize);
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(data.constData());
+        for (int off = 0; off + chunkSize <= data.size(); off += chunkSize) {
+            InferHints hints;
+            hints.ptrSize = ptrSize;
+            auto suggestions = inferTypes(raw + off, chunkSize, hints);
+            dump += QStringLiteral("+0x%1: ").arg(off, 2, 16, QChar('0'));
+            if (suggestions.isEmpty()) {
+                dump += QStringLiteral("(zero / unknown)\n");
+            } else {
+                const auto& top = suggestions[0];
+                QString label = formatHint(top);
+                QString preview = inferPreview(raw + off, chunkSize, top);
+                dump += QStringLiteral("[%1] score=%2").arg(label).arg(top.score);
+                if (!preview.isEmpty())
+                    dump += QStringLiteral("  %1").arg(preview);
+                dump += QStringLiteral("\n");
+            }
+        }
+    }
+
     return makeTextResult(dump);
 }
 
@@ -2329,6 +2471,358 @@ QJsonObject McpBridge::toolNodeReadValue(const QJsonObject& args) {
     }
 
     return makeTextResult(QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: analysis.infer_types — batch type inference on hex nodes
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolAnalysisInferTypes(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    const auto& tree = tab->doc->tree;
+    auto* prov = tab->doc->provider.get();
+    if (!prov) return makeTextResult("No provider", true);
+
+    QJsonArray requestedIds = args.value("nodeIds").toArray();
+    if (requestedIds.isEmpty())
+        return makeTextResult("nodeIds array is required", true);
+
+    bool useHistory = !args.contains("useHistory") || args.value("useHistory").toBool();
+    const auto& valueHistory = tab->ctrl->valueHistory();
+
+    QString output;
+    int analyzed = 0;
+
+    for (const auto& idVal : requestedIds) {
+        uint64_t nodeId = idVal.toString().toULongLong();
+        int idx = tree.indexOfId(nodeId);
+        if (idx < 0) {
+            output += QStringLiteral("node %1: not found\n").arg(nodeId);
+            continue;
+        }
+
+        const Node& node = tree.nodes[idx];
+        int sz = sizeForKind(node.kind);
+        if (sz <= 0) {
+            output += QStringLiteral("node %1 (%2): not a fixed-size type\n")
+                .arg(nodeId).arg(node.name);
+            continue;
+        }
+
+        int64_t signedOff = tree.computeOffset(idx);
+        uint64_t addr = (signedOff >= 0)
+            ? tree.baseAddress + static_cast<uint64_t>(signedOff) : 0;
+
+        if (addr == 0 || !prov->isReadable(addr, sz)) {
+            output += QStringLiteral("node %1 (%2): not readable at 0x%3\n")
+                .arg(nodeId).arg(node.name)
+                .arg(QString::number(addr, 16).toUpper());
+            continue;
+        }
+
+        QByteArray bytes = prov->readBytes(addr, sz);
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(bytes.constData());
+
+        // Build inference hints from value history
+        InferHints hints;
+        hints.ptrSize = tree.pointerSize;
+        if (useHistory) {
+            auto histIt = valueHistory.constFind(nodeId);
+            if (histIt != valueHistory.constEnd()) {
+                hints.sampleCount = histIt->uniqueCount();
+                hints.neverChanged = (histIt->heatLevel() == 0 && histIt->count > 0);
+            }
+        }
+
+        auto suggestions = inferTypes(data, sz, hints);
+
+        output += QStringLiteral("node %1 (%2) at 0x%3, %4 bytes")
+            .arg(nodeId).arg(node.name)
+            .arg(QString::number(addr, 16).toUpper())
+            .arg(sz);
+        if (hints.sampleCount > 0)
+            output += QStringLiteral(" [%1 samples, heat=%2]")
+                .arg(hints.sampleCount).arg(hints.neverChanged ? 0 : 1);
+        output += QStringLiteral(":\n");
+
+        if (suggestions.isEmpty()) {
+            output += QStringLiteral("  (no suggestions — likely all zeros)\n");
+        } else {
+            for (const auto& s : suggestions) {
+                QString label = formatHint(s);
+                QString preview = inferPreview(data, sz, s);
+                QString strengthStr;
+                switch (s.strength) {
+                case 1: strengthStr = QStringLiteral("weak"); break;
+                case 2: strengthStr = QStringLiteral("moderate"); break;
+                case 3: strengthStr = QStringLiteral("strong"); break;
+                default: strengthStr = QStringLiteral("none"); break;
+                }
+                output += QStringLiteral("  [%1] score=%2 (%3)")
+                    .arg(label).arg(s.score).arg(strengthStr);
+                if (!preview.isEmpty())
+                    output += QStringLiteral("  value: %1").arg(preview);
+                output += QStringLiteral("\n");
+            }
+        }
+        analyzed++;
+    }
+
+    output += QStringLiteral("\nAnalyzed %1 node(s).\n").arg(analyzed);
+    return makeTextResult(output);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: analysis.import_header — import C/C++ struct definitions
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolAnalysisImportHeader(const QJsonObject& args) {
+    QString sourceCode = args.value("sourceCode").toString();
+    if (sourceCode.trimmed().isEmpty())
+        return makeTextResult("sourceCode is required", true);
+
+    int pointerSize = (int)parseInteger(args.value("pointerSize"), 8);
+    if (pointerSize != 4 && pointerSize != 8) pointerSize = 8;
+
+    // Parse source code into a NodeTree
+    QString parseError;
+    NodeTree importedTree = importFromSource(sourceCode, &parseError, pointerSize);
+    if (importedTree.nodes.isEmpty())
+        return makeTextResult(parseError.isEmpty()
+            ? QStringLiteral("No struct definitions found in source code")
+            : parseError, true);
+
+    // Merge into active document
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    auto& tree = tab->doc->tree;
+    tab->ctrl->setSuppressRefresh(true);
+
+    // Count root structs for status
+    int classCount = 0;
+    for (const auto& n : importedTree.nodes)
+        if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
+
+    tab->doc->undoStack.beginMacro(
+        QStringLiteral("Import %1 type(s) from source").arg(classCount));
+
+    // Map old IDs to new IDs to preserve parent-child relationships
+    QHash<uint64_t, uint64_t> idMap;
+    for (const auto& node : importedTree.nodes)
+        idMap[node.id] = tree.reserveId();
+
+    for (const auto& node : importedTree.nodes) {
+        Node copy = node;
+        copy.id = idMap.value(node.id, node.id);
+        copy.parentId = idMap.value(node.parentId, node.parentId);
+        if (copy.refId != 0)
+            copy.refId = idMap.value(node.refId, node.refId);
+        tab->doc->undoStack.push(new RcxCommand(tab->ctrl,
+            cmd::Insert{copy}));
+    }
+
+    tab->doc->undoStack.endMacro();
+    tab->ctrl->setSuppressRefresh(false);
+    tab->ctrl->refresh();
+    m_mainWindow->rebuildWorkspaceModel();
+
+    // Build summary
+    QStringList typeNames;
+    for (const auto& n : importedTree.nodes) {
+        if (n.parentId == 0 && n.kind == NodeKind::Struct) {
+            QString name = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+            if (!name.isEmpty()) typeNames << name;
+        }
+    }
+
+    QJsonObject out;
+    out["typesImported"] = classCount;
+    out["nodesImported"] = importedTree.nodes.size();
+    out["typeNames"] = QJsonArray::fromStringList(typeNames);
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: analysis.pointer_chain — follow pointers with inference
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolAnalysisPointerChain(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    auto* prov = tab->doc->provider.get();
+    if (!prov) return makeTextResult("No provider", true);
+
+    int64_t addr = parseInteger(args.value("address"));
+    if (args.value("baseRelative").toBool())
+        addr += (int64_t)tab->doc->tree.baseAddress;
+
+    int maxDepth = qBound(1, (int)parseInteger(args.value("maxDepth"), 3), 8);
+    int readLen = qBound(8, (int)parseInteger(args.value("readLength"), 64), 512);
+    int ptrSize = tab->doc->tree.pointerSize;
+
+    // Cache executable regions for vtable detection
+    auto regions = prov->enumerateRegions();
+    auto isExecutable = [&regions](uint64_t va) -> bool {
+        for (const auto& r : regions) {
+            if (va >= r.base && va < r.base + r.size)
+                return r.executable;
+        }
+        return false;
+    };
+
+    // Get symbol lookup function
+    bool hasSymbols = SymbolStore::instance().hasSymbols();
+    auto symLookup = [&](uint64_t va) -> QString {
+        if (!hasSymbols) return {};
+        return SymbolStore::instance().getSymbolForAddress(va, prov);
+    };
+
+    QString output;
+    QSet<uint64_t> visited; // cycle detection
+
+    for (int depth = 0; depth < maxDepth; depth++) {
+        uint64_t curAddr = static_cast<uint64_t>(addr);
+
+        if (visited.contains(curAddr)) {
+            output += QStringLiteral("\n--- Level %1: CYCLE at 0x%2 ---\n")
+                .arg(depth).arg(QString::number(curAddr, 16).toUpper());
+            break;
+        }
+        visited.insert(curAddr);
+
+        if (!prov->isReadable(curAddr, readLen)) {
+            output += QStringLiteral("\n--- Level %1: 0x%2 (not readable) ---\n")
+                .arg(depth).arg(QString::number(curAddr, 16).toUpper());
+            break;
+        }
+
+        QByteArray data = prov->readBytes(curAddr, readLen);
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(data.constData());
+
+        // Symbol annotation for the address itself
+        QString addrSym = symLookup(curAddr);
+        output += QStringLiteral("\n--- Level %1: 0x%2")
+            .arg(depth).arg(QString::number(curAddr, 16).toUpper());
+        if (!addrSym.isEmpty())
+            output += QStringLiteral(" (%1)").arg(addrSym);
+        output += QStringLiteral(" ---\n");
+
+        // Hex dump (compact: 16 bytes per line)
+        for (int i = 0; i < data.size(); i += 16) {
+            int lineLen = qMin(16, data.size() - i);
+            output += QStringLiteral("+%1: ").arg(i, 4, 16, QChar('0'));
+            for (int j = 0; j < 16; j++) {
+                if (j < lineLen)
+                    output += QStringLiteral("%1 ").arg((uint8_t)data[i+j], 2, 16, QChar('0'));
+                else
+                    output += QStringLiteral("   ");
+                if (j == 7) output += QStringLiteral(" ");
+            }
+            output += QStringLiteral(" |");
+            for (int j = 0; j < lineLen; j++) {
+                uint8_t c = (uint8_t)data[i+j];
+                output += (c >= 0x20 && c <= 0x7e) ? QChar(c) : QChar('.');
+            }
+            output += QStringLiteral("|\n");
+        }
+
+        // Per-field type inference (8-byte aligned for 64-bit, 4-byte for 32-bit)
+        int chunkSize = (ptrSize >= 8) ? 8 : 4;
+        output += QStringLiteral("\nField inference:\n");
+        for (int off = 0; off + chunkSize <= data.size(); off += chunkSize) {
+            InferHints hints;
+            hints.ptrSize = ptrSize;
+            auto suggestions = inferTypes(raw + off, chunkSize, hints);
+
+            output += QStringLiteral("  +0x%1: ").arg(off, 2, 16, QChar('0'));
+            if (suggestions.isEmpty()) {
+                output += QStringLiteral("(zero / unknown)\n");
+            } else {
+                const auto& top = suggestions[0];
+                QString label = formatHint(top);
+                QString preview = inferPreview(raw + off, chunkSize, top);
+                output += QStringLiteral("[%1] score=%2").arg(label).arg(top.score);
+                if (!preview.isEmpty())
+                    output += QStringLiteral("  %1").arg(preview);
+
+                // Symbol annotation for pointer-like values
+                if ((top.kinds.size() == 1) &&
+                    (top.kinds[0] == NodeKind::Pointer64 || top.kinds[0] == NodeKind::Pointer32)) {
+                    uint64_t ptrVal = (chunkSize >= 8)
+                        ? detail::loadU64(raw + off)
+                        : (uint64_t)detail::loadU32(raw + off);
+                    QString sym = symLookup(ptrVal);
+                    if (!sym.isEmpty())
+                        output += QStringLiteral("  // %1").arg(sym);
+                }
+                output += QStringLiteral("\n");
+            }
+        }
+
+        // Vtable detection: check if offset 0 points to an array of code pointers
+        {
+            uint64_t firstQword = (ptrSize >= 8)
+                ? detail::loadU64(raw) : (uint64_t)detail::loadU32(raw);
+            if (firstQword != 0 && firstQword != UINT64_MAX
+                && prov->isReadable(firstQword, ptrSize * 4)) {
+                QByteArray vtableData = prov->readBytes(firstQword, ptrSize * 16);
+                const uint8_t* vtRaw = reinterpret_cast<const uint8_t*>(vtableData.constData());
+                int codePointers = 0;
+                int totalChecked = qMin(16, vtableData.size() / ptrSize);
+                for (int i = 0; i < totalChecked; i++) {
+                    uint64_t entry = (ptrSize >= 8)
+                        ? detail::loadU64(vtRaw + i * ptrSize)
+                        : (uint64_t)detail::loadU32(vtRaw + i * ptrSize);
+                    if (entry != 0 && isExecutable(entry))
+                        codePointers++;
+                }
+                if (codePointers >= 3 && codePointers >= totalChecked / 2) {
+                    output += QStringLiteral("\nVtable detected at 0x%1 (%2/%3 entries are code pointers)\n")
+                        .arg(QString::number(firstQword, 16).toUpper())
+                        .arg(codePointers).arg(totalChecked);
+                    // Show first few vtable entries with symbols
+                    for (int i = 0; i < qMin(8, totalChecked); i++) {
+                        uint64_t entry = (ptrSize >= 8)
+                            ? detail::loadU64(vtRaw + i * ptrSize)
+                            : (uint64_t)detail::loadU32(vtRaw + i * ptrSize);
+                        QString sym = symLookup(entry);
+                        output += QStringLiteral("  [%1] 0x%2")
+                            .arg(i).arg(QString::number(entry, 16).toUpper());
+                        if (!sym.isEmpty())
+                            output += QStringLiteral("  %1").arg(sym);
+                        output += QStringLiteral("\n");
+                    }
+                }
+            }
+        }
+
+        // Follow the first pointer-like value to next level
+        uint64_t nextAddr = 0;
+        if (ptrSize >= 8 && data.size() >= 8) {
+            uint64_t v = detail::loadU64(raw);
+            // Canonical x64 user-mode address check
+            if (v >= 0x10000 && v <= 0x00007FFFFFFFFFFFULL)
+                nextAddr = v;
+        } else if (data.size() >= 4) {
+            uint32_t v = detail::loadU32(raw);
+            if (v >= 0x10000)
+                nextAddr = v;
+        }
+
+        if (nextAddr == 0 || !prov->isReadable(nextAddr, ptrSize)) {
+            if (depth < maxDepth - 1)
+                output += QStringLiteral("\n(offset 0 is not a followable pointer — chain ends)\n");
+            break;
+        }
+
+        addr = (int64_t)nextAddr;
+    }
+
+    return makeTextResult(output);
 }
 
 // ════════════════════════════════════════════════════════════════════

@@ -597,6 +597,60 @@ if(BUILD_TESTING)
         )
         endif()
 
+        # ── Training2: SDK Building Course (hands-on lessons with screenshots) ──
+        set(TRAINING2_SRCS
+            src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+            src/controller.cpp src/symbolstore.cpp src/processpicker.cpp
+            src/processpicker.ui src/providerregistry.cpp src/typeselectorpopup.cpp
+            src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        set(TRAINING2_LIBS
+            ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+            QScintilla::QScintilla)
+        set(TRAINING2_SCREENSHOT_DIR "${CMAKE_SOURCE_DIR}/training2/screenshots")
+
+        macro(add_training_test name)
+            add_executable(${name} training2/tests/${name}.cpp ${TRAINING2_SRCS} ${ARGN})
+            target_include_directories(${name} PRIVATE src third_party/fadec training2/tests)
+            target_link_libraries(${name} PRIVATE ${TRAINING2_LIBS})
+            target_compile_definitions(${name} PRIVATE
+                TRAINING_SCREENSHOT_DIR="${TRAINING2_SCREENSHOT_DIR}")
+            if(WIN32)
+                target_link_libraries(${name} PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+            endif()
+            add_test(NAME ${name} COMMAND ${name})
+        endmacro()
+
+        # Beginner (01-03)
+        add_training_test(test_lesson_01)
+        add_training_test(test_lesson_02)
+        add_training_test(test_lesson_03)
+
+        # Intermediate (04-08)
+        add_training_test(test_lesson_04)
+        add_training_test(test_lesson_05)
+        add_training_test(test_lesson_06)
+        add_training_test(test_lesson_07)
+        add_training_test(test_lesson_08)
+
+        # Advanced (09-16)
+        add_training_test(test_lesson_09 src/imports/import_source.cpp)
+        add_training_test(test_lesson_10 src/imports/import_pdb.cpp)
+        if(WIN32)
+            target_link_libraries(test_lesson_10 PRIVATE raw_pdb)
+        endif()
+        add_training_test(test_lesson_11)
+        add_training_test(test_lesson_12)
+        add_training_test(test_lesson_13 src/generator.cpp)
+        add_training_test(test_lesson_14 src/scanner.cpp)
+        add_training_test(test_lesson_15 src/generator.cpp)
+        add_training_test(test_lesson_16)
+
+        # Expert (17-20)
+        add_training_test(test_lesson_17 src/generator.cpp)
+        add_training_test(test_lesson_18 src/generator.cpp)
+        add_training_test(test_lesson_19 src/generator.cpp)
+        add_training_test(test_lesson_20)
+
     endif() # BUILD_UI_TESTS
 endif()
 add_subdirectory(plugins/ProcessMemory)
