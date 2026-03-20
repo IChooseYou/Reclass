@@ -55,12 +55,20 @@ Theme Theme::fromJson(const QJsonObject& o) {
         if (o.contains(kThemeFields[i].key))
             t.*kThemeFields[i].ptr = QColor(o[kThemeFields[i].key].toString());
     }
-    // Derive heat colors from the theme's own palette when keys are absent
-    // cold = muted yellow, warm = hover/string amber, hot = marker red
+    // Derive heat colors by blending from textDim toward warm anchors.
+    // Cold = textDim nudged 30% toward warm gold (subtle "refined once").
+    // Warm = textDim nudged 60% toward orange (clearly changing).
+    // Hot  = markerPtr (the theme's danger color).
+    auto lerpRgb = [](const QColor& a, const QColor& b, double f) {
+        return QColor(qBound(0, a.red()   + int((b.red()   - a.red())   * f), 255),
+                      qBound(0, a.green() + int((b.green() - a.green()) * f), 255),
+                      qBound(0, a.blue()  + int((b.blue()  - a.blue())  * f), 255));
+    };
+    QColor dim = t.textDim.isValid() ? t.textDim : QColor(133, 133, 133);
     if (!t.indHeatCold.isValid())
-        t.indHeatCold = QColor("#D4A945");
+        t.indHeatCold = lerpRgb(dim, QColor(210, 170, 100), 0.30);
     if (!t.indHeatWarm.isValid())
-        t.indHeatWarm = t.indHoverSpan.isValid() ? t.indHoverSpan : t.syntaxString;
+        t.indHeatWarm = lerpRgb(dim, QColor(235, 145, 50), 0.60);
     if (!t.indHeatHot.isValid())
         t.indHeatHot = t.markerPtr;
 
