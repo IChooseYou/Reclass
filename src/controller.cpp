@@ -316,6 +316,35 @@ void RcxController::connectEditor(RcxEditor* editor) {
             cmd::ChangeEnumMembers{enumId, oldMembers, members}));
     });
 
+    // Live expression evaluation for BaseAddress editing
+    editor->setExprEvaluator([this](const QString& text) -> QString {
+        QString s = text.trimmed();
+        s.remove('`');
+        s.remove('\'');
+        if (s.isEmpty()) return {};
+        AddressParserCallbacks cbs;
+        if (m_doc->provider) {
+            auto* prov = m_doc->provider.get();
+            cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
+                uint64_t base = prov->symbolToAddress(name);
+                *ok = (base != 0);
+                return base;
+            };
+            int ptrSz = m_doc->tree.pointerSize;
+            cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
+                uint64_t val = 0;
+                *ok = prov->read(addr, &val, ptrSz);
+                return val;
+            };
+            cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
+                return SymbolStore::instance().resolve(name, prov, ok);
+            };
+        }
+        auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
+        if (!result.ok) return {};
+        return QStringLiteral("0x") + QString::number(result.value, 16).toUpper();
+    });
+
     // Inline editing signals
     connect(editor, &RcxEditor::inlineEditCommitted,
             this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text,

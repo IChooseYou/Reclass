@@ -2893,6 +2893,368 @@ private slots:
         m_editor->setProviderRef(nullptr, nullptr, nullptr);
         m_editor->applyDocument(m_result);
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // BaseAddress inline edit stress tests
+    // ════════════════════════════════════════════════════════════════════
+
+    // Helper: get current cursor line and column
+    void getCursor(int& line, int& col) {
+        m_editor->scintilla()->getCursorPosition(&line, &col);
+    }
+
+    // Helper: send a single key press
+    void sendKey(int key, Qt::KeyboardModifiers mods = Qt::NoModifier, const QString& text = {}) {
+        QKeyEvent ev(QEvent::KeyPress, key, mods, text);
+        QApplication::sendEvent(m_editor->scintilla(), &ev);
+        QApplication::processEvents();
+    }
+
+    // Helper: type a string character by character
+    void typeText(const QString& s) {
+        for (QChar c : s) {
+            QKeyEvent ev(QEvent::KeyPress, 0, Qt::NoModifier, QString(c));
+            QApplication::sendEvent(m_editor->scintilla(), &ev);
+        }
+        QApplication::processEvents();
+    }
+
+    // Helper: get the edit span boundaries
+    int editSpanStart() { return m_editor->editSpanStart(); }
+    int editSpanEnd()   { return m_editor->editEnd(); }
+
+    // Helper: begin BaseAddress edit with a specific command row text
+    bool beginAddrEdit(const QString& cmdText) {
+        m_editor->applyDocument(m_result);
+        m_editor->setCommandRowText(cmdText);
+        QApplication::processEvents();
+        return m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
+    }
+
+    // Helper: get line 0 text
+    QString getLine0() {
+        auto* sci = m_editor->scintilla();
+        int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, 0UL);
+        if (len <= 0) return {};
+        QByteArray buf(len + 1, '\0');
+        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, 0UL, (void*)buf.data());
+        QString t = QString::fromUtf8(buf.constData(), len);
+        while (t.endsWith('\n') || t.endsWith('\r')) t.chop(1);
+        return t;
+    }
+
+    // ── Test: Left arrow stops at span start ──
+    void testAddrEditLeftArrowClampsAtStart() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int spanStart = editSpanStart();
+
+        // Home to go to start
+        sendKey(Qt::Key_Home);
+        int line, col;
+        getCursor(line, col);
+        QCOMPARE(col, spanStart);
+
+        // Pressing left at start should NOT move further left
+        sendKey(Qt::Key_Left);
+        getCursor(line, col);
+        QCOMPARE(col, spanStart);
+
+        // Multiple left presses should stay at start
+        for (int i = 0; i < 10; i++)
+            sendKey(Qt::Key_Left);
+        getCursor(line, col);
+        QCOMPARE(col, spanStart);
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Right arrow stops at span end ──
+    void testAddrEditRightArrowClampsAtEnd() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int spanEnd = editSpanEnd();
+
+        // End to go to end
+        sendKey(Qt::Key_End);
+        int line, col;
+        getCursor(line, col);
+        QCOMPARE(col, spanEnd);
+
+        // Pressing right at end should NOT move further right
+        sendKey(Qt::Key_Right);
+        getCursor(line, col);
+        QCOMPARE(col, spanEnd);
+
+        // Multiple right presses should stay at end
+        for (int i = 0; i < 10; i++)
+            sendKey(Qt::Key_Right);
+        getCursor(line, col);
+        QCOMPARE(col, spanEnd);
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Backspace stops at span start ──
+    void testAddrEditBackspaceStopsAtStart() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int spanStart = editSpanStart();
+
+        sendKey(Qt::Key_Home);
+
+        // Backspace at start should be no-op
+        QString before = getLine0();
+        sendKey(Qt::Key_Backspace);
+        QString after = getLine0();
+        QCOMPARE(after, before);
+
+        int line, col;
+        getCursor(line, col);
+        QCOMPARE(col, spanStart);
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Delete stops at span end ──
+    void testAddrEditDeleteStopsAtEnd() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+
+        sendKey(Qt::Key_End);
+
+        // Delete at end should be no-op
+        QString before = getLine0();
+        sendKey(Qt::Key_Delete);
+        QString after = getLine0();
+        QCOMPARE(after, before);
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Home/End jump to span boundaries ──
+    void testAddrEditHomeEnd() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int spanStart = editSpanStart();
+        int spanEnd   = editSpanEnd();
+
+        sendKey(Qt::Key_End);
+        int line, col;
+        getCursor(line, col);
+        QCOMPARE(col, spanEnd);
+
+        sendKey(Qt::Key_Home);
+        getCursor(line, col);
+        QCOMPARE(col, spanStart);
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Typing characters stays within span ──
+    void testAddrEditTypingStaysInSpan() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int spanStart = editSpanStart();
+
+        // Select all and type replacement
+        sendKey(Qt::Key_Home);
+        sendKey(Qt::Key_End, Qt::ShiftModifier);
+        typeText("0x8+0x8");
+
+        int line, col;
+        getCursor(line, col);
+        int newEnd = editSpanEnd();
+        QVERIFY2(col >= spanStart && col <= newEnd,
+                 qPrintable(QString("Cursor col %1 should be in [%2, %3]")
+                     .arg(col).arg(spanStart).arg(newEnd)));
+
+        // Verify the text in the span is what we typed
+        QString lineText = getLine0();
+        ColumnSpan as = commandRowAddrSpan(lineText);
+        QVERIFY(as.valid);
+        QString spanText = lineText.mid(as.start, as.end - as.start).trimmed();
+        QVERIFY2(spanText.contains("0x8+0x8"),
+                 qPrintable("Span should contain typed text, got: " + spanText));
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Click outside edit span during edit commits/cancels ──
+    void testAddrEditClickOutsideCommits() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        QVERIFY(m_editor->isEditing());
+
+        // Click on a data line (well outside command row)
+        QPoint far = colToViewport(m_editor->scintilla(), kFirstDataLine, 5);
+        sendLeftClick(m_editor->scintilla()->viewport(), far);
+        QApplication::processEvents();
+
+        // Edit should have ended (committed or cancelled)
+        QVERIFY2(!m_editor->isEditing(),
+                 "Click outside edit span should end editing");
+
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Escape cancels edit without changing text ──
+    void testAddrEditEscapeCancels() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        QVERIFY(m_editor->isEditing());
+
+        // Type something
+        sendKey(Qt::Key_End);
+        typeText("FF");
+
+        // Escape should cancel
+        QSignalSpy cancelSpy(m_editor, &RcxEditor::inlineEditCancelled);
+        sendKey(Qt::Key_Escape);
+        QVERIFY(!m_editor->isEditing());
+        QCOMPARE(cancelSpy.count(), 1);
+
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Enter commits edit ──
+    void testAddrEditEnterCommits() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        QVERIFY(m_editor->isEditing());
+
+        QSignalSpy commitSpy(m_editor, &RcxEditor::inlineEditCommitted);
+        sendKey(Qt::Key_Return);
+        QVERIFY(!m_editor->isEditing());
+        QCOMPARE(commitSpy.count(), 1);
+
+        // Check committed text is the address
+        QList<QVariant> args = commitSpy.first();
+        QString text = args.at(3).toString().trimmed();
+        QVERIFY2(!text.isEmpty(), "Committed text should not be empty");
+
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Formula address span includes full formula ──
+    void testAddrEditFormulaSpan() {
+        // Set a formula-style command row
+        m_editor->applyDocument(m_result);
+        m_editor->setCommandRowText(
+            QStringLiteral("source\u25BE  <Reclass.exe>+0x8  class Foo {"));
+        QApplication::processEvents();
+
+        QString lineText = getLine0();
+        ColumnSpan as = commandRowAddrSpan(lineText);
+        QVERIFY2(as.valid, "Formula ADDR span should be valid");
+
+        QString spanText = lineText.mid(as.start, as.end - as.start);
+        QVERIFY2(spanText.contains("<Reclass.exe>"),
+                 qPrintable("Formula span should include module ref, got: " + spanText));
+        QVERIFY2(spanText.contains("+0x8"),
+                 qPrintable("Formula span should include offset, got: " + spanText));
+
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Up/Down/PageUp/PageDown blocked during edit ──
+    void testAddrEditVerticalKeysBlocked() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int line, col;
+
+        getCursor(line, col);
+        QCOMPARE(line, 0);
+
+        sendKey(Qt::Key_Down);
+        getCursor(line, col);
+        QCOMPARE(line, 0);
+
+        sendKey(Qt::Key_Up);
+        getCursor(line, col);
+        QCOMPARE(line, 0);
+
+        sendKey(Qt::Key_PageDown);
+        getCursor(line, col);
+        QCOMPARE(line, 0);
+
+        sendKey(Qt::Key_PageUp);
+        getCursor(line, col);
+        QCOMPARE(line, 0);
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Typing at end doesn't leak into surrounding text ──
+    void testAddrEditNoLeakRight() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0x10  class Foo {")));
+
+        // Go to end and type characters
+        sendKey(Qt::Key_End);
+        typeText("AB");
+
+        // Verify "class Foo" is still intact after the address
+        QString lineText = getLine0();
+        QVERIFY2(lineText.contains("class") && lineText.contains("Foo"),
+                 qPrintable("Root class should be intact, got: " + lineText));
+
+        // Verify cursor is still within span
+        int line, col;
+        getCursor(line, col);
+        QVERIFY2(col <= editSpanEnd(),
+                 qPrintable(QString("Cursor %1 should be <= spanEnd %2")
+                     .arg(col).arg(editSpanEnd())));
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Selection + Right collapses to right end naturally ──
+    void testAddrEditSelectionCollapseRight() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int start = editSpanStart();
+        int end   = editSpanEnd();
+
+        // Select all via Home then Shift+End
+        sendKey(Qt::Key_Home);
+        sendKey(Qt::Key_End, Qt::ShiftModifier);
+        QApplication::processEvents();
+
+        // Right arrow should collapse selection to its right end
+        sendKey(Qt::Key_Right);
+        int line, col;
+        getCursor(line, col);
+        QVERIFY2(col == end,
+                 qPrintable(QString("After Right, cursor=%1 expected=%2").arg(col).arg(end)));
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: Selection + Left collapses to left end naturally ──
+    void testAddrEditSelectionCollapseLeft() {
+        QVERIFY(beginAddrEdit(QStringLiteral("source\u25BE  0xABCD1234")));
+        int start = editSpanStart();
+        QVERIFY(m_editor->isEditing());
+
+        // Position cursor at end first
+        sendKey(Qt::Key_End);
+        QApplication::processEvents();
+
+        // Select leftward back to start
+        sendKey(Qt::Key_Home, Qt::ShiftModifier);
+        QApplication::processEvents();
+
+        // Left arrow should collapse selection to its left end (spanStart)
+        sendKey(Qt::Key_Left);
+        QApplication::processEvents();
+
+        int line, col;
+        getCursor(line, col);
+        QVERIFY2(col == start,
+                 qPrintable(QString("After Left, cursor=%1 expected=%2").arg(col).arg(start)));
+
+        if (m_editor->isEditing())
+            m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
 };
 
 QTEST_MAIN(TestEditor)

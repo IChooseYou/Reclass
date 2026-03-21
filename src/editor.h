@@ -7,7 +7,9 @@
 #include <QPoint>
 #include <QHash>
 #include <QVariantAnimation>
+#include <functional>
 
+class QLabel;
 class QLineEdit;
 class QsciScintilla;
 class QsciLexerCPP;
@@ -51,6 +53,8 @@ public:
 
     // ── Inline editing ──
     bool isEditing() const { return m_editState.active; }
+    int editSpanStart() const { return m_editState.spanStart; }
+    int editEnd() const;  // public accessor for editEndCol()
     bool beginInlineEdit(EditTarget target, int line = -1, int col = -1);
     void cancelInlineEdit();
     void setHexEditPending(bool v) { m_hexEditPending = v; }
@@ -67,6 +71,7 @@ public:
     QString textWithMargins() const;
     void setCustomTypeNames(const QStringList& names);
     void setValueHistoryRef(const QHash<uint64_t, ValueHistory>* ref) { m_valueHistory = ref; }
+    void setExprEvaluator(std::function<QString(const QString&)> fn) { m_exprEvaluator = std::move(fn); }
     void setProviderRef(const Provider* prov, const Provider* realProv, const NodeTree* tree) {
         m_disasmProvider = prov; m_disasmRealProv = realProv; m_disasmTree = tree;
     }
@@ -162,6 +167,8 @@ private:
 
     // ── Value history ref (owned by controller) ──
     const QHash<uint64_t, ValueHistory>* m_valueHistory = nullptr;
+    std::function<QString(const QString&)> m_exprEvaluator;
+    QLabel* m_exprResultLabel = nullptr;
     QWidget* m_historyPopup = nullptr;  // ValueHistoryPopup (file-local class in editor.cpp)
     QWidget* m_disasmPopup = nullptr;        // TitleBodyPopup (file-local class in editor.cpp)
     QWidget* m_structPreviewPopup = nullptr; // TitleBodyPopup (file-local class in editor.cpp)
@@ -211,6 +218,7 @@ private:
     void applyCommandRowPills();
 
     void commitInlineEdit();
+    void updateExprResultPopup();
     int  editEndCol() const;
     bool handleNormalKey(QKeyEvent* ke);
     bool handleEditKey(QKeyEvent* ke);

@@ -1001,7 +1001,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
 
     auto makeLabel = [](const TypeEntry& e) {
         QString label = e.displayName;
-        if (e.sizeBytes > 0) label += QStringLiteral(" - 0x%1 bytes").arg(QString::number(e.sizeBytes, 16).toUpper());
+        if (e.sizeBytes > 0) label += QStringLiteral(" - %1B").arg(e.sizeBytes);
         return label;
     };
 

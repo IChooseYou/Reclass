@@ -520,6 +520,10 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite)
             QTimer::singleShot(0, this, &RcxEditor::validateEditLive);
 
+        // Live expression result popup (BaseAddress + value edits with operators)
+        if (m_exprEvaluator)
+            QTimer::singleShot(0, this, [this]() { updateExprResultPopup(); });
+
         // Autocomplete for static field expressions — show field names as user types
         if (m_editState.target == EditTarget::StaticExpr && !m_staticCompletions.isEmpty()) {
             // Get word at cursor
@@ -539,6 +543,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
 }
 
 RcxEditor::~RcxEditor() {
+    delete m_exprResultLabel;
 }
 
 void RcxEditor::setupScintilla() {
@@ -1761,6 +1766,7 @@ void RcxEditor::applyCommandRowPills() {
 RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
     // Dismiss any open user list / autocomplete popup
     m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCCANCEL);
+    if (m_exprResultLabel) m_exprResultLabel->hide();
     // Clear edit comment and error marker before deactivating
     if (m_editState.target == EditTarget::Value
         || (m_editState.hexOverwrite && m_editState.target == EditTarget::Name)) {
@@ -3057,6 +3063,8 @@ int RcxEditor::editEndCol() const {
     return m_editState.spanStart + m_editState.original.size() + delta;
 }
 
+int RcxEditor::editEnd() const { return editEndCol(); }
+
 void RcxEditor::clampEditSelection() {
     if (!m_editState.active) return;
 
@@ -4071,6 +4079,64 @@ void RcxEditor::validateEditLive() {
         m_sci->markerAdd(m_editState.line, M_ERR);
         if (stateChanged) setEditComment("! " + errorMsg);
     }
+}
+
+void RcxEditor::updateExprResultPopup() {
+    if (!m_editState.active || !m_exprEvaluator) return;
+    bool isAddr = (m_editState.target == EditTarget::BaseAddress);
+    bool isVal  = (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite);
+    if (!isAddr && !isVal) return;
+
+    // Extract current edit text
+    QString lineText = getLineText(m_sci, m_editState.line);
+    int delta = lineText.size() - m_editState.linelenAfterReplace;
+    int editedLen = m_editState.original.size() + delta;
+    QString text = (editedLen > 0)
+        ? lineText.mid(m_editState.spanStart, editedLen).trimmed() : QString();
+
+    // Only show popup if text contains an operator (otherwise it's a plain value)
+    if (isVal && !text.contains('+') && !text.contains('-') && !text.contains('*')
+        && !text.contains('/') && !text.contains('<') && !text.contains('&')
+        && !text.contains('|') && !text.contains('^') && !text.contains('~')) {
+        if (m_exprResultLabel) m_exprResultLabel->hide();
+        return;
+    }
+
+    QString result = m_exprEvaluator(text);
+    if (result.isEmpty()) {
+        if (m_exprResultLabel) m_exprResultLabel->hide();
+        return;
+    }
+
+    // Create label lazily as a top-level tooltip window (not clipped by viewport)
+    if (!m_exprResultLabel) {
+        m_exprResultLabel = new QLabel(nullptr, Qt::ToolTip | Qt::FramelessWindowHint);
+        m_exprResultLabel->setProperty("DarkTitleBar", true);
+        m_exprResultLabel->setAttribute(Qt::WA_ShowWithoutActivating);
+        m_exprResultLabel->setFocusPolicy(Qt::NoFocus);
+    }
+
+    const auto& theme = ThemeManager::instance().current();
+    m_exprResultLabel->setFont(editorFont());
+    m_exprResultLabel->setStyleSheet(
+        QStringLiteral("background:%1; border:1px solid %2; padding:2px 6px;")
+            .arg(theme.backgroundAlt.name(), theme.border.name()));
+    m_exprResultLabel->setText(
+        QStringLiteral("<span style='color:%1'>Result: </span><span style='color:%2'>%3</span>")
+            .arg(theme.textDim.name(), theme.text.name(), result.toHtmlEscaped()));
+    m_exprResultLabel->setTextFormat(Qt::RichText);
+    m_exprResultLabel->adjustSize();
+
+    // Position just above the edit line, aligned to the edit span start
+    long spanPos = posFromCol(m_sci, m_editState.line, m_editState.spanStart);
+    int px = (int)m_sci->SendScintilla(
+        QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, spanPos);
+    int py = (int)m_sci->SendScintilla(
+        QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, spanPos);
+    QPoint global = m_sci->viewport()->mapToGlobal(QPoint(px, py));
+    m_exprResultLabel->move(global.x(), global.y() - m_exprResultLabel->height() - 2);
+    m_exprResultLabel->show();
+    m_exprResultLabel->raise();
 }
 
 void RcxEditor::setCommandRowText(const QString& line) {

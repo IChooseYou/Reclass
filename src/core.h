@@ -845,14 +845,21 @@ inline int commandRowRootStart(const QString& lineText) {
 }
 
 inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
-    // Address starts at "0x" after the source dropdown arrow
+    // Address starts after the source dropdown arrow (▾)
     int arrow = lineText.indexOf(QChar(0x25BE));
     if (arrow < 0) return {};
-    int start = lineText.indexOf(QStringLiteral("0x"), arrow);
-    if (start < 0) {
-        // Formula mode: address is between arrow and root keyword
-        start = arrow + 1;
-        while (start < lineText.size() && lineText[start].isSpace()) start++;
+    // Skip whitespace after arrow to find the start of the address/formula
+    int addrStart = arrow + 1;
+    while (addrStart < lineText.size() && lineText[addrStart].isSpace()) addrStart++;
+    // If text starts with '<' or '[', it's a formula — use the whole thing.
+    // Only look for bare "0x" prefix if the address doesn't start with formula syntax.
+    int start;
+    if (addrStart < lineText.size()
+        && (lineText[addrStart] == '<' || lineText[addrStart] == '[')) {
+        start = addrStart;
+    } else {
+        int oxPos = lineText.indexOf(QStringLiteral("0x"), arrow);
+        start = (oxPos >= 0) ? oxPos : addrStart;
     }
     // End at root keyword (struct/class/enum) or end of line
     int rootStart = commandRowRootStart(lineText);
