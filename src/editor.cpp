@@ -908,6 +908,19 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // Force full re-lex to fix stale syntax coloring after edits
     m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, (uintptr_t)0, (long)-1);
 
+    // Clear all TEXTFORE indicators to prevent stale color bleed from previous frame
+    // (setText + COLOURISE should reset them, but under rapid batch operations a
+    //  green IND_TYPE_HINT can survive and color entire converted lines)
+    {
+        long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+        for (int ind : {IND_HEX_DIM, IND_BASE_ADDR, IND_HOVER_SPAN, IND_HEAT_COLD,
+                        IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
+                        IND_HEAT_HOT, IND_TYPE_HINT}) {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
+        }
+    }
+
     applyLineAttributes(result.meta);
     applyHexDimming(result.meta);
 

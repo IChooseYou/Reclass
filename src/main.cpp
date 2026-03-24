@@ -285,9 +285,14 @@ public:
             return 3;
         if (metric == PM_MenuVMargin)
             return 3;
-        // Thin draggable separator between dock widgets / central widget
         if (metric == PM_DockWidgetSeparatorExtent)
-            return 1;
+            return 4;
+        if (metric == PM_DockWidgetFrameWidth)
+            return 0;
+        if (metric == PM_DockWidgetTitleMargin)
+            return 0;
+        if (metric == PM_DockWidgetTitleBarButtonMargin)
+            return 0;
         return QProxyStyle::pixelMetric(metric, opt, w);
     }
     void drawPrimitive(PrimitiveElement elem, const QStyleOption* opt,
@@ -295,6 +300,15 @@ public:
         // Opaque fill + 1px border at the true widget edge.
         // WA_TranslucentBackground (set in polish) makes this a layered window,
         // so DWM doesn't clip any edges.
+        // Dock resize handle — invisible (painted in background color)
+        if (elem == PE_IndicatorDockWidgetResizeHandle) {
+            p->fillRect(opt->rect, opt->palette.color(QPalette::Window));
+            return;
+        }
+        // Suppress dock widget frame (removes internal padding around content)
+        if (elem == PE_FrameDockWidget) {
+            return;  // no frame
+        }
         if (elem == PE_FrameMenu) {
             QRect r = opt->rect;
             p->fillRect(r, opt->palette.color(QPalette::Window));
@@ -544,6 +558,46 @@ public:
     }
 };
 
+class InspectionOverlay : public QWidget {
+public:
+    QRect  highlightRect;   // in parent (MainWindow) coordinates
+    QString label;
+
+    explicit InspectionOverlay(QWidget* parent) : QWidget(parent) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setFocusPolicy(Qt::NoFocus);
+        hide();
+    }
+    void paintEvent(QPaintEvent*) override {
+        if (highlightRect.isNull()) return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+
+        // Red highlight rectangle (2px)
+        p.setPen(QPen(QColor(255, 60, 60), 2));
+        p.setBrush(QColor(255, 60, 60, 20));
+        p.drawRect(highlightRect.adjusted(1, 1, -1, -1));
+
+        // Floating label above the rect
+        if (!label.isEmpty()) {
+            QFont f = p.font();
+            f.setPointSize(9);
+            p.setFont(f);
+            QFontMetrics fm(f);
+            QRect lr = fm.boundingRect(label).adjusted(-6, -2, 6, 2);
+            lr.moveBottomLeft(highlightRect.topLeft() + QPoint(0, -3));
+            if (lr.top() < 0)
+                lr.moveTopLeft(highlightRect.bottomLeft() + QPoint(0, 3));
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0, 0, 0, 200));
+            p.drawRoundedRect(lr, 3, 3);
+            p.setPen(Qt::white);
+            p.drawText(lr, Qt::AlignCenter, label);
+        }
+    }
+};
+
 namespace rcx {
 
 #ifdef __APPLE__
@@ -648,6 +702,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         m_mcp->start();
 
     // Active doc tracking is handled per dock in createTab() via visibilityChanged
+
+    // Install global event filter for Ctrl+Click UI inspection
+    qApp->installEventFilter(this);
 
     // Ensure border overlay is on top after initial layout settles
     QTimer::singleShot(0, this, [this]() {
@@ -1024,7 +1081,7 @@ private:
 class DockGripWidget : public QWidget {
 public:
     explicit DockGripWidget(QWidget* parent) : QWidget(parent) {
-        setFixedWidth(6);
+        setFixedWidth(12);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
         m_color = rcx::ThemeManager::instance().current().textFaint;
     }
@@ -1038,14 +1095,42 @@ protected:
         const double r = 0.75, s = 3.0;
         double cx = width() / 2.0;
         double cy = height() / 2.0;
-        // 2 columns x 4 rows, centered
-        for (int row = -2; row <= 1; row++) {
-            p.drawEllipse(QPointF(cx - s * 0.5, cy + row * s), r, r);
-            p.drawEllipse(QPointF(cx + s * 0.5, cy + row * s), r, r);
+        // 2 columns x 4 rows, centered symmetrically
+        const double offsets[] = {-1.5, -0.5, 0.5, 1.5};
+        for (double off : offsets) {
+            p.drawEllipse(QPointF(cx - s * 0.5, cy + off * s), r, r);
+            p.drawEllipse(QPointF(cx + s * 0.5, cy + off * s), r, r);
         }
     }
 private:
     QColor m_color;
+};
+
+// ── Custom-painted dock title bar ──
+// Used as QDockWidget::setTitleBarWidget(). Paints its own background so Fusion
+// can't insert frames or steal pixels. Qt handles drag/dock natively.
+class DockTitleBar : public QWidget {
+    int m_h;
+    QColor m_bg;
+    QColor m_borderRight;
+public:
+    explicit DockTitleBar(int height, const QColor& bg, QWidget* parent = nullptr)
+        : QWidget(parent), m_h(height), m_bg(bg) {
+        setMinimumHeight(m_h);
+        setMaximumHeight(m_h);
+    }
+    void setBarHeight(int h) { m_h = h; setMinimumHeight(h); setMaximumHeight(h); updateGeometry(); }
+    void setBackground(const QColor& c) { m_bg = c; update(); }
+    void setBorderRight(const QColor& c) { m_borderRight = c; update(); }
+    QSize sizeHint()        const override { return {QWidget::sizeHint().width(), m_h}; }
+    QSize minimumSizeHint() const override { return {0, m_h}; }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), m_bg);
+        if (m_borderRight.isValid())
+            p.fillRect(width() - 1, 0, 1, height(), m_borderRight);
+    }
 };
 
 // ── Custom-painted view tab button (no CSS) ──
@@ -1212,6 +1297,7 @@ public:
 
     explicit FlatStatusBar(QWidget* parent = nullptr) : QStatusBar(parent) {
         setSizeGripEnabled(false);
+        setStyleSheet(QStringLiteral("QStatusBar { border: none; }"));
     }
 
     QSize sizeHint() const override {
@@ -1228,9 +1314,11 @@ protected:
         QPainter p(this);
         p.fillRect(rect(), palette().window());
 
-        // Top hairline separator
-        if (m_top.isValid())
-            p.fillRect(0, 0, width(), 1, m_top);
+        // Top hairline separator (1 device pixel)
+        if (m_top.isValid()) {
+            qreal dpr = devicePixelRatioF();
+            p.fillRect(QRectF(0, 0, width(), 1.0 / dpr), m_top);
+        }
 
         // Vertical divider between tabRow and label
         if (m_div.isValid() && m_divX >= 0)
@@ -2299,6 +2387,47 @@ void MainWindow::setupDockTabBars() {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    // ── Ctrl+Click: UI inspection ──
+    if (event->type() == QEvent::MouseButtonPress) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        if (me->button() == Qt::LeftButton
+            && (me->modifiers() & Qt::ControlModifier)
+            && (me->modifiers() & Qt::ShiftModifier)) {
+            QPoint globalPos = me->globalPosition().toPoint();
+            QWidget* hit = qApp->widgetAt(globalPos);
+            if (hit) {
+                auto result = inspectAt(hit, hit->mapFromGlobal(globalPos));
+                if (result.selected && result.region == m_inspectedRegion.region
+                    && m_inspectedRegion.selected) {
+                    clearInspection();
+                } else {
+                    m_inspectedRegion = result;
+                    // Show overlay
+                    if (!m_inspectionOverlay)
+                        m_inspectionOverlay = new InspectionOverlay(this);
+                    auto* overlay = static_cast<InspectionOverlay*>(m_inspectionOverlay);
+                    overlay->highlightRect = QRect(
+                        mapFromGlobal(result.globalRect.topLeft()),
+                        result.globalRect.size());
+                    overlay->label = result.region;
+                    overlay->setGeometry(rect());
+                    overlay->raise();
+                    overlay->show();
+                    overlay->update();
+                    // Status bar
+                    QString dimPart;
+                    for (const auto& v : result.themeColors) {
+                        auto co = v.toObject();
+                        dimPart += QStringLiteral("  %1=%2")
+                            .arg(co["key"].toString(), co["value"].toString());
+                    }
+                    setAppStatus(result.region, dimPart);
+                }
+            }
+            return true; // consume
+        }
+    }
+
     if (event->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(event);
         if (auto* tabBar = qobject_cast<QTabBar*>(obj)) {
@@ -2697,9 +2826,10 @@ void MainWindow::applyTheme(const Theme& theme) {
     // QWidget default colors are required because having ANY stylesheet on QMainWindow
     // switches children from palette-based to CSS-based rendering.
     setStyleSheet(QStringLiteral(
-        "QMainWindow::separator { width: 1px; height: 1px; background: %1; }"
-        "QDockWidget { border: none; }"
-        "QDockWidget > QWidget { border: none; }").arg(theme.background.name()));
+        "QMainWindow::separator { width: 4px; height: 4px; background: %1; }"
+        "QDockWidget { border: none; margin: 0px; padding: 0px; }"
+        "QDockWidget > QWidget { border: none; margin: 0px; padding: 0px; }")
+        .arg(theme.background.name()));
 
     // Custom title bar — applied AFTER setStyleSheet() because the MainWindow
     // stylesheet re-resolves descendant palettes and would reset the QMenuBar palette.
@@ -2835,14 +2965,12 @@ void MainWindow::applyTheme(const Theme& theme) {
     if (m_workspaceSearch) {
         m_workspaceSearch->setStyleSheet(QStringLiteral(
             "QLineEdit { background: %1; color: %2;"
-            " border: 1px solid %4;"
+            " border: none;"
             " padding: 4px 8px 4px 2px; }"
-            "QLineEdit:focus { border: 1px solid %5; }"
             "QLineEdit QToolButton { padding: 0px 8px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
             .arg(theme.background.name(), theme.textDim.name(),
-                 theme.hover.name(), theme.border.name(),
-                 theme.borderFocused.name()));
+                 theme.hover.name()));
     }
 
     // Workspace tab bar + separator theme update
@@ -2859,34 +2987,27 @@ void MainWindow::applyTheme(const Theme& theme) {
         if (auto* sep = m_workspaceDock->findChild<QFrame*>("workspaceSep")) {
             sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
         }
-        m_workspaceDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
+        if (auto* sep = m_workspaceDock->findChild<QFrame*>("workspaceSepTop")) {
+            sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
+        }
     }
 
-    // Dock titlebar: restyle via stylesheet + close button
+    // Dock header: restyle title label, header background, close button, grip
     if (m_dockTitleLabel)
         m_dockTitleLabel->setStyleSheet(
             QStringLiteral("color: %1;").arg(theme.textDim.name()));
-    if (auto* titleBar = m_workspaceDock ? m_workspaceDock->titleBarWidget() : nullptr) {
-        QPalette tbPal = titleBar->palette();
-        tbPal.setColor(QPalette::Window, theme.backgroundAlt);
-        titleBar->setPalette(tbPal);
+    if (auto* header = m_workspaceDock ? m_workspaceDock->findChild<DockTitleBar*>("workspaceHeader") : nullptr) {
+        header->setBackground(theme.background);
     }
     if (m_dockCloseBtn)
         m_dockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
-            "QToolButton:hover { color: %2; }")
-            .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+            "QToolButton { border: none; padding: 0px; }"
+            "QToolButton:hover { background: %1; }")
+            .arg(theme.hover.name()));
     if (m_dockGrip)
         m_dockGrip->setGripColor(theme.textFaint);
-    if (m_workspaceDock)
-        m_workspaceDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
 
     // Scanner dock
-    if (m_scannerDock)
-        m_scannerDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
     if (m_scannerPanel)
         m_scannerPanel->applyTheme(theme);
     if (m_scanDockTitle)
@@ -2906,9 +3027,6 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_scanDockGrip->setGripColor(theme.textFaint);
 
     // Symbols dock
-    if (m_symbolsDock)
-        m_symbolsDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(theme.border.name()));
     if (m_symDockTitle)
         m_symDockTitle->setStyleSheet(
             QStringLiteral("color: %1;").arg(theme.textDim.name()));
@@ -2931,14 +3049,12 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_symDockGrip->setGripColor(theme.textFaint);
     QString searchBoxStyle = QStringLiteral(
         "QLineEdit { background: %1; color: %2;"
-        " border: 1px solid %4;"
+        " border: none;"
         " padding: 4px 8px 4px 2px; }"
-        "QLineEdit:focus { border: 1px solid %5; }"
         "QLineEdit QToolButton { padding: 0px 8px; }"
         "QLineEdit QToolButton:hover { background: %3; }")
         .arg(theme.background.name(), theme.textDim.name(),
-             theme.hover.name(), theme.border.name(),
-             theme.borderFocused.name());
+             theme.hover.name());
     if (m_symbolsSearch)
         m_symbolsSearch->setStyleSheet(searchBoxStyle);
     if (m_typesSearch)
@@ -3984,28 +4100,22 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceDock = new QDockWidget("Project", this);
     m_workspaceDock->setObjectName("WorkspaceDock");
     m_workspaceDock->setAllowedAreas(Qt::AllDockWidgetAreas);
-    m_workspaceDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
+    m_workspaceDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
 
-    // Custom titlebar: label + ✕ close button (matches MDI tab style)
+    // Custom titlebar — Qt handles drag/dock natively via setTitleBarWidget
+    const auto& t = ThemeManager::instance().current();
     {
-        const auto& t = ThemeManager::instance().current();
-
-        auto* titleBar = new QWidget(m_workspaceDock);
-        titleBar->setFixedHeight(29);
-        titleBar->setAutoFillBackground(true);
-        {
-            QPalette tbPal = titleBar->palette();
-            tbPal.setColor(QPalette::Window, t.backgroundAlt);
-            titleBar->setPalette(tbPal);
-        }
-        auto* layout = new QHBoxLayout(titleBar);
-        layout->setContentsMargins(4, 2, 2, 2);
-        layout->setSpacing(4);
+        auto* titleBar = new DockTitleBar(36, t.background, m_workspaceDock);
+        titleBar->setObjectName(QStringLiteral("workspaceHeader"));
+        auto* headerLayout = new QHBoxLayout(titleBar);
+        headerLayout->setContentsMargins(6, 0, 4, 0);
+        headerLayout->setSpacing(4);
 
         m_dockGrip = new DockGripWidget(titleBar);
-        layout->addWidget(m_dockGrip);
+        headerLayout->addWidget(m_dockGrip);
 
         m_dockTitleLabel = new QLabel("Project", titleBar);
+        m_dockTitleLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
         {
             m_dockTitleLabel->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
@@ -4014,38 +4124,42 @@ void MainWindow::createWorkspaceDock() {
             f.setFixedPitch(true);
             m_dockTitleLabel->setFont(f);
         }
-        layout->addWidget(m_dockTitleLabel);
+        headerLayout->addWidget(m_dockTitleLabel);
 
-        layout->addStretch();
+        headerLayout->addStretch();
 
         m_dockCloseBtn = new QToolButton(titleBar);
         m_dockCloseBtn->setIcon(QIcon(QStringLiteral(":/vsicons/close.svg")));
         m_dockCloseBtn->setIconSize(QSize(14, 14));
+        m_dockCloseBtn->setFixedSize(22, 22);
         m_dockCloseBtn->setAutoRaise(true);
         m_dockCloseBtn->setCursor(Qt::PointingHandCursor);
         m_dockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { border: none; padding: 0px 4px; }"
+            "QToolButton { border: none; padding: 0px; }"
             "QToolButton:hover { background: %1; }")
             .arg(t.hover.name()));
         connect(m_dockCloseBtn, &QToolButton::clicked, m_workspaceDock, &QDockWidget::close);
-        layout->addWidget(m_dockCloseBtn);
+        headerLayout->addWidget(m_dockCloseBtn, 0, Qt::AlignVCenter);
 
         m_workspaceDock->setTitleBarWidget(titleBar);
     }
 
-    // Outer border around entire dock (header + search + tree)
-    // background + ::title needed to suppress Fusion outline frame (renders ~#171717)
-    {
-        const auto& t = ThemeManager::instance().current();
-        m_workspaceDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
-    }
-
-    // Container widget: search box + tree view
+    // Content container: search + tree
     auto* dockContainer = new QWidget(m_workspaceDock);
+    dockContainer->setObjectName(QStringLiteral("workspaceContainer"));
     auto* dockLayout = new QVBoxLayout(dockContainer);
     dockLayout->setContentsMargins(0, 0, 0, 0);
     dockLayout->setSpacing(0);
+
+    // Separator above search
+    {
+        auto* sep = new QFrame(dockContainer);
+        sep->setObjectName(QStringLiteral("workspaceSepTop"));
+        sep->setFrameShape(QFrame::HLine);
+        sep->setFixedHeight(1);
+        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
+        dockLayout->addWidget(sep);
+    }
 
     m_workspaceSearch = new QLineEdit(dockContainer);
     m_workspaceSearch->setPlaceholderText(QStringLiteral("Filter types..."));
@@ -4090,16 +4204,15 @@ void MainWindow::createWorkspaceDock() {
         const auto& t = ThemeManager::instance().current();
         m_workspaceSearch->setStyleSheet(QStringLiteral(
             "QLineEdit { background: %1; color: %2;"
-            " border: 1px solid %4;"
-            " padding: 4px 8px 4px 2px; }"
-            "QLineEdit:focus { border: 1px solid %5; }"
+            " border: none;"
+            " padding: 2px 8px 2px 2px; }"
             "QLineEdit QToolButton { padding: 0px 8px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
             .arg(t.background.name(), t.textDim.name(),
-                 t.hover.name(), t.border.name(),
-                 t.borderFocused.name()));
+                 t.hover.name()));
     }
-    m_workspaceSearch->setContentsMargins(6, 6, 6, 6);
+    m_workspaceSearch->setFixedHeight(26);
+    m_workspaceSearch->setContentsMargins(4, 0, 4, 0);
     dockLayout->addWidget(m_workspaceSearch);
     // Separator below search
     {
@@ -4651,12 +4764,6 @@ void MainWindow::createScannerDock() {
         m_scannerDock->setTitleBarWidget(titleBar);
     }
 
-    {
-        const auto& t = ThemeManager::instance().current();
-        m_scannerDock->setStyleSheet(QStringLiteral(
-            "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
-    }
-
     m_scannerPanel = new ScannerPanel(m_scannerDock);
     m_scannerPanel->applyTheme(ThemeManager::instance().current());
     {
@@ -4804,9 +4911,6 @@ void MainWindow::createSymbolsDock() {
 
         m_symbolsDock->setTitleBarWidget(titleBar);
     }
-
-    m_symbolsDock->setStyleSheet(QStringLiteral(
-        "QDockWidget { border: 1px solid %1; }").arg(t.border.name()));
 
     // Helper: style a tree view to match theme
     auto styleTree = [&](QTreeView* tree) {
@@ -5144,14 +5248,12 @@ void MainWindow::createSymbolsDock() {
         }
         m_symbolsSearch->setStyleSheet(QStringLiteral(
             "QLineEdit { background: %1; color: %2;"
-            " border: 1px solid %4;"
+            " border: none;"
             " padding: 4px 8px 4px 2px; }"
-            "QLineEdit:focus { border: 1px solid %5; }"
             "QLineEdit QToolButton { padding: 0px 8px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
             .arg(t.background.name(), t.textDim.name(),
-                 t.hover.name(), t.border.name(),
-                 t.borderFocused.name()));
+                 t.hover.name()));
         m_symbolsSearch->setContentsMargins(6, 6, 6, 6);
         symLayout->addWidget(m_symbolsSearch);
 
@@ -6130,6 +6232,347 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 void MainWindow::updateBorderColor(const QColor& color) {
     static_cast<BorderOverlay*>(m_borderOverlay)->color = color;
     m_borderOverlay->update();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// UI Inspection (Ctrl+Shift+Click)
+// ════════════════════════════════════════════════════════════════════
+
+void MainWindow::clearInspection() {
+    m_inspectedRegion = InspectionResult{};
+    if (m_inspectionOverlay) {
+        m_inspectionOverlay->hide();
+        static_cast<InspectionOverlay*>(m_inspectionOverlay)->highlightRect = QRect();
+    }
+    setAppStatus("");
+}
+
+// Helper: build theme color entries for a set of field keys
+static QJsonArray themeColorsForKeys(const QStringList& keys) {
+    const auto& theme = ThemeManager::instance().current();
+    QJsonArray arr;
+    for (const QString& key : keys) {
+        for (int i = 0; i < kThemeFieldCount; i++) {
+            if (key == QLatin1String(kThemeFields[i].key)) {
+                QJsonObject entry;
+                entry["key"] = key;
+                entry["value"] = (theme.*kThemeFields[i].ptr).name();
+                entry["label"] = QString::fromLatin1(kThemeFields[i].label);
+                entry["group"] = QString::fromLatin1(kThemeFields[i].group);
+                arr.append(entry);
+                break;
+            }
+        }
+    }
+    return arr;
+}
+
+// Region → theme field keys mapping
+static QStringList themeKeysForRegion(const QString& region) {
+    static const QHash<QString, QStringList> map = {
+        {"editor.typeColumn",  {"syntaxKeyword", "syntaxType", "text"}},
+        {"editor.nameColumn",  {"text"}},
+        {"editor.valueColumn", {"text", "syntaxNumber", "indHeatCold", "indHeatWarm", "indHeatHot"}},
+        {"editor.hexBytes",    {"textFaint"}},
+        {"editor.foldArrow",   {"textFaint"}},
+        {"editor.margin",      {"textFaint", "background"}},
+        {"editor.asciiPreview", {"textFaint"}},
+        {"editor.commandRow",  {"indCmdPill", "textFaint", "indHoverSpan", "syntaxType"}},
+        {"editor.footer",      {"textFaint", "indCmdPill"}},
+        {"editor.header",      {"background", "text", "textFaint"}},
+        {"editor.treeLines",   {"textFaint"}},
+        {"editor.background",  {"background"}},
+        {"workspace.tree",     {"background", "text", "textDim", "hover", "selected"}},
+        {"dockTabBar",         {"background", "text", "textDim", "hover", "border", "indHoverSpan"}},
+        {"statusBar",          {"background", "textDim", "textMuted", "border"}},
+        {"menuBar",            {"background", "text", "hover", "border"}},
+        {"scanner",            {"background", "text", "textDim", "border"}},
+        {"symbols.tree",       {"background", "text", "textDim", "hover", "selected"}},
+        {"mainWindow.border",  {"border", "borderFocused"}},
+    };
+    return map.value(region);
+}
+
+MainWindow::InspectionResult MainWindow::inspectAt(QWidget* widget, QPoint localPos) {
+    InspectionResult r;
+    r.selected = true;
+    r.widgetName = QString::fromLatin1(widget->metaObject()->className());
+    r.globalRect = QRect(widget->mapToGlobal(QPoint(0, 0)), widget->size());
+
+    // Generic properties for any widget
+    r.properties["className"] = r.widgetName;
+    r.properties["objectName"] = widget->objectName();
+    r.properties["width"] = widget->width();
+    r.properties["height"] = widget->height();
+
+    // ── RcxEditor (Scintilla viewport) ──
+    // Walk up from the hit widget to find QsciScintilla → RcxEditor
+    RcxEditor* editor = nullptr;
+    {
+        QsciScintilla* sci = qobject_cast<QsciScintilla*>(widget);
+        if (!sci) sci = qobject_cast<QsciScintilla*>(widget->parent());
+        if (sci) {
+            for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+                for (const auto& pane : it->panes) {
+                    if (pane.editor && pane.editor->scintilla() == sci) {
+                        editor = pane.editor;
+                        break;
+                    }
+                }
+                if (editor) break;
+            }
+        }
+    }
+    if (editor) {
+        auto* sci = editor->scintilla();
+        QWidget* vp = sci->viewport();
+        QPoint vpPos = vp->mapFromGlobal(widget->mapToGlobal(localPos));
+
+        // Scintilla coordinate helpers
+        auto posFromCol = [sci](int ln, int c) -> long {
+            return sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                      (unsigned long)ln, (long)c);
+        };
+        auto pixelX = [sci](long bytePos) -> int {
+            return (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION,
+                                            0UL, bytePos);
+        };
+        auto pixelY = [sci](long bytePos) -> int {
+            return (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION,
+                                            0UL, bytePos);
+        };
+        int lineH = (int)sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+
+        // Helper: build a global rect from a column span on a given line
+        auto spanRect = [&](int ln, const ColumnSpan& s) -> QRect {
+            if (!s.valid) return {};
+            int x1 = pixelX(posFromCol(ln, s.start));
+            int x2 = pixelX(posFromCol(ln, s.end));
+            int y = pixelY(posFromCol(ln, 0));
+            return QRect(vp->mapToGlobal(QPoint(x1, y)), QSize(qMax(x2 - x1, 4), lineH));
+        };
+        // Helper: full-width line rect
+        auto lineRect = [&](int ln) -> QRect {
+            int y = pixelY(posFromCol(ln, 0));
+            return QRect(vp->mapToGlobal(QPoint(0, y)), QSize(vp->width(), lineH));
+        };
+
+        // Check if in margin area (left of viewport)
+        int margin0W = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINWIDTHN, 0UL, 0L);
+        int margin1W = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINWIDTHN, 1UL, 0L);
+        int totalMarginW = margin0W + margin1W;
+        if (vpPos.x() < 0) {
+            // Click was in the margin (to the left of the viewport)
+            r.region = QStringLiteral("editor.margin");
+            r.description = QStringLiteral("Offset margin — hex addresses/relative offsets");
+            r.globalRect = QRect(sci->mapToGlobal(QPoint(0, 0)),
+                                 QSize(totalMarginW, vp->height()));
+            r.properties["marginWidth"] = margin0W;
+            r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+            r.properties["fontSize"] = sci->font().pointSize();
+            r.properties["fontFamily"] = sci->font().family();
+            return r;
+        }
+
+        // Resolve line/col via Scintilla API
+        long pos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMPOINTCLOSE,
+                                       (unsigned long)vpPos.x(), (long)vpPos.y());
+        int line = -1, col = -1;
+        if (pos >= 0) {
+            line = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINEFROMPOSITION, (unsigned long)pos);
+            col = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETCOLUMN, (unsigned long)pos);
+        } else {
+            // Fallback: compute line from Y coordinate
+            int firstVisible = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+            if (lineH > 0) line = firstVisible + vpPos.y() / lineH;
+        }
+
+        const LineMeta* lm = (line >= 0) ? editor->metaForLine(line) : nullptr;
+        if (lm) {
+            int typeW = lm->effectiveTypeW;
+            int nameW = lm->effectiveNameW;
+            int lineLen = (int)sci->SendScintilla(
+                QsciScintillaBase::SCI_GETLINEENDPOSITION, (unsigned long)line)
+                - (int)sci->SendScintilla(
+                    QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)line);
+            ColumnSpan ts = RcxEditor::typeSpan(*lm, typeW);
+            ColumnSpan ns = RcxEditor::nameSpan(*lm, typeW, nameW);
+            ColumnSpan vs = RcxEditor::valueSpan(*lm, lineLen, typeW, nameW);
+
+            // Identify region + compute tight rect
+            if (lm->lineKind == LineKind::CommandRow) {
+                r.region = QStringLiteral("editor.commandRow");
+                r.description = QStringLiteral("Command row — source, address, root type");
+                r.globalRect = lineRect(line);
+            } else if (lm->lineKind == LineKind::Footer) {
+                r.region = QStringLiteral("editor.footer");
+                r.description = QStringLiteral("Struct footer — append/trim buttons");
+                r.globalRect = lineRect(line);
+            } else if (lm->lineKind == LineKind::Header) {
+                r.region = QStringLiteral("editor.header");
+                r.description = QStringLiteral("Struct/array header line");
+                r.globalRect = lineRect(line);
+            } else if (col >= 0 && col < kFoldCol + 1 && lm->foldHead) {
+                r.region = QStringLiteral("editor.foldArrow");
+                r.description = QStringLiteral("Fold arrow — click to expand/collapse");
+                r.globalRect = spanRect(line, {0, kFoldCol, true});
+            } else if (col >= 0 && col < kFoldCol + lm->depth * 3 && lm->depth > 0) {
+                r.region = QStringLiteral("editor.treeLines");
+                r.description = QStringLiteral("Tree indent connectors (├─ └─ │)");
+                r.globalRect = spanRect(line, {kFoldCol, kFoldCol + lm->depth * 3, true});
+            } else if (ts.valid && col >= ts.start && col < ts.end) {
+                r.region = QStringLiteral("editor.typeColumn");
+                r.description = QStringLiteral("Type column — field type names (int32_t, float, void*, etc.)");
+                r.globalRect = spanRect(line, ts);
+            } else if (ns.valid && col >= ns.start && col < ns.end) {
+                if (isHexPreview(lm->nodeKind)) {
+                    r.region = QStringLiteral("editor.asciiPreview");
+                    r.description = QStringLiteral("ASCII preview — printable character display for hex nodes");
+                    r.globalRect = spanRect(line, ns);
+                } else {
+                    r.region = QStringLiteral("editor.nameColumn");
+                    r.description = QStringLiteral("Name column — field names");
+                    r.globalRect = spanRect(line, ns);
+                }
+            } else if (vs.valid && col >= vs.start && col < vs.end) {
+                if (isHexPreview(lm->nodeKind)) {
+                    r.region = QStringLiteral("editor.hexBytes");
+                    r.description = QStringLiteral("Hex bytes — raw byte values (00 FF A3 ...)");
+                    r.globalRect = spanRect(line, vs);
+                } else {
+                    r.region = QStringLiteral("editor.valueColumn");
+                    r.description = QStringLiteral("Value column — live memory values");
+                    r.globalRect = spanRect(line, vs);
+                    if (lm->heatLevel > 0)
+                        r.properties["heatLevel"] = lm->heatLevel;
+                }
+            } else {
+                r.region = QStringLiteral("editor.background");
+                r.description = QStringLiteral("Editor background — empty area");
+                r.globalRect = lineRect(line);
+            }
+
+            // Extra context from LineMeta
+            r.properties["line"] = line;
+            r.properties["lineKind"] = (int)lm->lineKind;
+            if (lm->nodeId != 0)
+                r.properties["nodeId"] = QString::number(lm->nodeId);
+            if (lm->nodeKind != NodeKind::Int32)
+                r.properties["nodeKind"] = QString::fromLatin1(kindToString(lm->nodeKind));
+        } else {
+            r.region = QStringLiteral("editor.background");
+            r.description = QStringLiteral("Editor background — below content");
+            r.globalRect = QRect(vp->mapToGlobal(QPoint(0, 0)), vp->size());
+        }
+
+        // Editor-specific properties
+        r.properties["fontSize"] = sci->font().pointSize();
+        r.properties["fontFamily"] = sci->font().family();
+        r.properties["lineHeight"] = lineH;
+        r.properties["extraAscent"] = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETEXTRAASCENT);
+        r.properties["extraDescent"] = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETEXTRADESCENT);
+
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Workspace dock ──
+    if (m_workspaceDock && m_workspaceDock->isAncestorOf(widget)) {
+        if (m_workspaceTree && (widget == m_workspaceTree || m_workspaceTree->isAncestorOf(widget))) {
+            r.region = QStringLiteral("workspace.tree");
+            r.description = QStringLiteral("Project tree — struct/type list");
+        } else {
+            r.region = QStringLiteral("workspace.tree");
+            r.description = QStringLiteral("Workspace dock");
+        }
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Scanner dock ──
+    if (m_scannerDock && m_scannerDock->isAncestorOf(widget)) {
+        r.region = QStringLiteral("scanner");
+        r.description = QStringLiteral("Scanner panel — value/pattern search");
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Symbols dock ──
+    if (m_symbolsDock && m_symbolsDock->isAncestorOf(widget)) {
+        r.region = QStringLiteral("symbols.tree");
+        r.description = QStringLiteral("Symbols/modules panel");
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Status bar ──
+    if (statusBar() && statusBar()->isAncestorOf(widget)) {
+        r.region = QStringLiteral("statusBar");
+        r.description = QStringLiteral("Status bar — app status, MCP activity");
+        r.properties["height"] = statusBar()->height();
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Dock tab bar ──
+    if (auto* tabBar = qobject_cast<QTabBar*>(widget)) {
+        if (tabBar->parent() == this) {
+            r.region = QStringLiteral("dockTabBar");
+            r.description = QStringLiteral("Document tab bar — switch between open types");
+            r.properties["tabCount"] = tabBar->count();
+            r.properties["tabHeight"] = tabBar->height();
+            r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+            return r;
+        }
+    }
+    // Tab bar child widgets (close buttons etc.)
+    for (QWidget* p = widget->parentWidget(); p; p = p->parentWidget()) {
+        if (auto* tabBar = qobject_cast<QTabBar*>(p)) {
+            if (tabBar->parent() == this) {
+                r.region = QStringLiteral("dockTabBar");
+                r.description = QStringLiteral("Document tab bar");
+                r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+                return r;
+            }
+        }
+    }
+
+    // ── Menu bar ──
+    if (m_menuBar && (widget == m_menuBar || m_menuBar->isAncestorOf(widget))) {
+        r.region = QStringLiteral("menuBar");
+        r.description = QStringLiteral("Menu bar");
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+    if (qobject_cast<QMenu*>(widget)) {
+        r.region = QStringLiteral("menuBar");
+        r.description = QStringLiteral("Menu popup");
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Title bar ──
+    if (m_titleBar && m_titleBar->isAncestorOf(widget)) {
+        r.region = QStringLiteral("menuBar");
+        r.description = QStringLiteral("Title bar / menu bar");
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Main window border ──
+    if (widget == m_borderOverlay) {
+        r.region = QStringLiteral("mainWindow.border");
+        r.description = QStringLiteral("Window border");
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
+    // ── Fallback ──
+    r.region = r.widgetName;
+    r.description = QStringLiteral("Unknown widget: ") + r.widgetName;
+    // Return all theme colors as fallback
+    r.themeColors = themeColorsForKeys({"background", "text", "textDim", "hover", "border"});
+    return r;
 }
 
 void MainWindow::showStartPage() {

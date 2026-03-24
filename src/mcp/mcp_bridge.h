@@ -95,6 +95,13 @@ private:
     QJsonObject toolAnalysisImportHeader(const QJsonObject& args);
     QJsonObject toolAnalysisPointerChain(const QJsonObject& args);
 
+    // UI inspection + theme tools
+    QJsonObject toolUiInspect(const QJsonObject& args);
+    QJsonObject toolThemeGet(const QJsonObject& args);
+    QJsonObject toolThemeSet(const QJsonObject& args);
+    QJsonObject toolThemeSave(const QJsonObject& args);
+    QJsonObject toolThemeRevert(const QJsonObject& args);
+
     // Helpers
     QJsonObject makeTextResult(const QString& text, bool isError = false);
     QString resolvePlaceholder(const QString& ref,

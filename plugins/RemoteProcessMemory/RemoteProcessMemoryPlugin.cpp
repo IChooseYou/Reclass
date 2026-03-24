@@ -919,6 +919,15 @@ RemoteProcessMemoryPlugin::getOrCreateConnection(
     if (it != m_connections.end() && (*it)->connected)
         return *it;
 
+    /* Explicitly disconnect the old client before creating a new one.
+       Without this, the old IpcClient's OS handles (SHM mapping, events)
+       stay open and two clients race over the same shared memory — causing
+       crashes when the stale provider issues reads concurrently. */
+    if (it != m_connections.end()) {
+        (*it)->disconnect();
+        m_connections.erase(it);
+    }
+
     auto ipc = std::make_shared<IpcClient>();
     if (!ipc->connect(pid)) {
         if (errorMsg)

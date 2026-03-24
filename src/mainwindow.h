@@ -18,6 +18,8 @@ namespace rcx { class SymbolDownloader; }
 #include <QLineEdit>
 #include <QMap>
 #include <QButtonGroup>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QComboBox>
 #include <QPushButton>
 #include <QTimer>
@@ -103,6 +105,21 @@ private:
     QMenuBar*       m_menuBar = nullptr;
     bool            m_menuBarTitleCase = false;
     QWidget*        m_borderOverlay = nullptr;
+
+    // ── UI Inspection (Ctrl+Click) ──
+    QWidget*        m_inspectionOverlay = nullptr;
+    struct InspectionResult {
+        bool        selected = false;
+        QString     widgetName;
+        QString     region;
+        QString     description;
+        QRect       globalRect;
+        QJsonArray  themeColors;   // [{key, value, label, group}]
+        QJsonObject properties;    // {fontSize, fontFamily, width, height, ...}
+    };
+    InspectionResult m_inspectedRegion;
+    InspectionResult inspectAt(QWidget* widget, QPoint localPos);
+    void clearInspection();
     PluginManager   m_pluginManager;
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
