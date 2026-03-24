@@ -280,7 +280,7 @@ private:
         if (m_hz == HZ_Continue) lf.setUnderline(true);
         p.setFont(lf); p.setPen(m_t.indHoverSpan);
         QFontMetrics lfm(lf);
-        QString ct = QStringLiteral("Continue  \u2192");
+        QString ct = QStringLiteral("Tutorial  \u2192");
         int cw = lfm.horizontalAdvance(ct);
         m_contR = QRectF(x + (w - cw) / 2, cy, cw, lfm.height());
         p.drawText(int(m_contR.x()), cy + lfm.ascent(), ct);
