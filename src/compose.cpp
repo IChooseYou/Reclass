@@ -208,7 +208,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
     QString ptrTypeOverride;
     QString ptrTargetName;
     if (node.kind == NodeKind::Pointer32 || node.kind == NodeKind::Pointer64) {
-        if (node.ptrDepth > 0 && isValidPrimitivePtrTarget(node.elementKind)) {
+        if (node.ptrDepth > 0 && node.refId == 0 && isValidPrimitivePtrTarget(node.elementKind)) {
             // Primitive pointer: e.g. "int32*" or "f64**"
             const auto* meta = kindMeta(node.elementKind);
             QString baseName = meta ? QString::fromLatin1(meta->typeName)
@@ -217,7 +217,8 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             ptrTypeOverride = baseName + stars;
         } else {
             ptrTargetName = resolvePointerTarget(tree, node.refId);
-            ptrTypeOverride = fmt::pointerTypeName(node.kind, ptrTargetName);
+            QString stars = QString(node.ptrDepth + 1, QChar('*'));
+            ptrTypeOverride = (ptrTargetName.isEmpty() ? QStringLiteral("void") : ptrTargetName) + stars;
         }
     }
 
@@ -942,7 +943,8 @@ void composeNode(ComposeState& state, const NodeTree& tree,
     if ((node.kind == NodeKind::Pointer32 || node.kind == NodeKind::Pointer64)
         && node.refId != 0) {
         QString ptrTargetName = resolvePointerTarget(tree, node.refId);
-        QString ptrTypeOverride = fmt::pointerTypeName(node.kind, ptrTargetName);
+        QString stars = QString(node.ptrDepth + 1, QChar('*'));
+        QString ptrTypeOverride = (ptrTargetName.isEmpty() ? QStringLiteral("void") : ptrTargetName) + stars;
         if (node.isRelative)
             ptrTypeOverride += QStringLiteral(" rva");
 
@@ -1016,6 +1018,18 @@ void composeNode(ComposeState& state, const NodeTree& tree,
             // Relative pointer (RVA): target = base + value
             if (node.isRelative && ptrVal != 0)
                 ptrVal += base;
+
+            // Follow extra indirection levels for ** struct pointers
+            // ptrDepth=0 → single deref (normal *), ptrDepth=1 → double deref (**)
+            for (int d = 0; d < node.ptrDepth && ptrVal != 0; d++) {
+                bool is64 = (node.kind == NodeKind::Pointer64);
+                int psz = is64 ? 8 : 4;
+                if (!prov.isReadable(ptrVal, psz)) { ptrVal = 0; break; }
+                ptrVal = is64 ? prov.readU64(ptrVal)
+                              : (uint64_t)prov.readU32(ptrVal);
+                if (ptrVal == UINT64_MAX || (!is64 && ptrVal == 0xFFFFFFFF))
+                    ptrVal = 0;
+            }
 
             uint64_t pBase = ptrVal;
             bool ptrReadable = (ptrVal != 0) && prov.isReadable(pBase, 1);

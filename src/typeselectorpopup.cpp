@@ -587,7 +587,12 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
             .arg(theme.text.name(), theme.background.name(), theme.border.name(),
                  theme.text.name(), theme.selected.name(), theme.surface.name()));
         connect(m_createBtn, &QToolButton::clicked, this, [this]() {
-            emit createNewTypeRequested();
+            int modId = m_modGroup ? m_modGroup->checkedId() : -1;
+            if (modId < 0) modId = 0;  // -1 (no button checked) → 0 (plain)
+            int arrCount = 0;
+            if (modId == 3 && m_arrayCountEdit)
+                arrCount = m_arrayCountEdit->text().trimmed().toInt();
+            emit createNewTypeRequested(modId, arrCount);
             hide();
         });
         row->addWidget(m_createBtn);

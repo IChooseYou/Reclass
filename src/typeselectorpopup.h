@@ -78,7 +78,7 @@ public:
 
 signals:
     void typeSelected(const TypeEntry& entry, const QString& fullText);
-    void createNewTypeRequested();
+    void createNewTypeRequested(int modifierId, int arrayCount);
     void saveRequested();
     void dismissed();
 

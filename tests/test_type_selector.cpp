@@ -471,7 +471,7 @@ private slots:
         // Verify the entry came through — check the fullText (second arg)
         QCOMPARE(typeSpy.at(0).at(1).toString(), QStringLiteral("B"));
 
-        emit popup.createNewTypeRequested();
+        emit popup.createNewTypeRequested(0, 0);
         QCOMPARE(createSpy.count(), 1);
     }
 
@@ -1743,6 +1743,194 @@ private slots:
                  qPrintable(QString("Expected 'Bravo' in selected text, got '%1'").arg(selectedText)));
 
         popup.hide();
+    }
+
+    // ── createNewTypeRequested carries modifier state ──
+
+    void testCreateNewSignalCarriesModifier() {
+        TypeSelectorPopup popup;
+        popup.warmUp();
+        popup.setMode(TypePopupMode::FieldType);
+        popup.setPointerSize(8);
+
+        TypeEntry prim;
+        prim.entryKind = TypeEntry::Primitive;
+        prim.primitiveKind = NodeKind::Int32;
+        prim.displayName = "int32_t";
+        popup.setTypes({prim});
+
+        QSignalSpy spy(&popup, &TypeSelectorPopup::createNewTypeRequested);
+        QVERIFY(spy.isValid());
+
+        // ── Plain (no modifier) ──
+        popup.setModifier(0);
+        auto* createBtn = popup.findChild<QToolButton*>(QString(), Qt::FindDirectChildrenOnly);
+        // Find the "+ New" button by iterating children
+        QToolButton* newBtn = nullptr;
+        for (auto* btn : popup.findChildren<QToolButton*>()) {
+            if (btn->text().contains("New")) { newBtn = btn; break; }
+        }
+        QVERIFY2(newBtn, "Could not find '+ New' button in popup");
+
+        newBtn->click();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toInt(), 0);   // modifierId = 0 (plain)
+        QCOMPARE(spy.at(0).at(1).toInt(), 0);   // arrayCount = 0
+
+        // ── Pointer (*) modifier ──
+        spy.clear();
+        popup.show();
+        popup.setModifier(1);
+        newBtn->click();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toInt(), 1);   // modifierId = 1 (*)
+        QCOMPARE(spy.at(0).at(1).toInt(), 0);
+
+        // ── Double pointer (**) modifier ──
+        spy.clear();
+        popup.show();
+        popup.setModifier(2);
+        newBtn->click();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toInt(), 2);   // modifierId = 2 (**)
+
+        // ── Array ([]) modifier ──
+        spy.clear();
+        popup.show();
+        popup.setModifier(3, 16);
+        newBtn->click();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toInt(), 3);   // modifierId = 3 ([])
+        QCOMPARE(spy.at(0).at(1).toInt(), 16);  // arrayCount = 16
+    }
+
+    // ── Controller: createNewType with pointer modifier → node becomes Pointer64 ──
+
+    void testCreateNewTypeWithPtrModifier() {
+        // Setup: tree with one Hex64 field
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.structTypeName = "Root";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node field;
+        field.kind = NodeKind::Hex64;
+        field.name = "target";
+        field.parentId = rootId;
+        field.offset = 0;
+        int fi = tree.addNode(field);
+        uint64_t fieldId = tree.nodes[fi].id;
+
+        auto* doc = new RcxDocument();
+        doc->tree = tree;
+        doc->loadData(makeBuffer());
+        doc->tree.baseAddress = 0;
+
+        auto* splitter = new QSplitter;
+        auto ctrl = new RcxController(doc, splitter);
+        ctrl->addSplitEditor(splitter);
+        ctrl->setViewRootId(rootId);
+        ctrl->refresh();
+
+        // Simulate: popup selects "New" with * modifier (modifierId=1)
+        // This creates a new root struct and calls applyTypePopupResult with "NewClass*"
+        TypeEntry newEntry;
+        newEntry.entryKind = TypeEntry::Composite;
+
+        // Create the new struct manually (mimics what the handler does)
+        Node newStruct;
+        newStruct.kind = NodeKind::Struct;
+        newStruct.structTypeName = "TestNewClass";
+        newStruct.name = "instance";
+        newStruct.parentId = 0;
+        newStruct.offset = 0;
+        newStruct.id = doc->tree.reserveId();
+        doc->undoStack.push(new RcxCommand(ctrl, cmd::Insert{newStruct}));
+        newEntry.structId = newStruct.id;
+
+        // Apply with pointer modifier fullText
+        ctrl->applyTypePopupResult(TypePopupMode::FieldType, fi, newEntry,
+                                   QStringLiteral("TestNewClass*"));
+
+        // Verify: field should now be Pointer64 with refId pointing to the new struct
+        int updatedIdx = doc->tree.indexOfId(fieldId);
+        QVERIFY(updatedIdx >= 0);
+        const Node& updated = doc->tree.nodes[updatedIdx];
+        QCOMPARE(updated.kind, NodeKind::Pointer64);
+        QCOMPARE(updated.refId, newStruct.id);
+
+        delete splitter;
+        delete doc;
+    }
+
+    // ── Controller: createNewType with array modifier → node becomes Array ──
+
+    void testCreateNewTypeWithArrayModifier() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.structTypeName = "Root";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node field;
+        field.kind = NodeKind::Hex64;
+        field.name = "target";
+        field.parentId = rootId;
+        field.offset = 0;
+        int fi = tree.addNode(field);
+        uint64_t fieldId = tree.nodes[fi].id;
+
+        auto* doc = new RcxDocument();
+        doc->tree = tree;
+        doc->loadData(makeBuffer());
+        doc->tree.baseAddress = 0;
+
+        auto* splitter = new QSplitter;
+        auto ctrl = new RcxController(doc, splitter);
+        ctrl->addSplitEditor(splitter);
+        ctrl->setViewRootId(rootId);
+        ctrl->refresh();
+
+        // Create the new struct
+        Node newStruct;
+        newStruct.kind = NodeKind::Struct;
+        newStruct.structTypeName = "ArrayElemType";
+        newStruct.name = "instance";
+        newStruct.parentId = 0;
+        newStruct.offset = 0;
+        newStruct.id = doc->tree.reserveId();
+        doc->undoStack.push(new RcxCommand(ctrl, cmd::Insert{newStruct}));
+
+        TypeEntry newEntry;
+        newEntry.entryKind = TypeEntry::Composite;
+        newEntry.structId = newStruct.id;
+
+        // Apply with array modifier fullText
+        ctrl->applyTypePopupResult(TypePopupMode::FieldType, fi, newEntry,
+                                   QStringLiteral("ArrayElemType[10]"));
+
+        // Verify: field should now be Array with elementKind=Struct, arrayLen=10, refId set
+        int updatedIdx = doc->tree.indexOfId(fieldId);
+        QVERIFY(updatedIdx >= 0);
+        const Node& updated = doc->tree.nodes[updatedIdx];
+        QCOMPARE(updated.kind, NodeKind::Array);
+        QCOMPARE(updated.elementKind, NodeKind::Struct);
+        QCOMPARE(updated.arrayLen, 10);
+        QCOMPARE(updated.refId, newStruct.id);
+
+        delete splitter;
+        delete doc;
     }
 };
 

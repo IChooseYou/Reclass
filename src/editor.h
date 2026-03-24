@@ -39,6 +39,8 @@ public:
     void clearFocusNode();
     bool isFocusGlowActive() const { return m_focusNodeId != 0; }
     void setPresentationMode(bool on) { m_presentationMode = on; }
+    void setHoverEffects(bool on);
+    bool hoverEffects() const { return m_hoverEffects; }
     void showFindBar();
     void dismissHistoryPopup();
     void dismissAllPopups();
@@ -190,6 +192,9 @@ private:
     bool m_applyingDocument = false;
     bool m_clampingSelection = false;
     bool m_updatingComment = false;
+
+    // ── Hover effects toggle ──
+    bool m_hoverEffects = true;
 
     // ── Presentation mode (smooth scroll + focus glow) ──
     bool m_presentationMode = false;

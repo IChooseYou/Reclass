@@ -835,10 +835,19 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
     auto& node = m_doc->tree.nodes[nodeIdx];
 
     int oldSize = node.byteSize();
+    // For containers, byteSize() returns 0 — use structSpan for the real footprint
+    if (oldSize == 0 && (node.kind == NodeKind::Struct || node.kind == NodeKind::Array))
+        oldSize = m_doc->tree.structSpan(node.id);
     // Compute what byteSize() would be with the new kind
     Node tmp = node;
     tmp.kind = newKind;
     int newSize = tmp.byteSize();
+
+    // When converting TO a container (Struct/Array), the final size depends on
+    // refId/arrayMeta set by follow-up commands. Don't pad or shift here —
+    // applyTypePopupResult's post-mutation block handles size adjustments.
+    if (newKind == NodeKind::Struct || newKind == NodeKind::Array)
+        newSize = 0;
 
     if (newSize > 0 && newSize < oldSize) {
         // Shrinking: insert hex padding to fill gap (no offset shift)
@@ -1810,7 +1819,44 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 addedQuickConvert = true;
             }
         }
-        if (addedQuickConvert)
+        // Check if any selected nodes are non-hex primitives (for "Convert to Hex")
+        bool anyNonHex = false;
+        bool allConvertible = true;  // all non-container, non-hex
+        for (uint64_t id : ids) {
+            int idx = m_doc->tree.indexOfId(id);
+            if (idx < 0) continue;
+            NodeKind k = m_doc->tree.nodes[idx].kind;
+            if (k == NodeKind::Struct || k == NodeKind::Array)
+                allConvertible = false;
+            else if (!isHexNode(k))
+                anyNonHex = true;
+        }
+        if (anyNonHex && allConvertible) {
+            menu.addAction("Convert to Hex", [this, collectIndices]() {
+                auto indices = collectIndices();
+                // Convert each to hex equivalent based on size
+                m_suppressRefresh = true;
+                m_doc->undoStack.beginMacro(QStringLiteral("Convert to Hex"));
+                for (int idx : indices) {
+                    if (idx < 0 || idx >= m_doc->tree.nodes.size()) continue;
+                    const Node& n = m_doc->tree.nodes[idx];
+                    if (isHexNode(n.kind) || n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                        continue;
+                    int sz = n.byteSize();
+                    NodeKind hexKind;
+                    if (sz >= 8)      hexKind = NodeKind::Hex64;
+                    else if (sz >= 4) hexKind = NodeKind::Hex32;
+                    else if (sz >= 2) hexKind = NodeKind::Hex16;
+                    else              hexKind = NodeKind::Hex8;
+                    changeNodeKind(idx, hexKind);
+                }
+                m_doc->undoStack.endMacro();
+                m_suppressRefresh = false;
+                refresh();
+            });
+        }
+
+        if (addedQuickConvert || (anyNonHex && allConvertible))
             menu.addSeparator();
 
         menu.addAction(icon("symbol-structure.svg"), QString("Change type of %1 nodes...").arg(count),
@@ -2016,6 +2062,90 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             // Fall through to always-available actions
         } else {
 
+        // ── New Class / Ptr to New Class (promoted near top) ──
+        if (node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
+            int nodeSz = node.byteSize();
+            // "New Class" — convert this node to an embedded struct referencing a new root class
+            menu.addAction(icon("symbol-structure.svg"), "New Class", [this, nodeId, nodeSz]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni < 0) return;
+                const uint64_t parentId = m_doc->tree.nodes[ni].parentId;
+                const int nodeOffset = m_doc->tree.nodes[ni].offset;
+
+                // Create new root struct
+                QString baseName = QStringLiteral("NewClass");
+                QString typeName = baseName;
+                int counter = 2;
+                QSet<QString> existing;
+                for (const auto& nd : m_doc->tree.nodes)
+                    if (nd.kind == NodeKind::Struct && !nd.structTypeName.isEmpty())
+                        existing.insert(nd.structTypeName);
+                while (existing.contains(typeName))
+                    typeName = QStringLiteral("%1_%2").arg(baseName).arg(counter++);
+
+                m_suppressRefresh = true;
+                m_doc->undoStack.beginMacro(QStringLiteral("New Class"));
+
+                // 1. Create the root class definition (8 × Hex64 = 64 bytes)
+                Node root;
+                root.kind = NodeKind::Struct;
+                root.structTypeName = typeName;
+                root.name = QStringLiteral("instance");
+                root.classKeyword = QStringLiteral("class");
+                root.parentId = 0;
+                root.offset = 0;
+                root.id = m_doc->tree.reserveId();
+                m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{root}));
+                constexpr int kDefaultFields = 8;
+                for (int i = 0; i < kDefaultFields; i++)
+                    insertNode(root.id, i * 8, NodeKind::Hex64,
+                               QString("field_%1").arg(i * 8, 2, 16, QChar('0')));
+
+                // 2. Convert this node to Struct with refId
+                ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) {
+                    changeNodeKind(ni, NodeKind::Struct);
+                    ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni >= 0) {
+                        auto& n = m_doc->tree.nodes[ni];
+                        if (n.structTypeName != typeName)
+                            m_doc->undoStack.push(new RcxCommand(this,
+                                cmd::ChangeStructTypeName{nodeId, n.structTypeName, typeName}));
+                        if (n.refId != root.id)
+                            m_doc->undoStack.push(new RcxCommand(this,
+                                cmd::ChangePointerRef{nodeId, n.refId, root.id}));
+                    }
+                }
+
+                // 3. Shift siblings to make room for the embedded struct
+                int newSpan = m_doc->tree.structSpan(root.id);
+                int delta = newSpan - nodeSz;
+                if (delta > 0) {
+                    int oldEnd = nodeOffset + nodeSz;
+                    auto siblings = m_doc->tree.childrenOf(parentId);
+                    for (int si : siblings) {
+                        auto& sib = m_doc->tree.nodes[si];
+                        if (sib.id == nodeId || sib.isStatic) continue;
+                        if (sib.offset >= oldEnd) {
+                            m_doc->undoStack.push(new RcxCommand(this,
+                                cmd::ChangeOffset{sib.id, sib.offset, sib.offset + delta}));
+                        }
+                    }
+                }
+
+                m_doc->undoStack.endMacro();
+                m_suppressRefresh = false;
+                refresh();
+            });
+            // "Ptr to New Class" — convert to typed pointer + create new root class
+            if (nodeSz == 8 || nodeSz == 4) {
+                menu.addAction(icon("symbol-structure.svg"), "Ptr to New Class", [this, nodeId]() {
+                    convertToTypedPointer(nodeId);
+                });
+            }
+            menu.addSeparator();
+        }
+
         // ── Inference-based quick convert (from type hints) ──
         if (isHexNode(node.kind) && line >= 0 && line < m_lastResult.meta.size()) {
             const auto& lm = m_lastResult.meta[line];
@@ -2197,14 +2327,19 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             auto* convertMenu = menu.addMenu(icon("symbol-structure.svg"), "Convert");
             bool hasConvert = false;
 
-            // "Change to ptr*" — convert hex/void-ptr to typed pointer
-            if (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Hex32
-                || ((node.kind == NodeKind::Pointer64 || node.kind == NodeKind::Pointer32)
-                    && node.refId == 0)) {
-                convertMenu->addAction("Change to ptr*", [this, nodeId]() {
-                    convertToTypedPointer(nodeId);
-                });
-                hasConvert = true;
+            // "Change to ptr*" — convert any pointer-sized node to typed pointer
+            {
+                int sz = node.byteSize();
+                bool canPtrStar = (sz == 8 || sz == 4)
+                    && node.kind != NodeKind::Struct && node.kind != NodeKind::Array
+                    && !(  (node.kind == NodeKind::Pointer64 || node.kind == NodeKind::Pointer32)
+                         && node.refId != 0);  // already typed pointer
+                if (canPtrStar) {
+                    convertMenu->addAction("Change to ptr*", [this, nodeId]() {
+                        convertToTypedPointer(nodeId);
+                    });
+                    hasConvert = true;
+                }
             }
 
             // Split hex node into two half-sized hex nodes
@@ -2923,7 +3058,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         applyTypePopupResult(mode, nodeIdx, entry, fullText);
     });
     connect(popup, &TypeSelectorPopup::createNewTypeRequested,
-            this, [this, mode, nodeIdx]() {
+            this, [this, mode, nodeIdx](int modifierId, int arrayCount) {
         bool wasSuppressed = m_suppressRefresh;
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Create new type"));
@@ -2959,7 +3094,18 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         TypeEntry newEntry;
         newEntry.entryKind = TypeEntry::Composite;
         newEntry.structId  = n.id;
-        applyTypePopupResult(mode, nodeIdx, newEntry, QString());
+
+        // Build fullText with modifier suffix so applyTypePopupResult
+        // wraps the new type as pointer/array accordingly
+        QString fullText = typeName;
+        if (modifierId == 1)
+            fullText += QStringLiteral("*");
+        else if (modifierId == 2)
+            fullText += QStringLiteral("**");
+        else if (modifierId == 3 && arrayCount > 0)
+            fullText += QStringLiteral("[%1]").arg(arrayCount);
+
+        applyTypePopupResult(mode, nodeIdx, newEntry, fullText);
     });
 
     popup->popupLoading(pos);
@@ -3200,6 +3346,13 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
     TypeSpec spec = parseTypeSpec(fullText);
 
     if (mode == TypePopupMode::FieldType) {
+        // Capture old effective size before any mutations (for sibling offset adjustment)
+        const uint64_t parentId = m_doc->tree.nodes[nodeIdx].parentId;
+        const int nodeOffset = m_doc->tree.nodes[nodeIdx].offset;
+        int oldEffectiveSize = m_doc->tree.nodes[nodeIdx].byteSize();
+        if (oldEffectiveSize == 0 && (nodeKind == NodeKind::Struct || nodeKind == NodeKind::Array))
+            oldEffectiveSize = m_doc->tree.structSpan(nodeId);
+
         if (resolved.entryKind == TypeEntry::Primitive) {
             if (spec.arrayCount > 0) {
                 // Primitive array: e.g. "int32_t[10]"
@@ -3267,13 +3420,20 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
             m_doc->undoStack.beginMacro(QStringLiteral("Change to composite type"));
 
             if (spec.isPointer) {
-                // Pointer modifier: e.g. "Material*" → Pointer64 + refId
+                // Pointer modifier: e.g. "Material*" or "Material**" → Pointer64 + refId + ptrDepth
                 if (nodeKind != NodeKind::Pointer64)
                     changeNodeKind(nodeIdx, NodeKind::Pointer64);
                 int idx = m_doc->tree.indexOfId(nodeId);
-                if (idx >= 0 && m_doc->tree.nodes[idx].refId != resolved.structId)
-                    m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::ChangePointerRef{nodeId, m_doc->tree.nodes[idx].refId, resolved.structId}));
+                if (idx >= 0) {
+                    auto& n = m_doc->tree.nodes[idx];
+                    // ptrDepth: 0 = single struct pointer (*), 1+ = extra indirection levels (**)
+                    int newDepth = qMax(0, spec.ptrDepth - 1);
+                    if (n.ptrDepth != newDepth)
+                        n.ptrDepth = newDepth;
+                    if (n.refId != resolved.structId)
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangePointerRef{nodeId, n.refId, resolved.structId}));
+                }
 
             } else if (spec.arrayCount > 0) {
                 // Array modifier: e.g. "Material[10]" → Array + Struct element
@@ -3318,6 +3478,42 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
             m_doc->undoStack.endMacro();
             m_suppressRefresh = wasSuppressed;
             if (!m_suppressRefresh) refresh();
+        }
+        // ── Post-mutation sibling offset adjustment ──
+        // After all kind/refId/arrayMeta changes, compute the new effective size.
+        // If it differs from oldEffectiveSize, shift siblings to prevent overlap/gaps.
+        {
+            int ni = m_doc->tree.indexOfId(nodeId);
+            if (ni >= 0) {
+                const Node& updatedNode = m_doc->tree.nodes[ni];
+                int newEffectiveSize = updatedNode.byteSize();
+                if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Struct)
+                    newEffectiveSize = m_doc->tree.structSpan(nodeId);
+                // Array-of-Struct: byteSize() and structSpan() both return 0
+                // because sizeForKind(Struct)==0. Compute from refId span × arrayLen.
+                if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Array
+                    && updatedNode.elementKind == NodeKind::Struct && updatedNode.refId != 0) {
+                    int elemSpan = m_doc->tree.structSpan(updatedNode.refId);
+                    newEffectiveSize = elemSpan * updatedNode.arrayLen;
+                }
+                if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Array
+                    && updatedNode.elementKind != NodeKind::Struct)
+                    newEffectiveSize = sizeForKind(updatedNode.elementKind) * updatedNode.arrayLen;
+                int sizeDelta = newEffectiveSize - oldEffectiveSize;
+                if (sizeDelta != 0 && oldEffectiveSize > 0) {
+                    int oldEnd = nodeOffset + oldEffectiveSize;
+                    auto siblings = m_doc->tree.childrenOf(parentId);
+                    for (int si : siblings) {
+                        const auto& sib = m_doc->tree.nodes[si];
+                        if (sib.id == nodeId || sib.isStatic) continue;
+                        if (sib.offset >= oldEnd) {
+                            m_doc->undoStack.push(new RcxCommand(this,
+                                cmd::ChangeOffset{sib.id, sib.offset,
+                                                  sib.offset + sizeDelta}));
+                        }
+                    }
+                }
+            }
         }
     } else if (mode == TypePopupMode::ArrayElement) {
         if (resolved.entryKind == TypeEntry::Primitive) {

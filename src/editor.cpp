@@ -1311,7 +1311,27 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     applyHoverCursor();
 }
 
+void RcxEditor::setHoverEffects(bool on) {
+    if (m_hoverEffects == on) return;
+    m_hoverEffects = on;
+    if (!on) {
+        // Clear all hover visuals
+        m_hoveredNodeId = 0;
+        m_hoveredLine = -1;
+        m_prevHoveredNodeId = 0;
+        m_prevHoveredLine = -1;
+        m_sci->markerDeleteAll(M_HOVER);
+        for (int ln : m_hoverSpanLines)
+            clearIndicatorLine(IND_HOVER_SPAN, ln);
+        m_hoverSpanLines.clear();
+        dismissAllPopups();
+        m_sci->viewport()->setCursor(Qt::ArrowCursor);
+    }
+}
+
 void RcxEditor::applyHoverHighlight() {
+    if (!m_hoverEffects) return;
+
     uint64_t prevId = m_prevHoveredNodeId;
     int prevLine = m_prevHoveredLine;
     m_prevHoveredNodeId = m_hoveredNodeId;
@@ -3430,6 +3450,15 @@ void RcxEditor::applyHoverCursor() {
 
     // Lock cursor to Arrow during drag-selection (prevents flicker)
     if (m_dragStarted) {
+        m_sci->viewport()->setCursor(Qt::ArrowCursor);
+        return;
+    }
+
+    // Hover effects disabled: keep Arrow cursor, dismiss popups, skip all hover visuals
+    // (edit mode cursor + value history popup during editing still work)
+    if (!m_hoverEffects && !m_editState.active) {
+        if (!m_hoverInside || !m_applyingDocument)
+            dismissAllPopups();
         m_sci->viewport()->setCursor(Qt::ArrowCursor);
         return;
     }
