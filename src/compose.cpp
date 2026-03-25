@@ -403,12 +403,12 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             // Remove trailing separator spaces
             while (headerText.endsWith(' ')) headerText.chop(1);
             state.emitLine(headerText, std::move(lm));
-            // Emit standalone brace line
+            // Emit standalone brace line (Footer lineKind so tree connectors align with closing })
             LineMeta braceLm;
             braceLm.nodeIdx   = nodeIdx;
             braceLm.nodeId    = node.id;
             braceLm.depth     = depth;
-            braceLm.lineKind  = LineKind::Header;
+            braceLm.lineKind  = LineKind::Footer;
             braceLm.foldLevel = computeFoldLevel(depth, true);
             braceLm.markerMask = (1u << M_STRUCT_BG);
             state.emitLine(fmt::indent(depth) + QStringLiteral("{"), std::move(braceLm));
@@ -992,7 +992,7 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                     braceLm.nodeIdx   = nodeIdx;
                     braceLm.nodeId    = node.id;
                     braceLm.depth     = depth;
-                    braceLm.lineKind  = LineKind::Header;
+                    braceLm.lineKind  = LineKind::Footer;  // tree connectors align with closing }
                     braceLm.foldLevel = computeFoldLevel(depth, true);
                     braceLm.markerMask = lm.markerMask;
                     state.emitLine(fmt::indent(depth) + QStringLiteral("{"), std::move(braceLm));
@@ -1278,12 +1278,14 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     }
 
     // Brace wrapping: emit standalone "{" after CommandRow
+    // isRootHeader makes it flush left (no fold prefix), matching the root "};' footer
     if (state.braceWrap) {
         LineMeta braceLm;
         braceLm.nodeIdx   = -1;
         braceLm.nodeId    = 0;  // not associated with any node (no hover)
         braceLm.depth     = 0;
-        braceLm.lineKind  = LineKind::Header;
+        braceLm.lineKind  = LineKind::Footer;
+        braceLm.isRootHeader = true;  // flush left — same as root footer
         braceLm.foldLevel = SC_FOLDLEVELBASE;
         braceLm.markerMask = 0;
         state.emitLine(QStringLiteral("{"), std::move(braceLm));

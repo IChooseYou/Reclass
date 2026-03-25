@@ -3188,7 +3188,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             sci->setCaretLineBackgroundColor(theme.hover);
             sci->setSelectionBackgroundColor(theme.selection);
             sci->setSelectionForegroundColor(theme.text);
-            sci->setMarginsBackgroundColor(theme.backgroundAlt);
+            sci->setMarginsBackgroundColor(theme.background.darker(115));
             sci->setMarginsForegroundColor(theme.textDim);
         }
     }
@@ -3395,13 +3395,15 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT, (long)2);
     sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRADESCENT, (long)2);
 
-    // Line number margin
+    // Line number margin — same background as editor, muted text, padded right
     sci->setMarginType(0, QsciScintilla::NumberMargin);
-    sci->setMarginWidth(0, "00000");
+    sci->setMarginWidth(0, "0000000 ");  // room for large line counts + right padding
     const auto& theme = ThemeManager::instance().current();
-    sci->setMarginsBackgroundColor(theme.backgroundAlt);
+    sci->setMarginsBackgroundColor(theme.background.darker(115));
     sci->setMarginsForegroundColor(theme.textDim);
     sci->setMarginsFont(f);
+    // Left padding between margin numbers and code content
+    sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINLEFT, 0, (long)6);
 
     // Hide other margins
     sci->setMarginWidth(1, 0);
@@ -3552,9 +3554,10 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
                                      (unsigned long)qMax(1, pixelWidth));
     }
 
-    // Update margin width for line count
+    // Update margin width for line count (min 5 digits + padding)
     int lineCount = pane.rendered->lines();
-    QString marginStr = QString(QString::number(lineCount).size() + 2, '0');
+    int digits = qMax(5, QString::number(lineCount).size() + 2);
+    QString marginStr = QString(digits, '0') + QStringLiteral("  ");
     pane.rendered->setMarginWidth(0, marginStr);
 
     // Restore scroll

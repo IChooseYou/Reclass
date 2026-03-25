@@ -254,15 +254,22 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // Footer "+1024" button
     connect(editor, &RcxEditor::appendBytesRequested,
             this, [this](uint64_t structId, int byteCount) {
+        // If this is an embedded struct with refId (virtual children),
+        // append to the referenced root class definition instead
+        uint64_t targetId = structId;
+        int si = m_doc->tree.indexOfId(structId);
+        if (si >= 0 && m_doc->tree.childrenOf(structId).isEmpty()
+            && m_doc->tree.nodes[si].refId != 0)
+            targetId = m_doc->tree.nodes[si].refId;
         int hex64Count = byteCount / 8;
         int remainBytes = byteCount % 8;
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
         for (int i = 0; i < hex64Count; i++)
-            insertNode(structId, -1, NodeKind::Hex64,
+            insertNode(targetId, -1, NodeKind::Hex64,
                        QStringLiteral("field_%1").arg(i));
         for (int i = 0; i < remainBytes; i++)
-            insertNode(structId, -1, NodeKind::Hex8,
+            insertNode(targetId, -1, NodeKind::Hex8,
                        QStringLiteral("field_%1").arg(hex64Count + i));
         m_doc->undoStack.endMacro();
         m_suppressRefresh = false;
@@ -274,9 +281,17 @@ void RcxController::connectEditor(RcxEditor* editor) {
             this, [this](uint64_t structId) {
         // Unions don't have trailing padding — all members overlap at offset 0
         int si = m_doc->tree.indexOfId(structId);
-        if (si >= 0 && m_doc->tree.nodes[si].classKeyword == QStringLiteral("union"))
+        if (si < 0) return;
+        if (m_doc->tree.nodes[si].classKeyword == QStringLiteral("union"))
             return;
+        // If this is an embedded struct with refId (virtual children),
+        // operate on the referenced root class definition instead
+        uint64_t targetId = structId;
         QVector<int> children = m_doc->tree.childrenOf(structId);
+        if (children.isEmpty() && m_doc->tree.nodes[si].refId != 0) {
+            targetId = m_doc->tree.nodes[si].refId;
+            children = m_doc->tree.childrenOf(targetId);
+        }
         if (children.isEmpty()) return;
 
         // Sort by offset descending to find trailing hex nodes
