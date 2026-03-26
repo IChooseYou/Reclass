@@ -1121,6 +1121,7 @@ private:
 // Used as QDockWidget::setTitleBarWidget(). Paints its own background so Fusion
 // can't insert frames or steal pixels. Qt handles drag/dock natively.
 class DockTitleBar : public QWidget {
+    Q_OBJECT
     int m_h;
     QColor m_bg;
     QColor m_borderRight;
@@ -6760,4 +6761,6 @@ int main(int argc, char* argv[]) {
 
     return app.exec();
 }
+
+#include "main.moc"
 
