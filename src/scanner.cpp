@@ -637,8 +637,14 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             uint64_t advance;
             if ((uint64_t)readLen >= remaining)
                 advance = remaining;  // last chunk, no overlap needed
-            else if (readLen > overlap)
-                advance = (uint64_t)(readLen - overlap);
+             else if (readLen > overlap) {
+                  advance = (uint64_t)(readLen - overlap);
+                  if (alignment > 1) {
+                      uint64_t nextOff = off + advance;
+                      uint64_t aligned = ((nextOff + alignment - 1) / alignment) * alignment;
+                      advance = aligned - off;
+                  }
+            }
             else
                 advance = 1; // prevent infinite loop on tiny regions
             scannedBytes += advance;
