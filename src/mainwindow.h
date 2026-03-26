@@ -210,6 +210,7 @@ private:
     void createWorkspaceDock();
     void rebuildWorkspaceModel();       // debounced — safe to call frequently
     void rebuildWorkspaceModelNow();    // immediate rebuild
+    int  computeWorkspaceDockWidth() const;  // fit to longest type name
     QTimer*               m_workspaceRebuildTimer = nullptr;
     QTimer*               m_workspaceSearchTimer  = nullptr;
     void updateBorderColor(const QColor& color);

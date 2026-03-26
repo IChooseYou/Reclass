@@ -53,6 +53,7 @@
 #include <QGuiApplication>
 #include <QWindow>
 #include <QMouseEvent>
+#include <QScrollBar>
 #include "themes/thememanager.h"
 #include "themes/themeeditor.h"
 #include "optionsdialog.h"
@@ -3795,7 +3796,7 @@ void MainWindow::importFromSource() {
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
     }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 classes from source").arg(classCount));
@@ -3995,7 +3996,7 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
     // Ensure workspace dock is split alongside editor with sensible proportions
     if (m_docDocks.size() == 1 && m_workspaceDock) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
         m_workspaceDock->show();
     }
 
@@ -4041,7 +4042,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         rebuildWorkspaceModel();
         if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
     }
     m_workspaceDock->show();
         int classCount = 0;
@@ -4069,7 +4070,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
     }
     m_workspaceDock->show();
     addRecentFile(filePath);
@@ -4187,12 +4188,11 @@ void MainWindow::createWorkspaceDock() {
     }
     {
         auto* searchAction = m_workspaceSearch->addAction(
-            QIcon(QStringLiteral(":/vsicons/search.svg")),
+            QIcon(QStringLiteral(":/vsicons/filter.svg")),
             QLineEdit::LeadingPosition);
-        // Find the QToolButton created for the action and shrink its icon
         for (auto* btn : m_workspaceSearch->findChildren<QToolButton*>()) {
             if (btn->defaultAction() == searchAction) {
-                btn->setIconSize(QSize(14, 14));
+                btn->setIconSize(QSize(12, 12));
                 break;
             }
         }
@@ -4244,7 +4244,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceModel = new QStandardItemModel(this);
     m_workspaceModel->setHorizontalHeaderLabels({"Name"});
 
-    m_workspaceProxy = new QSortFilterProxyModel(this);
+    m_workspaceProxy = new rcx::WorkspaceProxyModel(this);
     m_workspaceProxy->setSourceModel(m_workspaceModel);
     m_workspaceProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     m_workspaceProxy->setRecursiveFilteringEnabled(true);
@@ -4267,6 +4267,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceSearchTimer->setInterval(150);
     connect(m_workspaceSearchTimer, &QTimer::timeout, this, [this]() {
         QString text = m_workspaceSearch->text();
+        static_cast<rcx::WorkspaceProxyModel*>(m_workspaceProxy)->setHasFilter(!text.isEmpty());
         m_workspaceProxy->setFilterFixedString(text);
         if (!text.isEmpty())
             m_workspaceTree->expandAll();
@@ -4320,6 +4321,9 @@ void MainWindow::createWorkspaceDock() {
             else if (chosen == actEnum)   newEnum();
             return;
         }
+
+        // Skip section headers (non-interactive)
+        if (!clickedIndex.data(rcx::RoleSectionHeader).toString().isEmpty()) return;
 
         // If right-clicked item is not in current selection, select only it
         auto* sel = m_workspaceTree->selectionModel();
@@ -4616,6 +4620,8 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceDock->hide();
 
     connect(m_workspaceTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& index) {
+        if (!index.data(rcx::RoleSectionHeader).toString().isEmpty()) return;
+
         auto structIdVar = index.data(Qt::UserRole + 1);
         uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
 
@@ -4677,6 +4683,8 @@ void MainWindow::createWorkspaceDock() {
 
     // Single-click: peek (raise existing tab / scroll to member) — no new tab creation
     connect(m_workspaceTree, &QTreeView::clicked, this, [this](const QModelIndex& index) {
+        if (!index.data(rcx::RoleSectionHeader).toString().isEmpty()) return;
+
         // Modifier held → user is multi-selecting, don't navigate
         if (QApplication::keyboardModifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
             return;
@@ -5774,7 +5782,7 @@ void MainWindow::importSelectedTypes() {
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {128}, Qt::Horizontal);
+        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
     }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 types into current project").arg(totalImported));
@@ -6010,6 +6018,11 @@ void MainWindow::rebuildWorkspaceModel() {
 }
 
 void MainWindow::rebuildWorkspaceModelNow() {
+    // Save scroll position before model clear (which resets it)
+    int savedScroll = 0;
+    if (m_workspaceTree && m_workspaceTree->verticalScrollBar())
+        savedScroll = m_workspaceTree->verticalScrollBar()->value();
+
     QVector<rcx::TabInfo> tabs;
     QSet<RcxDocument*> seenDocs;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
@@ -6021,16 +6034,24 @@ void MainWindow::rebuildWorkspaceModelNow() {
     }
     rcx::syncProjectExplorer(m_workspaceModel, tabs, m_pinnedIds);
 
-    // Mark items that are currently viewed in a tab + pinned state
+    // Mark items that are currently viewed in a tab + pinned/dirty state
     QSet<uint64_t> viewedIds;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
         viewedIds.insert(it->ctrl->viewRootId());
     for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
         auto* item = m_workspaceModel->item(i);
         if (!item) continue;
+        if (!item->data(rcx::RoleSectionHeader).toString().isEmpty()) continue;
         uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
         item->setData(viewedIds.contains(id), Qt::UserRole + 3);
         item->setData(m_pinnedIds.contains(id), Qt::UserRole + 4);
+        // Set dirty flag from owning document
+        auto subVar = item->data(Qt::UserRole);
+        if (subVar.isValid()) {
+            auto* dk = static_cast<QDockWidget*>(subVar.value<void*>());
+            if (dk && m_tabs.contains(dk))
+                item->setData(m_tabs[dk].doc->modified, rcx::RoleDirty);
+        }
     }
 
     if (m_dockTitleLabel) {
@@ -6038,6 +6059,7 @@ void MainWindow::rebuildWorkspaceModelNow() {
         for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
             auto* item = m_workspaceModel->item(i);
             if (!item) continue;
+            if (!item->data(rcx::RoleSectionHeader).toString().isEmpty()) continue;
             if (item->data(Qt::UserRole + 2).toBool())
                 ++enums;
             else
@@ -6053,6 +6075,31 @@ void MainWindow::rebuildWorkspaceModelNow() {
         }
         m_dockTitleLabel->setText(title);
     }
+
+    // Restore scroll position after rebuild
+    if (m_workspaceTree && m_workspaceTree->verticalScrollBar())
+        m_workspaceTree->verticalScrollBar()->setValue(savedScroll);
+}
+
+int MainWindow::computeWorkspaceDockWidth() const {
+    // Measure longest type name across all open documents
+    int maxChars = 12;  // minimum reasonable
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+        const auto& tree = it->doc->tree;
+        for (const auto& n : tree.nodes) {
+            if (n.parentId != 0 || n.kind != rcx::NodeKind::Struct) continue;
+            QString name = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+            if (name.size() > maxChars) maxChars = name.size();
+        }
+    }
+    // Compute pixel width: badge(fontH) + gap(4) + name + gap + count pill(~30) + padding(24)
+    QSettings s("Reclass", "Reclass");
+    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+    f.setFixedPitch(true);
+    QFontMetrics fm(f);
+    int nameW = fm.horizontalAdvance(QString(maxChars, QChar('W')));
+    int total = fm.height() + 4 + nameW + 30 + 24;
+    return qBound(180, total, 420);
 }
 
 void MainWindow::addRecentFile(const QString& path) {

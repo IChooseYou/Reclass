@@ -12,6 +12,18 @@
 
 namespace rcx {
 
+// ── Data roles ──
+// Qt::UserRole + 0  → void* subPtr (QDockWidget*)
+// Qt::UserRole + 1  → uint64_t id (node ID)
+// Qt::UserRole + 2  → bool isEnum
+// Qt::UserRole + 3  → bool isViewed (currently in a tab)
+// Qt::UserRole + 4  → bool isPinned
+// Qt::UserRole + 5  → QString sectionLabel (non-empty = section header item)
+// Qt::UserRole + 6  → bool isDirty (document modified)
+
+static constexpr int RoleSectionHeader = Qt::UserRole + 5;
+static constexpr int RoleDirty         = Qt::UserRole + 6;
+
 struct TabInfo {
     const NodeTree* tree;
     QString         name;
@@ -93,7 +105,15 @@ inline QStandardItem* makeTypeItem(const Node* node, const NodeTree* tree,
     return item;
 }
 
-// Full rebuild — used by benchmarks and first build.
+// Create a non-interactive section header item (PINNED, RECENT, ALL TYPES).
+inline QStandardItem* makeSectionItem(const QString& label) {
+    auto* item = new QStandardItem(label);
+    item->setData(label, RoleSectionHeader);
+    item->setFlags(Qt::ItemIsEnabled);
+    return item;
+}
+
+// Full rebuild with two sections: PINNED (if any) + ALL TYPES.
 inline void buildProjectExplorer(QStandardItemModel* model,
                                  const QVector<TabInfo>& tabs,
                                  const QSet<uint64_t>& pinnedIds = {}) {
@@ -101,110 +121,76 @@ inline void buildProjectExplorer(QStandardItemModel* model,
     model->setHorizontalHeaderLabels({QStringLiteral("Name")});
 
     struct Entry { const Node* node; void* subPtr; const NodeTree* tree; };
-    QVector<Entry> types, enums;
+    QVector<Entry> allEntries;
+
     for (const auto& tab : tabs) {
         QVector<int> topLevel = tab.tree->childrenOf(0);
         for (int idx : topLevel) {
             const Node& n = tab.tree->nodes[idx];
             if (n.kind != NodeKind::Struct) continue;
-            if (n.resolvedClassKeyword() == QStringLiteral("enum"))
-                enums.push_back(Entry{&n, tab.subPtr, tab.tree});
-            else
-                types.push_back(Entry{&n, tab.subPtr, tab.tree});
+            allEntries.push_back(Entry{&n, tab.subPtr, tab.tree});
         }
     }
 
-    // Pinned items at the very top, then structs, then enums
-    QVector<Entry> pinned;
-    QVector<Entry> unpinnedTypes, unpinnedEnums;
-    for (const auto& e : types) {
-        if (pinnedIds.contains(e.node->id)) pinned.append(e);
-        else unpinnedTypes.append(e);
+    // ── PINNED section (only if any pinned) ──
+    QVector<const Entry*> pinned;
+    for (const auto& e : allEntries)
+        if (pinnedIds.contains(e.node->id))
+            pinned.append(&e);
+    if (!pinned.isEmpty()) {
+        model->appendRow(makeSectionItem(QStringLiteral("PINNED")));
+        for (const auto* e : pinned)
+            model->appendRow(makeTypeItem(e->node, e->tree, e->subPtr));
     }
-    for (const auto& e : enums) {
-        if (pinnedIds.contains(e.node->id)) pinned.append(e);
-        else unpinnedEnums.append(e);
+
+    // ── ALL TYPES section ──
+    QVector<Entry> types, enums;
+    for (const auto& e : allEntries) {
+        if (e.node->resolvedClassKeyword() == QStringLiteral("enum"))
+            enums.push_back(e);
+        else
+            types.push_back(e);
     }
-    for (const auto& e : pinned)
+    model->appendRow(makeSectionItem(QStringLiteral("ALL TYPES")));
+    for (const auto& e : types)
         model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
-    for (const auto& e : unpinnedTypes)
-        model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
-    for (const auto& e : unpinnedEnums)
+    for (const auto& e : enums)
         model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
 }
 
-// Incremental sync — preserves tree expansion/scroll state.
+// Full rebuild (debounced at 50ms).
 inline void syncProjectExplorer(QStandardItemModel* model,
                                 const QVector<TabInfo>& tabs,
                                 const QSet<uint64_t>& pinnedIds = {}) {
-    // First call — full build
-    if (model->rowCount() == 0 && !tabs.isEmpty()) {
-        buildProjectExplorer(model, tabs, pinnedIds);
-        return;
-    }
-
-    // Collect desired entries
-    struct Entry { uint64_t id; const Node* node; void* subPtr; const NodeTree* tree; bool isEnum; };
-    QVector<Entry> desired;
-    for (const auto& tab : tabs) {
-        QVector<int> topLevel = tab.tree->childrenOf(0);
-        for (int idx : topLevel) {
-            const Node& n = tab.tree->nodes[idx];
-            if (n.kind != NodeKind::Struct) continue;
-            bool ie = n.resolvedClassKeyword() == QStringLiteral("enum");
-            desired.push_back(Entry{n.id, &n, tab.subPtr, tab.tree, ie});
-        }
-    }
-
-    QHash<uint64_t, int> desiredMap;
-    desiredMap.reserve(desired.size());
-    for (int i = 0; i < desired.size(); ++i)
-        desiredMap[desired[i].id] = i;
-
-    // Remove stale items (backwards)
-    for (int i = model->rowCount() - 1; i >= 0; --i) {
-        auto* item = model->item(i);
-        if (!item) continue;
-        uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
-        if (!desiredMap.contains(id))
-            model->removeRow(i);
-    }
-
-    // Update existing items
-    QSet<uint64_t> existing;
-    for (int i = 0; i < model->rowCount(); ++i) {
-        auto* item = model->item(i);
-        uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
-        existing.insert(id);
-        auto dit = desiredMap.find(id);
-        if (dit == desiredMap.end()) continue;
-        const Entry& e = desired[*dit];
-
-        QString display = typeDisplayString(e.node, e.tree);
-        if (item->text() != display)
-            item->setText(display);
-        item->setData(QVariant::fromValue(e.subPtr), Qt::UserRole);
-
-        // Refresh children only when count changed (avoids destroying expansion state)
-        if (!e.isEnum) {
-            QVector<int> members = e.tree->childrenOf(id);
-            int visCount = 0;
-            for (int mi : members)
-                if (!isHexPad(e.tree->nodes[mi].kind)) ++visCount;
-            if (item->rowCount() != visCount)
-                buildStructChildren(item, e.tree, id, e.subPtr);
-        }
-    }
-
-    // Add new items
-    for (const auto& e : desired) {
-        if (existing.contains(e.id)) continue;
-        model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
-    }
-
-    if (model->horizontalHeaderItem(0) == nullptr)
-        model->setHorizontalHeaderLabels({QStringLiteral("Name")});
+    buildProjectExplorer(model, tabs, pinnedIds);
 }
+
+// ── Proxy model that hides section headers when a filter is active ──
+
+class WorkspaceProxyModel : public QSortFilterProxyModel {
+    bool m_hasFilter = false;
+public:
+    using QSortFilterProxyModel::QSortFilterProxyModel;
+
+    void setHasFilter(bool v) {
+        if (m_hasFilter != v) {
+            m_hasFilter = v;
+            invalidateFilter();
+        }
+    }
+
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override {
+        QModelIndex idx = sourceModel()->index(sourceRow, 0, sourceParent);
+        bool isSection = !idx.data(RoleSectionHeader).toString().isEmpty();
+        if (m_hasFilter) {
+            if (isSection) return false;
+            return QSortFilterProxyModel::filterAcceptsRow(sourceRow, sourceParent);
+        }
+        if (isSection) return true;
+        return QSortFilterProxyModel::filterAcceptsRow(sourceRow, sourceParent);
+    }
+};
 
 // ── Custom delegate for rich workspace tree rendering ──
 
@@ -223,10 +209,19 @@ public:
         m_bg        = t.background;
         m_badgeBg   = t.backgroundAlt;
         m_badgeText = t.textDim;
+        m_surface   = t.surface;       // count pill bg (darker than badgeBg)
+        m_border    = t.border;
+        m_dirtyDot  = t.markerCycle;   // amber/orange dot for unsaved
     }
 
     QSize sizeHint(const QStyleOptionViewItem& option,
                    const QModelIndex& index) const override {
+        // Section headers get extra vertical space
+        if (!index.data(RoleSectionHeader).toString().isEmpty()) {
+            QSize s = QStyledItemDelegate::sizeHint(option, index);
+            s.setHeight(option.fontMetrics.height() + 16);
+            return s;
+        }
         QSize s = QStyledItemDelegate::sizeHint(option, index);
         int pad = index.parent().isValid() ? 6 : 10;
         s.setHeight(option.fontMetrics.height() + pad);
@@ -237,6 +232,40 @@ public:
                const QModelIndex& index) const override {
         painter->save();
 
+        // ── Section header rendering ──
+        QString sectionLabel = index.data(RoleSectionHeader).toString();
+        if (!sectionLabel.isEmpty()) {
+            painter->fillRect(option.rect, m_bg);
+
+            QFont sf = option.font;
+            sf.setPointSizeF(sf.pointSizeF() * 0.67);
+            sf.setBold(false);
+            sf.setLetterSpacing(QFont::AbsoluteSpacing, 1.2);
+            painter->setFont(sf);
+            QFontMetrics sfm(sf);
+
+            QRect textRect = option.rect.adjusted(4, 0, -4, 0);
+            int textW = sfm.horizontalAdvance(sectionLabel);
+            int textY = textRect.y() + (textRect.height() + sfm.ascent() - sfm.descent()) / 2;
+
+            painter->setPen(m_textMuted);
+            painter->drawText(textRect.x(), textY, sectionLabel);
+
+            // Hairline extending right from label
+            int lineY = textRect.y() + textRect.height() / 2;
+            int lineStart = textRect.x() + textW + 8;
+            if (lineStart < textRect.right()) {
+                QPen hp(m_border);
+                hp.setWidthF(0.5);
+                painter->setPen(hp);
+                painter->drawLine(lineStart, lineY, textRect.right(), lineY);
+            }
+
+            painter->restore();
+            return;
+        }
+
+        // ── Normal item — keep existing drawControl flow (safe, no global side effects) ──
         QStyleOptionViewItem opt = option;
         initStyleOption(&opt, index);
         opt.text.clear();
@@ -246,8 +275,8 @@ public:
         // Custom background for selection/hover
         if (opt.state & QStyle::State_Selected) {
             painter->fillRect(opt.rect, m_selected);
-            // Left accent bar
-            painter->fillRect(QRect(opt.rect.x(), opt.rect.y(), 1, opt.rect.height()), m_accent);
+            // Left accent bar (2px, inset 4px top/bottom)
+            painter->fillRect(QRect(opt.rect.x(), opt.rect.y() + 4, 2, opt.rect.height() - 8), m_accent);
         } else if (opt.state & QStyle::State_MouseOver) {
             painter->fillRect(opt.rect, m_hover);
         }
@@ -283,6 +312,19 @@ public:
             textRect.setLeft(textRect.left() + sz + 4);
         }
 
+        // Orange dot for unsaved/dirty items
+        if (!isChild && index.data(RoleDirty).toBool()) {
+            int dotSz = 4;
+            int dotX = textRect.x();
+            int dotY = textRect.y() + (textRect.height() - dotSz) / 2;
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(m_dirtyDot);
+            painter->drawEllipse(dotX, dotY, dotSz, dotSz);
+            painter->setRenderHint(QPainter::Antialiasing, false);
+            textRect.setLeft(textRect.left() + dotSz + 3);
+        }
+
         painter->setFont(opt.font);
 
         if (!isChild) {
@@ -303,7 +345,7 @@ public:
                 rightEdge = pill.left() - 2;
 
                 painter->setPen(Qt::NoPen);
-                painter->setBrush(m_badgeBg);
+                painter->setBrush(m_surface);
                 painter->drawRect(pill);
                 painter->setPen(m_textMuted);
                 painter->drawText(pill, Qt::AlignCenter, count);
@@ -352,7 +394,8 @@ public:
 private:
     QColor m_text, m_textDim, m_textMuted, m_syntaxType;
     QColor m_hover, m_selected, m_accent, m_bg;
-    QColor m_badgeBg, m_badgeText;
+    QColor m_badgeBg, m_badgeText, m_surface;
+    QColor m_border, m_dirtyDot;
 };
 
 } // namespace rcx
