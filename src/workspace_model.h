@@ -211,7 +211,6 @@ public:
         m_badgeText = t.textDim;
         m_surface   = t.surface;       // count pill bg (darker than badgeBg)
         m_border    = t.border;
-        m_dirtyDot  = t.markerCycle;   // amber/orange dot for unsaved
     }
 
     QSize sizeHint(const QStyleOptionViewItem& option,
@@ -312,19 +311,6 @@ public:
             textRect.setLeft(textRect.left() + sz + 4);
         }
 
-        // Orange dot for unsaved/dirty items
-        if (!isChild && index.data(RoleDirty).toBool()) {
-            int dotSz = 4;
-            int dotX = textRect.x();
-            int dotY = textRect.y() + (textRect.height() - dotSz) / 2;
-            painter->setRenderHint(QPainter::Antialiasing, true);
-            painter->setPen(Qt::NoPen);
-            painter->setBrush(m_dirtyDot);
-            painter->drawEllipse(dotX, dotY, dotSz, dotSz);
-            painter->setRenderHint(QPainter::Antialiasing, false);
-            textRect.setLeft(textRect.left() + dotSz + 3);
-        }
-
         painter->setFont(opt.font);
 
         if (!isChild) {
@@ -395,7 +381,7 @@ private:
     QColor m_text, m_textDim, m_textMuted, m_syntaxType;
     QColor m_hover, m_selected, m_accent, m_bg;
     QColor m_badgeBg, m_badgeText, m_surface;
-    QColor m_border, m_dirtyDot;
+    QColor m_border;
 };
 
 } // namespace rcx

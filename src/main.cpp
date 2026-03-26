@@ -241,12 +241,25 @@ public:
 class MenuBarStyle : public QProxyStyle {
 public:
     using QProxyStyle::QProxyStyle;
+    bool eventFilter(QObject* obj, QEvent* ev) override {
+#ifdef _WIN32
+        if (ev->type() == QEvent::Show && qobject_cast<QMenu*>(obj)) {
+            auto* w = static_cast<QWidget*>(obj);
+            HWND hwnd = reinterpret_cast<HWND>(w->winId());
+            ULONG_PTR cs = GetClassLongPtr(hwnd, GCL_STYLE);
+            if (cs & CS_DROPSHADOW)
+                SetClassLongPtr(hwnd, GCL_STYLE, cs & ~CS_DROPSHADOW);
+            obj->removeEventFilter(this);  // one-shot
+        }
+#endif
+        return QProxyStyle::eventFilter(obj, ev);
+    }
     void polish(QWidget* w) override {
 #ifdef _WIN32
         if (qobject_cast<QMenu*>(w)) {
             w->setWindowFlag(Qt::FramelessWindowHint, true);
-            // Layered window — gives full pixel control; DWM won't clip edges.
             w->setAttribute(Qt::WA_TranslucentBackground);
+            w->installEventFilter(this);  // deferred CS_DROPSHADOW removal on first show
         }
 #endif
         QProxyStyle::polish(w);
@@ -257,8 +270,12 @@ public:
         QSize s = QProxyStyle::sizeFromContents(type, opt, sz, w);
         if (type == CT_MenuBarItem)
             s.setHeight(s.height() + qRound(s.height() * 0.5));
-        if (type == CT_MenuItem)
+        if (type == CT_MenuItem) {
+            if (auto* mi = qstyleoption_cast<const QStyleOptionMenuItem*>(opt))
+                if (mi->menuItemType == QStyleOptionMenuItem::Separator)
+                    return QSize(s.width(), 7);
             s = QSize(s.width() + 24, s.height() + 4);
+        }
         if (type == CT_ItemViewItem)
             s.setHeight(s.height() + 4);
         // Dock tab bar: fixed height + extra width for close button
@@ -312,13 +329,14 @@ public:
         }
         if (elem == PE_FrameMenu) {
             QRect r = opt->rect;
-            p->fillRect(r, opt->palette.color(QPalette::Window));
-            p->setPen(opt->palette.color(QPalette::Dark));
-            int x2 = r.right(), y2 = r.bottom();
-            p->drawLine(r.left(), r.top(), x2, r.top());     // top
-            p->drawLine(r.left(), y2,      x2, y2);           // bottom
-            p->drawLine(r.left(), r.top(), r.left(), y2);     // left
-            p->drawLine(x2,       r.top(), x2, y2);           // right
+            QColor bg = opt->palette.color(QPalette::Window);
+            QColor bd = opt->palette.color(QPalette::Dark);
+            p->fillRect(r, bg);
+            // 1px border via fillRect strips (no pen ambiguity)
+            p->fillRect(r.left(), r.top(), r.width(), 1, bd);          // top
+            p->fillRect(r.left(), r.bottom(), r.width(), 1, bd);       // bottom
+            p->fillRect(r.left(), r.top(), 1, r.height(), bd);         // left
+            p->fillRect(r.right(), r.top(), 1, r.height(), bd);        // right
             return;
         }
         // Kill the status bar item frame and panel border
@@ -633,10 +651,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 #endif
 
 #ifdef _WIN32
-    // 1px top margin preserves DWM drop shadow on the frameless window
+    // Explicitly disable DWM drop shadow on the frameless window
     {
         auto hwnd = reinterpret_cast<HWND>(winId());
-        MARGINS margins = {0, 0, 1, 0};
+        MARGINS margins = {0, 0, 0, 0};
         DwmExtendFrameIntoClientArea(hwnd, &margins);
     }
 #endif
@@ -4094,6 +4112,7 @@ bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
         addRecentFile(tab.doc->filePath);
     }
     updateWindowTitle();
+    rebuildWorkspaceModel();
     return true;
 }
 
@@ -6046,13 +6065,6 @@ void MainWindow::rebuildWorkspaceModelNow() {
         uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
         item->setData(viewedIds.contains(id), Qt::UserRole + 3);
         item->setData(m_pinnedIds.contains(id), Qt::UserRole + 4);
-        // Set dirty flag from owning document
-        auto subVar = item->data(Qt::UserRole);
-        if (subVar.isValid()) {
-            auto* dk = static_cast<QDockWidget*>(subVar.value<void*>());
-            if (dk && m_tabs.contains(dk))
-                item->setData(m_tabs[dk].doc->modified, rcx::RoleDirty);
-        }
     }
 
     if (m_dockTitleLabel) {
@@ -6066,7 +6078,13 @@ void MainWindow::rebuildWorkspaceModelNow() {
             else
                 ++structs;
         }
-        QString title = QStringLiteral("Project");
+        bool anyDirty = false;
+        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
+            if (it->doc->modified) { anyDirty = true; break; }
+        QString title;
+        if (anyDirty)
+            title = QStringLiteral("\u2022 ");
+        title += QStringLiteral("Project");
         if (structs || enums) {
             title += QStringLiteral(" \u2014 %1 struct%2")
                 .arg(structs).arg(structs != 1 ? "s" : "");
