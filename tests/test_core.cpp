@@ -322,21 +322,22 @@ private slots:
         lm.isContinuation = false;
         lm.nodeIdx = 0;
 
-        // kFoldCol (3) + depth*3 = 6
+        // kFoldCol + depth*kTreeIndent
+        int ind = rcx::kFoldCol + 1 * rcx::kTreeIndent;
         auto ts = rcx::typeSpanFor(lm);
         QVERIFY(ts.valid);
-        QCOMPARE(ts.start, 6);
-        QCOMPARE(ts.end, 20);   // 6 + 14 (kColType)
+        QCOMPARE(ts.start, ind);
+        QCOMPARE(ts.end, ind + 14);   // + kColType
 
         auto ns = rcx::nameSpanFor(lm);
         QVERIFY(ns.valid);
-        QCOMPARE(ns.start, 21); // 6 + 14 + 1 (kSepWidth)
-        QCOMPARE(ns.end, 43);   // 21 + 22 (kColName)
+        QCOMPARE(ns.start, ind + 14 + 1); // + kColType + kSepWidth
+        QCOMPARE(ns.end, ind + 14 + 1 + 22);   // + kColName
 
         auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
-        QCOMPARE(vs.start, 44); // 21 + 22 + 1 (kSepWidth)
-        QCOMPARE(vs.end, 44 + rcx::kColValue);
+        QCOMPARE(vs.start, ind + 14 + 22 + 2); // + kColType + kColName + 2*kSepWidth
+        QCOMPARE(vs.end, ind + 14 + 22 + 2 + rcx::kColValue);
     }
 
     void testColumnSpan_continuation() {
@@ -349,10 +350,11 @@ private slots:
         QVERIFY(!rcx::typeSpanFor(lm).valid);
         QVERIFY(!rcx::nameSpanFor(lm).valid);
 
+        int ind2 = rcx::kFoldCol + 1 * rcx::kTreeIndent;
         auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
-        QCOMPARE(vs.start, 6 + 14 + 22 + 2);  // kFoldCol+indent + kColType(14) + kColName(22) + 2*kSepWidth
-        QCOMPARE(vs.end, 44 + rcx::kColValue);
+        QCOMPARE(vs.start, ind2 + 14 + 22 + 2);  // indent + kColType + kColName + 2*kSepWidth
+        QCOMPARE(vs.end, ind2 + 14 + 22 + 2 + rcx::kColValue);
     }
 
     void testColumnSpan_headerFooter() {

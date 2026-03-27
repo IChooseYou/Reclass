@@ -127,7 +127,7 @@ QString fmtPointer64(uint64_t v) { return hexVal(v); }
 // ── Indentation ──
 
 QString indent(int depth) {
-    return QString(depth * 3, ' ');
+    return QString(depth * kTreeIndent, ' ');
 }
 
 // ── Offset margin ──

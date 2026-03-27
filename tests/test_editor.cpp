@@ -20,7 +20,12 @@
 #include <QLayout>
 #include <QHBoxLayout>
 #include <QScrollBar>
+#include <QDockWidget>
+#include <QTabBar>
+#include <QFrame>
+#include <QTextEdit>
 #include <Qsci/qsciscintilla.h>
+#include "themes/thememanager.h"  // for DISABLED_testDockTabBarBorderAlignment
 #include <Qsci/qsciscintillabase.h>
 #include "editor.h"
 #include "core.h"
@@ -2550,8 +2555,8 @@ private slots:
             QsciScintillaBase::SCI_GOTOLINE, (unsigned long)headerLine);
         QApplication::processEvents();
 
-        // The type column starts at kFoldCol + depth*3
-        int typeStart = 3 + lm->depth * 3;  // kFoldCol = 3
+        // The type column starts at kFoldCol + depth*kTreeIndent
+        int typeStart = kFoldCol + lm->depth * kTreeIndent;
 
         // Hover over type column — should show PointingHandCursor
         // (Before fix: showed ArrowCursor because headerTypeNameSpan returned invalid)
@@ -2618,7 +2623,7 @@ private slots:
         QVERIFY2(hdrText.contains("my_target"), qPrintable("Header line should contain name: " + hdrText));
 
         // The name should be inline-editable despite being a hex node kind
-        int nameStart = kFoldCol + lm->depth * 3 + lm->effectiveTypeW + kSepWidth;
+        int nameStart = kFoldCol + lm->depth * kTreeIndent + lm->effectiveTypeW + kSepWidth;
         bool ok = m_editor->beginInlineEdit(EditTarget::Name, headerLine, nameStart);
         QVERIFY2(ok, qPrintable(QString("Static field name must be editable. line=%1 col=%2 depth=%3 typeW=%4 text='%5'")
             .arg(headerLine).arg(nameStart).arg(lm->depth).arg(lm->effectiveTypeW).arg(hdrText)));
@@ -2682,7 +2687,7 @@ private slots:
 
         // Hover over the type column (after "static " prefix) — should be PointingHandCursor
         // "static " is 7 chars, so the actual type starts at indent + 7
-        int typeCol = kFoldCol + lm->depth * 3 + 7;
+        int typeCol = kFoldCol + lm->depth * kTreeIndent + 7;
         QPoint typePos = colToViewport(m_editor->scintilla(), headerLine, typeCol + 1);
         if (typePos.y() > 0) {
             sendMouseMove(m_editor->scintilla()->viewport(), typePos);
@@ -3256,6 +3261,252 @@ private slots:
         m_editor->applyDocument(m_result);
     }
 };
+
+// Border alignment test removed — requires full MenuBarStyle which lives in main.cpp.
+// Visual verification done manually in the real app.
+
+#if 0  // DISABLED: testDockTabBarBorderAlignment
+    void testDockTabBarBorderAlignment() {
+        const auto& t = rcx::ThemeManager::instance().current();
+        QColor borderColor = t.border;
+        QColor bgColor = t.background;
+
+        // Install test style that replicates real app's tab bar painting
+        QApplication::setStyle(new BorderTestStyle("Fusion"));
+
+        // Apply dark palette globally so all widgets render with theme colors
+        QPalette globalPal;
+        globalPal.setColor(QPalette::Window, bgColor);
+        globalPal.setColor(QPalette::WindowText, t.textDim);
+        globalPal.setColor(QPalette::Base, bgColor);
+        globalPal.setColor(QPalette::Text, t.text);
+        globalPal.setColor(QPalette::Mid, t.hover);
+        globalPal.setColor(QPalette::Dark, t.border);
+        globalPal.setColor(QPalette::Link, t.indHoverSpan);
+        QApplication::setPalette(globalPal);
+
+        // ── Build a minimal replica of the real app layout ──
+        auto* win = new QMainWindow;
+        win->resize(700, 400);
+        win->setDockNestingEnabled(true);
+        win->setTabPosition(Qt::TopDockWidgetArea, QTabWidget::North);
+        win->setStyleSheet(QStringLiteral(
+            "QMainWindow::separator { width: 4px; height: 4px; background: %1; }"
+            "QDockWidget { border: none; margin: 0; padding: 0; }"
+            "QDockWidget > QWidget { border: none; margin: 0; padding: 0; }")
+            .arg(bgColor.name()));
+
+        // Invisible central widget (same as real app)
+        auto* central = new QWidget(win);
+        central->setMaximumSize(0, 0);
+        central->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        win->setCentralWidget(central);
+        win->setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
+        win->setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
+
+        // ── Workspace dock (left) — DockTitleBar + separator + content ──
+        auto* wsDock = new QDockWidget("Project", win);
+        wsDock->setFeatures(QDockWidget::DockWidgetMovable);
+        {
+            // Title bar: 45px with 1px bottom border painted directly
+            // (matches doc tab bar base line at y=45)
+            class WsTitleBar : public QWidget {
+                QColor m_bg, m_border;
+            public:
+                WsTitleBar(const QColor& bg, const QColor& border, QWidget* p)
+                    : QWidget(p), m_bg(bg), m_border(border) {
+                    setFixedHeight(45);
+                    setMinimumHeight(45);
+                    setMaximumHeight(45);
+                }
+                void paintEvent(QPaintEvent*) override {
+                    QPainter p(this);
+                    p.fillRect(rect(), Qt::red);  // paint entire title bar RED to verify it renders
+                }
+            };
+            auto* titleBar = new WsTitleBar(bgColor, borderColor, wsDock);
+            wsDock->setTitleBarWidget(titleBar);
+
+            // Content: just a body widget
+            auto* content = new QWidget(wsDock);
+            content->setAutoFillBackground(true);
+            content->setPalette(globalPal);
+            auto* layout = new QVBoxLayout(content);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(0);
+            auto* body = new QWidget(content);
+            body->setAutoFillBackground(true);
+            body->setPalette(globalPal);
+            layout->addWidget(body);
+            wsDock->setWidget(content);
+        }
+        win->addDockWidget(Qt::TopDockWidgetArea, wsDock);
+
+        // ── Doc dock (right) — 0-height title bar, tab bar via tabification ──
+        auto* docDock = new QDockWidget("UnnamedClass0", win);
+        docDock->setFeatures(QDockWidget::DockWidgetMovable);
+        {
+            auto* emptyTitle = new QWidget(docDock);
+            emptyTitle->setFixedHeight(0);
+            docDock->setTitleBarWidget(emptyTitle);
+            auto* body = new QWidget(docDock);
+            body->setAutoFillBackground(true);
+            body->setPalette(globalPal);
+            docDock->setWidget(body);
+        }
+        // Sentinel dock (keeps tab bar visible with 1 doc)
+        auto* sentinel = new QDockWidget(win);
+        sentinel->setFeatures(QDockWidget::NoDockWidgetFeatures);
+        {
+            auto* st = new QWidget(sentinel);
+            st->setFixedHeight(0);
+            sentinel->setTitleBarWidget(st);
+            sentinel->setWidget(new QWidget(sentinel));
+            sentinel->setWindowTitle(QStringLiteral("\u200B"));
+        }
+
+        // Split workspace left, doc right
+        win->splitDockWidget(wsDock, docDock, Qt::Horizontal);
+        win->tabifyDockWidget(docDock, sentinel);
+        docDock->raise();
+
+        // Resize workspace to ~200px
+        win->resizeDocks({wsDock}, {200}, Qt::Horizontal);
+
+        win->show();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+
+        // Apply palette to dock tab bars
+        for (auto* tabBar : win->findChildren<QTabBar*>()) {
+            if (tabBar->parent() != win) continue;
+            tabBar->setStyleSheet(QString());
+            tabBar->setElideMode(Qt::ElideNone);
+            tabBar->setExpanding(false);
+            tabBar->setPalette(globalPal);
+        }
+        QApplication::processEvents();
+        QApplication::processEvents();
+        QTest::qWait(200);
+
+        // ── Grab and analyze ──
+        QPixmap px = win->grab();
+        QImage img = px.toImage().convertToFormat(QImage::Format_ARGB32);
+        img.save("dock_border_trace.png");
+
+        int W = img.width();
+        int H = img.height();
+        QVERIFY(W > 100 && H > 100);
+
+        // Helper: check if pixel matches border color (within tolerance)
+        auto isBorder = [&](int x, int y) -> bool {
+            QColor c(img.pixel(x, y));
+            return qAbs(c.red() - borderColor.red()) < 10
+                && qAbs(c.green() - borderColor.green()) < 10
+                && qAbs(c.blue() - borderColor.blue()) < 10;
+        };
+
+        int wsX = 50;
+        int docX = W * 3 / 4;
+
+        // Report actual tab bar height for calibration
+        for (auto* tabBar : win->findChildren<QTabBar*>()) {
+            if (tabBar->parent() != win) continue;
+            qDebug() << "Tab bar widget height:" << tabBar->height()
+                     << "sizeHint:" << tabBar->sizeHint().height();
+        }
+
+        // Dump ALL non-background pixels on both sides, y=0..60
+        qDebug() << "=== Doc side (x=" << docX << ") y=0..60 ===";
+        for (int y = 0; y < qMin(60, H); y++) {
+            QColor c(img.pixel(docX, y));
+            bool bg = (qAbs(c.red()-bgColor.red()) < 5
+                    && qAbs(c.green()-bgColor.green()) < 5
+                    && qAbs(c.blue()-bgColor.blue()) < 5);
+            if (!bg)
+                qDebug() << QString("  doc(%1,%2) = %3 R%4G%5B%6 %7")
+                    .arg(docX).arg(y).arg(c.name())
+                    .arg(c.red()).arg(c.green()).arg(c.blue())
+                    .arg(isBorder(docX, y) ? "BORDER" : "");
+        }
+        qDebug() << "=== Workspace side (x=" << wsX << ") y=0..60 ALL pixels ===";
+        for (int y = 0; y < qMin(60, H); y++) {
+            QColor c(img.pixel(wsX, y));
+            if (y <= 2 || (y >= 42 && y <= 50))
+                qDebug() << QString("  ws(%1,%2) = %3 R%4G%5B%6 %7")
+                    .arg(wsX).arg(y).arg(c.name())
+                    .arg(c.red()).arg(c.green()).arg(c.blue())
+                    .arg(isBorder(wsX, y) ? "BORDER" : "");
+        }
+
+        // Find borders
+        int docBorderY = -1;
+        for (int y = 1; y < qMin(80, H); y++)  // skip y=0 (window frame)
+            if (isBorder(docX, y)) { docBorderY = y; break; }
+        int wsBorderY = -1;
+        for (int y = 1; y < qMin(80, H); y++)
+            if (isBorder(wsX, y)) { wsBorderY = y; break; }
+        qDebug() << "Doc border at y =" << docBorderY
+                 << " Workspace border at y =" << wsBorderY;
+
+        // Both borders must exist
+        QVERIFY2(docBorderY > 0,
+            "No border found on doc side");
+        QVERIFY2(wsBorderY > 0,
+            "No border found on workspace side (separator missing?)");
+
+        // They must be at the same y-coordinate
+        QVERIFY2(docBorderY == wsBorderY,
+            qPrintable(QString("Border misaligned: doc at y=%1, workspace at y=%2 (delta=%3)")
+                .arg(docBorderY).arg(wsBorderY).arg(docBorderY - wsBorderY)));
+
+        int borderY = docBorderY;
+
+        // Verify 1px thick on both sides
+        QVERIFY2(!isBorder(docX, borderY - 1),
+            qPrintable(QString("Double border on doc side above: y=%1").arg(borderY - 1)));
+        QVERIFY2(!isBorder(docX, borderY + 1),
+            qPrintable(QString("Double border on doc side below: y=%1").arg(borderY + 1)));
+        QVERIFY2(!isBorder(wsX, borderY - 1),
+            qPrintable(QString("Double border on workspace above: y=%1").arg(borderY - 1)));
+        QVERIFY2(!isBorder(wsX, borderY + 1),
+            qPrintable(QString("Double border on workspace below: y=%1").arg(borderY + 1)));
+
+        // Scan full width at borderY — count gaps
+        int gapCount = 0;
+        int firstGap = -1;
+        for (int x = 0; x < W; x++) {
+            if (!isBorder(x, borderY)) {
+                gapCount++;
+                if (firstGap < 0) firstGap = x;
+            }
+        }
+
+        // Save annotated diagnostic
+        {
+            QImage diag = img.copy();
+            QPainter dp(&diag);
+            dp.setPen(QPen(Qt::cyan, 1));
+            dp.drawLine(0, borderY, W - 1, borderY);
+            dp.setPen(QPen(Qt::red, 1));
+            for (int x = 0; x < W; x++) {
+                if (!isBorder(x, borderY))
+                    dp.drawPoint(x, borderY);
+            }
+            dp.end();
+            diag.save("dock_border_annotated.png");
+        }
+
+        // Allow up to 8px of gaps (splitter handle between docks)
+        QVERIFY2(gapCount <= 8,
+            qPrintable(QString("Border not continuous at y=%1: %2 gap pixels, first at x=%3")
+                .arg(borderY).arg(gapCount).arg(firstGap)));
+
+        qDebug() << "Border alignment OK: y =" << borderY
+                 << "width =" << W << "gaps =" << gapCount;
+
+        delete win;
+    }
+#endif
 
 QTEST_MAIN(TestEditor)
 #include "test_editor.moc"

@@ -1131,10 +1131,14 @@ void RcxEditor::reformatMargins() {
         if (lm.lineKind != LineKind::Field && lm.lineKind != LineKind::Header)
             continue;
 
-        // Place offset in the parent's indent slot (one level above the field's own indent)
-        // so the field's own 3-char indent acts as visual separator from the type column
-        int col = kFoldCol + (lm.depth - 2) * 3;
-        int slotWidth = 5;
+        // Place offset in the indent area before the child's type column.
+        // Need at least 4 chars (3 for "+XX" + 1 gap). With kTreeIndent=2
+        // there's only 1 char per level of nesting, so skip when too tight.
+        int childTypeCol = kFoldCol + lm.depth * kTreeIndent;
+        int parentTypeCol = kFoldCol + (lm.depth - 1) * kTreeIndent;
+        int slotWidth = childTypeCol - parentTypeCol - 1;  // -1 for gap before type
+        if (slotWidth < 3) continue;  // not enough room for "+XX"
+        int col = parentTypeCol;
 
         auto pos = [&](int c) -> long {
             return m_sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
@@ -1827,7 +1831,7 @@ RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
 static ColumnSpan headerNameSpan(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header) return {};
 
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int typeW = lm.effectiveTypeW;
     int nameStart = ind + typeW + kSepWidth;
 
@@ -1856,7 +1860,7 @@ static ColumnSpan headerTypeNameSpan(const LineMeta& lm, const QString& lineText
     if (lm.lineKind != LineKind::Header) return {};
     if (lm.isArrayHeader) return {};
 
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int typeW = lm.effectiveTypeW;
     int typeEnd = ind + typeW;
     if (typeEnd > lineText.size()) typeEnd = lineText.size();
@@ -1898,7 +1902,7 @@ static ColumnSpan headerTypeNameSpan(const LineMeta& lm, const QString& lineText
 // Type span for array headers: "int32_t[10]" in "int32_t[10] positions {"
 static ColumnSpan arrayHeaderTypeSpan(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header || !lm.isArrayHeader) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int typeEnd = lineText.indexOf(' ', ind);
     if (typeEnd <= ind) return {};
     return {ind, typeEnd, true};

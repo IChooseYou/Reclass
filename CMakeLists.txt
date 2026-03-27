@@ -514,6 +514,13 @@ if(BUILD_TESTING)
         target_link_libraries(test_options_dialog PRIVATE ${QT}::Widgets ${QT}::Test)
         add_test(NAME test_options_dialog COMMAND test_options_dialog)
 
+        add_executable(test_titlebar_border tests/test_titlebar_border.cpp
+        src/titlebar.cpp src/themes/theme.cpp src/themes/thememanager.cpp
+        src/resources.qrc)
+        target_include_directories(test_titlebar_border PRIVATE src)
+        target_link_libraries(test_titlebar_border PRIVATE ${QT}::Widgets ${QT}::Test ${QT}::Svg)
+        add_test(NAME test_titlebar_border COMMAND test_titlebar_border)
+
         add_executable(test_source_provider tests/test_source_provider.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp

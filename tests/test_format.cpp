@@ -124,8 +124,8 @@ private slots:
 
     void testIndent() {
         QCOMPARE(fmt::indent(0), QString(""));
-        QCOMPARE(fmt::indent(1), QString("   "));
-        QCOMPARE(fmt::indent(3), QString("         "));
+        QCOMPARE(fmt::indent(1), QString("  "));
+        QCOMPARE(fmt::indent(3), QString("      "));
     }
 
     void testParseValueInt32() {

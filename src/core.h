@@ -705,6 +705,7 @@ enum class EditTarget { Name, Type, Value, BaseAddress, Source, ArrayIndex, Arra
 
 // Column layout constants (shared with format.cpp span computation)
 inline constexpr int kFoldCol     = 3;   // 3-char fold indicator prefix per line
+inline constexpr int kTreeIndent  = 2;   // chars per nesting-level indent (tree connectors)
 inline constexpr int kColType     = 14;  // Max type column width (fits "uint64_t[999]")
 inline constexpr int kColName     = 22;
 inline constexpr int kColValue    = 96;
@@ -719,14 +720,14 @@ inline constexpr int kCompactTypeW    = 20; // Type column cap for compact colum
 
 inline ColumnSpan typeSpanFor(const LineMeta& lm, int typeW = kColType) {
     if (lm.lineKind != LineKind::Field || lm.isContinuation || lm.isMemberLine) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     return {ind, ind + typeW, true};
 }
 
 inline ColumnSpan nameSpanFor(const LineMeta& lm, int typeW = kColType, int nameW = kColName) {
     if (lm.isContinuation || lm.lineKind != LineKind::Field || lm.isMemberLine) return {};
 
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int start = ind + typeW + kSepWidth;
 
     // Hex: ASCII preview occupies the name column (padded to nameW)
@@ -740,7 +741,7 @@ inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/, int typeW
     if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer ||
         lm.lineKind == LineKind::ArrayElementSeparator) return {};
     if (lm.isMemberLine) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
 
     // Hex uses nameW for ASCII column (same as regular name column)
     bool isHex = isHexPreview(lm.nodeKind);
@@ -761,7 +762,7 @@ inline ColumnSpan valueSpanFor(const LineMeta& lm, int /*lineLength*/, int typeW
 // Member line spans (enum "name = value", bitfield "name : N = value")
 inline ColumnSpan memberNameSpanFor(const LineMeta& lm, const QString& lineText) {
     if (!lm.isMemberLine) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int eq = lineText.indexOf(QLatin1String(" = "), ind);
     if (eq < 0) return {};
     int nameEnd = eq;
@@ -799,7 +800,7 @@ inline ColumnSpan staticExprSpanFor(const LineMeta& /*lm*/, const QString& lineT
 
 inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW = kColType, int nameW = kColName) {
     if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
 
     bool isHex = isHexPreview(lm.nodeKind);
     int valWidth = isHex ? 23 : kColValue;
@@ -910,7 +911,7 @@ inline ColumnSpan commandRowChevronSpan(const QString& lineText) {
 
 inline ColumnSpan arrayElemTypeSpanFor(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header || !lm.isArrayHeader) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     // Find '[' in the type portion
     int bracket = lineText.indexOf('[', ind);
     if (bracket <= ind) return {};
@@ -919,7 +920,7 @@ inline ColumnSpan arrayElemTypeSpanFor(const LineMeta& lm, const QString& lineTe
 
 inline ColumnSpan arrayElemCountSpanFor(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header || !lm.isArrayHeader) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int openBracket = lineText.indexOf('[', ind);
     int closeBracket = lineText.indexOf(']', openBracket);
     if (openBracket < 0 || closeBracket < 0 || closeBracket <= openBracket + 1) return {};
@@ -929,7 +930,7 @@ inline ColumnSpan arrayElemCountSpanFor(const LineMeta& lm, const QString& lineT
 // Click-area version: includes brackets [N] for hit testing
 inline ColumnSpan arrayElemCountClickSpanFor(const LineMeta& lm, const QString& lineText) {
     if (lm.lineKind != LineKind::Header || !lm.isArrayHeader) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int openBracket = lineText.indexOf('[', ind);
     int closeBracket = lineText.indexOf(']', openBracket);
     if (openBracket < 0 || closeBracket < 0 || closeBracket <= openBracket + 1) return {};
@@ -947,7 +948,7 @@ inline ColumnSpan pointerKindSpanFor(const LineMeta& /*lm*/, const QString& /*li
 inline ColumnSpan pointerTargetSpanFor(const LineMeta& lm, const QString& lineText) {
     if ((lm.lineKind != LineKind::Field && lm.lineKind != LineKind::Header) || lm.isContinuation) return {};
     if (lm.nodeKind != NodeKind::Pointer32 && lm.nodeKind != NodeKind::Pointer64) return {};
-    int ind = kFoldCol + lm.depth * 3;
+    int ind = kFoldCol + lm.depth * kTreeIndent;
     int star = lineText.indexOf('*', ind);
     if (star <= ind) return {};
     return {ind, star, true};

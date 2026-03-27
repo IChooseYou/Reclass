@@ -282,11 +282,11 @@ public:
         if (type == CT_TabBarTab) {
             if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
                 if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
-                    s.setHeight(31);
+                    s.setHeight(37);
                     // Sentinel "+" tab: compact icon-only width
                     if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt))
                         if (tab->text == QStringLiteral("\u200B"))
-                            return QSize(32, 31);
+                            return QSize(32, 37);
                     s.setWidth(s.width() + 24);  // room for DockTabButtons (16px icon + padding)
                 }
             }
@@ -348,6 +348,17 @@ public:
         // Transparent menu bar background (no CSS needed)
         if (elem == PE_PanelMenuBar)
             return;
+        // Dock tab bar base line — use theme border color instead of Fusion default
+        if (elem == PE_FrameTabBarBase) {
+            if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
+                if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
+                    p->fillRect(opt->rect.left(), opt->rect.bottom(),
+                                opt->rect.width(), 1,
+                                opt->palette.color(QPalette::Dark));
+                    return;
+                }
+            }
+        }
         // Item-view row background — patch Highlight so the row bg matches CE_ItemViewItem
         if (elem == PE_PanelItemViewRow) {
             if (auto* vi = qstyleoption_cast<const QStyleOptionViewItem*>(opt)) {
@@ -440,16 +451,15 @@ public:
                     QColor bg = tab->palette.color(QPalette::Window);      // theme.background
                     if (hovered || (sentinel && selected))
                         bg = tab->palette.color(QPalette::Mid);            // theme.hover
-                    p->fillRect(tab->rect, bg);
+                    // Fill background 1px short at bottom so PE_FrameTabBarBase
+                    // base line (drawn first, full widget width) remains visible
+                    p->fillRect(tab->rect.adjusted(0, 0, 0, -1), bg);
                     // Selected accent line on top (2px) — not for sentinel "+" tab
                     if (selected && !sentinel) {
                         p->fillRect(QRect(tab->rect.left(), tab->rect.top(),
                                           tab->rect.width(), 2),
                                     tab->palette.color(QPalette::Link));   // theme.indHoverSpan
                     }
-                    // Bottom border (1px separator between tabs and content)
-                    p->setPen(tab->palette.color(QPalette::Dark));         // theme.border
-                    p->drawLine(tab->rect.bottomLeft(), tab->rect.bottomRight());
                     return;
                 }
             }
@@ -1112,6 +1122,7 @@ public:
     explicit DockGripWidget(QWidget* parent) : QWidget(parent) {
         setFixedWidth(12);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        setCursor(Qt::SizeAllCursor);
         m_color = rcx::ThemeManager::instance().current().textFaint;
     }
     void setGripColor(const QColor& c) { m_color = c; update(); }
@@ -6497,10 +6508,10 @@ MainWindow::InspectionResult MainWindow::inspectAt(QWidget* widget, QPoint local
                 r.region = QStringLiteral("editor.foldArrow");
                 r.description = QStringLiteral("Fold arrow — click to expand/collapse");
                 r.globalRect = spanRect(line, {0, kFoldCol, true});
-            } else if (col >= 0 && col < kFoldCol + lm->depth * 3 && lm->depth > 0) {
+            } else if (col >= 0 && col < kFoldCol + lm->depth * kTreeIndent && lm->depth > 0) {
                 r.region = QStringLiteral("editor.treeLines");
-                r.description = QStringLiteral("Tree indent connectors (├─ └─ │)");
-                r.globalRect = spanRect(line, {kFoldCol, kFoldCol + lm->depth * 3, true});
+                r.description = QStringLiteral("Tree indent connectors (├ └ │)");
+                r.globalRect = spanRect(line, {kFoldCol, kFoldCol + lm->depth * kTreeIndent, true});
             } else if (ts.valid && col >= ts.start && col < ts.end) {
                 r.region = QStringLiteral("editor.typeColumn");
                 r.description = QStringLiteral("Type column — field type names (int32_t, float, void*, etc.)");

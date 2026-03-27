@@ -120,15 +120,15 @@ struct ComposeState {
                 bool active = (d < siblingStack.size() && siblingStack[d]);
                 if (isFooter || d < D - 1) {
                     // Ancestor continuation or footer's own level
-                    treeIndent += active ? QStringLiteral("\u2502  ")
-                                        : QStringLiteral("   ");
+                    treeIndent += active ? QStringLiteral("\u2502 ")
+                                        : QStringLiteral("  ");
                 } else {
                     // This node's own connector (non-footer only)
-                    treeIndent += active ? QStringLiteral("\u251C\u2500 ")
-                                        : QStringLiteral("\u2514\u2500 ");
+                    treeIndent += active ? QStringLiteral("\u251C ")
+                                        : QStringLiteral("\u2514 ");
                 }
             }
-            text += treeIndent + lineText.mid(D * 3);
+            text += treeIndent + lineText.mid(D * kTreeIndent);
         } else {
             text += lineText;
         }
