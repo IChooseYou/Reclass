@@ -582,8 +582,11 @@ public:
     }
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
-        p.setPen(color);
-        p.drawRect(0, 0, width() - 1, height() - 1);
+        int w = width(), h = height();
+        p.fillRect(0, 0, w, 1, color);          // top
+        p.fillRect(0, h - 1, w, 1, color);      // bottom
+        p.fillRect(0, 0, 1, h, color);           // left
+        p.fillRect(w - 1, 0, 1, h, color);       // right
     }
 };
 
@@ -2426,6 +2429,13 @@ void MainWindow::setupDockTabBars() {
 
             menu.exec(tabBar->mapToGlobal(pos));
         });
+    }
+
+    // Re-raise border overlay — new tab bars created during dock rearrangement
+    // can end up above the overlay in z-order
+    if (m_borderOverlay) {
+        m_borderOverlay->setGeometry(rect());
+        m_borderOverlay->raise();
     }
 }
 
