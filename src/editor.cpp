@@ -337,6 +337,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     findCloseBtn->setFixedSize(24, 24);
     m_findBar = new QLineEdit(m_findBarContainer);
     m_findBar->setPlaceholderText(QStringLiteral("Find..."));
+    m_findBar->setFont(editorFont());
     m_findBar->setFixedHeight(24);
     fbLayout->addWidget(findPrevBtn);
     fbLayout->addWidget(findNextBtn);
@@ -395,7 +396,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
             m_findPos = pos + (forward ? needle.size() : 0);
         }
     };
-    connect(m_findBar, &QLineEdit::textChanged, this, [doFind]() { doFind(true); });
+    connect(m_findBar, &QLineEdit::textChanged, this, [this, doFind]() { m_findPos = 0; doFind(true); });
     connect(m_findBar, &QLineEdit::returnPressed, this, [doFind]() { doFind(true); });
     connect(findNextBtn, &QToolButton::clicked, this, [doFind]() { doFind(true); });
     connect(findPrevBtn, &QToolButton::clicked, this, [doFind]() { doFind(false); });
@@ -4228,6 +4229,7 @@ void RcxEditor::setEditorFont(const QString& fontName) {
     for (int i = 0; i <= 127; i++)
         m_lexer->setFont(f, i);
     m_sci->setMarginsFont(f);
+    if (m_findBar) m_findBar->setFont(f);
 
     // Re-apply margin styles and width with new font metrics
     allocateMarginStyles();
