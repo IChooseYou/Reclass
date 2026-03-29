@@ -3491,13 +3491,12 @@ void RcxEditor::paintEditableSpans(int line) {
         if (resolvedSpanFor(line, t, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
     }
-    // Reveal placeholder as clickable pill on selected lines (matches Trim/+10h styling)
+    // Reveal placeholder "  //" as a clickable pill on selected lines
     if (lm->commentPlaceholder && lm->commentStart >= 0) {
         QString lineText = getLineText(m_sci, line);
         int end = (int)lineText.size();
         if (lm->commentStart < end) {
             clearIndicatorLine(IND_COMMENT_HIDE, line);
-            // Pill box covers full placeholder range; dim text matches footer pill look
             fillIndicatorCols(IND_CMD_PILL, line, lm->commentStart, end);
             fillIndicatorCols(IND_HEX_DIM, line, lm->commentStart, end);
         }
@@ -3747,15 +3746,6 @@ void RcxEditor::applyHoverCursor() {
             }
             if (!narrowed && h.col >= span.start && h.col < span.end) {
                 fillIndicatorCols(IND_HOVER_SPAN, line, span.start, span.end);
-                m_hoverSpanLines.append(line);
-            }
-            // Comment placeholder pill: extend hover to full placeholder range
-            if (!narrowed && t == EditTarget::Comment
-                && line >= 0 && line < m_meta.size()
-                && m_meta[line].commentPlaceholder && m_meta[line].commentStart >= 0
-                && h.col >= m_meta[line].commentStart) {
-                int pillEnd = (int)lineText.size();
-                fillIndicatorCols(IND_HOVER_SPAN, line, m_meta[line].commentStart, pillEnd);
                 m_hoverSpanLines.append(line);
             }
         }
@@ -4079,11 +4069,6 @@ void RcxEditor::applyHoverCursor() {
         NormalizedSpan trimmed;
         bool overText = resolvedSpanFor(line, t, trimmed)
                         && h.col >= trimmed.start && h.col < trimmed.end;
-        // Comment placeholder pill: treat full placeholder range as clickable
-        if (!overText && t == EditTarget::Comment && line >= 0 && line < m_meta.size()
-            && m_meta[line].commentPlaceholder && m_meta[line].commentStart >= 0
-            && h.col >= m_meta[line].commentStart)
-            overText = true;
         if (overText) {
             switch (t) {
             case EditTarget::Type:
@@ -4093,13 +4078,6 @@ void RcxEditor::applyHoverCursor() {
             case EditTarget::RootClassType:
             case EditTarget::TypeSelector:
                 desired = Qt::PointingHandCursor;
-                break;
-            case EditTarget::Comment:
-                // Placeholder pill = pointer cursor; real comment = I-beam
-                if (line >= 0 && line < m_meta.size() && m_meta[line].commentPlaceholder)
-                    desired = Qt::PointingHandCursor;
-                else
-                    desired = Qt::IBeamCursor;
                 break;
             default:
                 desired = Qt::IBeamCursor;
