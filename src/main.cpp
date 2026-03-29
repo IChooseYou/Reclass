@@ -1020,6 +1020,15 @@ void MainWindow::createMenus() {
             tab.ctrl->setTypeHints(checked);
     });
 
+    auto* actComments = view->addAction("&Comments");
+    actComments->setCheckable(true);
+    actComments->setChecked(settings.value("showComments", false).toBool());
+    connect(actComments, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("showComments", checked);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setShowComments(checked);
+    });
+
     auto* actHoverEffects = view->addAction("Ho&ver Effects");
     actHoverEffects->setCheckable(true);
     actHoverEffects->setChecked(settings.value("hoverEffects", true).toBool());
@@ -2020,6 +2029,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", true).toBool());
     ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
     ctrl->setTypeHints(QSettings("Reclass", "Reclass").value("typeHints", false).toBool());
+    ctrl->setShowComments(QSettings("Reclass", "Reclass").value("showComments", false).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
@@ -3753,7 +3763,6 @@ QString MainWindow::generateDebugText(RcxEditor* editor) const {
             if (lm->isArrayElement) meta += QStringLiteral(" arrElem");
             if (lm->foldHead) meta += lm->foldCollapsed ? QStringLiteral(" fold+") : QStringLiteral(" fold-");
             if (lm->typeHintStart >= 0) meta += QStringLiteral(" hint@%1").arg(lm->typeHintStart);
-            if (lm->commentPlaceholder) meta += QStringLiteral(" cmtPill");
         }
 
         output.append(margin + QStringLiteral("|") + annotated + meta);

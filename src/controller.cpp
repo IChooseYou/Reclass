@@ -146,9 +146,10 @@ RcxDocument::RcxDocument(QObject* parent)
 
 ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
                                    bool treeLines, bool braceWrap, bool typeHints,
+                                   bool showComments,
                                    SymbolLookupFn symbolLookup) const {
     return rcx::compose(tree, *provider, viewRootId, compactColumns, treeLines, braceWrap, typeHints,
-                        std::move(symbolLookup));
+                        showComments, std::move(symbolLookup));
 }
 
 bool RcxDocument::save(const QString& path) {
@@ -848,9 +849,9 @@ void RcxController::refresh() {
 
     // Compose against snapshot provider if active, otherwise real provider
     if (m_snapshotProv)
-        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, symLookup);
+        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
     else
-        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, symLookup);
+        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
 
     s_composeDoc = nullptr;
 
@@ -4083,6 +4084,11 @@ void RcxController::setBraceWrap(bool v) {
 
 void RcxController::setTypeHints(bool v) {
     m_typeHints = v;
+    refresh();
+}
+
+void RcxController::setShowComments(bool v) {
+    m_showComments = v;
     refresh();
 }
 

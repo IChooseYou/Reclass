@@ -71,6 +71,7 @@ struct ComposeState {
     bool               treeLines      = false;  // draw Unicode tree connectors in indentation
     bool               braceWrap      = false;  // opening brace on its own line
     bool               typeHints      = false;  // show type inference hints on hex nodes
+    bool               showComments   = true;   // show user comments and PDB symbol annotations
     SymbolLookupFn     symbolLookup;             // optional PDB symbol lookup callback
     QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
@@ -258,7 +259,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
 
         // Comment annotation: user comment takes priority, then PDB symbol
         // Appended right after value text (not at fixed column) for compact display
-        if (sub == 0) {
+        if (sub == 0 && state.showComments) {
             QString commentText;
             if (!node.comment.isEmpty())
                 commentText = node.comment;
@@ -272,12 +273,6 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 while (lineText.endsWith(' ')) lineText.chop(1);
                 lm.commentStart = kFoldCol + lineText.size() + 2; // after fold prefix + "  " gap
                 lineText += QStringLiteral("  // ") + commentText;
-            } else {
-                // Placeholder "  // " — invisible by default, shown as pill when line is selected
-                while (lineText.endsWith(' ')) lineText.chop(1);
-                lm.commentStart = kFoldCol + lineText.size() + 2;
-                lm.commentPlaceholder = true;
-                lineText += QStringLiteral("  // ");
             }
         }
 
@@ -1127,12 +1122,14 @@ void composeNode(ComposeState& state, const NodeTree& tree,
 
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId,
                       bool compactColumns, bool treeLines, bool braceWrap,
-                      bool typeHints, SymbolLookupFn symbolLookup) {
+                      bool typeHints, bool showComments,
+                      SymbolLookupFn symbolLookup) {
     ComposeState state;
     state.compactColumns = compactColumns;
     state.treeLines = treeLines;
     state.braceWrap = braceWrap;
     state.typeHints = typeHints;
+    state.showComments = showComments;
     state.symbolLookup = std::move(symbolLookup);
 
     // Precompute parent→children map
