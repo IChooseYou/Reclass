@@ -325,6 +325,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // Comment edit (';' key) — respects selection
     connect(editor, &RcxEditor::commentEditRequested,
             this, [this, editor]() {
+        if (!m_showComments) return;
         QSet<uint64_t> ids = m_selIds;
         // Strip footer/array/member bits to get real node IDs
         QSet<uint64_t> nodeIds;
@@ -2082,8 +2083,8 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addSeparator();
 
-        // Batch comment
-        menu.addAction(icon("edit.svg"), QString("&Comment %1 nodes\t;").arg(count), [this, ids]() {
+        // Batch comment (only when comments are enabled)
+        if (m_showComments) menu.addAction(icon("edit.svg"), QString("&Comment %1 nodes\t;").arg(count), [this, ids]() {
             // Gather existing comment from first node as default
             QString existing;
             for (uint64_t id : ids) {
@@ -2476,9 +2477,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             editor->beginInlineEdit(EditTarget::Type, line);
         });
 
-        menu.addAction(icon("edit.svg"), "&Comment\t;", [editor, line]() {
-            editor->beginInlineEdit(EditTarget::Comment, line);
-        });
+        if (m_showComments) {
+            menu.addAction(icon("edit.svg"), "&Comment\t;", [editor, line]() {
+                editor->beginInlineEdit(EditTarget::Comment, line);
+            });
+        }
 
         menu.addSeparator();
 
