@@ -305,6 +305,7 @@ static constexpr int IND_HEAT_WARM    = 17; // Heatmap level 2 (moderate changes
 static constexpr int IND_HEAT_HOT     = 18; // Heatmap level 3 (frequent changes)
 static constexpr int IND_FIND         = 19; // Search match highlight
 static constexpr int IND_TYPE_HINT    = 20; // Dimmed type inference hint text on hex nodes
+static constexpr int IND_COMMENT_HIDE = 21; // Hides placeholder "  //" text (colored as paper)
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -630,6 +631,10 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
                          IND_FIND, (long)1);
 
+    // Comment placeholder — TEXTFORE colored as paper (invisible until selected)
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_COMMENT_HIDE, 17 /*INDIC_TEXTFORE*/);
+
 }
 
 void RcxEditor::setupLexer() {
@@ -776,6 +781,9 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_TYPE_HINT, theme.indHintGreen);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_FIND, theme.borderFocused);
+    // Comment placeholder: colored as editor paper (invisible)
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_COMMENT_HIDE, editorBg);
 
     // Lexer colors
     m_lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::Keyword);
@@ -916,7 +924,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
         for (int ind : {IND_HEX_DIM, IND_BASE_ADDR, IND_HOVER_SPAN, IND_HEAT_COLD,
                         IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
-                        IND_HEAT_HOT, IND_TYPE_HINT}) {
+                        IND_HEAT_HOT, IND_TYPE_HINT, IND_COMMENT_HIDE}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
             m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
         }
@@ -940,10 +948,13 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     applyHeatmapHighlight(result.meta, lineTexts);
     applySymbolColoring(result.meta, lineTexts);
 
-    // Apply green coloring to user comments (same indicator as symbol annotations)
+    // Apply green coloring to real comments; hide placeholder "  //" with paper color
     for (int i = 0; i < result.meta.size(); i++) {
         const auto& lm = result.meta[i];
-        if (lm.commentStart >= 0 && !lineTexts[i].isEmpty())
+        if (lm.commentStart < 0 || lineTexts[i].isEmpty()) continue;
+        if (lm.commentPlaceholder)
+            fillIndicatorCols(IND_COMMENT_HIDE, i, lm.commentStart, lineTexts[i].size());
+        else
             fillIndicatorCols(IND_HINT_GREEN, i, lm.commentStart, lineTexts[i].size());
     }
 
@@ -3479,6 +3490,16 @@ void RcxEditor::paintEditableSpans(int line) {
                          EditTarget::PointerTarget, EditTarget::Comment}) {
         if (resolvedSpanFor(line, t, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
+    }
+    // Reveal placeholder "  //" as a clickable pill on selected lines
+    if (lm->commentPlaceholder && lm->commentStart >= 0) {
+        QString lineText = getLineText(m_sci, line);
+        int end = (int)lineText.size();
+        if (lm->commentStart < end) {
+            clearIndicatorLine(IND_COMMENT_HIDE, line);
+            fillIndicatorCols(IND_CMD_PILL, line, lm->commentStart, end);
+            fillIndicatorCols(IND_HEX_DIM, line, lm->commentStart, end);
+        }
     }
 }
 

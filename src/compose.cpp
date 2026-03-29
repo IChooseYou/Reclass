@@ -272,6 +272,12 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 while (lineText.endsWith(' ')) lineText.chop(1);
                 lm.commentStart = kFoldCol + lineText.size() + 2; // after fold prefix + "  " gap
                 lineText += QStringLiteral("  // ") + commentText;
+            } else {
+                // Placeholder "  // " — invisible by default, shown as pill when line is selected
+                while (lineText.endsWith(' ')) lineText.chop(1);
+                lm.commentStart = kFoldCol + lineText.size() + 2;
+                lm.commentPlaceholder = true;
+                lineText += QStringLiteral("  // ");
             }
         }
 

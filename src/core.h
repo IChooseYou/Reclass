@@ -636,6 +636,7 @@ struct LineMeta {
     int      typeHintStart  = -1;      // Character offset where hint text starts in line text (-1 = none)
     QVector<NodeKind> typeHintKinds;   // Suggested kinds from inference (empty = no hint)
     int      commentStart   = -1;      // Character offset where "// comment" starts in line text (-1 = none)
+    bool     commentPlaceholder = false; // true when "  //" is a placeholder (no real comment)
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {

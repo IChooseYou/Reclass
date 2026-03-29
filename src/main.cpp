@@ -3753,6 +3753,7 @@ QString MainWindow::generateDebugText(RcxEditor* editor) const {
             if (lm->isArrayElement) meta += QStringLiteral(" arrElem");
             if (lm->foldHead) meta += lm->foldCollapsed ? QStringLiteral(" fold+") : QStringLiteral(" fold-");
             if (lm->typeHintStart >= 0) meta += QStringLiteral(" hint@%1").arg(lm->typeHintStart);
+            if (lm->commentPlaceholder) meta += QStringLiteral(" cmtPill");
         }
 
         output.append(margin + QStringLiteral("|") + annotated + meta);
