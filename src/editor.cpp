@@ -933,11 +933,20 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             lm.nodeKind == NodeKind::Pointer32 ||
             lm.nodeKind == NodeKind::Pointer64 ||
             lm.lineKind == LineKind::Footer ||
-            lm.typeHintStart >= 0)
+            lm.typeHintStart >= 0 ||
+            lm.commentStart >= 0)
             lineTexts[i] = getLineText(m_sci, i);
     }
     applyHeatmapHighlight(result.meta, lineTexts);
     applySymbolColoring(result.meta, lineTexts);
+
+    // Apply green coloring to user comments (same indicator as symbol annotations)
+    for (int i = 0; i < result.meta.size(); i++) {
+        const auto& lm = result.meta[i];
+        if (lm.commentStart >= 0 && !lineTexts[i].isEmpty())
+            fillIndicatorCols(IND_HINT_GREEN, i, lm.commentStart, lineTexts[i].size());
+    }
+
     applyCommandRowPills();
 
     // Footer buttons — pill styling
@@ -2005,6 +2014,14 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
         if (lm->isStaticLine)
             s = staticExprSpanFor(*lm, lineText);
         break;
+    case EditTarget::Comment:
+        if (lm->commentStart >= 0 && lm->commentStart < textLen)
+            s = {lm->commentStart, textLen, true};
+        // Fallback: allow comment creation on any Field line without existing comment
+        else if (lm->nodeIdx >= 0 && lm->lineKind == LineKind::Field
+                 && !lm->isContinuation && !lm->isMemberLine)
+            s = {textLen - 1, textLen, true};
+        break;
     case EditTarget::Source: break;
     }
 
@@ -2146,9 +2163,15 @@ static bool hitTestTarget(QsciScintilla* sci,
         vs = memberValueSpanFor(lm, lineText);
     }
 
+    // Comment span: from commentStart to end of line (if comment exists)
+    ColumnSpan cs;
+    if (lm.commentStart >= 0 && lm.commentStart < textLen)
+        cs = {lm.commentStart, textLen, true};
+
     if (inSpan(ts))      outTarget = EditTarget::Type;
     else if (inSpan(ns)) outTarget = EditTarget::Name;
     else if (inSpan(vs)) outTarget = EditTarget::Value;
+    else if (inSpan(cs)) outTarget = EditTarget::Comment;
     else return false;
 
     // Array headers: redirect generic Type hit to ArrayElementType (uses popup, not inline edit)
@@ -2521,11 +2544,17 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         else
             emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex64);
         return true;
+    case Qt::Key_Semicolon:
+        if (ke->modifiers() == Qt::NoModifier) {
+            emit commentEditRequested();
+            return true;
+        }
+        return false;
     case Qt::Key_Tab: {
         EditTarget order[] = {EditTarget::Name, EditTarget::Type, EditTarget::Value,
                               EditTarget::ArrayElementType, EditTarget::ArrayElementCount,
-                              EditTarget::PointerTarget};
-        constexpr int N = 6;
+                              EditTarget::PointerTarget, EditTarget::Comment};
+        constexpr int N = 7;
         int start = 0;
         for (int i = 0; i < N; i++)
             if (order[i] == m_lastTabTarget) { start = (i + 1) % N; break; }
@@ -2925,6 +2954,16 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
             int hexWidth = byteCount * 3 - 1;
             norm = {s.start, s.start + hexWidth, true};
         }
+    } else if (target == EditTarget::Comment) {
+        // Comment editing: find "// " in composed line or create new at end
+        lineText = getLineText(m_sci, line);
+        if (lm->commentStart >= 0 && lm->commentStart < lineText.size()) {
+            // Existing comment — span from "// " to end of line
+            norm = {lm->commentStart, (int)lineText.size(), true};
+        } else {
+            // No existing comment — create at end of line
+            norm = {(int)lineText.size(), (int)lineText.size(), true};
+        }
     } else {
         if (!resolvedSpanFor(line, target, norm, &lineText)) return false;
     }
@@ -2977,6 +3016,14 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         QString inner = trimmed.mid(bracketOpen + 1, bracketClose - bracketOpen - 1);
         int innerAbsStart = norm.start + bracketOpen + 1;
         narrowToComponent(inner, innerAbsStart);
+    }
+
+    // Comment editing: strip "// " prefix from trimmed text for editing
+    if (target == EditTarget::Comment) {
+        if (trimmed.startsWith(QStringLiteral("// ")))
+            trimmed = trimmed.mid(3);
+        else if (trimmed.startsWith(QStringLiteral("//")))
+            trimmed = trimmed.mid(2);
     }
 
     m_editState.active = true;
@@ -3037,6 +3084,48 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
                                  (uintptr_t)padUtf8.size(), padUtf8.constData());
             m_editState.linelenAfterReplace += extend;
         }
+    }
+
+    // Comment editing: if no existing comment, append "  // " placeholder at end of line
+    if (target == EditTarget::Comment) {
+        QString curLine = getLineText(m_sci, line);
+        if (lm->commentStart < 0 || lm->commentStart >= (int)curLine.size()) {
+            // Trim trailing whitespace so "// " sits close to content (not after padding)
+            int trimEnd = (int)curLine.size();
+            while (trimEnd > 0 && curLine[trimEnd - 1] == ' ') trimEnd--;
+            if (trimEnd < (int)curLine.size()) {
+                long trimStart = posFromCol(m_sci, line, trimEnd);
+                long trimEndPos = posFromCol(m_sci, line, (int)curLine.size());
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, trimStart);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, trimEndPos);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET, (uintptr_t)0, "");
+                m_editState.linelenAfterReplace -= ((int)curLine.size() - trimEnd);
+            }
+            // Append "  // " at trimmed position
+            QString placeholder = QStringLiteral("  // ");
+            long appendPos = posFromCol(m_sci, line, trimEnd);
+            QByteArray utf8 = placeholder.toUtf8();
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, appendPos);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, appendPos);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
+                                 (uintptr_t)utf8.size(), utf8.constData());
+            m_editState.linelenAfterReplace += placeholder.size();
+            m_editState.spanStart = trimEnd + 5;  // after "  // "
+            m_editState.original = QString();
+        } else {
+            // Existing "// comment" — strip "// " prefix, edit the text part only
+            int textStart = lm->commentStart;
+            // Skip "// " prefix (find actual text start)
+            if (textStart + 3 <= (int)curLine.size() && curLine.mid(textStart, 3) == QStringLiteral("// "))
+                textStart += 3;
+            else if (textStart + 2 <= (int)curLine.size() && curLine.mid(textStart, 2) == QStringLiteral("//"))
+                textStart += 2;
+            m_editState.spanStart = textStart;
+            m_editState.original = curLine.mid(textStart).trimmed();
+        }
+        // Sync norm with adjusted spanStart for correct cursor placement
+        norm.start = m_editState.spanStart;
+        norm.end = m_editState.spanStart + m_editState.original.size();
     }
 
     // Switch to I-beam for editing (skip for picker-based targets)
@@ -3387,7 +3476,7 @@ void RcxEditor::paintEditableSpans(int line) {
     NormalizedSpan norm;
     for (EditTarget t : {EditTarget::Type, EditTarget::Name, EditTarget::Value,
                          EditTarget::ArrayElementType, EditTarget::ArrayElementCount,
-                         EditTarget::PointerTarget}) {
+                         EditTarget::PointerTarget, EditTarget::Comment}) {
         if (resolvedSpanFor(line, t, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
     }

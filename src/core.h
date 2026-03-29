@@ -206,6 +206,7 @@ struct Node {
     int      viewIndex  = 0;   // Array: current view offset (transient)
     QVector<QPair<QString, int64_t>> enumMembers; // Enum: name→value pairs
     QVector<BitfieldMember> bitfieldMembers;       // Bitfield: per-bit member definitions
+    QString  comment;          // User annotation (displayed as "// text" in comment column)
 
     // Note: Returns 0 for Array-of-Struct/Array. Use tree.structSpan() for accurate size.
     int byteSize() const {
@@ -272,6 +273,8 @@ struct Node {
             }
             o["bitfieldMembers"] = arr;
         }
+        if (!comment.isEmpty())
+            o["comment"] = comment;
         return o;
     }
     static Node fromJson(const QJsonObject& o) {
@@ -311,6 +314,7 @@ struct Node {
                 n.bitfieldMembers.append(m);
             }
         }
+        n.comment = o["comment"].toString();
         return n;
     }
 
@@ -631,6 +635,7 @@ struct LineMeta {
     QString  typeHint;                 // Type inference hint text (e.g. "Float×2") — only set for hex nodes when hints enabled
     int      typeHintStart  = -1;      // Character offset where hint text starts in line text (-1 = none)
     QVector<NodeKind> typeHintKinds;   // Suggested kinds from inference (empty = no hint)
+    int      commentStart   = -1;      // Character offset where "// comment" starts in line text (-1 = none)
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {
@@ -681,6 +686,7 @@ namespace cmd {
     struct ChangeOffsetExpr { uint64_t nodeId; QString oldExpr, newExpr; };
     struct ToggleStatic     { uint64_t nodeId; bool oldVal, newVal; };
     struct ToggleRelative   { uint64_t nodeId; bool oldVal, newVal; };
+    struct ChangeComment    { uint64_t nodeId; QString oldComment, newComment; };
 }
 
 using Command = std::variant<
@@ -688,7 +694,8 @@ using Command = std::variant<
     cmd::Insert, cmd::Remove, cmd::ChangeBase, cmd::WriteBytes,
     cmd::ChangeArrayMeta, cmd::ChangePointerRef, cmd::ChangeStructTypeName,
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
-    cmd::ChangeOffsetExpr, cmd::ToggleStatic, cmd::ToggleRelative
+    cmd::ChangeOffsetExpr, cmd::ToggleStatic, cmd::ToggleRelative,
+    cmd::ChangeComment
 >;
 
 // ── Column spans (for inline editing) ──
@@ -701,7 +708,7 @@ struct ColumnSpan {
 
 enum class EditTarget { Name, Type, Value, BaseAddress, Source, ArrayIndex, ArrayCount,
                         ArrayElementType, ArrayElementCount, PointerTarget,
-                        RootClassType, RootClassName, TypeSelector, StaticExpr };
+                        RootClassType, RootClassName, TypeSelector, StaticExpr, Comment };
 
 // Column layout constants (shared with format.cpp span computation)
 inline constexpr int kFoldCol     = 3;   // 3-char fold indicator prefix per line
@@ -799,7 +806,9 @@ inline ColumnSpan staticExprSpanFor(const LineMeta& /*lm*/, const QString& lineT
 }
 
 inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW = kColType, int nameW = kColName) {
-    if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer) return {};
+    if (lm.lineKind == LineKind::Header || lm.lineKind == LineKind::Footer
+        || lm.lineKind == LineKind::CommandRow || lm.lineKind == LineKind::ArrayElementSeparator
+        || lm.isContinuation || lm.isMemberLine) return {};
     int ind = kFoldCol + lm.depth * kTreeIndent;
 
     bool isHex = isHexPreview(lm.nodeKind);

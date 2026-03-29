@@ -781,6 +781,86 @@ private slots:
         QString expr = lineText.mid(span.start, span.end - span.start);
         QCOMPARE(expr.trimmed(), QStringLiteral("base + e_lfanew"));
     }
+
+    // ── Test: comment field JSON round-trip ──
+    void testCommentJsonRoundTrip() {
+        rcx::Node n;
+        n.id = 42;
+        n.kind = rcx::NodeKind::Int32;
+        n.name = QStringLiteral("health");
+        n.comment = QStringLiteral("player HP");
+
+        QJsonObject json = n.toJson();
+        QCOMPARE(json["comment"].toString(), QStringLiteral("player HP"));
+
+        rcx::Node loaded = rcx::Node::fromJson(json);
+        QCOMPARE(loaded.comment, QStringLiteral("player HP"));
+        QCOMPARE(loaded.name, QStringLiteral("health"));
+        QCOMPARE(loaded.kind, rcx::NodeKind::Int32);
+    }
+
+    // ── Test: empty comment not serialized ──
+    void testEmptyCommentNotSerialized() {
+        rcx::Node n;
+        n.id = 1;
+        n.kind = rcx::NodeKind::Hex64;
+        n.comment = QString();
+
+        QJsonObject json = n.toJson();
+        QVERIFY(!json.contains("comment"));
+
+        rcx::Node loaded = rcx::Node::fromJson(json);
+        QVERIFY(loaded.comment.isEmpty());
+    }
+
+    // ── Test: NodeTree save/load round-trip preserves comments ──
+    void testCommentTreeRoundTrip() {
+        rcx::NodeTree tree;
+        tree.baseAddress = 0x400000;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = QStringLiteral("Test");
+        root.structTypeName = QStringLiteral("TestStruct");
+        int ri = tree.addNode(root);
+
+        rcx::Node field;
+        field.kind = rcx::NodeKind::Int32;
+        field.name = QStringLiteral("score");
+        field.parentId = tree.nodes[ri].id;
+        field.offset = 0;
+        field.comment = QStringLiteral("game score value");
+        tree.addNode(field);
+
+        rcx::Node field2;
+        field2.kind = rcx::NodeKind::Float;
+        field2.name = QStringLiteral("speed");
+        field2.parentId = tree.nodes[ri].id;
+        field2.offset = 4;
+        field2.comment = QString();  // no comment
+        tree.addNode(field2);
+
+        // Serialize and deserialize
+        QJsonObject json = tree.toJson();
+        rcx::NodeTree loaded = rcx::NodeTree::fromJson(json);
+
+        QCOMPARE(loaded.nodes.size(), tree.nodes.size());
+        // Find the 'score' node and check comment
+        bool foundScore = false;
+        bool foundSpeed = false;
+        for (const auto& n : loaded.nodes) {
+            if (n.name == QStringLiteral("score")) {
+                QCOMPARE(n.comment, QStringLiteral("game score value"));
+                foundScore = true;
+            }
+            if (n.name == QStringLiteral("speed")) {
+                QVERIFY(n.comment.isEmpty());
+                foundSpeed = true;
+            }
+        }
+        QVERIFY(foundScore);
+        QVERIFY(foundSpeed);
+    }
 };
 
 QTEST_MAIN(TestCore)

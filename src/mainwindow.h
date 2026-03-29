@@ -93,7 +93,7 @@ public:
     void project_close(QDockWidget* dock = nullptr);
 
 private:
-    enum ViewMode { VM_Reclass, VM_Rendered };
+    enum ViewMode { VM_Reclass, VM_Rendered, VM_Debug };
 
     QWidget*        m_centralPlaceholder;
     ShimmerLabel*   m_statusLabel;
@@ -133,6 +133,7 @@ private:
         QTabWidget*    tabWidget = nullptr;
         RcxEditor*     editor    = nullptr;
         QsciScintilla* rendered  = nullptr;
+        QsciScintilla* debugView = nullptr;
         QLineEdit*     findBar   = nullptr;
         QWidget*       findContainer = nullptr;
         QWidget*       renderedContainer = nullptr;
@@ -186,8 +187,12 @@ private:
     void setViewMode(ViewMode mode);
     void updateRenderedView(TabState& tab, SplitPane& pane);
     void updateAllRenderedPanes(TabState& tab);
+    void updateDebugView(TabState& tab, SplitPane& pane);
+    void updateAllDebugPanes(TabState& tab);
+    QString generateDebugText(RcxEditor* editor) const;
     uint64_t findRootStructForNode(const NodeTree& tree, uint64_t nodeId) const;
     void setupRenderedSci(QsciScintilla* sci);
+    void setupDebugSci(QsciScintilla* sci);
 
     SplitPane createSplitPane(TabState& tab);
     void applyTheme(const Theme& theme);

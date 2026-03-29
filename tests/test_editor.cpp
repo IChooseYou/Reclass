@@ -3260,6 +3260,78 @@ private slots:
             m_editor->cancelInlineEdit();
         m_editor->applyDocument(m_result);
     }
+
+    // ── Test: comment editing on non-hex field (UInt8) ──
+    void testCommentEditOnNonHexField() {
+        m_editor->applyDocument(m_result);
+
+        const LineMeta* lm = m_editor->metaForLine(kFirstDataLine);
+        QVERIFY(lm);
+        QCOMPARE(lm->lineKind, LineKind::Field);
+        QVERIFY(!isHexNode(lm->nodeKind));
+
+        bool ok = m_editor->beginInlineEdit(EditTarget::Comment, kFirstDataLine);
+        QVERIFY2(ok, "Comment edit should succeed on non-hex field");
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: comment editing on hex field (Hex32) ──
+    void testCommentEditOnHexField() {
+        m_editor->applyDocument(m_result);
+
+        int hexLine = -1;
+        for (int i = kFirstDataLine; i < 20; i++) {
+            const LineMeta* lm = m_editor->metaForLine(i);
+            if (lm && isHexNode(lm->nodeKind) && lm->lineKind == LineKind::Field) {
+                hexLine = i;
+                break;
+            }
+        }
+        QVERIFY2(hexLine >= 0, "Test tree should have a hex node");
+
+        const LineMeta* lm = m_editor->metaForLine(hexLine);
+        QVERIFY(isHexNode(lm->nodeKind));
+
+        bool ok = m_editor->beginInlineEdit(EditTarget::Comment, hexLine);
+        QVERIFY2(ok, qPrintable(QString("Comment edit should succeed on hex field (line %1, kind %2)")
+            .arg(hexLine).arg(kindToString(lm->nodeKind))));
+        QVERIFY(m_editor->isEditing());
+
+        int line, col;
+        m_editor->scintilla()->getCursorPosition(&line, &col);
+        QCOMPARE(line, hexLine);
+        QVERIFY2(col == m_editor->editSpanStart(),
+            qPrintable(QString("Cursor col %1 should be at spanStart %2")
+                .arg(col).arg(m_editor->editSpanStart())));
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: ';' key emits commentEditRequested signal ──
+    void testSemicolonKeyEmitsSignal() {
+        m_editor->applyDocument(m_result);
+
+        int hexLine = -1;
+        for (int i = kFirstDataLine; i < 20; i++) {
+            const LineMeta* lm = m_editor->metaForLine(i);
+            if (lm && isHexNode(lm->nodeKind) && lm->lineKind == LineKind::Field) {
+                hexLine = i;
+                break;
+            }
+        }
+        QVERIFY(hexLine >= 0);
+
+        m_editor->scintilla()->setCursorPosition(hexLine, 0);
+
+        QSignalSpy spy(m_editor, &RcxEditor::commentEditRequested);
+        QKeyEvent ke(QEvent::KeyPress, Qt::Key_Semicolon, Qt::NoModifier, ";");
+        QApplication::sendEvent(m_editor->scintilla(), &ke);
+
+        QCOMPARE(spy.count(), 1);
+    }
 };
 
 // Border alignment test removed — requires full MenuBarStyle which lives in main.cpp.

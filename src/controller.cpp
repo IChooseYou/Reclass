@@ -13,6 +13,12 @@
 #include <QJsonArray>
 #include <QMenu>
 #include <QInputDialog>
+#include <QDialog>
+#include <QVBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QDialogButtonBox>
+#include <QPushButton>
 #include <QClipboard>
 #include <QApplication>
 #include <QFileDialog>
@@ -43,6 +49,70 @@ static QString elideLeft(const QString& s, int max) {
     if (s.size() <= max) return s;
     if (max <= 1) return QStringLiteral("\u2026").left(max);
     return QStringLiteral("\u2026") + s.right(max - 1);
+}
+
+// Themed comment input dialog matching the editor style
+static QString showCommentDialog(QWidget* parent, const QString& title,
+                                 const QString& existing, bool* ok) {
+    *ok = false;
+    const auto& theme = ThemeManager::instance().current();
+    QSettings settings("Reclass", "Reclass");
+    QFont editorFont(settings.value("font", "JetBrains Mono").toString(), 12);
+    editorFont.setFixedPitch(true);
+
+    QDialog dlg(parent);
+    dlg.setWindowTitle(title);
+    dlg.setMinimumWidth(380);
+
+    QPalette pal = dlg.palette();
+    pal.setColor(QPalette::Window, theme.background);
+    pal.setColor(QPalette::WindowText, theme.text);
+    pal.setColor(QPalette::Base, theme.backgroundAlt);
+    pal.setColor(QPalette::Text, theme.text);
+    dlg.setPalette(pal);
+    dlg.setAutoFillBackground(true);
+
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(16, 12, 16, 12);
+    layout->setSpacing(8);
+
+    auto* label = new QLabel(QStringLiteral("Comment:"), &dlg);
+    label->setFont(editorFont);
+    label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textDim.name()));
+    layout->addWidget(label);
+
+    auto* input = new QLineEdit(&dlg);
+    input->setText(existing);
+    input->setFont(editorFont);
+    input->selectAll();
+    input->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
+        " padding: 6px 8px; selection-background-color: %4; }")
+        .arg(theme.backgroundAlt.name(), theme.text.name(),
+             theme.border.name(), theme.selected.name()));
+    layout->addWidget(input);
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Save"));
+    QString btnStyle = QStringLiteral(
+        "QPushButton { background: %1; color: %2; border: 1px solid %3;"
+        " padding: 4px 16px; border-radius: 3px; font-family: '%5'; font-size: 11px; }"
+        "QPushButton:hover { background: %4; }")
+        .arg(theme.background.name(), theme.text.name(), theme.border.name(),
+             theme.hover.name(), editorFont.family());
+    buttons->setStyleSheet(btnStyle);
+    layout->addWidget(buttons);
+
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    input->setFocus();
+    if (dlg.exec() == QDialog::Accepted) {
+        *ok = true;
+        return input->text();
+    }
+    return {};
 }
 
 static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
@@ -248,6 +318,75 @@ void RcxController::connectEditor(RcxEditor* editor) {
         else {
             uint64_t target = m_viewRootId ? m_viewRootId : 0;
             insertNode(target, -1, kind, QStringLiteral("field"));
+        }
+    });
+
+    // Comment edit (';' key) — respects selection
+    connect(editor, &RcxEditor::commentEditRequested,
+            this, [this, editor]() {
+        QSet<uint64_t> ids = m_selIds;
+        // Strip footer/array/member bits to get real node IDs
+        QSet<uint64_t> nodeIds;
+        for (uint64_t id : ids) {
+            uint64_t nid = id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                  | kMemberBit | kMemberSubMask);
+            if (m_doc->tree.indexOfId(nid) >= 0)
+                nodeIds.insert(nid);
+        }
+
+        if (nodeIds.size() <= 1) {
+            // Single selection (or empty): find the selected node's first line and edit inline
+            uint64_t targetId = nodeIds.isEmpty() ? 0 : *nodeIds.begin();
+            if (targetId == 0) {
+                // Nothing selected — use cursor position
+                editor->beginInlineEdit(EditTarget::Comment);
+                return;
+            }
+            // Find the display line for this node
+            for (int i = 0; i < m_lastResult.meta.size(); i++) {
+                const auto& lm = m_lastResult.meta[i];
+                if (lm.nodeId == targetId && lm.lineKind == LineKind::Field
+                    && !lm.isContinuation && !lm.isMemberLine) {
+                    editor->beginInlineEdit(EditTarget::Comment, i);
+                    return;
+                }
+            }
+            // Fallback: try cursor position
+            editor->beginInlineEdit(EditTarget::Comment);
+        } else {
+            // Multi-selection: prompt for comment text and apply to all
+            // Gather existing comment from first selected node as default
+            QString existingComment;
+            for (uint64_t nid : nodeIds) {
+                int idx = m_doc->tree.indexOfId(nid);
+                if (idx >= 0 && !m_doc->tree.nodes[idx].comment.isEmpty()) {
+                    existingComment = m_doc->tree.nodes[idx].comment;
+                    break;
+                }
+            }
+            bool ok = false;
+            QString text = showCommentDialog(
+                qobject_cast<QWidget*>(parent()),
+                QStringLiteral("Comment %1 nodes").arg(nodeIds.size()),
+                existingComment, &ok);
+            if (!ok) return;
+            QString comment = text.trimmed();
+
+            m_suppressRefresh = true;
+            m_doc->undoStack.beginMacro(
+                QStringLiteral("Comment %1 nodes").arg(nodeIds.size()));
+            for (uint64_t nid : nodeIds) {
+                int idx = m_doc->tree.indexOfId(nid);
+                if (idx < 0) continue;
+                const Node& node = m_doc->tree.nodes[idx];
+                if (node.comment != comment) {
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeComment{nid, node.comment, comment}));
+                }
+            }
+            m_doc->undoStack.endMacro();
+            m_suppressRefresh = false;
+            refresh();
         }
     });
 
@@ -635,6 +774,17 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 if (node.isStatic && text != node.offsetExpr) {
                     m_doc->undoStack.push(new RcxCommand(this,
                         cmd::ChangeOffsetExpr{node.id, node.offsetExpr, text}));
+                }
+            }
+            break;
+        }
+        case EditTarget::Comment: {
+            if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
+                const Node& node = m_doc->tree.nodes[nodeIdx];
+                QString newComment = text.trimmed();
+                if (newComment != node.comment) {
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeComment{node.id, node.comment, newComment}));
                 }
             }
             break;
@@ -1430,6 +1580,10 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].isStatic = isUndo ? c.oldVal : c.newVal;
+        } else if constexpr (std::is_same_v<T, cmd::ChangeComment>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0)
+                tree.nodes[idx].comment = isUndo ? c.oldComment : c.newComment;
         }
     }, command);
 
@@ -1927,6 +2081,39 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addSeparator();
 
+        // Batch comment
+        menu.addAction(icon("edit.svg"), QString("&Comment %1 nodes\t;").arg(count), [this, ids]() {
+            // Gather existing comment from first node as default
+            QString existing;
+            for (uint64_t id : ids) {
+                int idx = m_doc->tree.indexOfId(id);
+                if (idx >= 0 && !m_doc->tree.nodes[idx].comment.isEmpty()) {
+                    existing = m_doc->tree.nodes[idx].comment;
+                    break;
+                }
+            }
+            bool ok = false;
+            QString text = showCommentDialog(
+                qobject_cast<QWidget*>(parent()),
+                QStringLiteral("Comment %1 nodes").arg(ids.size()),
+                existing, &ok);
+            if (!ok) return;
+            QString comment = text.trimmed();
+            m_suppressRefresh = true;
+            m_doc->undoStack.beginMacro(QStringLiteral("Comment %1 nodes").arg(ids.size()));
+            for (uint64_t id : ids) {
+                int idx = m_doc->tree.indexOfId(id);
+                if (idx < 0) continue;
+                const Node& node = m_doc->tree.nodes[idx];
+                if (node.comment != comment)
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeComment{node.id, node.comment, comment}));
+            }
+            m_doc->undoStack.endMacro();
+            m_suppressRefresh = false;
+            refresh();
+        });
+
         menu.addAction(icon("files.svg"), QString("Duplicate %1 nodes").arg(count), [this, ids]() {
             for (uint64_t id : ids) {
                 int idx = m_doc->tree.indexOfId(id);
@@ -2286,6 +2473,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addAction("Change &Type\tT", [editor, line]() {
             editor->beginInlineEdit(EditTarget::Type, line);
+        });
+
+        menu.addAction(icon("edit.svg"), "&Comment\t;", [editor, line]() {
+            editor->beginInlineEdit(EditTarget::Comment, line);
         });
 
         menu.addSeparator();

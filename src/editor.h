@@ -95,6 +95,7 @@ signals:
     void typeSelectorRequested();
     void typePickerRequested(EditTarget target, int nodeIdx, QPoint globalPos);
     void insertAboveRequested(int nodeIdx, NodeKind kind);
+    void commentEditRequested();
     void relativeOffsetsChanged(bool relative);
     void appendBytesRequested(uint64_t structId, int byteCount);
     void trimHexRequested(uint64_t structId);

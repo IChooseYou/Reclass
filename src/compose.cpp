@@ -256,6 +256,25 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                                             /*comment=*/{}, typeW, nameW, ptrTypeOverride,
                                             state.compactColumns);
 
+        // Comment annotation: user comment takes priority, then PDB symbol
+        // Appended right after value text (not at fixed column) for compact display
+        if (sub == 0) {
+            QString commentText;
+            if (!node.comment.isEmpty())
+                commentText = node.comment;
+            else if (state.symbolLookup) {
+                QString sym = state.symbolLookup(absAddr);
+                if (!sym.isEmpty())
+                    commentText = sym;
+            }
+            if (!commentText.isEmpty()) {
+                // Trim trailing spaces (from value column padding) so comment sits close to value
+                while (lineText.endsWith(' ')) lineText.chop(1);
+                lm.commentStart = kFoldCol + lineText.size() + 2; // after fold prefix + "  " gap
+                lineText += QStringLiteral("  // ") + commentText;
+            }
+        }
+
         // Type inference hint for hex nodes (when enabled)
         if (state.typeHints && isHexNode(node.kind) && sub == 0) {
             const int sz = sizeForKind(node.kind);
@@ -276,13 +295,6 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                     lm.typeHint = QStringLiteral("[") + typeName + QStringLiteral("]");
                 lineText += QStringLiteral("  ") + lm.typeHint;
             }
-        }
-
-        // PDB symbol annotation: show symbol name if this address matches a loaded symbol
-        if (sub == 0 && state.symbolLookup) {
-            QString sym = state.symbolLookup(absAddr);
-            if (!sym.isEmpty())
-                lineText += QStringLiteral("  // ") + sym;
         }
 
         state.emitLine(lineText, std::move(lm));

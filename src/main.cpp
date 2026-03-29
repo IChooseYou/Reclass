@@ -636,6 +636,18 @@ namespace rcx {
 void applyMacTitleBarTheme(QWidget* window, const Theme& theme);
 #endif
 
+// Helper: extract text from a Scintilla line (duplicated from editor.cpp where it's file-local)
+static QString sciGetLineText(QsciScintilla* sci, int line) {
+    int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
+    if (len <= 0) return {};
+    QByteArray buf(len + 1, '\0');
+    sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)line, (void*)buf.data());
+    QString text = QString::fromUtf8(buf.data(), len);
+    while (text.endsWith('\n') || text.endsWith('\r'))
+        text.chop(1);
+    return text;
+}
+
 // MainWindow class declaration is in mainwindow.h
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -1635,6 +1647,11 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
     pane.tabWidget->addTab(pane.renderedContainer, "Code");     // index 1
 
+    // Create Debug view: plain-text Scintilla showing composed text with visible special chars
+    pane.debugView = new QsciScintilla;
+    setupDebugSci(pane.debugView);
+    pane.tabWidget->addTab(pane.debugView, "Debug");            // index 2
+
     // Corner widget: format combo + gear icon
     {
         const auto& ct = ThemeManager::instance().current();
@@ -1727,11 +1744,13 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         SplitPane* p = findPaneByTabWidget(tw);
         if (!p) return;
 
-        // Show/hide corner controls (format combo, scope combo, gear)
+        // Show/hide corner controls (format combo, scope combo, gear) — Code tab only
         if (auto* cw = tw->cornerWidget(Qt::BottomRightCorner))
             cw->setVisible(index == 1);
 
-        p->viewMode = (index == 1) ? VM_Rendered : VM_Reclass;
+        if (index == 0)      p->viewMode = VM_Reclass;
+        else if (index == 1) p->viewMode = VM_Rendered;
+        else                 p->viewMode = VM_Debug;
 
         // Sync status bar buttons if this is the active pane
         auto* tab = activeTab();
@@ -1739,11 +1758,14 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
             && &tab->panes[tab->activePaneIdx] == p)
             syncViewButtons(p->viewMode);
 
-        if (index == 1) {
+        if (index == 1 || index == 2) {
             for (auto& tab : m_tabs) {
                 for (auto& pane : tab.panes) {
                     if (&pane == p) {
-                        updateRenderedView(tab, pane);
+                        if (index == 1)
+                            updateRenderedView(tab, pane);
+                        else
+                            updateDebugView(tab, pane);
                         break;
                     }
                 }
@@ -2091,10 +2113,12 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             else
                 setAppStatus(main, dimPart);
         }
-        // Update all rendered panes on selection change
+        // Update all rendered/debug panes on selection change
         auto it = m_tabs.find(dock);
-        if (it != m_tabs.end())
+        if (it != m_tabs.end()) {
             updateAllRenderedPanes(*it);
+            updateAllDebugPanes(*it);
+        }
     });
     connect(ctrl, &RcxController::selectionChanged,
             this, [this](int count) {
@@ -2152,6 +2176,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
+                    updateAllDebugPanes(*it2);
                     dockGuard->setWindowTitle(tabTitle(*it2));
                 }
                 rebuildWorkspaceModel();
@@ -2173,6 +2198,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
                     updateAllRenderedPanes(*it2);
+                    updateAllDebugPanes(*it2);
                     dockGuard->setWindowTitle(tabTitle(*it2));
                 }
                 updateWindowTitle();
@@ -3231,6 +3257,19 @@ void MainWindow::applyTheme(const Theme& theme) {
             sci->setSelectionForegroundColor(theme.text);
             sci->setMarginsBackgroundColor(theme.background.darker(115));
             sci->setMarginsForegroundColor(theme.textDim);
+
+            // Debug view (no lexer — just paper/text colors)
+            if (pane.debugView) {
+                const QColor dbg = theme.background.darker(115);
+                pane.debugView->setPaper(dbg);
+                pane.debugView->setColor(theme.text);
+                pane.debugView->setCaretForegroundColor(theme.text);
+                pane.debugView->setCaretLineBackgroundColor(theme.hover);
+                pane.debugView->setSelectionBackgroundColor(theme.selection);
+                pane.debugView->setSelectionForegroundColor(theme.text);
+                pane.debugView->setMarginsBackgroundColor(dbg);
+                pane.debugView->setMarginsForegroundColor(theme.textDim);
+            }
         }
     }
 }
@@ -3323,6 +3362,11 @@ void MainWindow::setEditorFont(const QString& fontName) {
                         lex->setFont(f, i);
                 }
                 pane.rendered->setMarginsFont(f);
+            }
+            // Update debug view font
+            if (pane.debugView) {
+                pane.debugView->setFont(f);
+                pane.debugView->setMarginsFont(f);
             }
         }
     }
@@ -3484,13 +3528,49 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     sci->setSelectionForegroundColor(theme.text);
 }
 
+void MainWindow::setupDebugSci(QsciScintilla* sci) {
+    QSettings settings("Reclass", "Reclass");
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QFont f(fontName, 12);
+    f.setFixedPitch(true);
+
+    sci->setFont(f);
+    sci->setReadOnly(true);
+    sci->setWrapMode(QsciScintilla::WrapNone);
+    sci->setTabWidth(4);
+    sci->setIndentationsUseTabs(false);
+    sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT, (long)2);
+    sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRADESCENT, (long)2);
+
+    // Line number margin
+    sci->setMarginType(0, QsciScintilla::NumberMargin);
+    sci->setMarginWidth(0, "0000000 ");
+    const auto& theme = ThemeManager::instance().current();
+    sci->setMarginsBackgroundColor(theme.background.darker(115));
+    sci->setMarginsForegroundColor(theme.textDim);
+    sci->setMarginsFont(f);
+    sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINLEFT, 0, (long)6);
+    sci->setMarginWidth(1, 0);
+    sci->setMarginWidth(2, 0);
+
+    // No lexer — plain monochrome text for diagnostic readability
+    const QColor editorBg = theme.background.darker(115);
+    sci->setPaper(editorBg);
+    sci->setColor(theme.text);
+    sci->setCaretForegroundColor(theme.text);
+    sci->setCaretLineVisible(true);
+    sci->setCaretLineBackgroundColor(theme.hover);
+    sci->setSelectionBackgroundColor(theme.selection);
+    sci->setSelectionForegroundColor(theme.text);
+}
+
 // ── View mode / generator switching ──
 
 void MainWindow::setViewMode(ViewMode mode) {
     auto* pane = findActiveSplitPane();
     if (!pane) return;
     pane->viewMode = mode;
-    int idx = (mode == VM_Rendered) ? 1 : 0;
+    int idx = (mode == VM_Debug) ? 2 : (mode == VM_Rendered) ? 1 : 0;
     pane->tabWidget->setCurrentIndex(idx);
     syncViewButtons(mode);
 }
@@ -3612,6 +3692,93 @@ void MainWindow::updateAllRenderedPanes(TabState& tab) {
     for (auto& pane : tab.panes) {
         if (pane.viewMode == VM_Rendered)
             updateRenderedView(tab, pane);
+    }
+}
+
+// ── Debug view ──
+
+QString MainWindow::generateDebugText(RcxEditor* editor) const {
+    auto* sci = editor->scintilla();
+    int lineCount = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
+    QStringList output;
+    output.reserve(lineCount);
+
+    // LineKind names for annotation
+    static const char* lineKindNames[] = {
+        "CmdRow", "Blank", "Header", "Field", "Cont", "Footer", "ArrSep"
+    };
+
+    for (int i = 0; i < lineCount; i++) {
+        // Margin text (offset)
+        QString margin;
+        const LineMeta* lm = editor->metaForLine(i);
+        if (lm) margin = lm->offsetText;
+
+        QString lineText = sciGetLineText(sci, i);
+
+        // Replace special Unicode chars with visible names, spaces with middle dot
+        QString annotated;
+        annotated.reserve(lineText.size() * 2);
+        for (QChar ch : lineText) {
+            switch (ch.unicode()) {
+            case 0x25B8: annotated += QStringLiteral("[>]"); break;   // ▸ fold collapsed
+            case 0x25BE: annotated += QStringLiteral("[v]"); break;   // ▾ fold expanded
+            case 0x2502: annotated += QStringLiteral("[|]"); break;   // │ tree vertical
+            case 0x251C: annotated += QStringLiteral("[+]"); break;   // ├ tree branch
+            case 0x2514: annotated += QStringLiteral("[L]"); break;   // └ tree corner
+            case 0x2026: annotated += QStringLiteral("[..]"); break;  // … ellipsis
+            case 0x2192: annotated += QStringLiteral("[->]"); break;  // → arrow
+            case 0x00B7: annotated += QStringLiteral("[.]"); break;   // · middle dot (margin)
+            case ' ':    annotated += QChar(0x00B7); break;           // space → visible dot
+            default:     annotated += ch; break;
+            }
+        }
+
+        // Per-line metadata annotation
+        QString meta;
+        if (lm) {
+            int lk = (int)lm->lineKind;
+            const char* kindName = (lk >= 0 && lk <= 6) ? lineKindNames[lk] : "?";
+            meta = QStringLiteral("  ## L=%1 %2 nKind=%3 depth=%4 cmtStart=%5 tW=%6 nW=%7")
+                .arg(i)
+                .arg(QString::fromLatin1(kindName))
+                .arg(QString::fromLatin1(kindToString(lm->nodeKind)))
+                .arg(lm->depth)
+                .arg(lm->commentStart)
+                .arg(lm->effectiveTypeW)
+                .arg(lm->effectiveNameW);
+            if (lm->isStaticLine) meta += QStringLiteral(" static");
+            if (lm->isContinuation) meta += QStringLiteral(" cont");
+            if (lm->isMemberLine) meta += QStringLiteral(" member");
+            if (lm->isArrayElement) meta += QStringLiteral(" arrElem");
+            if (lm->foldHead) meta += lm->foldCollapsed ? QStringLiteral(" fold+") : QStringLiteral(" fold-");
+            if (lm->typeHintStart >= 0) meta += QStringLiteral(" hint@%1").arg(lm->typeHintStart);
+        }
+
+        output.append(margin + QStringLiteral("|") + annotated + meta);
+    }
+    return output.join('\n');
+}
+
+void MainWindow::updateDebugView(TabState& tab, SplitPane& pane) {
+    if (pane.viewMode != VM_Debug) return;
+    if (!pane.debugView || !pane.editor) return;
+
+    QString text = generateDebugText(pane.editor);
+    pane.debugView->setReadOnly(false);
+    pane.debugView->setText(text);
+    pane.debugView->setReadOnly(true);
+
+    // Adjust margin width for line count
+    int lineCount = pane.debugView->lines();
+    int digits = qMax(5, QString::number(lineCount).size() + 2);
+    pane.debugView->setMarginWidth(0, QString(digits, '0') + QStringLiteral("  "));
+}
+
+void MainWindow::updateAllDebugPanes(TabState& tab) {
+    for (auto& pane : tab.panes) {
+        if (pane.viewMode == VM_Debug)
+            updateDebugView(tab, pane);
     }
 }
 
