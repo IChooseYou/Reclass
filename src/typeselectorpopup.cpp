@@ -77,19 +77,26 @@ protected:
         int boxSz = fm.height() - 2;
         int boxY = cy - boxSz / 2;
 
-        // Checkbox square
-        p.setPen(chk ? t.indHoverSpan : t.textDim);
-        p.drawRect(x, boxY, boxSz - 1, boxSz - 1);
+        // Checkbox square (4 fillRect strips — no pen ambiguity)
+        {
+            QColor bc = chk ? t.indHoverSpan : t.textDim;
+            int bx = x, by = boxY, bs = boxSz;
+            p.fillRect(bx, by, bs, 1, bc);              // top
+            p.fillRect(bx, by + bs - 1, bs, 1, bc);     // bottom
+            p.fillRect(bx, by, 1, bs, bc);               // left
+            p.fillRect(bx + bs - 1, by, 1, bs, bc);      // right
+        }
 
         // Checkmark when checked
         if (chk) {
-            p.setPen(QPen(t.indHoverSpan, 1.5));
             p.setRenderHint(QPainter::Antialiasing, true);
-            int cx = x + boxSz / 2;
-            int my = boxY + boxSz / 2;
-            // Simple checkmark: down-right then up-right
-            p.drawLine(x + 2, my, cx - 1, boxY + boxSz - 3);
-            p.drawLine(cx - 1, boxY + boxSz - 3, x + boxSz - 3, boxY + 2);
+            p.setPen(QPen(t.indHoverSpan, 1.5));
+            // Checkmark: down-right then up-right, inset from box edges
+            int lx = x + 3, ly = boxY + boxSz / 2;
+            int mx = x + boxSz / 2 - 1, my = boxY + boxSz - 4;
+            int rx = x + boxSz - 3, ry = boxY + 3;
+            p.drawLine(lx, ly, mx, my);
+            p.drawLine(mx, my, rx, ry);
             p.setRenderHint(QPainter::Antialiasing, false);
         }
 
