@@ -11,6 +11,7 @@ class QLineEdit;
 class QListView;
 class QStringListModel;
 class QLabel;
+class QAbstractButton;
 class QToolButton;
 class QButtonGroup;
 class QWidget;
@@ -105,9 +106,9 @@ private:
 
     // Category filter checkboxes
     QWidget*          m_chipRow      = nullptr;
-    QToolButton*      m_chipPrim     = nullptr;
-    QToolButton*      m_chipTypes    = nullptr;
-    QToolButton*      m_chipEnums    = nullptr;
+    QAbstractButton*  m_chipPrim     = nullptr;
+    QAbstractButton*  m_chipTypes    = nullptr;
+    QAbstractButton*  m_chipEnums    = nullptr;
     QLabel*           m_statusLabel  = nullptr;
 
     QVector<TypeEntry> m_allTypes;

@@ -23,6 +23,95 @@
 
 namespace rcx {
 
+// ── CategoryChip — flat custom-painted toggle button ──
+// No CSS, no Fusion — pure QPainter with direct theme colors.
+
+class CategoryChip : public QAbstractButton {
+public:
+    explicit CategoryChip(const QString& label, QWidget* parent = nullptr)
+        : QAbstractButton(parent), m_label(label)
+    {
+        setCheckable(true);
+        setChecked(true);
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover, true);
+        setMouseTracking(true);
+    }
+
+    void setCount(int n) { m_count = n; update(); }
+
+    QSize sizeHint() const override {
+        QFontMetrics fm(font());
+        QString text = m_count >= 0
+            ? QStringLiteral("%1 (%2)").arg(m_label).arg(m_count)
+            : m_label;
+        int checkW = fm.height();  // space for checkmark
+        return QSize(checkW + 4 + fm.horizontalAdvance(text) + 12, fm.height() + 6);
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, false);
+        const auto& t = ThemeManager::instance().current();
+        QFontMetrics fm(font());
+        bool hov = underMouse();
+        bool chk = isChecked();
+
+        // Background
+        QColor bg;
+        if (isDown())
+            bg = t.surface;
+        else if (chk)
+            bg = t.selected;
+        else if (hov)
+            bg = t.hover;
+        else
+            bg = t.background;
+        p.fillRect(rect(), bg);
+
+        int x = 4;
+        int cy = height() / 2;
+        int boxSz = fm.height() - 2;
+        int boxY = cy - boxSz / 2;
+
+        // Checkbox square
+        p.setPen(chk ? t.indHoverSpan : t.textDim);
+        p.drawRect(x, boxY, boxSz - 1, boxSz - 1);
+
+        // Checkmark when checked
+        if (chk) {
+            p.setPen(QPen(t.indHoverSpan, 1.5));
+            p.setRenderHint(QPainter::Antialiasing, true);
+            int cx = x + boxSz / 2;
+            int my = boxY + boxSz / 2;
+            // Simple checkmark: down-right then up-right
+            p.drawLine(x + 2, my, cx - 1, boxY + boxSz - 3);
+            p.drawLine(cx - 1, boxY + boxSz - 3, x + boxSz - 3, boxY + 2);
+            p.setRenderHint(QPainter::Antialiasing, false);
+        }
+
+        x += boxSz + 4;
+
+        // Text
+        QString text = m_count >= 0
+            ? QStringLiteral("%1 (%2)").arg(m_label).arg(m_count)
+            : m_label;
+        p.setPen(chk ? t.text : t.textDim);
+        p.setFont(font());
+        p.drawText(x, 0, width() - x - 4, height(), Qt::AlignVCenter | Qt::AlignLeft, text);
+    }
+
+    void enterEvent(QEnterEvent*) override { update(); }
+    void leaveEvent(QEvent*) override { update(); }
+
+private:
+    QString m_label;
+    int m_count = -1;
+};
+
 // ── parseTypeSpec ──
 
 TypeSpec parseTypeSpec(const QString& text) {
@@ -186,10 +275,11 @@ public:
                 painter->fillRect(option.rect, t.hover);
         }
 
-        int x = option.rect.x();
+        const int leftPad = 6;
+        int x = option.rect.x() + leftPad;
         int y = option.rect.y();
         int h = option.rect.height();
-        int w = option.rect.width();
+        int w = option.rect.width() - leftPad;
 
         // Scale metrics from font height
         QFontMetrics fmMain(m_font);
@@ -418,23 +508,8 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         chipLayout->setContentsMargins(0, 0, 0, 2);
         chipLayout->setSpacing(6);
 
-        QString chipStyle = QStringLiteral(
-            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-            "  padding: 2px 8px; border-radius: 10px; }"
-            "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
-            "QToolButton:hover:!checked { background: %6; }"
-            "QToolButton:pressed { background: %7; }")
-            .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
-                 theme.text.name(), theme.selected.name(), theme.hover.name(),
-                 theme.surface.name());
-
-        auto makeChip = [&](const QString& label) -> QToolButton* {
-            auto* btn = new QToolButton;
-            btn->setText(label);
-            btn->setCheckable(true);
-            btn->setChecked(true);
-            btn->setCursor(Qt::PointingHandCursor);
-            btn->setStyleSheet(chipStyle);
+        auto makeChip = [&](const QString& label) -> CategoryChip* {
+            auto* btn = new CategoryChip(label);
             chipLayout->addWidget(btn);
             return btn;
         };
@@ -792,21 +867,10 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
     m_btnDblPtr->setStyleSheet(btnStyle);
     m_btnArray->setStyleSheet(btnStyle);
 
-    // Category chip buttons
-    {
-        QString chipStyle = QStringLiteral(
-            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-            "  padding: 2px 8px; border-radius: 10px; }"
-            "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
-            "QToolButton:hover:!checked { background: %6; }"
-            "QToolButton:pressed { background: %7; }")
-            .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
-                 theme.text.name(), theme.selected.name(), theme.hover.name(),
-                 theme.surface.name());
-        m_chipPrim->setStyleSheet(chipStyle);
-        m_chipTypes->setStyleSheet(chipStyle);
-        m_chipEnums->setStyleSheet(chipStyle);
-    }
+    // Category chips — custom painted, theme read at paint time, no stylesheet needed
+    if (m_chipPrim) m_chipPrim->update();
+    if (m_chipTypes) m_chipTypes->update();
+    if (m_chipEnums) m_chipEnums->update();
 
     // Status label
     if (m_statusLabel) {
@@ -1124,12 +1188,9 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
 
     m_model->setStringList(displayStrings);
 
-    auto updateChipLabel = [](QToolButton* btn, const QString& abbrev, int count) {
-        btn->setText(QStringLiteral("%1 (%2)").arg(abbrev).arg(count));
-    };
-    if (m_chipPrim)  updateChipLabel(m_chipPrim,  QStringLiteral("Built-in"),  primCount);
-    if (m_chipTypes) updateChipLabel(m_chipTypes, QStringLiteral("Types"),    typeCount);
-    if (m_chipEnums) updateChipLabel(m_chipEnums, QStringLiteral("Enum"),     enumCount);
+    if (m_chipPrim)  static_cast<CategoryChip*>(m_chipPrim)->setCount(primCount);
+    if (m_chipTypes) static_cast<CategoryChip*>(m_chipTypes)->setCount(typeCount);
+    if (m_chipEnums) static_cast<CategoryChip*>(m_chipEnums)->setCount(enumCount);
 
     if (m_statusLabel)
         m_statusLabel->setText(QStringLiteral("%1 results").arg(resultCount));

@@ -9,6 +9,7 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QMenu>
+#include <QInputDialog>
 #include <QPainter>
 #include <QEventLoop>
 
@@ -230,6 +231,8 @@ ScannerPanel::ScannerPanel(QWidget* parent)
                                        QStringLiteral("Copy Value"));
         auto* goTo = menu.addAction(QIcon(QStringLiteral(":/vsicons/arrow-right.svg")),
                                     QStringLiteral("Go to Address"));
+        menu.addSeparator();
+        auto* changeAll = menu.addAction(QStringLiteral("Change All Values (%1)").arg(m_results.size()));
         auto* chosen = menu.exec(m_resultTable->viewport()->mapToGlobal(pos));
         if (chosen == copyAddr) {
             QString addr = QStringLiteral("0x%1")
@@ -241,6 +244,70 @@ ScannerPanel::ScannerPanel(QWidget* parent)
             m_statusLabel->setText(QStringLiteral("Copied value"));
         } else if (chosen == goTo) {
             emit goToAddress(m_results[row].address);
+        } else if (chosen == changeAll) {
+            QString hint = m_lastScanMode == 0
+                ? QStringLiteral("hex bytes (e.g. 90 90 90)")
+                : QStringLiteral("value (e.g. 999)");
+            bool ok;
+            QString text = QInputDialog::getText(this, QStringLiteral("Change All Values"),
+                QStringLiteral("New %1:").arg(hint), QLineEdit::Normal, QString(), &ok);
+            if (!ok || text.isEmpty()) return;
+
+            std::shared_ptr<Provider> prov;
+            if (m_providerGetter) prov = m_providerGetter();
+            if (!prov || !prov->isWritable()) {
+                m_statusLabel->setText(QStringLiteral("Provider is read-only"));
+                return;
+            }
+
+            // Parse value using same logic as single-cell edit
+            QByteArray bytes;
+            if (m_lastScanMode == 0) {
+                QStringList tokens = text.split(' ', Qt::SkipEmptyParts);
+                for (const QString& tok : tokens) {
+                    bool tokOk;
+                    uint val = tok.toUInt(&tokOk, 16);
+                    if (!tokOk || val > 0xFF) {
+                        m_statusLabel->setText(QStringLiteral("Invalid hex byte: %1").arg(tok));
+                        return;
+                    }
+                    bytes.append(char(val));
+                }
+            } else {
+                bool valOk = false;
+                bytes.resize(valueSize());
+                char* d = bytes.data();
+                switch (m_lastValueType) {
+                case ValueType::Int8:   { auto v = (int8_t)text.toInt(&valOk);     if (valOk) memcpy(d, &v, 1); break; }
+                case ValueType::UInt8:  { auto v = (uint8_t)text.toUInt(&valOk);   if (valOk) memcpy(d, &v, 1); break; }
+                case ValueType::Int16:  { auto v = (int16_t)text.toShort(&valOk);  if (valOk) memcpy(d, &v, 2); break; }
+                case ValueType::UInt16: { auto v = text.toUShort(&valOk);          if (valOk) memcpy(d, &v, 2); break; }
+                case ValueType::Int32:  { auto v = text.toInt(&valOk);             if (valOk) memcpy(d, &v, 4); break; }
+                case ValueType::UInt32: { auto v = text.toUInt(&valOk);            if (valOk) memcpy(d, &v, 4); break; }
+                case ValueType::Int64:  { auto v = text.toLongLong(&valOk);        if (valOk) memcpy(d, &v, 8); break; }
+                case ValueType::UInt64: { auto v = text.toULongLong(&valOk);       if (valOk) memcpy(d, &v, 8); break; }
+                case ValueType::Float:  { auto v = text.toFloat(&valOk);           if (valOk) memcpy(d, &v, 4); break; }
+                case ValueType::Double: { auto v = text.toDouble(&valOk);          if (valOk) memcpy(d, &v, 8); break; }
+                default: break;
+                }
+                if (!valOk) {
+                    m_statusLabel->setText(QStringLiteral("Invalid value"));
+                    return;
+                }
+            }
+            if (bytes.isEmpty()) return;
+
+            int wrote = 0;
+            int readSize = (m_lastScanMode == 1) ? valueSize() : 16;
+            for (auto& r : m_results) {
+                if (prov->writeBytes(r.address, bytes)) {
+                    r.scanValue = prov->readBytes(r.address, readSize);
+                    ++wrote;
+                }
+            }
+            populateTable(m_resultTable->columnCount() > 2);
+            m_statusLabel->setText(QStringLiteral("Wrote to %1/%2 addresses")
+                .arg(wrote).arg(m_results.size()));
         }
     });
 

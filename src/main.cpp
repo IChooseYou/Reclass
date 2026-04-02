@@ -318,9 +318,37 @@ public:
         // Opaque fill + 1px border at the true widget edge.
         // WA_TranslucentBackground (set in polish) makes this a layered window,
         // so DWM doesn't clip any edges.
-        // Dock resize handle — invisible (painted in background color)
+        // Dock separator — 1px border line at rest, hover highlight + accent
         if (elem == PE_IndicatorDockWidgetResizeHandle) {
-            p->fillRect(opt->rect, opt->palette.color(QPalette::Window));
+            QRect r = opt->rect;
+            bool vertical = r.height() > r.width();
+            bool hovered  = opt->state & State_MouseOver;
+            QColor bg     = opt->palette.color(QPalette::Window); // theme.background
+            QColor line   = opt->palette.color(QPalette::Dark);   // theme.border
+            QColor hov    = opt->palette.color(QPalette::Mid);    // theme.hover
+            QColor accent = opt->palette.color(QPalette::Link);   // theme.indHoverSpan
+
+            // Bottom separator (horizontal, near status bar) — keep invisible
+            if (!vertical && w && r.y() > w->height() * 3 / 4) {
+                p->fillRect(r, bg);
+                return;
+            }
+
+            if (hovered) {
+                p->fillRect(r, hov);
+                // 2px accent line centered
+                if (vertical)
+                    p->fillRect(r.x() + (r.width() - 2) / 2, r.y(), 2, r.height(), accent);
+                else
+                    p->fillRect(r.x(), r.y() + (r.height() - 2) / 2, r.width(), 2, accent);
+            } else {
+                p->fillRect(r, bg);
+                // 1px border line centered
+                if (vertical)
+                    p->fillRect(r.center().x(), r.y(), 1, r.height(), line);
+                else
+                    p->fillRect(r.x(), r.center().y(), r.width(), 1, line);
+            }
             return;
         }
         // Suppress dock widget frame (removes internal padding around content)
@@ -2740,6 +2768,7 @@ void MainWindow::openFile() {
     project_open();
 }
 
+
 void MainWindow::saveFile() {
     project_save(nullptr, false);
 }
@@ -2916,9 +2945,10 @@ void MainWindow::applyTheme(const Theme& theme) {
     // switches children from palette-based to CSS-based rendering.
     setStyleSheet(QStringLiteral(
         "QMainWindow::separator { width: 4px; height: 4px; background: %1; }"
+        "QMainWindow::separator:hover { background: %2; }"
         "QDockWidget { border: none; margin: 0px; padding: 0px; }"
         "QDockWidget > QWidget { border: none; margin: 0px; padding: 0px; }")
-        .arg(theme.background.name()));
+        .arg(theme.background.name(), theme.hover.name()));
 
     // Custom title bar — applied AFTER setStyleSheet() because the MainWindow
     // stylesheet re-resolves descendant palettes and would reset the QMenuBar palette.
@@ -4210,11 +4240,10 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
 
     auto* dock = createTab(doc);
 
-    // Ensure workspace dock is split alongside editor with sensible proportions
+    // Dock the first editor tab — don't force workspace open (user can open via View menu)
     if (m_docDocks.size() == 1 && m_workspaceDock) {
         splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
         resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
-        m_workspaceDock->show();
     }
 
     rebuildWorkspaceModelNow();
@@ -6933,8 +6962,7 @@ int main(int argc, char* argv[]) {
     app.setStyle(new MenuBarStyle("Fusion")); // Fusion + generous menu sizing
 
     // Load embedded fonts
-    int fontId = QFontDatabase::addApplicationFont(":/fonts/JetBrainsMono.ttf");
-    if (fontId == -1)
+    if (QFontDatabase::addApplicationFont(":/fonts/JetBrainsMono.ttf") == -1)
         qWarning("Failed to load embedded JetBrains Mono font");
     // Apply saved font preference before creating any editors
     {
