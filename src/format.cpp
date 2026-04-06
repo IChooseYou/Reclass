@@ -236,7 +236,7 @@ static QString bytesToAscii(const QByteArray& b, int slot) {
 static const char kHexDigits[] = "0123456789ABCDEF";
 
 static QString bytesToHex(const QByteArray& b, int slot) {
-    QChar buf[64]; // max slot=8 → 8*3-1=23 chars; 64 is plenty
+    QChar buf[64]; // max slot=16 → 16*3-1=47 chars; 64 is plenty
     int pos = 0;
     for (int i = 0; i < slot; ++i) {
         uint8_t c = (i < b.size()) ? (uint8_t)b[i] : 0;
@@ -397,12 +397,12 @@ QString fmtNodeLine(const Node& node, const Provider& prov,
     QString type = overflow ? fitOverflow(rawType, colType)
                             : (typeOverride.isEmpty() ? typeName(node.kind, colType)
                                                       : fit(typeOverride, colType));
-    QString name = overflow ? node.name : fit(node.name, colName);
+    QString name = fit(node.name, colName);
 
     // Effective column width for this line (accounts for overflow, clamped to hard max)
     int effectiveColType = overflow ? rawType.size() : colType;
     // Blank prefix for continuation lines (same width as type+sep+name+sep)
-    const int prefixW = effectiveColType + (overflow ? name.size() : colName) + 2 * kSepWidth;
+    const int prefixW = effectiveColType + colName + 2 * kSepWidth;
 
     // Comment suffix (only present when a comment is provided; no trailing padding)
     QString cmtSuffix = comment.isEmpty() ? QString()
@@ -421,7 +421,7 @@ QString fmtNodeLine(const Node& node, const Provider& prov,
         QByteArray b = prov.isReadable(addr, sz)
             ? prov.readBytes(addr, sz) : QByteArray(sz, '\0');
         QString ascii = bytesToAscii(b, sz).leftJustified(colName, ' ');
-        QString hex = bytesToHex(b, sz).leftJustified(23, ' ');
+        QString hex = bytesToHex(b, sz).leftJustified(qMax(23, sz * 3 - 1), ' ');
         return ind + type + SEP + ascii + SEP + hex + cmtSuffix;
     }
 
