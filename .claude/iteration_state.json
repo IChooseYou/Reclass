@@ -22,7 +22,8 @@
     {"iteration":17,"title":"Status bar hints for hex shortcuts","testsPassed":true},
     {"iteration":18,"title":"Escape clears selection","testsPassed":true},
     {"iteration":19,"title":"Ctrl+A selects all visible nodes","testsPassed":true},
-    {"iteration":20,"title":"Home/End jump to first/last node","testsPassed":true}
+    {"iteration":20,"title":"Home/End jump to first/last node","testsPassed":true},
+    {"iteration":"20-fix","title":"Fix: setCursorPosition on click so keyboard shortcuts work","testsPassed":true,"testsAdded":6}
   ],
   "queue": [
     {"iteration":21,"category":"interaction","title":"Copy field as C declaration (Ctrl+C)"},
