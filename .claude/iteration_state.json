@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "currentIteration": 181,
+  "currentIteration": 211,
   "totalPlanned": 300,
-  "completedSummary": "181 iterations. All 14 headless tests pass. 60 tests added.",
+  "completedSummary": "211 iterations. All 14 headless tests pass. 70 tests added.",
   "batchLog": [
     {"batch": "1-10", "focus": "keyboard shortcuts + code quality"},
     {"batch": "11-20", "focus": "hex type cycling + navigation"},
@@ -20,15 +20,16 @@
     {"batch": "111-125", "focus": "5 more controller tests", "testsAdded": 5},
     {"batch": "126", "focus": "type tooltip: selection-driven, multi-select, below"},
     {"batch": "127-140", "focus": "reorder fields, Ctrl+C address, 5 undo/redo tests", "testsAdded": 5},
-    {"batch": "141-142", "focus": "keycap icons + click cycling"},
-    {"batch": "143-155", "focus": "isUnion/isBitfield/isEnum helper replacements"},
-    {"batch": "156", "focus": "tooltip redesign with clear labels"},
-    {"batch": "157-166", "focus": "discoverable shortcuts in context menu + status bar"},
-    {"batch": "167-171", "focus": "-0.0f fix, C++ forward decls, Delete/Ctrl+D guards"},
-    {"batch": "172-176", "focus": "forward decl test, -0.0f test, codegen pragma tests", "testsAdded": 5},
-    {"batch": "177-181", "focus": "PageUp/Down navigation, Ctrl+G go-to-offset"}
+    {"batch": "141-155", "focus": "keycap icons, click cycling, isUnion/isBitfield helpers"},
+    {"batch": "156-166", "focus": "tooltip removal, discoverable context menu shortcuts"},
+    {"batch": "167-176", "focus": "-0.0f fix, forward decls, safety guards, tests", "testsAdded": 5},
+    {"batch": "177-181", "focus": "PageUp/Down, Ctrl+G go-to-offset"},
+    {"batch": "182-186", "focus": "static field dedup, Ctrl+X cut, collapse/expand all"},
+    {"batch": "187-191", "focus": "nullptr display, footer hex+decimal, Copy as C Struct"},
+    {"batch": "192-201", "focus": "Python CFUNCTYPE, dedup prep, 5 generator tests", "testsAdded": 5},
+    {"batch": "202-211", "focus": "lazy childMap sorting in compose (perf for large SDKs)"}
   ],
-  "totalTestsAdded": 60,
+  "totalTestsAdded": 70,
   "queue": [],
   "failed": []
 }
