@@ -2602,31 +2602,45 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         }
         return true;
     }
-    // ── Hex node quick-type shortcuts ──
+    // ── Type shortcuts ──
     case Qt::Key_Space: {
-        // Cycle hex size: 8→16→32→64→128→8
+        // Space = next hex size, Shift+Space = prev hex size
+        // Non-hex nodes: convert to hex equivalent first
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
-        if (!lm || !isHexNode(lm->nodeKind)) return false;
-        static constexpr NodeKind cycle[] = {
+        if (!lm) return false;
+        int sz = sizeForKind(lm->nodeKind);
+        if (sz <= 0) return false;  // skip containers
+        static constexpr NodeKind hexCycle[] = {
             NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
             NodeKind::Hex64, NodeKind::Hex128
         };
+        if (!isHexNode(lm->nodeKind)) {
+            // Convert to hex equivalent of same size
+            for (auto hk : hexCycle) {
+                if (sizeForKind(hk) == sz) {
+                    emit quickTypeChangeRequested(ni, hk);
+                    return true;
+                }
+            }
+            return false;
+        }
         int cur = -1;
-        for (int i = 0; i < 5; i++) if (cycle[i] == lm->nodeKind) { cur = i; break; }
+        for (int i = 0; i < 5; i++) if (hexCycle[i] == lm->nodeKind) { cur = i; break; }
         if (cur < 0) return false;
-        NodeKind next = cycle[(cur + 1) % 5];
+        int dir = (ke->modifiers() & Qt::ShiftModifier) ? -1 : 1;
+        NodeKind next = hexCycle[(cur + dir + 5) % 5];
         emit quickTypeChangeRequested(ni, next);
         return true;
     }
     case Qt::Key_1: case Qt::Key_2: case Qt::Key_3: case Qt::Key_4: case Qt::Key_5: {
-        // 1=Hex8, 2=Hex16, 3=Hex32, 4=Hex64, 5=Hex128
+        // 1=Hex8, 2=Hex16, 3=Hex32, 4=Hex64, 5=Hex128 (any non-container node)
         if (ke->modifiers() != Qt::NoModifier) return false;
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
-        if (!lm || !isHexNode(lm->nodeKind)) return false;
+        if (!lm || sizeForKind(lm->nodeKind) <= 0) return false;
         static constexpr NodeKind sizes[] = {
             NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
             NodeKind::Hex64, NodeKind::Hex128
@@ -2635,26 +2649,25 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return true;
     }
     case Qt::Key_P: {
-        // P = convert to pointer (size-appropriate)
+        // P = convert to pointer (any non-container node with size >= 4)
         if (ke->modifiers() != Qt::NoModifier) return false;
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
-        if (!lm || !isHexNode(lm->nodeKind)) return false;
+        if (!lm) return false;
         int sz = sizeForKind(lm->nodeKind);
-        NodeKind target = (sz >= 8) ? NodeKind::Pointer64
-                        : (sz >= 4) ? NodeKind::Pointer32
-                        : NodeKind::Pointer32;
+        if (sz < 4) return false;
+        NodeKind target = (sz >= 8) ? NodeKind::Pointer64 : NodeKind::Pointer32;
         emit quickTypeChangeRequested(ni, target);
         return true;
     }
     case Qt::Key_F: {
-        // F = convert to float (from 4-byte hex) or double (from 8-byte)
+        // F = convert to float (4-byte) or double (8-byte) from any same-size node
         if (ke->modifiers() != Qt::NoModifier) return false;
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
-        if (!lm || !isHexNode(lm->nodeKind)) return false;
+        if (!lm) return false;
         int sz = sizeForKind(lm->nodeKind);
         if (sz == 4) emit quickTypeChangeRequested(ni, NodeKind::Float);
         else if (sz == 8) emit quickTypeChangeRequested(ni, NodeKind::Double);
@@ -2662,48 +2675,42 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return true;
     }
     case Qt::Key_S: {
-        // S = toggle signed int ↔ hex (same size)
+        // S = convert to signed int of same byte size (from any type)
         if (ke->modifiers() != Qt::NoModifier) return false;
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
         if (!lm) return false;
-        NodeKind k = lm->nodeKind;
+        int sz = sizeForKind(lm->nodeKind);
         NodeKind target;
-        switch (k) {
-        case NodeKind::Hex8:  target = NodeKind::Int8;  break;
-        case NodeKind::Hex16: target = NodeKind::Int16; break;
-        case NodeKind::Hex32: target = NodeKind::Int32; break;
-        case NodeKind::Hex64: target = NodeKind::Int64; break;
-        case NodeKind::Int8:  target = NodeKind::Hex8;  break;
-        case NodeKind::Int16: target = NodeKind::Hex16; break;
-        case NodeKind::Int32: target = NodeKind::Hex32; break;
-        case NodeKind::Int64: target = NodeKind::Hex64; break;
+        switch (sz) {
+        case 1: target = NodeKind::Int8;  break;
+        case 2: target = NodeKind::Int16; break;
+        case 4: target = NodeKind::Int32; break;
+        case 8: target = NodeKind::Int64; break;
         default: return false;
         }
+        if (target == lm->nodeKind) return false;  // already signed
         emit quickTypeChangeRequested(ni, target);
         return true;
     }
     case Qt::Key_U: {
-        // U = toggle unsigned int ↔ hex (same size)
+        // U = convert to unsigned int of same byte size (from any type)
         if (ke->modifiers() != Qt::NoModifier) return false;
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
         if (!lm) return false;
-        NodeKind k = lm->nodeKind;
+        int sz = sizeForKind(lm->nodeKind);
         NodeKind target;
-        switch (k) {
-        case NodeKind::Hex8:  target = NodeKind::UInt8;  break;
-        case NodeKind::Hex16: target = NodeKind::UInt16; break;
-        case NodeKind::Hex32: target = NodeKind::UInt32; break;
-        case NodeKind::Hex64: target = NodeKind::UInt64; break;
-        case NodeKind::UInt8:  target = NodeKind::Hex8;  break;
-        case NodeKind::UInt16: target = NodeKind::Hex16; break;
-        case NodeKind::UInt32: target = NodeKind::Hex32; break;
-        case NodeKind::UInt64: target = NodeKind::Hex64; break;
+        switch (sz) {
+        case 1: target = NodeKind::UInt8;  break;
+        case 2: target = NodeKind::UInt16; break;
+        case 4: target = NodeKind::UInt32; break;
+        case 8: target = NodeKind::UInt64; break;
         default: return false;
         }
+        if (target == lm->nodeKind) return false;  // already unsigned
         emit quickTypeChangeRequested(ni, target);
         return true;
     }
@@ -4406,27 +4413,41 @@ void RcxEditor::applyHoverCursor() {
                             richBody.append(row);
                         }
 
-                        // Row 2: Space hex-size carousel (only for hex nodes)
-                        if (isHexNode(lm.nodeKind)) {
+                        // Row 2: Space resize carousel (always shown)
+                        {
                             static constexpr NodeKind hexCycle[] = {
                                 NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
                                 NodeKind::Hex64, NodeKind::Hex128
                             };
-                            int hi = -1;
-                            for (int i = 0; i < 5; i++)
-                                if (hexCycle[i] == lm.nodeKind) { hi = i; break; }
-                            if (hi >= 0) {
-                                int hprev = (hi - 1 + 5) % 5;
-                                int hnext = (hi + 1) % 5;
-                                TipLine row2;
+                            TipLine row2;
+                            if (isHexNode(lm.nodeKind)) {
+                                // Already hex: show prev/current/next in hex cycle
+                                int hi = -1;
+                                for (int i = 0; i < 5; i++)
+                                    if (hexCycle[i] == lm.nodeKind) { hi = i; break; }
+                                if (hi >= 0) {
+                                    int hprev = (hi - 1 + 5) % 5;
+                                    int hnext = (hi + 1) % 5;
+                                    row2.append({QStringLiteral(" \u2423 "), cAccent, false});
+                                    row2.append({pad(kn(hexCycle[hprev])), cDim, false});
+                                    row2.append({QStringLiteral(" "), {}, false});
+                                    row2.append({kn(lm.nodeKind), cBright, true});
+                                    row2.append({QStringLiteral(" "), {}, false});
+                                    row2.append({pad(kn(hexCycle[hnext])), cDim, false});
+                                }
+                            } else {
+                                // Non-hex: Space converts to hex equivalent
+                                NodeKind hexEquiv = NodeKind::Hex8;
+                                for (auto hk : hexCycle)
+                                    if (sizeForKind(hk) == sz) { hexEquiv = hk; break; }
                                 row2.append({QStringLiteral(" \u2423 "), cAccent, false});
-                                row2.append({pad(kn(hexCycle[hprev])), cDim, false});
+                                row2.append({pad(QStringLiteral("")), {}, false});
                                 row2.append({QStringLiteral(" "), {}, false});
-                                row2.append({kn(lm.nodeKind), cBright, true});
-                                row2.append({QStringLiteral(" "), {}, false});
-                                row2.append({pad(kn(hexCycle[hnext])), cDim, false});
-                                richBody.append(row2);
+                                row2.append({kn(hexEquiv), cDim, false});
+                                row2.append({QStringLiteral(" \u2190 to hex"), cDim, false});
                             }
+                            if (!row2.isEmpty())
+                                richBody.append(row2);
                         }
 
                         if (!m_arrowTooltip) {
