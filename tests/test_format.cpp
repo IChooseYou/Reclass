@@ -329,6 +329,47 @@ private slots:
         QVERIFY(s.contains("};"));
         QVERIFY(!s.contains("sizeof"));  // No sizeof comment
     }
+    void testFmtFloatEdgeCases() {
+        QCOMPARE(fmt::fmtFloat(std::numeric_limits<float>::quiet_NaN()), QStringLiteral("NaN"));
+        QCOMPARE(fmt::fmtFloat(std::numeric_limits<float>::infinity()), QStringLiteral("inff"));
+        QCOMPARE(fmt::fmtFloat(-std::numeric_limits<float>::infinity()), QStringLiteral("-inff"));
+        // Normal float should contain 'f' suffix
+        QVERIFY(fmt::fmtFloat(3.14f).contains('f'));
+    }
+
+    void testFmtDoubleIntegerValue() {
+        // Double with integer value should still have decimal point
+        QString s = fmt::fmtDouble(42.0);
+        QVERIFY(s.contains('.'));
+    }
+
+    void testFmtBoolValues() {
+        QCOMPARE(fmt::fmtBool(1), QStringLiteral("true"));
+        QCOMPARE(fmt::fmtBool(0), QStringLiteral("false"));
+    }
+
+    void testValidateValueEmpty() {
+        // Empty string should be OK (some contexts allow empty)
+        QVERIFY(fmt::validateValue(NodeKind::Int32, "").isEmpty());
+    }
+
+    void testValidateValueHexOverflow() {
+        // Value too large for Int8 should produce error
+        QString err = fmt::validateValue(NodeKind::Int8, "999");
+        QVERIFY(!err.isEmpty());
+    }
+
+    void testParseValueBoolStrings() {
+        bool ok;
+        QByteArray b = fmt::parseValue(NodeKind::Bool, "true", &ok);
+        QVERIFY(ok);
+        QCOMPARE(b.size(), 1);
+        QCOMPARE((uint8_t)b[0], (uint8_t)1);
+
+        b = fmt::parseValue(NodeKind::Bool, "false", &ok);
+        QVERIFY(ok);
+        QCOMPARE((uint8_t)b[0], (uint8_t)0);
+    }
 };
 
 QTEST_MAIN(TestFormat)

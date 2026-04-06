@@ -1426,6 +1426,107 @@ private slots:
         QString result = rcx::renderCode(rcx::CodeFormat::PythonCtypes, tree, rootId);
         QVERIFY(result.contains("ctypes.Structure"));
     }
+    // ── Hex128, enum, union, pointer, bitfield tests ──
+
+    void testHex128CppOutput() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "Big"; root.name = "big";
+        int ri = tree.addNode(root);
+        rcx::Node f; f.kind = rcx::NodeKind::Hex128;
+        f.name = "bigfield"; f.parentId = tree.nodes[ri].id; f.offset = 0;
+        tree.addNode(f);
+        QString cpp = rcx::renderCpp(tree, tree.nodes[ri].id);
+        QVERIFY(cpp.contains("cstdint"));
+        // Hex128 is emitted as padding (uint8_t[0x10])
+        QVERIFY(cpp.contains("uint8_t") || cpp.contains("0x10"));
+    }
+
+    void testHex128RustOutput() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "Big"; root.name = "big";
+        int ri = tree.addNode(root);
+        rcx::Node f; f.kind = rcx::NodeKind::Hex128;
+        f.name = "bigfield"; f.parentId = tree.nodes[ri].id; f.offset = 0;
+        tree.addNode(f);
+        QString rs = rcx::renderRust(tree, tree.nodes[ri].id);
+        QVERIFY(rs.contains("u8") || rs.contains("0x10"));
+    }
+
+    void testEnumCppOutput() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "Colors"; root.name = "colors";
+        root.classKeyword = QStringLiteral("enum");
+        root.enumMembers = {{QStringLiteral("Red"), 0}, {QStringLiteral("Green"), 1}};
+        tree.addNode(root);
+        QString cpp = rcx::renderCpp(tree, tree.nodes[0].id);
+        QVERIFY(cpp.contains("enum Colors"));
+        QVERIFY(cpp.contains("Red = 0"));
+        QVERIFY(cpp.contains("Green = 1"));
+    }
+
+    void testUnionCppOutput() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "MyUnion"; root.name = "u";
+        root.classKeyword = QStringLiteral("union");
+        int ri = tree.addNode(root);
+        rcx::Node f1; f1.kind = rcx::NodeKind::Int32; f1.name = "i";
+        f1.parentId = tree.nodes[ri].id; f1.offset = 0; tree.addNode(f1);
+        rcx::Node f2; f2.kind = rcx::NodeKind::Float; f2.name = "f";
+        f2.parentId = tree.nodes[ri].id; f2.offset = 0; tree.addNode(f2);
+        QString cpp = rcx::renderCpp(tree, tree.nodes[ri].id);
+        QVERIFY(cpp.contains("union MyUnion"));
+    }
+
+    void testPythonUnionOutput() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "MyUnion"; root.name = "u";
+        root.classKeyword = QStringLiteral("union");
+        int ri = tree.addNode(root);
+        rcx::Node f1; f1.kind = rcx::NodeKind::Int32; f1.name = "i";
+        f1.parentId = tree.nodes[ri].id; f1.offset = 0; tree.addNode(f1);
+        QString py = rcx::renderPython(tree, tree.nodes[ri].id);
+        QVERIFY(py.contains("ctypes.Union"));
+    }
+
+    void testPointerFieldCpp() {
+        rcx::NodeTree tree;
+        rcx::Node target; target.kind = rcx::NodeKind::Struct;
+        target.structTypeName = "Target"; target.name = "t";
+        int ti = tree.addNode(target);
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "HasPtr"; root.name = "hp";
+        int ri = tree.addNode(root);
+        rcx::Node ptr; ptr.kind = rcx::NodeKind::Pointer64;
+        ptr.name = "target_ptr"; ptr.parentId = tree.nodes[ri].id;
+        ptr.offset = 0; ptr.refId = tree.nodes[ti].id;
+        tree.addNode(ptr);
+        QString cpp = rcx::renderCpp(tree, tree.nodes[ri].id);
+        QVERIFY(cpp.contains("struct Target* target_ptr"));
+    }
+
+    void testCSharpStructLayoutSize() {
+        auto tree = makeSimpleStruct();
+        QString cs = rcx::renderCSharp(tree, tree.nodes[0].id);
+        QVERIFY(cs.contains("[StructLayout("));
+        QVERIFY(cs.contains("FieldOffset"));
+    }
+
+    void testAlignCommentsNoMarkers() {
+        // Verify alignComments handles strings without markers gracefully
+        // (indirectly: generate code for a struct with no fields)
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "Empty"; root.name = "e";
+        tree.addNode(root);
+        QString cpp = rcx::renderCpp(tree, tree.nodes[0].id);
+        QVERIFY(!cpp.isEmpty());
+        QVERIFY(cpp.contains("Empty"));
+    }
 };
 
 QTEST_MAIN(TestGenerator)
