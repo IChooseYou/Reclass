@@ -238,14 +238,10 @@ RcxController::RcxController(RcxDocument* doc, QWidget* parent)
     connect(m_doc, &RcxDocument::documentChanged, this, &RcxController::refresh);
     setupAutoRefresh();
 
-    // Auto-show hex toolbar when a hex node is selected
-    connect(this, &RcxController::nodeSelected, this, [this](int nodeIdx) {
-        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) { hideHexToolbar(); return; }
-        const auto& node = m_doc->tree.nodes[nodeIdx];
-        if (isHexNode(node.kind) && !m_editors.isEmpty())
-            showHexToolbar(m_editors.first(), nodeIdx);
-        else
-            hideHexToolbar();
+    // Hex toolbar: no longer auto-shows (replaced by type-cycling tooltip).
+    // Still available via context menu for insert/join/fill operations.
+    connect(this, &RcxController::nodeSelected, this, [this](int /*nodeIdx*/) {
+        hideHexToolbar();
     });
 }
 

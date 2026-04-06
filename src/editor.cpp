@@ -4379,16 +4379,38 @@ void RcxEditor::applyHoverCursor() {
                             auto* m = kindMeta(k);
                             return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
                         };
+                        // Column width = longest typeName in this size group
+                        int colW = 0;
+                        for (auto k : variants) colW = qMax(colW, kn(k).size());
+                        auto pad = [&](NodeKind k) { return kn(k).leftJustified(colW); };
+
                         QString tipTitle = kn(lm.nodeKind) + QStringLiteral("  (%1 byte%2)")
                             .arg(sz).arg(sz > 1 ? "s" : "");
+
+                        // Row 1: Left/Right type carousel
                         QString tipBody =
-                            QStringLiteral("\u25C0 [Left]   ") + kn(variants[prevIdx]) + QStringLiteral("\n")
-                          + QStringLiteral("\u25B6 [Right]  ") + kn(variants[nextIdx]) + QStringLiteral("\n")
-                          + QStringLiteral("\n");
-                        if (isHexNode(lm.nodeKind))
-                            tipBody += QStringLiteral("Space=resize  1-5=size  P=ptr  F=float  S U=int");
-                        else
-                            tipBody += QStringLiteral("Space=resize (hex only)  S U=toggle int/hex");
+                            QStringLiteral(" \u25C0  ") + pad(variants[prevIdx])
+                          + QStringLiteral("  [ ") + pad(lm.nodeKind) + QStringLiteral(" ]  ")
+                          + pad(variants[nextIdx]) + QStringLiteral("  \u25B6");
+
+                        // Row 2: Space hex-size carousel (only for hex nodes)
+                        if (isHexNode(lm.nodeKind)) {
+                            static constexpr NodeKind hexCycle[] = {
+                                NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+                                NodeKind::Hex64, NodeKind::Hex128
+                            };
+                            int hi = -1;
+                            for (int i = 0; i < 5; i++)
+                                if (hexCycle[i] == lm.nodeKind) { hi = i; break; }
+                            if (hi >= 0) {
+                                int hprev = (hi - 1 + 5) % 5;
+                                int hnext = (hi + 1) % 5;
+                                tipBody += QStringLiteral("\n")
+                                    + QStringLiteral(" \u2423  ") + pad(hexCycle[hprev])
+                                    + QStringLiteral("  [ ") + pad(lm.nodeKind) + QStringLiteral(" ]  ")
+                                    + pad(hexCycle[hnext]);
+                            }
+                        }
 
                         if (!m_arrowTooltip) {
                             m_arrowTooltip = new RcxTooltip(this);
