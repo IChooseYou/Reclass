@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "currentIteration": 140,
+  "currentIteration": 155,
   "totalPlanned": 300,
-  "completedSummary": "140 iterations. All 14 headless tests pass. 55 tests added.",
+  "completedSummary": "155 iterations. All 14 headless tests pass. 55 tests added.",
   "batchLog": [
     {"batch": "1-10", "focus": "keyboard shortcuts + code quality"},
     {"batch": "11-20", "focus": "hex type cycling + navigation"},
@@ -19,7 +19,9 @@
     {"batch": "101-110", "focus": "cycle display + footer size"},
     {"batch": "111-125", "focus": "5 more controller tests", "testsAdded": 5},
     {"batch": "126", "focus": "type tooltip: selection-driven, multi-select, below"},
-    {"batch": "127-140", "focus": "reorder fields, Ctrl+C address, 5 undo/redo tests", "testsAdded": 5}
+    {"batch": "127-140", "focus": "reorder fields, Ctrl+C address, 5 undo/redo tests", "testsAdded": 5},
+    {"batch": "141-142", "focus": "keycap icons in tooltip + click cycling to type picker"},
+    {"batch": "143-155", "focus": "replace classKeyword checks with isUnion/isBitfield/isEnum helpers"}
   ],
   "totalTestsAdded": 55,
   "queue": [],
