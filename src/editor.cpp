@@ -2543,10 +2543,11 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     case Qt::Key_Enter:
         return beginInlineEdit(EditTarget::Value);
     case Qt::Key_Delete:
-        emit deleteSelectedRequested();
+        if (!m_currentSelIds.isEmpty())
+            emit deleteSelectedRequested();
         return true;
     case Qt::Key_D:
-        if (ke->modifiers() & Qt::ControlModifier) {
+        if ((ke->modifiers() & Qt::ControlModifier) && !m_currentSelIds.isEmpty()) {
             emit duplicateSelectedRequested();
             return true;
         }

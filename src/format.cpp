@@ -94,6 +94,7 @@ QString fmtFloat(float v) {
     // Negative values get a '-' prefix (8 chars total), positive stay 7.
     if (std::isnan(v)) return QStringLiteral("NaN");
     if (std::isinf(v)) return v > 0 ? QStringLiteral("inff") : QStringLiteral("-inff");
+    if (v == 0.f && std::signbit(v)) return QStringLiteral("-0.000f");
 
     float av = std::fabs(v);
     if (av >= 100000.f)

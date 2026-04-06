@@ -358,6 +358,20 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
 
     ctx.emittedIds.insert(structId);
     ctx.emittedTypeNames.insert(typeName);
+
+    // Forward-declare pointer targets not yet emitted (prevents compilation errors)
+    for (int ci : ctx.childMap.value(structId)) {
+        const Node& child = ctx.tree.nodes[ci];
+        if (isPointerKind(child.kind) && child.refId != 0) {
+            int ri = ctx.tree.indexOfId(child.refId);
+            if (ri >= 0 && !ctx.emittedIds.contains(child.refId)
+                && !ctx.forwardDeclared.contains(child.refId)) {
+                ctx.output += QStringLiteral("struct %1;\n").arg(ctx.structName(ctx.tree.nodes[ri]));
+                ctx.forwardDeclared.insert(child.refId);
+            }
+        }
+    }
+
     int structSize = ctx.tree.structSpan(structId, &ctx.childMap);
 
     QString kw = node.resolvedClassKeyword();
