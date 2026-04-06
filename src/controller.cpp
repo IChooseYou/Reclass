@@ -422,6 +422,32 @@ void RcxController::connectEditor(RcxEditor* editor) {
         m_doc->undoStack.endMacro();
     });
 
+    // Collapse all / Expand all (Ctrl+Shift+[ / ])
+    connect(editor, &RcxEditor::collapseAllRequested, this, [this]() {
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Collapse all"));
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            auto& n = m_doc->tree.nodes[i];
+            if (isContainerKind(n.kind) && !n.collapsed)
+                m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{n.id, false, true}));
+        }
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = false;
+        refresh();
+    });
+    connect(editor, &RcxEditor::expandAllRequested, this, [this]() {
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Expand all"));
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            auto& n = m_doc->tree.nodes[i];
+            if (isContainerKind(n.kind) && n.collapsed)
+                m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{n.id, true, false}));
+        }
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = false;
+        refresh();
+    });
+
     // Comment edit (';' key) — respects selection
     connect(editor, &RcxEditor::commentEditRequested,
             this, [this, editor]() {
@@ -2265,6 +2291,18 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
     refresh();
 }
 
+void RcxController::insertStaticField(uint64_t parentId) {
+    Node sf;
+    sf.id = m_doc->tree.reserveId();
+    sf.kind = NodeKind::Hex64;
+    sf.name = QStringLiteral("static_field");
+    sf.parentId = parentId;
+    sf.offset = 0;
+    sf.isStatic = true;
+    sf.offsetExpr = QStringLiteral("base");
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{sf, {}}));
+}
+
 void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
     bool ok;
     QString input = QInputDialog::getText(parent,
@@ -3043,16 +3081,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     insertNode(nodeId, 0, NodeKind::Hex64, "newField");
                 });
                 structMenu->addAction("Add Static Field", [this, nodeId]() {
-                    Node sf;
-                    sf.id = m_doc->tree.reserveId();
-                    sf.kind = NodeKind::Hex64;
-                    sf.name = QStringLiteral("static_field");
-                    sf.parentId = nodeId;
-                    sf.offset = 0;
-                    sf.isStatic = true;
-                    sf.offsetExpr = QStringLiteral("base");
-                    m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::Insert{sf, {}}));
+                    insertStaticField(nodeId);
                 });
                 if (node.collapsed) {
                     structMenu->addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
@@ -3075,16 +3104,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 if (pi >= 0 && (m_doc->tree.nodes[pi].kind == NodeKind::Struct
                              || m_doc->tree.nodes[pi].kind == NodeKind::Array)) {
                     structMenu->addAction("Add Static Field", [this, pid]() {
-                        Node sf;
-                        sf.id = m_doc->tree.reserveId();
-                        sf.kind = NodeKind::Hex64;
-                        sf.name = QStringLiteral("static_field");
-                        sf.parentId = pid;
-                        sf.offset = 0;
-                        sf.isStatic = true;
-                        sf.offsetExpr = QStringLiteral("base");
-                        m_doc->undoStack.push(new RcxCommand(this,
-                            cmd::Insert{sf, {}}));
+                        insertStaticField(pid);
                     });
                     hasStructAction = true;
                 }
@@ -3204,16 +3224,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                          || m_doc->tree.nodes[ri].kind == NodeKind::Array)) {
                 uint64_t rootId = m_viewRootId;
                 menu.addAction("Add Static Field", [this, rootId]() {
-                    Node sf;
-                    sf.id = m_doc->tree.reserveId();
-                    sf.kind = NodeKind::Hex64;
-                    sf.name = QStringLiteral("static_field");
-                    sf.parentId = rootId;
-                    sf.offset = 0;
-                    sf.isStatic = true;
-                    sf.offsetExpr = QStringLiteral("base");
-                    m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::Insert{sf, {}}));
+                    insertStaticField(rootId);
                 });
             }
         }

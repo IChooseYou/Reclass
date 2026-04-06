@@ -2565,6 +2565,19 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             return true;
         }
         return false;
+    case Qt::Key_X:
+        if ((ke->modifiers() & Qt::ControlModifier) && !m_currentSelIds.isEmpty()) {
+            // Ctrl+X: copy address then delete (cut)
+            int line, col;
+            m_sci->getCursorPosition(&line, &col);
+            const LineMeta* lm = metaForLine(line);
+            if (lm && lm->offsetAddr != 0)
+                QApplication::clipboard()->setText(
+                    QStringLiteral("0x") + QString::number(lm->offsetAddr, 16).toUpper());
+            emit deleteSelectedRequested();
+            return true;
+        }
+        return false;
     case Qt::Key_Insert:
         if (ke->modifiers() & Qt::ShiftModifier)
             emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex32);
@@ -2831,6 +2844,20 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
                 if (last != first)
                     emit nodeClicked(last, m_meta[last].nodeId, Qt::ShiftModifier);
             }
+            return true;
+        }
+        return false;
+    case Qt::Key_BracketLeft:
+        if ((ke->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            == (Qt::ControlModifier | Qt::ShiftModifier)) {
+            emit collapseAllRequested();
+            return true;
+        }
+        return false;
+    case Qt::Key_BracketRight:
+        if ((ke->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            == (Qt::ControlModifier | Qt::ShiftModifier)) {
+            emit expandAllRequested();
             return true;
         }
         return false;

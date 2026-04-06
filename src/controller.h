@@ -217,6 +217,7 @@ private:
 
     void connectEditor(RcxEditor* editor);
     void appendBytesDialog(QWidget* parent, uint64_t targetId);
+    void insertStaticField(uint64_t parentId);
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
     void updateCommandRow();
     void switchToSavedSource(int idx);
