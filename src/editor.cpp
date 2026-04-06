@@ -1379,17 +1379,19 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
                 if (!allSameKind)
                     tipTitle = QStringLiteral("mixed  (%1 bytes)").arg(sz);
 
+                // All keycaps use " ← " / " → " / "Spc" — same 3-char width
+                // so the text after them starts at the same X position
                 QVector<TipLine> richBody;
                 { TipLine row;
-                  row.append({QStringLiteral("\u2190"), cAccent, false, true});  // keyCap: ←
-                  row.append({QStringLiteral(" "), {}, false, false});
-                  row.append({pad(kn(variants[prevIdx])), cDim, false, false});
-                  row.append({QStringLiteral(" "), {}, false, false});
+                  row.append({QStringLiteral(" \u2190 "), cAccent, false, true});
+                  row.append({QStringLiteral("  "), {}, false, false});
+                  row.append({kn(variants[prevIdx]), cDim, false, false});
+                  row.append({QStringLiteral("   "), {}, false, false});
                   row.append({kn(curKind), cBright, true, false});
-                  row.append({QStringLiteral(" "), {}, false, false});
-                  row.append({pad(kn(variants[nextIdx])), cDim, false, false});
-                  row.append({QStringLiteral(" "), {}, false, false});
-                  row.append({QStringLiteral("\u2192"), cAccent, false, true});  // keyCap: →
+                  row.append({QStringLiteral("   "), {}, false, false});
+                  row.append({kn(variants[nextIdx]), cDim, false, false});
+                  row.append({QStringLiteral("  "), {}, false, false});
+                  row.append({QStringLiteral(" \u2192 "), cAccent, false, true});
                   richBody.append(row); }
 
                 static constexpr NodeKind hexCycle[] = {
@@ -1400,21 +1402,20 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
                       int hi = -1;
                       for (int i = 0; i < 5; i++) if (hexCycle[i] == curKind) { hi = i; break; }
                       if (hi >= 0) {
-                          row2.append({QStringLiteral("Spc"), cAccent, false, true});  // keyCap: Space
-                          row2.append({QStringLiteral(" "), {}, false, false});
-                          row2.append({pad(kn(hexCycle[(hi-1+5)%5])), cDim, false, false});
-                          row2.append({QStringLiteral(" "), {}, false, false});
+                          row2.append({QStringLiteral("Spc"), cAccent, false, true});
+                          row2.append({QStringLiteral("  "), {}, false, false});
+                          row2.append({kn(hexCycle[(hi-1+5)%5]), cDim, false, false});
+                          row2.append({QStringLiteral("   "), {}, false, false});
                           row2.append({kn(curKind), cBright, true, false});
-                          row2.append({QStringLiteral(" "), {}, false, false});
-                          row2.append({pad(kn(hexCycle[(hi+1)%5])), cDim, false, false});
+                          row2.append({QStringLiteral("   "), {}, false, false});
+                          row2.append({kn(hexCycle[(hi+1)%5]), cDim, false, false});
                       }
                   } else {
                       NodeKind hexEquiv = NodeKind::Hex8;
                       for (auto hk : hexCycle) if (sizeForKind(hk) == sz) { hexEquiv = hk; break; }
-                      row2.append({QStringLiteral("Spc"), cAccent, false, true});  // keyCap: Space
-                      row2.append({QStringLiteral(" "), {}, false, false});
-                      row2.append({kn(hexEquiv), cDim, false, false});
-                      row2.append({QStringLiteral(" \u2190 to hex"), cDim, false, false});
+                      row2.append({QStringLiteral("Spc"), cAccent, false, true});
+                      row2.append({QStringLiteral("  "), {}, false, false});
+                      row2.append({kn(hexEquiv) + QStringLiteral("  \u2190 to hex"), cDim, false, false});
                   }
                   if (!row2.isEmpty()) richBody.append(row2); }
 
