@@ -353,7 +353,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.ptrBase    = state.currentPtrBase;
         lm.nodeKind   = node.kind;
         lm.foldLevel  = computeFoldLevel(depth, false);
-        lm.markerMask = 0;
+        lm.markerMask = (1u << M_STRUCT_BG);
         lm.arrayElementIdx = arrayElementIdx;
         uint64_t relOff = absAddr - arrayContainerAddr;
         QString relOffHex = QString::number(relOff, 16).toUpper();
