@@ -1527,6 +1527,65 @@ private slots:
         QVERIFY(!cpp.isEmpty());
         QVERIFY(cpp.contains("Empty"));
     }
+    void testForwardDeclarationForPointerTarget() {
+        // A points to B, A is emitted first → B must be forward-declared
+        rcx::NodeTree tree;
+        rcx::Node structB;
+        structB.kind = rcx::NodeKind::Struct;
+        structB.structTypeName = "TargetB";
+        structB.name = "b";
+        structB.parentId = 0;
+        int bi = tree.addNode(structB);
+        uint64_t bId = tree.nodes[bi].id;
+
+        // Add a field to B so it's non-empty
+        rcx::Node bf;
+        bf.kind = rcx::NodeKind::Int32; bf.name = "val";
+        bf.parentId = bId; bf.offset = 0;
+        tree.addNode(bf);
+
+        rcx::Node structA;
+        structA.kind = rcx::NodeKind::Struct;
+        structA.structTypeName = "StructA";
+        structA.name = "a";
+        structA.parentId = 0;
+        int ai = tree.addNode(structA);
+        uint64_t aId = tree.nodes[ai].id;
+
+        // A has a pointer to B
+        rcx::Node ptr;
+        ptr.kind = rcx::NodeKind::Pointer64;
+        ptr.name = "ptr_to_b";
+        ptr.parentId = aId;
+        ptr.offset = 0;
+        ptr.refId = bId;
+        tree.addNode(ptr);
+
+        // Generate C++ for A only → should forward-declare B
+        QString cpp = rcx::renderCpp(tree, aId);
+        // Must contain "struct TargetB;" forward declaration
+        QVERIFY2(cpp.contains("struct TargetB;"),
+            qPrintable("Missing forward declaration. Output:\n" + cpp));
+        QVERIFY(cpp.contains("struct TargetB* ptr_to_b"));
+    }
+
+    void testCppIncludesCstdint() {
+        auto tree = makeSimpleStruct();
+        QString cpp = rcx::renderCpp(tree, tree.nodes[0].id);
+        QVERIFY(cpp.contains("#include <cstdint>"));
+    }
+
+    void testRustAllowDeadCode() {
+        auto tree = makeSimpleStruct();
+        QString rs = rcx::renderRust(tree, tree.nodes[0].id);
+        QVERIFY(rs.contains("#[allow(dead_code)]"));
+    }
+
+    void testCSharpNullableDisable() {
+        auto tree = makeSimpleStruct();
+        QString cs = rcx::renderCSharp(tree, tree.nodes[0].id);
+        QVERIFY(cs.contains("#nullable disable"));
+    }
 };
 
 QTEST_MAIN(TestGenerator)

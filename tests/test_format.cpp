@@ -335,6 +335,8 @@ private slots:
         QCOMPARE(fmt::fmtFloat(-std::numeric_limits<float>::infinity()), QStringLiteral("-inff"));
         // Normal float should contain 'f' suffix
         QVERIFY(fmt::fmtFloat(3.14f).contains('f'));
+        // -0.0f should display with minus sign
+        QVERIFY(fmt::fmtFloat(-0.0f).startsWith('-'));
     }
 
     void testFmtDoubleIntegerValue() {
