@@ -1372,52 +1372,65 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
                 const auto& theme = ThemeManager::instance().current();
                 QColor cDim = theme.textMuted, cBright = theme.text, cAccent = theme.indHoverSpan;
                 int count = selIds.size();
-                QString tipTitle = kn(curKind) + QStringLiteral("  (%1 byte%2)")
-                    .arg(sz).arg(sz > 1 ? "s" : "");
-                if (count > 1)
-                    tipTitle += QStringLiteral("  \u00D7%1").arg(count);
-                if (!allSameKind)
-                    tipTitle = QStringLiteral("mixed  (%1 bytes)").arg(sz);
 
-                // All keycaps use " ← " / " → " / "Spc" — same 3-char width
-                // so the text after them starts at the same X position
+                // Title: clear statement of what this is
+                QString tipTitle;
+                if (!allSameKind)
+                    tipTitle = QStringLiteral("Change Type  (%1 bytes \u00D7%2 fields)").arg(sz).arg(count);
+                else if (count > 1)
+                    tipTitle = QStringLiteral("Change Type  (%1 \u00D7%2)").arg(kn(curKind)).arg(count);
+                else
+                    tipTitle = QStringLiteral("Change Type");
+
                 QVector<TipLine> richBody;
+
+                // Row 1: what Left arrow does
                 { TipLine row;
                   row.append({QStringLiteral(" \u2190 "), cAccent, false, true});
-                  row.append({QStringLiteral("  "), {}, false, false});
-                  row.append({kn(variants[prevIdx]), cDim, false, false});
-                  row.append({QStringLiteral("   "), {}, false, false});
-                  row.append({kn(curKind), cBright, true, false});
-                  row.append({QStringLiteral("   "), {}, false, false});
-                  row.append({kn(variants[nextIdx]), cDim, false, false});
-                  row.append({QStringLiteral("  "), {}, false, false});
-                  row.append({QStringLiteral(" \u2192 "), cAccent, false, true});
+                  row.append({QStringLiteral("  change to  "), cDim, false, false});
+                  row.append({kn(variants[prevIdx]), cBright, true, false});
                   richBody.append(row); }
 
+                // Row 2: what Right arrow does
+                { TipLine row;
+                  row.append({QStringLiteral(" \u2192 "), cAccent, false, true});
+                  row.append({QStringLiteral("  change to  "), cDim, false, false});
+                  row.append({kn(variants[nextIdx]), cBright, true, false});
+                  richBody.append(row); }
+
+                // Row 3: Space resize (hex nodes show next size, others show "convert to hex")
                 static constexpr NodeKind hexCycle[] = {
                     NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
                     NodeKind::Hex64, NodeKind::Hex128 };
-                { TipLine row2;
+                { TipLine row;
                   if (isHexNode(curKind)) {
                       int hi = -1;
                       for (int i = 0; i < 5; i++) if (hexCycle[i] == curKind) { hi = i; break; }
                       if (hi >= 0) {
-                          row2.append({QStringLiteral("Spc"), cAccent, false, true});
-                          row2.append({QStringLiteral("  "), {}, false, false});
-                          row2.append({kn(hexCycle[(hi-1+5)%5]), cDim, false, false});
-                          row2.append({QStringLiteral("   "), {}, false, false});
-                          row2.append({kn(curKind), cBright, true, false});
-                          row2.append({QStringLiteral("   "), {}, false, false});
-                          row2.append({kn(hexCycle[(hi+1)%5]), cDim, false, false});
+                          row.append({QStringLiteral("Spc"), cAccent, false, true});
+                          row.append({QStringLiteral("  resize to  "), cDim, false, false});
+                          row.append({kn(hexCycle[(hi+1)%5]), cBright, true, false});
                       }
                   } else {
                       NodeKind hexEquiv = NodeKind::Hex8;
                       for (auto hk : hexCycle) if (sizeForKind(hk) == sz) { hexEquiv = hk; break; }
-                      row2.append({QStringLiteral("Spc"), cAccent, false, true});
-                      row2.append({QStringLiteral("  "), {}, false, false});
-                      row2.append({kn(hexEquiv) + QStringLiteral("  \u2190 to hex"), cDim, false, false});
+                      row.append({QStringLiteral("Spc"), cAccent, false, true});
+                      row.append({QStringLiteral("  convert to "), cDim, false, false});
+                      row.append({kn(hexEquiv), cBright, true, false});
                   }
-                  if (!row2.isEmpty()) richBody.append(row2); }
+                  if (!row.isEmpty()) richBody.append(row); }
+
+                // Row 4: shortcut hints
+                { TipLine row;
+                  row.append({QStringLiteral("P"), cAccent, false, true});
+                  row.append({QStringLiteral(" ptr  "), cDim, false, false});
+                  row.append({QStringLiteral("F"), cAccent, false, true});
+                  row.append({QStringLiteral(" float  "), cDim, false, false});
+                  row.append({QStringLiteral("S"), cAccent, false, true});
+                  row.append({QStringLiteral(" signed  "), cDim, false, false});
+                  row.append({QStringLiteral("U"), cAccent, false, true});
+                  row.append({QStringLiteral(" unsigned"), cDim, false, false});
+                  richBody.append(row); }
 
                 if (!m_arrowTooltip) {
                     m_arrowTooltip = new RcxTooltip(this);
