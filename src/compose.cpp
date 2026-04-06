@@ -335,8 +335,8 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.nodeKind   = node.kind;
         lm.markerMask = (1u << M_CYCLE) | (1u << M_ERR);
         lm.foldLevel  = computeFoldLevel(depth, false);
-        state.emitLine(fmt::indent(depth) + QStringLiteral("/* CYCLE: ") +
-                       node.name + QStringLiteral(" */"), std::move(lm));
+        state.emitLine(fmt::indent(depth) + QStringLiteral("\u21BB ") +
+                       node.name + QStringLiteral("  (circular reference)"), std::move(lm));
         return;
     }
     state.visiting.insert(node.id);

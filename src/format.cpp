@@ -163,12 +163,14 @@ QString fmtStructHeader(const Node& node, int depth, bool collapsed, int colType
     return ind + type + SEP + node.name + SEP + suffix;
 }
 
-QString fmtStructFooter(const Node& node, int depth, int /*totalSize*/) {
+QString fmtStructFooter(const Node& node, int depth, int totalSize) {
     QString footer = indent(depth) + QStringLiteral("};");
-    if (node.resolvedClassKeyword() == QStringLiteral("enum"))
+    if (node.isEnum())
         footer += QStringLiteral("  +10");
     else
         footer += QStringLiteral("  +10h +100h +1000h Trim");
+    if (totalSize > 0)
+        footer += QStringLiteral("  // 0x") + QString::number(totalSize, 16).toUpper();
     return footer;
 }
 
