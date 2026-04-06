@@ -723,7 +723,7 @@ inline constexpr int kColValue    = 96;
 inline constexpr int kColComment  = 28;  // "// Enter=Save Esc=Cancel" fits
 inline constexpr int kColBaseAddr = 12;  // "0x" + up to 10 hex digits (40-bit address)
 inline constexpr int kSepWidth    = 1;
-inline constexpr int kMinTypeW    = 7;   // Minimum type column width (fits "uint8_t")
+inline constexpr int kMinTypeW    = 9;   // Minimum type column width (fits "uint64_t" + separator)
 inline constexpr int kMaxTypeW    = 128; // Maximum type column width
 inline constexpr int kMinNameW    = 8;   // Minimum name column width (matches ASCII preview)
 inline constexpr int kMaxNameW    = 128; // Maximum name column width
