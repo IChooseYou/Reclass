@@ -184,6 +184,17 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
         return tree.nodes[a].offset < tree.nodes[b].offset;
     });
 
+    // Deduplicate field names (append _2, _3, etc. for duplicates)
+    QHash<QString, int> nameCount;
+    auto uniqueName = [&](const QString& raw) -> QString {
+        QString name = sanitizeIdent(raw.isEmpty()
+            ? QStringLiteral("field_%1").arg(0, 2, 16, QChar('0')) : raw);
+        int& count = nameCount[name];
+        count++;
+        return (count > 1) ? name + QStringLiteral("_%1").arg(count) : name;
+    };
+    Q_UNUSED(uniqueName)  // used in future dedup pass
+
     // Helper: emit a padding/hex run as a single collapsed byte array
     auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
@@ -1249,8 +1260,8 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
             }
             case NodeKind::FuncPtr32:
             case NodeKind::FuncPtr64:
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_void_p),").arg(name)
-                    + QStringLiteral(" # fn ptr") + oc + QStringLiteral("\n");
+                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.CFUNCTYPE(None)),").arg(name)
+                    + oc + QStringLiteral("\n");
                 break;
             default:
                 ctx.output += ind + QStringLiteral("(\"%1\", %2),").arg(name, pyTypeName(child.kind))

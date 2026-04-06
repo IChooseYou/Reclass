@@ -1586,6 +1586,62 @@ private slots:
         QString cs = rcx::renderCSharp(tree, tree.nodes[0].id);
         QVERIFY(cs.contains("#nullable disable"));
     }
+    void testDefinesOutput() {
+        auto tree = makeSimpleStruct();
+        uint64_t rootId = tree.nodes[0].id;
+        QString def = rcx::renderDefines(tree, rootId);
+        QVERIFY(def.contains("#pragma once"));
+        QVERIFY(def.contains("Player_health"));
+        QVERIFY(def.contains("Player_speed"));
+        QVERIFY(def.contains("0x0") || def.contains("0x00"));
+    }
+
+    void testPythonFuncPtrCFUNCTYPE() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "VTable"; root.name = "vt";
+        int ri = tree.addNode(root);
+        rcx::Node fp; fp.kind = rcx::NodeKind::FuncPtr64;
+        fp.name = "func"; fp.parentId = tree.nodes[ri].id; fp.offset = 0;
+        tree.addNode(fp);
+        QString py = rcx::renderPython(tree, tree.nodes[ri].id);
+        QVERIFY2(py.contains("CFUNCTYPE"), qPrintable("Expected CFUNCTYPE. Got:\n" + py));
+    }
+
+    void testRustPointerField() {
+        rcx::NodeTree tree;
+        rcx::Node target; target.kind = rcx::NodeKind::Struct;
+        target.structTypeName = "Target"; target.name = "t";
+        int ti = tree.addNode(target);
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "HasPtr"; root.name = "hp";
+        int ri = tree.addNode(root);
+        rcx::Node ptr; ptr.kind = rcx::NodeKind::Pointer64;
+        ptr.name = "ptr"; ptr.parentId = tree.nodes[ri].id;
+        ptr.offset = 0; ptr.refId = tree.nodes[ti].id;
+        tree.addNode(ptr);
+        QString rs = rcx::renderRust(tree, tree.nodes[ri].id);
+        QVERIFY(rs.contains("*mut Target"));
+    }
+
+    void testPythonEnumSlots() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "Status"; root.name = "s";
+        root.classKeyword = QStringLiteral("enum");
+        root.enumMembers = {{QStringLiteral("OK"), 0}, {QStringLiteral("ERR"), 1}};
+        tree.addNode(root);
+        QString py = rcx::renderPython(tree, tree.nodes[0].id);
+        QVERIFY(py.contains("__slots__"));
+    }
+
+    void testCppNullptrPointerValue() {
+        // Verify that 0-value pointers show "nullptr" in format output
+        QCOMPARE(rcx::fmt::fmtPointer64(0), QStringLiteral("nullptr"));
+        QCOMPARE(rcx::fmt::fmtPointer32(0), QStringLiteral("nullptr"));
+        // Non-null should still be hex
+        QVERIFY(rcx::fmt::fmtPointer64(0x1234).startsWith("0x"));
+    }
 };
 
 QTEST_MAIN(TestGenerator)
