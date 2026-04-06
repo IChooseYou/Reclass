@@ -1036,6 +1036,96 @@ private slots:
             if (n.name == "field_float_copy") { foundCopy = true; break; }
         QVERIFY2(foundCopy, "Expected duplicated node with _copy suffix");
     }
+
+    void testSplitHexNode() {
+        // Find field_hex (Hex32 at offset 12) and split it
+        uint64_t hexId = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_hex") { hexId = n.id; break; }
+        QVERIFY(hexId != 0);
+
+        m_ctrl->splitHexNode(hexId);
+
+        // Original should be gone, two Hex16 nodes at offsets 12 and 14
+        QVERIFY(m_doc->tree.indexOfId(hexId) < 0);
+        int found16 = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.kind == NodeKind::Hex16 && (n.offset == 12 || n.offset == 14))
+                found16++;
+        QCOMPARE(found16, 2);
+    }
+
+    void testSplitHexNodeUndo() {
+        uint64_t hexId = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_hex") { hexId = n.id; break; }
+        QVERIFY(hexId != 0);
+        int countBefore = m_doc->tree.nodes.size();
+
+        m_ctrl->splitHexNode(hexId);
+        m_doc->undoStack.undo();
+
+        QCOMPARE(m_doc->tree.nodes.size(), countBefore);
+        QVERIFY(m_doc->tree.indexOfId(hexId) >= 0);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(hexId)].kind, NodeKind::Hex32);
+    }
+
+    void testGroupIntoUnion() {
+        // Select field_u32 and field_float, group into union
+        uint64_t u32Id = 0, floatId = 0;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "field_u32") u32Id = n.id;
+            if (n.name == "field_float") floatId = n.id;
+        }
+        QVERIFY(u32Id != 0 && floatId != 0);
+
+        QSet<uint64_t> ids = {u32Id, floatId};
+        m_ctrl->groupIntoUnion(ids);
+
+        // There should now be a union node containing the two fields
+        bool foundUnion = false;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.isUnion()) {
+                foundUnion = true;
+                // Children should be at offset 0
+                auto kids = m_doc->tree.childrenOf(n.id);
+                QCOMPARE(kids.size(), 2);
+                for (int ci : kids)
+                    QCOMPARE(m_doc->tree.nodes[ci].offset, 0);
+                break;
+            }
+        }
+        QVERIFY2(foundUnion, "Expected a union node after groupIntoUnion");
+    }
+
+    void testToggleCollapseRoundTrip() {
+        // Root struct should be uncollapsed
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        QCOMPARE(m_doc->tree.nodes[0].collapsed, false);
+
+        int ri = m_doc->tree.indexOfId(rootId);
+        m_ctrl->toggleCollapse(ri);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(rootId)].collapsed, true);
+
+        m_ctrl->toggleCollapse(m_doc->tree.indexOfId(rootId));
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(rootId)].collapsed, false);
+    }
+
+    void testInsertNodeAutoOffset() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        int countBefore = m_doc->tree.nodes.size();
+
+        // Insert with offset -1 = auto-place after last sibling
+        m_ctrl->insertNode(rootId, -1, NodeKind::Hex64, "appended");
+        QCOMPARE(m_doc->tree.nodes.size(), countBefore + 1);
+
+        // Find the new node
+        bool found = false;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "appended") { found = true; QVERIFY(n.offset > 0); break; }
+        }
+        QVERIFY(found);
+    }
 };
 
 QTEST_MAIN(TestController)
