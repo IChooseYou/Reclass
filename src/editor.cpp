@@ -2359,6 +2359,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                     m_pendingClickLine = h.line;
                     m_pendingClickMods = me->modifiers();
                 } else {
+                    m_sci->setCursorPosition(h.line, 0);
                     emit nodeClicked(h.line, h.nodeId, me->modifiers());
                     m_pendingClickNodeId = 0;
                 }
@@ -2400,6 +2401,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         m_dragging = false;
         m_dragStarted = false;
         if (m_pendingClickNodeId != 0) {
+            m_sci->setCursorPosition(m_pendingClickLine, 0);
             emit nodeClicked(m_pendingClickLine, m_pendingClickNodeId,
                              m_pendingClickMods);
             m_pendingClickNodeId = 0;
@@ -2707,12 +2709,15 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     }
     case Qt::Key_Left:
     case Qt::Key_Right: {
-        // Cycle through same-size type variants
+        // Cycle through same-size type variants (non-container nodes only)
         if (ke->modifiers() != Qt::NoModifier) return false;
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
         if (!lm) return false;
+        // Only cycle for nodes with a fixed byte size (skip Struct/Array)
+        int sz = sizeForKind(lm->nodeKind);
+        if (sz <= 0) return false;
         int dir = (ke->key() == Qt::Key_Right) ? 1 : -1;
         emit cycleSameSizeTypeRequested(ni, dir);
         return true;

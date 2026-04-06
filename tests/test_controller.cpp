@@ -909,6 +909,133 @@ private slots:
         QCOMPARE(m_doc->tree.nodes[idx].isStatic, true);
         QCOMPARE(m_doc->tree.nodes[idx].offsetExpr, QStringLiteral("base"));
     }
+    // ── Keyboard shortcut logic tests ──
+
+    void testQuickTypeChangeHexSameSize() {
+        // Hex32 → Int32 (same 4-byte size, no split/join)
+        int hexIdx = m_doc->tree.indexOfId(
+            [&]{ for (auto& n : m_doc->tree.nodes)
+                     if (n.name == "field_hex") return n.id;
+                 return (uint64_t)0; }());
+        QVERIFY(hexIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[hexIdx].kind, NodeKind::Hex32);
+
+        m_ctrl->changeNodeKind(hexIdx, NodeKind::Int32);
+        hexIdx = m_doc->tree.indexOfId(m_doc->tree.nodes[hexIdx].id);
+        QCOMPARE(m_doc->tree.nodes[hexIdx].kind, NodeKind::Int32);
+    }
+
+    void testQuickTypeChangeHexShrink() {
+        // Hex32 → Hex16 (shrink: should insert padding)
+        int hexIdx = -1;
+        uint64_t hexId = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            if (m_doc->tree.nodes[i].name == "field_hex") {
+                hexIdx = i; hexId = m_doc->tree.nodes[i].id; break;
+            }
+        }
+        QVERIFY(hexIdx >= 0);
+        int oldOffset = m_doc->tree.nodes[hexIdx].offset;
+
+        m_ctrl->changeNodeKind(hexIdx, NodeKind::Hex16);
+        int newIdx = m_doc->tree.indexOfId(hexId);
+        QVERIFY(newIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[newIdx].kind, NodeKind::Hex16);
+        QCOMPARE(m_doc->tree.nodes[newIdx].offset, oldOffset);
+
+        // Padding should exist after the shrunk node
+        bool foundPad = false;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.offset == oldOffset + 2 && isHexNode(n.kind)) {
+                foundPad = true; break;
+            }
+        }
+        QVERIFY2(foundPad, "Expected padding after shrink");
+    }
+
+    void testQuickTypeChangeHexGrow() {
+        // Hex32 → Hex64 (grow: should shift siblings)
+        int hexIdx = -1;
+        uint64_t hexId = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            if (m_doc->tree.nodes[i].name == "field_hex") {
+                hexIdx = i; hexId = m_doc->tree.nodes[i].id; break;
+            }
+        }
+        QVERIFY(hexIdx >= 0);
+        int oldOffset = m_doc->tree.nodes[hexIdx].offset; // 12
+
+        m_ctrl->changeNodeKind(hexIdx, NodeKind::Hex64);
+        int newIdx = m_doc->tree.indexOfId(hexId);
+        QVERIFY(newIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[newIdx].kind, NodeKind::Hex64);
+        QCOMPARE(m_doc->tree.nodes[newIdx].offset, oldOffset);
+        // Size grew from 4 to 8, siblings after offset 16 shifted by 4
+    }
+
+    void testCycleSameSizeTypeVariants() {
+        // Get field_hex (Hex32 at offset 12)
+        int hexIdx = -1;
+        uint64_t hexId = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            if (m_doc->tree.nodes[i].name == "field_hex") {
+                hexIdx = i; hexId = m_doc->tree.nodes[i].id; break;
+            }
+        }
+        QVERIFY(hexIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[hexIdx].kind, NodeKind::Hex32);
+
+        // Build the same-size variant list as the controller does
+        int sz = sizeForKind(NodeKind::Hex32); // 4
+        QVector<NodeKind> variants;
+        for (const auto& m : kKindMeta) {
+            if (m.size == sz && m.kind != NodeKind::Struct && m.kind != NodeKind::Array)
+                variants.append(m.kind);
+        }
+        QVERIFY(variants.size() > 1);
+        QVERIFY(variants.contains(NodeKind::Hex32));
+        QVERIFY(variants.contains(NodeKind::Int32));
+        QVERIFY(variants.contains(NodeKind::Float));
+
+        // Cycle forward: Hex32 → next variant
+        int curIdx = variants.indexOf(NodeKind::Hex32);
+        NodeKind expected = variants[(curIdx + 1) % variants.size()];
+        m_ctrl->changeNodeKind(hexIdx, expected);
+        int newIdx = m_doc->tree.indexOfId(hexId);
+        QVERIFY(newIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[newIdx].kind, expected);
+    }
+
+    void testDeleteKeyRemovesNode() {
+        int countBefore = m_doc->tree.nodes.size();
+        // Find field_u8
+        uint64_t u8Id = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_u8") { u8Id = n.id; break; }
+        QVERIFY(u8Id != 0);
+
+        int idx = m_doc->tree.indexOfId(u8Id);
+        m_ctrl->removeNode(idx);
+        QVERIFY(m_doc->tree.indexOfId(u8Id) < 0);
+        QVERIFY(m_doc->tree.nodes.size() < countBefore);
+    }
+
+    void testDuplicateNode() {
+        int countBefore = m_doc->tree.nodes.size();
+        int idx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "field_float") { idx = i; break; }
+        QVERIFY(idx >= 0);
+
+        m_ctrl->duplicateNode(idx);
+        QCOMPARE(m_doc->tree.nodes.size(), countBefore + 1);
+
+        // Find the copy
+        bool foundCopy = false;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_float_copy") { foundCopy = true; break; }
+        QVERIFY2(foundCopy, "Expected duplicated node with _copy suffix");
+    }
 };
 
 QTEST_MAIN(TestController)
