@@ -459,6 +459,10 @@ struct NodeTree {
         const Node& node = nodes[idx];
         int declaredSize = node.byteSize();
 
+        // Short-circuit: non-container nodes have no children to traverse
+        if (!isContainerKind(node.kind) && node.refId == 0)
+            return declaredSize;
+
         int maxEnd = 0;
         QVector<int> kids = childMap ? childMap->value(structId) : childrenOf(structId);
         for (int ci : kids) {

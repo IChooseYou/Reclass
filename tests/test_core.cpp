@@ -1014,6 +1014,115 @@ private slots:
         QCOMPARE(result.size(), 1);
         QVERIFY(result.contains(childId));
     }
+
+    void testNodeJsonRoundTrip() {
+        // Build a node with all optional fields populated
+        rcx::Node n;
+        n.id = 42;
+        n.kind = rcx::NodeKind::Struct;
+        n.name = QStringLiteral("TestNode");
+        n.structTypeName = QStringLiteral("TestType");
+        n.classKeyword = QStringLiteral("class");
+        n.parentId = 10;
+        n.offset = 64;
+        n.isStatic = true;
+        n.offsetExpr = QStringLiteral("base + 0x10");
+        n.isRelative = true;
+        n.arrayLen = 5;
+        n.strLen = 128;
+        n.refId = 99;
+        n.elementKind = rcx::NodeKind::Float;
+        n.ptrDepth = 2;
+        n.comment = QStringLiteral("test comment");
+        n.enumMembers = {{QStringLiteral("A"), 0}, {QStringLiteral("B"), 1}};
+        n.bitfieldMembers = {{QStringLiteral("bit0"), 0, 1}, {QStringLiteral("bits"), 1, 3}};
+
+        QJsonObject json = n.toJson();
+        rcx::Node n2 = rcx::Node::fromJson(json);
+
+        QCOMPARE(n2.id, n.id);
+        QCOMPARE(n2.kind, n.kind);
+        QCOMPARE(n2.name, n.name);
+        QCOMPARE(n2.structTypeName, n.structTypeName);
+        QCOMPARE(n2.classKeyword, n.classKeyword);
+        QCOMPARE(n2.parentId, n.parentId);
+        QCOMPARE(n2.offset, n.offset);
+        QCOMPARE(n2.isStatic, n.isStatic);
+        QCOMPARE(n2.offsetExpr, n.offsetExpr);
+        QCOMPARE(n2.isRelative, n.isRelative);
+        QCOMPARE(n2.arrayLen, n.arrayLen);
+        QCOMPARE(n2.strLen, n.strLen);
+        QCOMPARE(n2.refId, n.refId);
+        QCOMPARE(n2.elementKind, n.elementKind);
+        QCOMPARE(n2.ptrDepth, n.ptrDepth);
+        QCOMPARE(n2.comment, n.comment);
+        QCOMPARE(n2.enumMembers.size(), n.enumMembers.size());
+        QCOMPARE(n2.enumMembers[0].first, QStringLiteral("A"));
+        QCOMPARE(n2.enumMembers[1].second, (int64_t)1);
+        QCOMPARE(n2.bitfieldMembers.size(), n.bitfieldMembers.size());
+        QCOMPARE(n2.bitfieldMembers[0].name, QStringLiteral("bit0"));
+        QCOMPARE(n2.bitfieldMembers[1].bitWidth, (uint8_t)3);
+    }
+
+    void testNodeTreeJsonRoundTrip() {
+        rcx::NodeTree tree;
+        tree.baseAddress = 0x7FF600000000ULL;
+        tree.baseAddressFormula = QStringLiteral("<app.exe> + 0x100");
+        tree.pointerSize = 4;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = QStringLiteral("root");
+        root.structTypeName = QStringLiteral("Root");
+        tree.addNode(root);
+        uint64_t rootId = tree.nodes[0].id;
+
+        rcx::Node child;
+        child.kind = rcx::NodeKind::Int32;
+        child.name = QStringLiteral("x");
+        child.parentId = rootId;
+        child.offset = 4;
+        tree.addNode(child);
+
+        QJsonObject json = tree.toJson();
+        rcx::NodeTree tree2 = rcx::NodeTree::fromJson(json);
+
+        QCOMPARE(tree2.baseAddress, tree.baseAddress);
+        QCOMPARE(tree2.baseAddressFormula, tree.baseAddressFormula);
+        QCOMPARE(tree2.pointerSize, tree.pointerSize);
+        QCOMPARE(tree2.nodes.size(), tree.nodes.size());
+        QCOMPARE(tree2.nodes[1].name, QStringLiteral("x"));
+        QCOMPARE(tree2.nodes[1].offset, 4);
+    }
+
+    void testStructSpanLeafShortCircuit() {
+        // structSpan on a non-container node should return byteSize directly
+        rcx::NodeTree tree;
+        rcx::Node n;
+        n.kind = rcx::NodeKind::UInt64;
+        n.offset = 0;
+        int ni = tree.addNode(n);
+        QCOMPARE(tree.structSpan(tree.nodes[ni].id), 8);
+    }
+
+    void testStaticFieldExcludedFromSpan() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node normal; normal.kind = rcx::NodeKind::UInt32;
+        normal.parentId = rootId; normal.offset = 0;
+        tree.addNode(normal);
+
+        rcx::Node staticF; staticF.kind = rcx::NodeKind::UInt64;
+        staticF.parentId = rootId; staticF.offset = 1000;
+        staticF.isStatic = true;
+        tree.addNode(staticF);
+
+        // Static field at offset 1000 should NOT inflate structSpan
+        QCOMPARE(tree.structSpan(rootId), 4); // just the UInt32
+    }
 };
 
 QTEST_MAIN(TestCore)
