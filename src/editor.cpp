@@ -2468,19 +2468,10 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
                 // Single-click on already-selected node:
-                // If type tooltip is showing → open type picker (2nd click)
-                // Otherwise → inline edit the clicked token
+                // Click on type column → open type picker
+                // Click on other editable token → inline edit
                 int tLine, tCol; EditTarget t;
                 if (alreadySelected && plain) {
-                    if (m_typeTooltips && m_arrowTooltip && m_arrowTooltip->isVisible()) {
-                        // 2nd click: dismiss tooltip, open type picker
-                        static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
-                        auto* lm = metaForLine(h.line);
-                        if (lm && lm->nodeIdx >= 0 && sizeForKind(lm->nodeKind) > 0) {
-                            m_pendingClickNodeId = 0;
-                            return beginInlineEdit(EditTarget::Type, h.line);
-                        }
-                    }
                     if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                         m_pendingClickNodeId = 0;
                         return beginInlineEdit(t, tLine, tCol);
