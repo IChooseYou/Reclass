@@ -2467,19 +2467,52 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool alreadySelected = m_currentSelIds.contains(h.nodeId);
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
-                // Single-click on already-selected node:
-                // Click on type column → open type picker
-                // Click on other editable token → inline edit
-                int tLine, tCol; EditTarget t;
-                if (alreadySelected && plain) {
-                    if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
+                // ── Click cycle on same node: select → type picker → select → ... ──
+                if (alreadySelected && plain && m_currentSelIds.size() == 1) {
+                    if (h.nodeId == m_clickCycleNodeId && m_clickCycleState == 1) {
+                        // State 1 → open type picker (state 2)
+                        m_clickCycleState = 2;
+                        auto* lm = metaForLine(h.line);
+                        if (lm && lm->nodeIdx >= 0 && sizeForKind(lm->nodeKind) > 0) {
+                            if (m_arrowTooltip)
+                                static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
+                            m_pendingClickNodeId = 0;
+                            return beginInlineEdit(EditTarget::Type, h.line);
+                        }
+                        // Fallback: not a type-editable node, try inline edit
+                        int tLine, tCol; EditTarget t;
+                        if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
+                            m_pendingClickNodeId = 0;
+                            return beginInlineEdit(t, tLine, tCol);
+                        }
+                    } else if (h.nodeId == m_clickCycleNodeId && m_clickCycleState == 2) {
+                        // State 2 → back to tooltip (state 1)
+                        m_clickCycleState = 1;
+                        // Re-select to trigger tooltip via applySelectionOverlay
+                        m_sci->setCursorPosition(h.line, 0);
+                        emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
                         m_pendingClickNodeId = 0;
-                        return beginInlineEdit(t, tLine, tCol);
+                        return true;
+                    } else {
+                        // Same node, state 0 → advance to 1 (tooltip shown by selection)
+                        m_clickCycleNodeId = h.nodeId;
+                        m_clickCycleState = 1;
+                        int tLine, tCol; EditTarget t;
+                        if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
+                            m_pendingClickNodeId = 0;
+                            return beginInlineEdit(t, tLine, tCol);
+                        }
                     }
                 }
 
+                // Different node or modifier click → reset cycle
+                if (h.nodeId != m_clickCycleNodeId) {
+                    m_clickCycleNodeId = h.nodeId;
+                    m_clickCycleState = 1;  // first select shows tooltip
+                }
+
                 m_dragging = true;
-                m_dragStarted = false;  // require threshold before extending
+                m_dragStarted = false;
                 m_dragStartPos = me->pos();
                 m_dragLastLine = h.line;
                 m_dragInitMods = me->modifiers();
@@ -2487,7 +2520,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool multi = m_currentSelIds.size() > 1;
 
                 if (alreadySelected && multi && plain) {
-                    // Defer: might be start of double-click-to-edit
                     m_pendingClickNodeId = h.nodeId;
                     m_pendingClickLine = h.line;
                     m_pendingClickMods = me->modifiers();
