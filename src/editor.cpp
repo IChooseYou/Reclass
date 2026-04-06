@@ -4356,6 +4356,75 @@ void RcxEditor::applyHoverCursor() {
                 }
             }
         }
+        // ── Type cycling tooltip on non-container field type column ──
+        if (!showTip && tokenHit && t == EditTarget::Type
+            && h.line > 0 && h.line < m_meta.size()) {
+            const auto& lm = m_meta[h.line];
+            int sz = sizeForKind(lm.nodeKind);
+            if (sz > 0 && lm.lineKind == LineKind::Field && !lm.isContinuation) {
+                NormalizedSpan span;
+                if (resolvedSpanFor(h.line, EditTarget::Type, span)
+                    && h.col >= span.start && h.col < span.end) {
+                    // Build same-size variant list
+                    QVector<NodeKind> variants;
+                    for (const auto& m : kKindMeta) {
+                        if (m.size == sz && m.kind != NodeKind::Struct && m.kind != NodeKind::Array)
+                            variants.append(m.kind);
+                    }
+                    int curIdx = variants.indexOf(lm.nodeKind);
+                    if (curIdx >= 0 && variants.size() > 1) {
+                        int prevIdx = (curIdx - 1 + variants.size()) % variants.size();
+                        int nextIdx = (curIdx + 1) % variants.size();
+                        auto kn = [](NodeKind k) {
+                            auto* m = kindMeta(k);
+                            return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
+                        };
+                        QString tipTitle = kn(lm.nodeKind) + QStringLiteral("  (%1 byte%2)")
+                            .arg(sz).arg(sz > 1 ? "s" : "");
+                        QString tipBody =
+                            QStringLiteral("\u25C0 [Left]   ") + kn(variants[prevIdx]) + QStringLiteral("\n")
+                          + QStringLiteral("\u25B6 [Right]  ") + kn(variants[nextIdx]) + QStringLiteral("\n")
+                          + QStringLiteral("\n");
+                        if (isHexNode(lm.nodeKind))
+                            tipBody += QStringLiteral("Space=resize  1-5=size  P=ptr  F=float  S U=int");
+                        else
+                            tipBody += QStringLiteral("Space=resize (hex only)  S U=toggle int/hex");
+
+                        if (!m_arrowTooltip) {
+                            m_arrowTooltip = new RcxTooltip(this);
+                            static_cast<RcxTooltip*>(m_arrowTooltip)->onMouseMove =
+                                [this](QMouseEvent* e) {
+                                QPoint gp = e->globalPosition().toPoint();
+                                QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
+                                m_lastHoverPos = vp;
+                                m_hoverInside = m_sci->viewport()->rect().contains(vp);
+                                applyHoverCursor();
+                            };
+                        }
+                        auto* tip = static_cast<RcxTooltip*>(m_arrowTooltip);
+                        const auto& theme = ThemeManager::instance().current();
+                        tip->setTheme(theme.backgroundAlt, theme.border,
+                                      theme.text, theme.textDim, theme.border);
+                        tip->populate(tipTitle, tipBody, editorFont());
+                        long posA = posFromCol(m_sci, h.line, span.start);
+                        long posB = posFromCol(m_sci, h.line, span.end);
+                        int xA = (int)m_sci->SendScintilla(
+                            QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posA);
+                        int xB = (int)m_sci->SendScintilla(
+                            QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posB);
+                        int py = (int)m_sci->SendScintilla(
+                            QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, posA);
+                        int lh = (int)m_sci->SendScintilla(
+                            QsciScintillaBase::SCI_TEXTHEIGHT, (unsigned long)h.line);
+                        QPoint anchor = m_sci->viewport()->mapToGlobal(
+                            QPoint((xA + xB) / 2, py + lh));
+                        tip->showAt(anchor);
+                        showTip = true;
+                    }
+                }
+            }
+        }
+
         if (!showTip && m_arrowTooltip && m_arrowTooltip->isVisible())
             static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
     }
