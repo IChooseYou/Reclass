@@ -273,6 +273,27 @@ static QString readValueImpl(const Node& node, const Provider& prov,
     case NodeKind::Hex16:     return display ? hexVal(prov.readU16(addr)) : rawHex(prov.readU16(addr), 4);
     case NodeKind::Hex32:     return display ? hexVal(prov.readU32(addr)) : rawHex(prov.readU32(addr), 8);
     case NodeKind::Hex64:     return display ? hexVal(prov.readU64(addr)) : rawHex(prov.readU64(addr), 16);
+    case NodeKind::Hex128: {
+        // 16-byte hex: read as two uint64 (low + high)
+        QByteArray b = prov.readBytes(addr, 16);
+        if (b.size() < 16) b.resize(16);
+        if (!display) {
+            // Editable: space-separated hex bytes
+            QString hex;
+            for (int i = 0; i < 16; i++) {
+                if (i > 0) hex += ' ';
+                hex += rawHex((uint8_t)b[i], 2);
+            }
+            return hex;
+        }
+        // Display: "0x" + 32 hex digits (big-endian display)
+        uint64_t hi = 0, lo = 0;
+        memcpy(&lo, b.constData(), 8);
+        memcpy(&hi, b.constData() + 8, 8);
+        if (hi == 0) return hexVal(lo);
+        return QStringLiteral("0x") + QString::number(hi, 16).toUpper()
+             + QString::number(lo, 16).toUpper().rightJustified(16, '0');
+    }
     case NodeKind::Int8:      return fmtInt8((int8_t)prov.readU8(addr));
     case NodeKind::Int16:     return fmtInt16((int16_t)prov.readU16(addr));
     case NodeKind::Int32:     return fmtInt32((int32_t)prov.readU32(addr));
@@ -544,6 +565,11 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
         qulonglong val = cleaned.toULongLong(ok, 16);
         return *ok ? toBytes<uint64_t>(val) : QByteArray{};
     }
+    case NodeKind::Hex128: {
+        QString cleaned = stripHex(s);
+        // Space-separated bytes → raw byte order
+        return parseHexBytes(cleaned, 16, ok);
+    }
     case NodeKind::Int8: {
         bool isHex = s.startsWith("0x", Qt::CaseInsensitive);
         if (isHex) {
@@ -656,7 +682,7 @@ QString validateValue(NodeKind kind, const QString& text) {
     if (s.isEmpty()) return {};
 
     // For integer/hex types, validate character set first
-    bool isHexKind = (kind >= NodeKind::Hex8 && kind <= NodeKind::Hex64)
+    bool isHexKind = isHexNode(kind)
                   || kind == NodeKind::Pointer32 || kind == NodeKind::Pointer64
                   || kind == NodeKind::FuncPtr32 || kind == NodeKind::FuncPtr64;
     bool isIntKind = (kind >= NodeKind::Int8 && kind <= NodeKind::UInt64);

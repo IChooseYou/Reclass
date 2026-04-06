@@ -2835,6 +2835,34 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 editor->setHexEditPending(true);
                 editor->beginInlineEdit(EditTarget::Name, line);
             });
+            // Downsize / Upsize options
+            if (node.kind != NodeKind::Hex8) {
+                static constexpr NodeKind hexDown[] = {
+                    NodeKind::Hex8, NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32, NodeKind::Hex64};
+                int hi = -1;
+                static constexpr NodeKind hexList[] = {
+                    NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32, NodeKind::Hex64, NodeKind::Hex128};
+                for (int i = 0; i < 5; i++) if (hexList[i] == node.kind) { hi = i; break; }
+                if (hi > 0) {
+                    auto* dm = kindMeta(hexList[hi - 1]);
+                    menu.addAction(QStringLiteral("Downsize to %1 (split)").arg(QString::fromLatin1(dm->typeName)),
+                        [this, nodeId]() { splitHexNode(nodeId); });
+                }
+            }
+            if (node.kind != NodeKind::Hex128) {
+                static constexpr NodeKind hexList[] = {
+                    NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32, NodeKind::Hex64, NodeKind::Hex128};
+                int hi = -1;
+                for (int i = 0; i < 5; i++) if (hexList[i] == node.kind) { hi = i; break; }
+                if (hi >= 0 && hi < 4) {
+                    auto* um = kindMeta(hexList[hi + 1]);
+                    menu.addAction(QStringLiteral("Upsize to %1 (join)\tSpace").arg(QString::fromLatin1(um->typeName)),
+                        [this, nodeId, hexList, hi]() {
+                            int ni = m_doc->tree.indexOfId(nodeId);
+                            if (ni >= 0) joinHexNodes(nodeId, hexList[hi + 1]);
+                        });
+                }
+            }
             menu.addSeparator();
         }
 

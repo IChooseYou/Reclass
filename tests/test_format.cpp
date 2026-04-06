@@ -372,6 +372,41 @@ private slots:
         QVERIFY(ok);
         QCOMPARE((uint8_t)b[0], (uint8_t)0);
     }
+    void testParseValueHex128() {
+        bool ok;
+        // Space-separated 16 bytes
+        QByteArray b = fmt::parseValue(NodeKind::Hex128,
+            "00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF", &ok);
+        QVERIFY(ok);
+        QCOMPARE(b.size(), 16);
+        QCOMPARE((uint8_t)b[0], (uint8_t)0x00);
+        QCOMPARE((uint8_t)b[15], (uint8_t)0xFF);
+    }
+
+    void testParseValueHex128TooShort() {
+        bool ok;
+        // Only 8 bytes — should fail (expects 16)
+        QByteArray b = fmt::parseValue(NodeKind::Hex128,
+            "00 11 22 33 44 55 66 77", &ok);
+        QVERIFY(!ok);
+    }
+
+    void testReadValueHex128() {
+        // Build a 16-byte buffer and read it as Hex128
+        QByteArray data(16, '\0');
+        data[0] = 0x41;  // 'A'
+        data[15] = (char)0xFF;
+        BufferProvider prov(data);
+        Node n;
+        n.kind = NodeKind::Hex128;
+        // Display mode should show hex value
+        QString val = fmt::readValue(n, prov, 0, 0);
+        QVERIFY(!val.isEmpty());
+        // Editable mode should show space-separated hex bytes
+        QString edit = fmt::editableValue(n, prov, 0, 0);
+        QVERIFY(edit.contains(' '));
+        QVERIFY(edit.size() >= 47);  // 16*3-1 = 47 chars
+    }
 };
 
 QTEST_MAIN(TestFormat)
