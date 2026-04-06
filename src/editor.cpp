@@ -2602,6 +2602,25 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         }
         return true;
     }
+    case Qt::Key_PageUp:
+    case Qt::Key_PageDown: {
+        // Jump by a screenful of lines (like normal PageUp/Down but landing on a node)
+        int visible = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_LINESONSCREEN);
+        int line, col;
+        m_sci->getCursorPosition(&line, &col);
+        int dir = (ke->key() == Qt::Key_PageUp) ? -1 : 1;
+        int target = qBound(0, line + dir * visible, m_meta.size() - 1);
+        // Find nearest node line from target position
+        for (int i = target; i >= 0 && i < m_meta.size(); i += dir) {
+            const auto& lm = m_meta[i];
+            if (lm.nodeId == 0 || lm.nodeId == kCommandRowId || lm.isContinuation) continue;
+            m_sci->setCursorPosition(i, 0);
+            m_sci->ensureLineVisible(i);
+            emit nodeClicked(i, lm.nodeId, ke->modifiers());
+            break;
+        }
+        return true;
+    }
     case Qt::Key_Tab: {
         // Core targets for all field nodes; Type opens popup so put it last
         EditTarget order[] = {EditTarget::Name, EditTarget::Value, EditTarget::Comment,

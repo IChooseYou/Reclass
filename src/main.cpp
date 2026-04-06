@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "providerregistry.h"
+#include <QInputDialog>
 #include "generator.h"
 #include "imports/import_reclass_xml.h"
 #include "imports/import_source.h"
@@ -1073,6 +1074,39 @@ void MainWindow::createMenus() {
         connect(actRefresh, &QAction::triggered, this, [this]() {
             auto* ctrl = activeController();
             if (ctrl) { ctrl->resetChangeTracking(); ctrl->refresh(); }
+        });
+    }
+    {
+        auto* actGoTo = view->addAction("&Go to Offset...");
+        actGoTo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
+        connect(actGoTo, &QAction::triggered, this, [this]() {
+            auto* ctrl = activeController();
+            if (!ctrl) return;
+            bool ok;
+            QString input = QInputDialog::getText(this,
+                QStringLiteral("Go to Offset"),
+                QStringLiteral("Hex offset within struct (e.g. 0x40):"),
+                QLineEdit::Normal, QString(), &ok);
+            if (!ok || input.trimmed().isEmpty()) return;
+            QString s = input.trimmed();
+            if (s.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) s = s.mid(2);
+            uint64_t offset = s.toULongLong(&ok, 16);
+            if (!ok) return;
+            const auto& result = ctrl->lastResult();
+            uint64_t base = ctrl->document()->tree.baseAddress;
+            int bestLine = -1;
+            int64_t bestDist = INT64_MAX;
+            for (int i = 0; i < result.meta.size(); i++) {
+                const auto& lm = result.meta[i];
+                if (lm.nodeIdx < 0 || lm.isContinuation) continue;
+                int64_t dist = qAbs((int64_t)(lm.offsetAddr - base) - (int64_t)offset);
+                if (dist < bestDist) { bestDist = dist; bestLine = i; }
+            }
+            if (bestLine >= 0 && activePaneEditor()) {
+                activePaneEditor()->scrollToNodeId(result.meta[bestLine].nodeId);
+                ctrl->handleNodeClick(activePaneEditor(), bestLine,
+                    result.meta[bestLine].nodeId, Qt::NoModifier);
+            }
         });
     }
 
