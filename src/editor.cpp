@@ -1381,13 +1381,15 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
 
                 QVector<TipLine> richBody;
                 { TipLine row;
-                  row.append({QStringLiteral(" \u25C0 "), cAccent, false});
-                  row.append({pad(kn(variants[prevIdx])), cDim, false});
-                  row.append({QStringLiteral(" "), {}, false});
-                  row.append({kn(curKind), cBright, true});
-                  row.append({QStringLiteral(" "), {}, false});
-                  row.append({pad(kn(variants[nextIdx])), cDim, false});
-                  row.append({QStringLiteral(" \u25B6"), cAccent, false});
+                  row.append({QStringLiteral("\u2190"), cAccent, false, true});  // keyCap: ←
+                  row.append({QStringLiteral(" "), {}, false, false});
+                  row.append({pad(kn(variants[prevIdx])), cDim, false, false});
+                  row.append({QStringLiteral(" "), {}, false, false});
+                  row.append({kn(curKind), cBright, true, false});
+                  row.append({QStringLiteral(" "), {}, false, false});
+                  row.append({pad(kn(variants[nextIdx])), cDim, false, false});
+                  row.append({QStringLiteral(" "), {}, false, false});
+                  row.append({QStringLiteral("\u2192"), cAccent, false, true});  // keyCap: →
                   richBody.append(row); }
 
                 static constexpr NodeKind hexCycle[] = {
@@ -1398,21 +1400,21 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
                       int hi = -1;
                       for (int i = 0; i < 5; i++) if (hexCycle[i] == curKind) { hi = i; break; }
                       if (hi >= 0) {
-                          row2.append({QStringLiteral(" \u2423 "), cAccent, false});
-                          row2.append({pad(kn(hexCycle[(hi-1+5)%5])), cDim, false});
-                          row2.append({QStringLiteral(" "), {}, false});
-                          row2.append({kn(curKind), cBright, true});
-                          row2.append({QStringLiteral(" "), {}, false});
-                          row2.append({pad(kn(hexCycle[(hi+1)%5])), cDim, false});
+                          row2.append({QStringLiteral("Spc"), cAccent, false, true});  // keyCap: Space
+                          row2.append({QStringLiteral(" "), {}, false, false});
+                          row2.append({pad(kn(hexCycle[(hi-1+5)%5])), cDim, false, false});
+                          row2.append({QStringLiteral(" "), {}, false, false});
+                          row2.append({kn(curKind), cBright, true, false});
+                          row2.append({QStringLiteral(" "), {}, false, false});
+                          row2.append({pad(kn(hexCycle[(hi+1)%5])), cDim, false, false});
                       }
                   } else {
                       NodeKind hexEquiv = NodeKind::Hex8;
                       for (auto hk : hexCycle) if (sizeForKind(hk) == sz) { hexEquiv = hk; break; }
-                      row2.append({QStringLiteral(" \u2423 "), cAccent, false});
-                      row2.append({pad(QStringLiteral("")), {}, false});
-                      row2.append({QStringLiteral(" "), {}, false});
-                      row2.append({kn(hexEquiv), cDim, false});
-                      row2.append({QStringLiteral(" \u2190 to hex"), cDim, false});
+                      row2.append({QStringLiteral("Spc"), cAccent, false, true});  // keyCap: Space
+                      row2.append({QStringLiteral(" "), {}, false, false});
+                      row2.append({kn(hexEquiv), cDim, false, false});
+                      row2.append({QStringLiteral(" \u2190 to hex"), cDim, false, false});
                   }
                   if (!row2.isEmpty()) richBody.append(row2); }
 
@@ -2465,10 +2467,21 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool alreadySelected = m_currentSelIds.contains(h.nodeId);
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
-                // Single-click on editable token of already-selected node → edit
+                // Single-click on already-selected node:
+                // If type tooltip is showing → open type picker (2nd click)
+                // Otherwise → inline edit the clicked token
                 int tLine, tCol; EditTarget t;
-                if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
-                    if (alreadySelected && plain) {
+                if (alreadySelected && plain) {
+                    if (m_typeTooltips && m_arrowTooltip && m_arrowTooltip->isVisible()) {
+                        // 2nd click: dismiss tooltip, open type picker
+                        static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
+                        auto* lm = metaForLine(h.line);
+                        if (lm && lm->nodeIdx >= 0 && sizeForKind(lm->nodeKind) > 0) {
+                            m_pendingClickNodeId = 0;
+                            return beginInlineEdit(EditTarget::Type, h.line);
+                        }
+                    }
+                    if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                         m_pendingClickNodeId = 0;
                         return beginInlineEdit(t, tLine, tCol);
                     }
