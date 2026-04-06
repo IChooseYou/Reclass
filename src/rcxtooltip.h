@@ -166,34 +166,42 @@ protected:
         if (!m_richLines.isEmpty()) {
             QFont boldBody = m_font; boldBody.setBold(true);
             QFont keyFont = m_font;
-            keyFont.setPointSizeF(m_font.pointSizeF() * 0.85);
+            keyFont.setPointSizeF(m_font.pointSizeF() * 0.80);
             QFontMetrics kfm(keyFont);
+            // Compute line height: max of text height and keycap height
+            int keyH = kfm.height() + 10;  // generous inner padding
+            int lineH = qMax((int)bf.lineSpacing(), keyH + 4);
             for (int li = 0; li < m_richLines.size(); li++) {
                 qreal cx = kPad;
                 for (const auto& span : m_richLines[li]) {
                     QColor col = span.color.isValid() ? span.color : m_bodyCol;
                     if (span.keyCap) {
-                        // Draw keyboard key outline: rounded rect with text inside
+                        // Draw keyboard key: rounded rect with centered symbol
                         int tw = kfm.horizontalAdvance(span.text);
-                        int kh = kfm.height() + 4;
-                        int kw = qMax(tw + 8, kh);  // min square
-                        qreal ky = cy + (bf.height() - kh) / 2.0;
-                        QRectF kr(cx + 1, ky, kw, kh);
-                        p.setPen(QPen(col, 1.0));
-                        p.setBrush(Qt::NoBrush);
-                        p.drawRoundedRect(kr, 3, 3);
+                        int kw = qMax(tw + 14, keyH);  // generous horizontal padding, min square
+                        qreal ky = cy + (lineH - keyH) / 2.0;
+                        QRectF kr(cx, ky, kw, keyH);
+                        // Subtle fill for the key face
+                        QColor keyBg = m_bg.lighter(130);
+                        p.setPen(QPen(col.darker(120), 1.2));
+                        p.setBrush(keyBg);
+                        p.drawRoundedRect(kr, 4, 4);
+                        // Key label
                         p.setFont(keyFont);
+                        p.setPen(col);
                         p.drawText(kr, Qt::AlignCenter, span.text);
-                        cx += kw + 4;
+                        cx += kw + 6;  // gap after key
                     } else {
                         p.setFont(span.bold ? boldBody : m_font);
                         p.setPen(col);
                         QFontMetrics sfm(span.bold ? boldBody : m_font);
-                        p.drawText(QPointF(cx, cy + sfm.ascent()), span.text);
+                        // Vertically center text in the expanded line
+                        qreal textY = cy + (lineH - sfm.height()) / 2.0 + sfm.ascent();
+                        p.drawText(QPointF(cx, textY), span.text);
                         cx += sfm.horizontalAdvance(span.text);
                     }
                 }
-                cy += bf.lineSpacing();
+                cy += lineH;
             }
         } else {
             for (const auto& l : m_lines) {
@@ -216,16 +224,19 @@ private:
     void recalc() {
         QFontMetrics tf(m_bold), bf(m_font);
         QFont keyFont = m_font;
-        keyFont.setPointSizeF(m_font.pointSizeF() * 0.85);
+        keyFont.setPointSizeF(m_font.pointSizeF() * 0.80);
         QFontMetrics kfm(keyFont);
+        int keyH = kfm.height() + 10;
+        bool hasKeyCaps = false;
         int maxW = m_title.isEmpty() ? 0 : tf.horizontalAdvance(m_title);
         if (!m_richLines.isEmpty()) {
             for (const auto& rl : m_richLines) {
                 int lineW = 0;
                 for (const auto& s : rl) {
                     if (s.keyCap) {
+                        hasKeyCaps = true;
                         int tw = kfm.horizontalAdvance(s.text);
-                        lineW += qMax(tw + 8, kfm.height() + 4) + 4;
+                        lineW += qMax(tw + 14, keyH) + 6;
                     } else {
                         QFontMetrics sfm(s.bold ? tf : bf);
                         lineW += sfm.horizontalAdvance(s.text);
@@ -237,9 +248,10 @@ private:
             for (const auto& l : m_lines) maxW = qMax(maxW, bf.horizontalAdvance(l));
         }
         int lineCount = m_richLines.isEmpty() ? m_lines.size() : m_richLines.size();
+        int lineH = hasKeyCaps ? qMax((int)bf.lineSpacing(), keyH + 4) : bf.lineSpacing();
         m_bw = qMin(maxW + 2 * kPad, kMaxW);
         m_bh = kPad + (m_title.isEmpty() ? 0 : tf.height() + kGap + 1 + kGap)
-             + lineCount * bf.lineSpacing() + kPad;
+             + lineCount * lineH + kPad;
     }
 
     QString m_title, m_body;
