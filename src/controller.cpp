@@ -2444,11 +2444,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 }
             }
             auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
-            insertMenu->addAction("Insert 4 Above", [this, firstIdx]() {
+            insertMenu->addAction("Insert 4 Above\tShift+Ins", [this, firstIdx]() {
                 if (firstIdx >= 0)
                     insertNodeAbove(firstIdx, NodeKind::Hex32, QStringLiteral("field"));
             });
-            insertMenu->addAction("Insert 8 Above", [this, firstIdx]() {
+            insertMenu->addAction("Insert 8 Above\tIns", [this, firstIdx]() {
                 if (firstIdx >= 0)
                     insertNodeAbove(firstIdx, NodeKind::Hex64, QStringLiteral("field"));
             });
@@ -2772,32 +2772,84 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             }
         }
 
-        // ── Quick-convert suggestions (top-level for fast access) ──
+        // ── Quick-convert + discoverable shortcuts ──
         bool addedQuickConvert = false;
+
+        // "Next Type" shows what → arrow does (discoverable!)
+        {
+            int sz = sizeForKind(node.kind);
+            if (sz > 0) {
+                QVector<NodeKind> variants;
+                for (const auto& m : kKindMeta)
+                    if (m.size == sz && !isContainerKind(m.kind)) variants.append(m.kind);
+                int ci = variants.indexOf(node.kind);
+                if (ci >= 0 && variants.size() > 1) {
+                    auto* nextMeta = kindMeta(variants[(ci + 1) % variants.size()]);
+                    menu.addAction(QStringLiteral("Next Type: %1\t\u2192")
+                        .arg(QString::fromLatin1(nextMeta->typeName)),
+                        [this, nodeIdx, variants, ci]() {
+                            changeNodeKind(nodeIdx, variants[(ci + 1) % variants.size()]);
+                        });
+                    addedQuickConvert = true;
+                }
+            }
+        }
+
+        // Hex resize shortcut
+        if (isHexNode(node.kind)) {
+            static constexpr NodeKind hexCycle[] = {
+                NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+                NodeKind::Hex64, NodeKind::Hex128 };
+            int hi = -1;
+            for (int i = 0; i < 5; i++) if (hexCycle[i] == node.kind) { hi = i; break; }
+            if (hi >= 0) {
+                auto* nm = kindMeta(hexCycle[(hi + 1) % 5]);
+                menu.addAction(QStringLiteral("Resize to %1\tSpace")
+                    .arg(QString::fromLatin1(nm->typeName)),
+                    [this, nodeId, hexCycle, hi]() {
+                        int ni = m_doc->tree.indexOfId(nodeId);
+                        if (ni >= 0) changeNodeKind(ni, hexCycle[(hi + 1) % 5]);
+                    });
+                addedQuickConvert = true;
+            }
+        }
+
+        if (addedQuickConvert)
+            menu.addSeparator();
+        addedQuickConvert = false;
+
         if (node.kind == NodeKind::Hex64) {
-            menu.addAction("Change to uint64_t", [this, nodeId]() {
+            menu.addAction("Change to uint64_t\tU", [this, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni >= 0) changeNodeKind(ni, NodeKind::UInt64);
             });
-            menu.addAction("Change to uint32_t", [this, nodeId]() {
+            menu.addAction("Change to float\tF", [this, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::UInt32);
+                if (ni >= 0) changeNodeKind(ni, NodeKind::Double);
             });
             addedQuickConvert = true;
         } else if (node.kind == NodeKind::Hex32) {
-            menu.addAction("Change to uint32_t", [this, nodeId]() {
+            menu.addAction("Change to uint32_t\tU", [this, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni >= 0) changeNodeKind(ni, NodeKind::UInt32);
             });
-            menu.addAction("Change to float", [this, nodeId]() {
+            menu.addAction("Change to float\tF", [this, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni >= 0) changeNodeKind(ni, NodeKind::Float);
             });
             addedQuickConvert = true;
         } else if (node.kind == NodeKind::Hex16) {
-            menu.addAction("Change to int16_t", [this, nodeId]() {
+            menu.addAction("Change to int16_t\tS", [this, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni >= 0) changeNodeKind(ni, NodeKind::Int16);
+            });
+            addedQuickConvert = true;
+        }
+        if (node.kind == NodeKind::Hex64 || isPointerKind(node.kind)) {
+            menu.addAction("Change to ptr\tP", [this, nodeId]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni >= 0) changeNodeKind(ni, sizeForKind(m_doc->tree.nodes[ni].kind) >= 8
+                    ? NodeKind::Pointer64 : NodeKind::Pointer32);
             });
             addedQuickConvert = true;
         }
