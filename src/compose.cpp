@@ -1208,8 +1208,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     int maxNameLen = kMinNameW;
     for (int i = 0; i < tree.nodes.size(); i++) {
         maxTypeLen = qMax(maxTypeLen, typeNameLens[i]);
-        if (!isHexPreview(tree.nodes[i].kind))
-            maxNameLen = qMax(maxNameLen, (int)tree.nodes[i].name.size());
+        // Include ALL nodes (even hex) so column width stays stable when cycling types
+        maxNameLen = qMax(maxNameLen, (int)tree.nodes[i].name.size());
     }
     state.typeW = qBound(kMinTypeW, maxTypeLen, typeCap);
     state.nameW = qBound(kMinNameW, maxNameLen, kMaxNameW);
@@ -1230,10 +1230,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
                 continue;
             scopeMaxType = qMax(scopeMaxType, typeNameLens[childIdx]);
 
-            // Name width (skip hex, but include containers)
-            if (!isHexPreview(child.kind)) {
-                scopeMaxName = qMax(scopeMaxName, (int)child.name.size());
-            }
+            // Name width: include ALL nodes so width stays stable when cycling types
+            scopeMaxName = qMax(scopeMaxName, (int)child.name.size());
         }
 
         // Primitive arrays with no tree children: account for synthesized element types
@@ -1264,10 +1262,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
                 continue;
             rootMaxType = qMax(rootMaxType, typeNameLens[childIdx]);
 
-            // Name width (skip hex, include containers)
-            if (!isHexPreview(child.kind)) {
-                rootMaxName = qMax(rootMaxName, (int)child.name.size());
-            }
+            // Name width: include ALL nodes so width stays stable when cycling types
+            rootMaxName = qMax(rootMaxName, (int)child.name.size());
         }
         state.scopeTypeW[0] = qBound(kMinTypeW, rootMaxType, typeCap);
         state.scopeNameW[0] = qBound(kMinNameW, rootMaxName, kMaxNameW);
