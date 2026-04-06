@@ -14,6 +14,7 @@ namespace rcx {
 
 class RcxController;
 class TypeSelectorPopup;
+class HexToolbarPopup;
 struct TypeEntry;
 enum class TypePopupMode;
 
@@ -191,6 +192,12 @@ private:
     QPointer<TypeSelectorPopup> m_cachedPopup;
     int m_typePopupGen = 0;  // generation counter for deferred content loading
 
+    // ── Hex toolbar popup (auto-shows on hex node selection) ──
+    QPointer<HexToolbarPopup> m_hexToolbar;
+    void showHexToolbar(RcxEditor* editor, int nodeIdx);
+    void hideHexToolbar();
+    void joinHexNodes(uint64_t nodeId, NodeKind targetKind);
+
     // ── Auto-refresh state ──
     using PageMap = QHash<uint64_t, QByteArray>;
     QTimer*         m_refreshTimer = nullptr;
@@ -209,6 +216,7 @@ private:
     QVector<RcxDocument*>* m_projectDocs = nullptr;
 
     void connectEditor(RcxEditor* editor);
+    void appendBytesDialog(QWidget* parent, uint64_t targetId);
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
     void updateCommandRow();
     void switchToSavedSource(int idx);

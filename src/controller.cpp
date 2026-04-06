@@ -2240,6 +2240,34 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
     refresh();
 }
 
+void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
+    bool ok;
+    QString input = QInputDialog::getText(parent,
+        QStringLiteral("Append bytes"),
+        QStringLiteral("Byte count (decimal or 0x hex):"),
+        QLineEdit::Normal, QStringLiteral("128"), &ok);
+    if (!ok || input.trimmed().isEmpty()) return;
+    QString trimmed = input.trimmed();
+    int byteCount = 0;
+    if (trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        byteCount = trimmed.mid(2).toInt(&ok, 16);
+    else
+        byteCount = trimmed.toInt(&ok, 10);
+    if (!ok || byteCount <= 0) return;
+    int hex64Count = byteCount / 8;
+    int remainBytes = byteCount % 8;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
+    int idx = 0;
+    for (int i = 0; i < hex64Count; i++, idx++)
+        insertNode(targetId, -1, NodeKind::Hex64, QStringLiteral("field_%1").arg(idx));
+    for (int i = 0; i < remainBytes; i++, idx++)
+        insertNode(targetId, -1, NodeKind::Hex8, QStringLiteral("field_%1").arg(idx));
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = false;
+    refresh();
+}
+
 void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                                      int subLine, const QPoint& globalPos) {
     auto icon = [](const char* name) { return QIcon(QStringLiteral(":/vsicons/%1").arg(name)); };
@@ -2833,37 +2861,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             });
             insertMenu->addSeparator();
             insertMenu->addAction("Append bytes...", [this, &menu]() {
-                bool ok;
-                QString input = QInputDialog::getText(menu.parentWidget(),
-                    QStringLiteral("Append bytes"),
-                    QStringLiteral("Byte count (decimal or 0x hex):"),
-                    QLineEdit::Normal, QStringLiteral("128"), &ok);
-                if (!ok || input.trimmed().isEmpty()) return;
-
-                QString trimmed = input.trimmed();
-                int byteCount = 0;
-                if (trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
-                    byteCount = trimmed.mid(2).toInt(&ok, 16);
-                else
-                    byteCount = trimmed.toInt(&ok, 10);
-                if (!ok || byteCount <= 0) return;
-
-                uint64_t target = m_viewRootId ? m_viewRootId : 0;
-                int hex64Count = byteCount / 8;
-                int remainBytes = byteCount % 8;
-
-                m_suppressRefresh = true;
-                m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
-                int idx = 0;
-                for (int i = 0; i < hex64Count; i++, idx++)
-                    insertNode(target, -1, NodeKind::Hex64,
-                               QStringLiteral("field_%1").arg(idx));
-                for (int i = 0; i < remainBytes; i++, idx++)
-                    insertNode(target, -1, NodeKind::Hex8,
-                               QStringLiteral("field_%1").arg(idx));
-                m_doc->undoStack.endMacro();
-                m_suppressRefresh = false;
-                refresh();
+                appendBytesDialog(menu.parentWidget(), m_viewRootId ? m_viewRootId : 0);
             });
         }
 
@@ -2969,7 +2967,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 });
                 structMenu->addAction("Add Static Field", [this, nodeId]() {
                     Node sf;
-                    sf.id = m_doc->tree.m_nextId++;
+                    sf.id = m_doc->tree.reserveId();
                     sf.kind = NodeKind::Hex64;
                     sf.name = QStringLiteral("static_field");
                     sf.parentId = nodeId;
@@ -3001,7 +2999,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                              || m_doc->tree.nodes[pi].kind == NodeKind::Array)) {
                     structMenu->addAction("Add Static Field", [this, pid]() {
                         Node sf;
-                        sf.id = m_doc->tree.m_nextId++;
+                        sf.id = m_doc->tree.reserveId();
                         sf.kind = NodeKind::Hex64;
                         sf.name = QStringLiteral("static_field");
                         sf.parentId = pid;
@@ -3119,37 +3117,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
         insertMenu->addSeparator();
         insertMenu->addAction("Append bytes...", [this, &menu]() {
-            bool ok;
-            QString input = QInputDialog::getText(menu.parentWidget(),
-                QStringLiteral("Append bytes"),
-                QStringLiteral("Byte count (decimal or 0x hex):"),
-                QLineEdit::Normal, QStringLiteral("128"), &ok);
-            if (!ok || input.trimmed().isEmpty()) return;
-
-            QString trimmed = input.trimmed();
-            int byteCount = 0;
-            if (trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
-                byteCount = trimmed.mid(2).toInt(&ok, 16);
-            else
-                byteCount = trimmed.toInt(&ok, 10);
-            if (!ok || byteCount <= 0) return;
-
-            uint64_t target = m_viewRootId ? m_viewRootId : 0;
-            int hex64Count = byteCount / 8;
-            int remainBytes = byteCount % 8;
-
-            m_suppressRefresh = true;
-            m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
-            int idx = 0;
-            for (int i = 0; i < hex64Count; i++, idx++)
-                insertNode(target, -1, NodeKind::Hex64,
-                           QStringLiteral("field_%1").arg(idx));
-            for (int i = 0; i < remainBytes; i++, idx++)
-                insertNode(target, -1, NodeKind::Hex8,
-                           QStringLiteral("field_%1").arg(idx));
-            m_doc->undoStack.endMacro();
-            m_suppressRefresh = false;
-            refresh();
+            appendBytesDialog(menu.parentWidget(), m_viewRootId ? m_viewRootId : 0);
         });
 
         // Add Static Field to current view root
@@ -3160,7 +3128,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 uint64_t rootId = m_viewRootId;
                 menu.addAction("Add Static Field", [this, rootId]() {
                     Node sf;
-                    sf.id = m_doc->tree.m_nextId++;
+                    sf.id = m_doc->tree.reserveId();
                     sf.kind = NodeKind::Hex64;
                     sf.name = QStringLiteral("static_field");
                     sf.parentId = rootId;
@@ -3528,6 +3496,18 @@ void RcxController::updateCommandRow() {
     }
     if (row2.isEmpty())
         row2 = QStringLiteral("struct NoName") + brace;
+
+    // Append struct total size
+    uint64_t sizeRootId = m_viewRootId;
+    if (sizeRootId == 0) {
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.parentId == 0 && n.kind == NodeKind::Struct) { sizeRootId = n.id; break; }
+    }
+    if (sizeRootId != 0) {
+        int sz = m_doc->tree.structSpan(sizeRootId);
+        if (sz > 0)
+            row2 += QStringLiteral("  // 0x%1").arg(QString::number(sz, 16).toUpper());
+    }
 
     QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral("  ") + row2;
 
