@@ -2145,6 +2145,10 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
             QString dimPart = QString("  +0x%1").arg(node.offset, 2, 16, QChar('0'));
 
+            // Show keyboard hints for hex nodes
+            if (isHexNode(node.kind))
+                dimPart += QStringLiteral("  Space=resize \u2190\u2191\u2192\u2193=nav/cycle P=ptr F=float S=int U=uint 1-5=size");
+
             auto* ap = findActiveSplitPane();
             if (ap && ap->viewMode == VM_Rendered)
                 setAppStatus(QString("Rendered: %1").arg(main));
