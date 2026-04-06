@@ -3824,117 +3824,33 @@ void MainWindow::updateAllDebugPanes(TabState& tab) {
 
 // ── Export C++ header to file ──
 
-void MainWindow::exportCpp() {
+void MainWindow::exportToFile(CodeFormat fmt) {
     auto* tab = activeTab();
     if (!tab) return;
 
-    QString path = QFileDialog::getSaveFileName(this,
-        "Export C++ Header", {}, "C++ Header (*.h);;All Files (*)");
+    QString title = QStringLiteral("Export %1").arg(codeFormatName(fmt));
+    QString path = QFileDialog::getSaveFileName(this, title, {},
+        QString::fromLatin1(codeFormatFileFilter(fmt)));
     if (path.isEmpty()) return;
 
     const QHash<NodeKind, QString>* aliases =
         tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
     bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
-    QString text = renderCppAll(tab->doc->tree, aliases, asserts);
+    QString text = renderCodeAll(fmt, tab->doc->tree, aliases, asserts);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Export Failed",
-            "Could not write to: " + path);
+        QMessageBox::warning(this, "Export Failed", "Could not write to: " + path);
         return;
     }
     file.write(text.toUtf8());
     setAppStatus("Exported to " + QFileInfo(path).fileName());
 }
 
-// ── Export Rust structs ──
-
-void MainWindow::exportRust() {
-    auto* tab = activeTab();
-    if (!tab) return;
-
-    QString path = QFileDialog::getSaveFileName(this,
-        "Export Rust Structs", {}, "Rust Source (*.rs);;All Files (*)");
-    if (path.isEmpty()) return;
-
-    const QHash<NodeKind, QString>* aliases =
-        tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
-    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
-    QString text = renderRustAll(tab->doc->tree, aliases, asserts);
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Export Failed",
-            "Could not write to: " + path);
-        return;
-    }
-    file.write(text.toUtf8());
-    setAppStatus("Exported to " + QFileInfo(path).fileName());
-}
-
-// ── Export #define offsets ──
-
-void MainWindow::exportDefines() {
-    auto* tab = activeTab();
-    if (!tab) return;
-
-    QString path = QFileDialog::getSaveFileName(this,
-        "Export #define Offsets", {}, "C Header (*.h);;All Files (*)");
-    if (path.isEmpty()) return;
-
-    QString text = renderDefinesAll(tab->doc->tree);
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Export Failed",
-            "Could not write to: " + path);
-        return;
-    }
-    file.write(text.toUtf8());
-    setAppStatus("Exported to " + QFileInfo(path).fileName());
-}
-
-// ── Export C# structs ──
-
-void MainWindow::exportCSharp() {
-    auto* tab = activeTab();
-    if (!tab) return;
-
-    QString path = QFileDialog::getSaveFileName(this,
-        "Export C# Structs", {}, "C# Source (*.cs);;All Files (*)");
-    if (path.isEmpty()) return;
-
-    const QHash<NodeKind, QString>* aliases =
-        tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
-    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
-    QString text = renderCSharpAll(tab->doc->tree, aliases, asserts);
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Export Failed",
-            "Could not write to: " + path);
-        return;
-    }
-    file.write(text.toUtf8());
-    setAppStatus("Exported to " + QFileInfo(path).fileName());
-}
-
-// ── Export Python ctypes ──
-
-void MainWindow::exportPython() {
-    auto* tab = activeTab();
-    if (!tab) return;
-
-    QString path = QFileDialog::getSaveFileName(this,
-        "Export Python ctypes", {}, "Python Source (*.py);;All Files (*)");
-    if (path.isEmpty()) return;
-
-    QString text = renderPythonAll(tab->doc->tree);
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Export Failed",
-            "Could not write to: " + path);
-        return;
-    }
-    file.write(text.toUtf8());
-    setAppStatus("Exported to " + QFileInfo(path).fileName());
-}
+void MainWindow::exportCpp()     { exportToFile(CodeFormat::CppHeader); }
+void MainWindow::exportRust()    { exportToFile(CodeFormat::RustStruct); }
+void MainWindow::exportDefines() { exportToFile(CodeFormat::DefineOffsets); }
+void MainWindow::exportCSharp()  { exportToFile(CodeFormat::CSharpStruct); }
+void MainWindow::exportPython()  { exportToFile(CodeFormat::PythonCtypes); }
 
 // ── Export ReClass XML ──
 

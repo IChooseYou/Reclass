@@ -5,6 +5,7 @@
 #include "scannerpanel.h"
 #include "imports/import_pdb.h"
 #include "startpage.h"
+#include "generator.h"
 #include "workspace_model.h"
 namespace rcx { class SymbolDownloader; }
 #include <QMainWindow>
@@ -63,6 +64,7 @@ private slots:
     void about();
     void toggleMcp();
     void setEditorFont(const QString& fontName);
+    void exportToFile(CodeFormat fmt);
     void exportCpp();
     void exportRust();
     void exportDefines();
