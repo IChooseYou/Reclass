@@ -1077,6 +1077,15 @@ void MainWindow::createMenus() {
                 if (pane.editor) pane.editor->setTypeTooltips(checked);
     });
 
+    {
+        auto* actRefresh = view->addAction("&Refresh");
+        actRefresh->setShortcut(QKeySequence(Qt::Key_F5));
+        connect(actRefresh, &QAction::triggered, this, [this]() {
+            auto* ctrl = activeController();
+            if (ctrl) { ctrl->resetChangeTracking(); ctrl->refresh(); }
+        });
+    }
+
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
     {

@@ -710,9 +710,9 @@ static void emitRustStruct(GenContext& ctx, uint64_t structId) {
     bool isUnion = (kw == QStringLiteral("union"));
 
     if (isUnion)
-        ctx.output += QStringLiteral("#[repr(C)]\n#[derive(Copy, Clone)]\npub union %1 {\n").arg(typeName);
+        ctx.output += QStringLiteral("#[repr(C)]\n#[derive(Copy, Clone)]\n#[allow(dead_code)]\npub union %1 {\n").arg(typeName);
     else
-        ctx.output += QStringLiteral("#[repr(C)]\npub struct %1 {\n").arg(typeName);
+        ctx.output += QStringLiteral("#[repr(C)]\n#[derive(Debug)]\n#[allow(dead_code)]\npub struct %1 {\n").arg(typeName);
 
     emitRustStructBody(ctx, structId, isUnion, 1, 0);
 
@@ -1279,13 +1279,13 @@ static void emitPythonStruct(GenContext& ctx, uint64_t structId) {
 
     // Enum with members — emit as class with constants
     if (kw == QStringLiteral("enum") && !node.enumMembers.isEmpty()) {
-        ctx.output += QStringLiteral("class %1:  # enum\n").arg(typeName);
+        ctx.output += QStringLiteral("class %1:  # enum\n    __slots__ = ()\n").arg(typeName);
         for (const auto& m : node.enumMembers) {
             ctx.output += QStringLiteral("    %1 = %2\n")
                 .arg(sanitizeIdent(m.first))
                 .arg(m.second);
         }
-        ctx.output += QStringLiteral("\n\n");
+        ctx.output += QStringLiteral("\n");
         ctx.visiting.remove(structId);
         return;
     }
@@ -1539,7 +1539,7 @@ QString renderCSharp(const NodeTree& tree, uint64_t rootStructId,
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
-    ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n\n");
+    ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
     emitCSharpStruct(ctx, rootStructId);
     return alignComments(ctx.output);
 }
@@ -1553,7 +1553,7 @@ QString renderCSharpTree(const NodeTree& tree, uint64_t rootStructId,
 
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
-    ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n\n");
+    ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
         emitCSharpStruct(ctx, sid);
@@ -1565,7 +1565,7 @@ QString renderCSharpAll(const NodeTree& tree,
                         const QHash<NodeKind, QString>* typeAliases,
                         bool emitAsserts) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
-    ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n\n");
+    ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
 
     QVector<int> roots = ctx.childMap.value(0);
     std::sort(roots.begin(), roots.end(), [&](int a, int b) {
