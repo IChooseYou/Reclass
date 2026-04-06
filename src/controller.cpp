@@ -2935,7 +2935,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 structMenu->addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
                     insertNode(nodeId, 0, NodeKind::Hex64, "newField");
                 });
-                structMenu->addAction("Add Static Method (WIP)", [this, nodeId]() {
+                structMenu->addAction("Add Static Field", [this, nodeId]() {
                     Node sf;
                     sf.id = m_doc->tree.m_nextId++;
                     sf.kind = NodeKind::Hex64;
@@ -2967,7 +2967,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 int pi = m_doc->tree.indexOfId(pid);
                 if (pi >= 0 && (m_doc->tree.nodes[pi].kind == NodeKind::Struct
                              || m_doc->tree.nodes[pi].kind == NodeKind::Array)) {
-                    structMenu->addAction("Add Static Method (WIP)", [this, pid]() {
+                    structMenu->addAction("Add Static Field", [this, pid]() {
                         Node sf;
                         sf.id = m_doc->tree.m_nextId++;
                         sf.kind = NodeKind::Hex64;
@@ -3126,7 +3126,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             if (ri >= 0 && (m_doc->tree.nodes[ri].kind == NodeKind::Struct
                          || m_doc->tree.nodes[ri].kind == NodeKind::Array)) {
                 uint64_t rootId = m_viewRootId;
-                menu.addAction("Add Static Method (WIP)", [this, rootId]() {
+                menu.addAction("Add Static Field", [this, rootId]() {
                     Node sf;
                     sf.id = m_doc->tree.m_nextId++;
                     sf.kind = NodeKind::Hex64;
