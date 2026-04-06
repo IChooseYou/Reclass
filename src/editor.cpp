@@ -2677,6 +2677,19 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             return true;
         }
         return false;
+    case Qt::Key_C:
+        if (ke->modifiers() == Qt::ControlModifier) {
+            // Ctrl+C: copy absolute address of selected node
+            int line, col;
+            m_sci->getCursorPosition(&line, &col);
+            const LineMeta* lm = metaForLine(line);
+            if (lm && lm->offsetAddr != 0) {
+                QApplication::clipboard()->setText(
+                    QStringLiteral("0x") + QString::number(lm->offsetAddr, 16).toUpper());
+            }
+            return true;
+        }
+        return false;
     case Qt::Key_Insert:
         if (ke->modifiers() & Qt::ShiftModifier)
             emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex32);
@@ -2691,9 +2704,18 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return false;
     case Qt::Key_Up:
     case Qt::Key_Down: {
+        int dir = (ke->key() == Qt::Key_Up) ? -1 : 1;
+        // Ctrl+Shift+Up/Down: reorder field in sibling list
+        if ((ke->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            == (Qt::ControlModifier | Qt::ShiftModifier)) {
+            int ni = currentNodeIndex();
+            if (ni >= 0)
+                emit moveNodeRequested(ni, dir);
+            return true;
+        }
+        // Normal arrow: navigate between nodes
         int line, col;
         m_sci->getCursorPosition(&line, &col);
-        int dir = (ke->key() == Qt::Key_Up) ? -1 : 1;
         for (int i = line + dir; i >= 0 && i < m_meta.size(); i += dir) {
             const auto& lm = m_meta[i];
             if (lm.nodeId == 0 || lm.nodeId == kCommandRowId) continue;

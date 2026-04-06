@@ -106,6 +106,7 @@ signals:
     void duplicateSelectedRequested();
     void quickTypeChangeRequested(int nodeIdx, NodeKind targetKind);
     void cycleSameSizeTypeRequested(int nodeIdx, int direction);  // -1=prev, +1=next
+    void moveNodeRequested(int nodeIdx, int direction);  // -1=up, +1=down
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;

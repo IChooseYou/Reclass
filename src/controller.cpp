@@ -396,6 +396,32 @@ void RcxController::connectEditor(RcxEditor* editor) {
         }
     });
 
+    // Ctrl+Shift+Up/Down: reorder field among siblings
+    connect(editor, &RcxEditor::moveNodeRequested,
+            this, [this](int nodeIdx, int direction) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        const Node& node = m_doc->tree.nodes[nodeIdx];
+        auto siblings = m_doc->tree.childrenOf(node.parentId);
+        // Sort siblings by offset
+        std::sort(siblings.begin(), siblings.end(), [&](int a, int b) {
+            return m_doc->tree.nodes[a].offset < m_doc->tree.nodes[b].offset;
+        });
+        int pos = siblings.indexOf(nodeIdx);
+        if (pos < 0) return;
+        int swapPos = pos + direction;
+        if (swapPos < 0 || swapPos >= siblings.size()) return;
+        int swapIdx = siblings[swapPos];
+        // Swap offsets
+        int offA = m_doc->tree.nodes[nodeIdx].offset;
+        int offB = m_doc->tree.nodes[swapIdx].offset;
+        m_doc->undoStack.beginMacro(QStringLiteral("Reorder field"));
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeOffset{node.id, offA, offB}));
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeOffset{m_doc->tree.nodes[swapIdx].id, offB, offA}));
+        m_doc->undoStack.endMacro();
+    });
+
     // Comment edit (';' key) — respects selection
     connect(editor, &RcxEditor::commentEditRequested,
             this, [this, editor]() {

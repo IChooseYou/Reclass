@@ -1213,6 +1213,109 @@ private slots:
         // Original root should still exist
         QVERIFY(m_doc->tree.indexOfId(rootId) >= 0);
     }
+
+    void testMoveNodeSwapsOffsets() {
+        // Find field_u32 (offset 0) and field_float (offset 4) — adjacent siblings
+        uint64_t u32Id = 0, floatId = 0;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "field_u32") u32Id = n.id;
+            if (n.name == "field_float") floatId = n.id;
+        }
+        QVERIFY(u32Id != 0 && floatId != 0);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].offset, 0);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(floatId)].offset, 4);
+
+        // Sort siblings to find their order, then simulate move down
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        auto siblings = m_doc->tree.childrenOf(rootId);
+        std::sort(siblings.begin(), siblings.end(), [&](int a, int b) {
+            return m_doc->tree.nodes[a].offset < m_doc->tree.nodes[b].offset;
+        });
+        int u32Idx = m_doc->tree.indexOfId(u32Id);
+        int pos = siblings.indexOf(u32Idx);
+        QVERIFY(pos >= 0 && pos + 1 < siblings.size());
+        int swapIdx = siblings[pos + 1];
+
+        // Swap offsets (what moveNodeRequested does)
+        m_doc->undoStack.beginMacro("swap");
+        m_doc->undoStack.push(new RcxCommand(m_ctrl,
+            cmd::ChangeOffset{u32Id, 0, 4}));
+        m_doc->undoStack.push(new RcxCommand(m_ctrl,
+            cmd::ChangeOffset{m_doc->tree.nodes[swapIdx].id, 4, 0}));
+        m_doc->undoStack.endMacro();
+
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].offset, 4);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(floatId)].offset, 0);
+
+        // Undo should restore original offsets
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].offset, 0);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(floatId)].offset, 4);
+    }
+
+    void testChangeBaseAddress() {
+        uint64_t oldBase = m_doc->tree.baseAddress;
+        m_doc->undoStack.push(new RcxCommand(m_ctrl,
+            cmd::ChangeBase{oldBase, 0x7FF600000000ULL, QString(), QString()}));
+        QCOMPARE(m_doc->tree.baseAddress, 0x7FF600000000ULL);
+
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.baseAddress, oldBase);
+    }
+
+    void testChangeArrayMeta() {
+        // Add an array node, then change its element kind and length
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        Node arr;
+        arr.kind = NodeKind::Array;
+        arr.name = "testArr";
+        arr.parentId = rootId;
+        arr.offset = 100;
+        arr.elementKind = NodeKind::UInt8;
+        arr.arrayLen = 10;
+        arr.id = m_doc->tree.reserveId();
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{arr}));
+
+        uint64_t arrId = arr.id;
+        m_doc->undoStack.push(new RcxCommand(m_ctrl,
+            cmd::ChangeArrayMeta{arrId, NodeKind::UInt8, NodeKind::Float, 10, 4}));
+
+        int ai = m_doc->tree.indexOfId(arrId);
+        QCOMPARE(m_doc->tree.nodes[ai].elementKind, NodeKind::Float);
+        QCOMPARE(m_doc->tree.nodes[ai].arrayLen, 4);
+
+        m_doc->undoStack.undo();
+        ai = m_doc->tree.indexOfId(arrId);
+        QCOMPARE(m_doc->tree.nodes[ai].elementKind, NodeKind::UInt8);
+        QCOMPARE(m_doc->tree.nodes[ai].arrayLen, 10);
+    }
+
+    void testChangeClassKeyword() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        QString oldKw = m_doc->tree.nodes[0].resolvedClassKeyword();
+        m_doc->undoStack.push(new RcxCommand(m_ctrl,
+            cmd::ChangeClassKeyword{rootId, oldKw, QStringLiteral("class")}));
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(rootId)].classKeyword,
+                 QStringLiteral("class"));
+
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(rootId)].resolvedClassKeyword(), oldKw);
+    }
+
+    void testChangeComment() {
+        uint64_t u32Id = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_u32") { u32Id = n.id; break; }
+        QVERIFY(u32Id != 0);
+
+        m_doc->undoStack.push(new RcxCommand(m_ctrl,
+            cmd::ChangeComment{u32Id, QString(), QStringLiteral("health points")}));
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].comment,
+                 QStringLiteral("health points"));
+
+        m_doc->undoStack.undo();
+        QVERIFY(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].comment.isEmpty());
+    }
 };
 
 QTEST_MAIN(TestController)
