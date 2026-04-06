@@ -1,19 +1,30 @@
 {
   "version": 1,
-  "currentIteration": 0,
+  "currentIteration": 10,
   "totalPlanned": 300,
-  "completed": [],
+  "completed": [
+    {"iteration":1,"category":"keyboard","title":"Wire Delete key to remove selected nodes","filesChanged":["src/editor.cpp","src/editor.h","src/controller.cpp"],"testsPassed":true},
+    {"iteration":2,"category":"keyboard","title":"Wire Ctrl+D to duplicate selected node","filesChanged":["src/editor.cpp","src/editor.h","src/controller.cpp"],"testsPassed":true},
+    {"iteration":3,"category":"keyboard","title":"Arrow key navigation between nodes","filesChanged":["src/editor.cpp"],"testsPassed":true},
+    {"iteration":4,"category":"keyboard","title":"Smart Tab cycling skip inapplicable fields","filesChanged":["src/editor.cpp"],"testsPassed":true},
+    {"iteration":5,"category":"interaction","title":"Inline comment editing via semicolon key (already correct)","filesChanged":[],"testsPassed":true},
+    {"iteration":6,"category":"rendering","title":"Fix compact mode column alignment overflow","filesChanged":["src/format.cpp"],"testsPassed":true},
+    {"iteration":7,"category":"bugfix","title":"Remove WIP from static field menu labels","filesChanged":["src/controller.cpp"],"testsPassed":true},
+    {"iteration":8,"category":"rendering","title":"Array element visual separation","filesChanged":["src/compose.cpp"],"testsPassed":true},
+    {"iteration":9,"category":"code_quality","title":"Unify 5 export methods into exportToFile","filesChanged":["src/main.cpp","src/mainwindow.h"],"testsPassed":true},
+    {"iteration":10,"category":"performance","title":"O(1) kindMeta lookup","filesChanged":["src/core.h"],"testsPassed":true}
+  ],
   "queue": [
-    {"iteration":1,"category":"keyboard","title":"Wire Delete key to remove selected nodes"},
-    {"iteration":2,"category":"keyboard","title":"Wire Ctrl+D to duplicate selected node"},
-    {"iteration":3,"category":"keyboard","title":"Arrow key navigation between nodes"},
-    {"iteration":4,"category":"keyboard","title":"Smart Tab cycling skip inapplicable fields"},
-    {"iteration":5,"category":"interaction","title":"Inline comment editing via semicolon key"},
-    {"iteration":6,"category":"rendering","title":"Fix compact mode column alignment overflow"},
-    {"iteration":7,"category":"bugfix","title":"Remove WIP from static field menu labels"},
-    {"iteration":8,"category":"rendering","title":"Array element visual separation"},
-    {"iteration":9,"category":"code_quality","title":"Unify 5 export methods into exportToFile"},
-    {"iteration":10,"category":"performance","title":"O(1) kindMeta lookup"}
+    {"iteration":11,"category":"keyboard","title":"Quick number-key type conversion for hex nodes"},
+    {"iteration":12,"category":"interaction","title":"Single-click-to-edit on unselected nodes"},
+    {"iteration":13,"category":"rendering","title":"Dynamic comment column width"},
+    {"iteration":14,"category":"navigation","title":"Go-to-offset Ctrl+G command"},
+    {"iteration":15,"category":"code_quality","title":"Extract context menu multi-select into helper"},
+    {"iteration":16,"category":"rendering","title":"Better cycle detection display"},
+    {"iteration":17,"category":"keyboard","title":"Ctrl+Shift+Up/Down to reorder fields"},
+    {"iteration":18,"category":"interaction","title":"Copy field as C declaration to clipboard"},
+    {"iteration":19,"category":"code_quality","title":"Extract context menu Convert submenu"},
+    {"iteration":20,"category":"rendering","title":"Float scientific notation for extreme values"}
   ],
   "failed": []
 }
