@@ -73,6 +73,19 @@ struct GenContext {
 
     void prepare() { output.reserve(tree.nodes.size() * 80); }
 
+    // Split children into regular (sorted by offset) and static fields
+    std::pair<QVector<int>, QVector<int>> prepareChildren(uint64_t structId) const {
+        QVector<int> children, staticIdxs;
+        for (int ci : childMap.value(structId)) {
+            if (tree.nodes[ci].isStatic) staticIdxs.append(ci);
+            else children.append(ci);
+        }
+        std::sort(children.begin(), children.end(), [&](int a, int b) {
+            return tree.nodes[a].offset < tree.nodes[b].offset;
+        });
+        return {children, staticIdxs};
+    }
+
     QString uniquePadName() {
         return QStringLiteral("_pad%1").arg(padCounter++, 4, 16, QChar('0'));
     }
@@ -172,17 +185,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = indent(depth);
 
-    QVector<int> allChildren = ctx.childMap.value(structId);
-    QVector<int> children, staticIdxs;
-    for (int ci : allChildren) {
-        if (tree.nodes[ci].isStatic)
-            staticIdxs.append(ci);
-        else
-            children.append(ci);
-    }
-    std::sort(children.begin(), children.end(), [&](int a, int b) {
-        return tree.nodes[a].offset < tree.nodes[b].offset;
-    });
+    auto [children, staticIdxs] = ctx.prepareChildren(structId);
 
     // Deduplicate field names (append _2, _3, etc. for duplicates)
     QHash<QString, int> nameCount;
@@ -563,17 +566,7 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = indent(depth);
 
-    QVector<int> allChildren = ctx.childMap.value(structId);
-    QVector<int> children, staticIdxs;
-    for (int ci : allChildren) {
-        if (tree.nodes[ci].isStatic)
-            staticIdxs.append(ci);
-        else
-            children.append(ci);
-    }
-    std::sort(children.begin(), children.end(), [&](int a, int b) {
-        return tree.nodes[a].offset < tree.nodes[b].offset;
-    });
+    auto [children, staticIdxs] = ctx.prepareChildren(structId);
 
     auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
@@ -870,17 +863,7 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
 
     QString ind = indent(depth);
 
-    QVector<int> allChildren = ctx.childMap.value(structId);
-    QVector<int> children, staticIdxs;
-    for (int ci : allChildren) {
-        if (tree.nodes[ci].isStatic)
-            staticIdxs.append(ci);
-        else
-            children.append(ci);
-    }
-    std::sort(children.begin(), children.end(), [&](int a, int b) {
-        return tree.nodes[a].offset < tree.nodes[b].offset;
-    });
+    auto [children, staticIdxs] = ctx.prepareChildren(structId);
 
     // C# uses [FieldOffset(N)] for explicit layout — no manual padding needed
     for (int ci : children) {
@@ -1108,15 +1091,8 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = QStringLiteral("        ");  // 2 levels for inside _fields_
 
-    QVector<int> allChildren = ctx.childMap.value(structId);
-    QVector<int> children;
-    for (int ci : allChildren) {
-        if (!tree.nodes[ci].isStatic)
-            children.append(ci);
-    }
-    std::sort(children.begin(), children.end(), [&](int a, int b) {
-        return tree.nodes[a].offset < tree.nodes[b].offset;
-    });
+    auto [children, staticIdxs_] = ctx.prepareChildren(structId);
+    Q_UNUSED(staticIdxs_)
 
     auto emitPadField = [&](int relOffset, int size) {
         if (size <= 0) return;

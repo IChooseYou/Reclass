@@ -2554,36 +2554,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addSeparator();
 
-        {
-            auto* act = menu.addAction("Track Value Changes");
-            act->setCheckable(true);
-            act->setChecked(m_trackValues);
-            connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
-        }
-        {
-            auto* act = menu.addAction("Clear Value History");
-            act->setToolTip(QStringLiteral("Reset change tracking for selected nodes"));
-            connect(act, &QAction::triggered, this, [this, ids]() {
-                for (uint64_t id : ids) {
-                    m_valueHistory.remove(id);
-                    m_lastValueAddr.remove(id);
-                    for (int ci : m_doc->tree.subtreeIndices(id)) {
-                        m_valueHistory.remove(m_doc->tree.nodes[ci].id);
-                        m_lastValueAddr.remove(m_doc->tree.nodes[ci].id);
-                    }
-                }
-                m_refreshGen++;
-                m_prevPages.clear();
-                m_changedOffsets.clear();
-                m_valueTrackCooldown = 5;
-                refresh();
-                for (auto* editor : m_editors)
-                    editor->dismissHistoryPopup();
-            });
-        }
-
-        menu.addSeparator();
-
         QMenu* copyMenu = menu.addMenu(icon("clippy.svg"), "Copy");
         copyMenu->addAction(icon("link.svg"), "Copy &Address", [this, ids]() {
             QStringList addrs;
@@ -3138,34 +3108,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             if (ni >= 0) removeNode(ni);
         });
 
-        menu.addSeparator();
-
-        // ── Tracking ──
-        {
-            auto* act = menu.addAction("Track Value Changes");
-            act->setCheckable(true);
-            act->setChecked(m_trackValues);
-            connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
-        }
-        {
-            auto* act = menu.addAction("Clear Value History");
-            act->setToolTip(QStringLiteral("Reset change tracking for this node"));
-            connect(act, &QAction::triggered, this, [this, nodeId]() {
-                m_valueHistory.remove(nodeId);
-                m_lastValueAddr.remove(nodeId);
-                for (int ci : m_doc->tree.subtreeIndices(nodeId)) {
-                    m_valueHistory.remove(m_doc->tree.nodes[ci].id);
-                    m_lastValueAddr.remove(m_doc->tree.nodes[ci].id);
-                }
-                m_refreshGen++;
-                m_prevPages.clear();
-                m_changedOffsets.clear();
-                m_valueTrackCooldown = 5;
-                refresh();
-                for (auto* editor : m_editors)
-                    editor->dismissHistoryPopup();
-            });
-        }
 
         menu.addSeparator();
         } // else (non-member node actions)
@@ -3200,13 +3142,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 });
             }
         }
-
-        menu.addSeparator();
-
-        auto* act = menu.addAction("Track Value Changes");
-        act->setCheckable(true);
-        act->setChecked(m_trackValues);
-        connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
 
         menu.addSeparator();
     }
@@ -3259,17 +3194,20 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         QApplication::clipboard()->setText(editor->textWithMargins());
     });
 
-    menu.addSeparator();
 
-    menu.addAction(icon("search.svg"), "Search...\tCtrl+F", [editor]() {
-        QTimer::singleShot(0, editor, &RcxEditor::showFindBar);
-    });
-    menu.addAction(icon("arrow-left.svg"), "Undo\tCtrl+Z", [this]() {
-        m_doc->undoStack.undo();
-    })->setEnabled(m_doc->undoStack.canUndo());
-    menu.addAction(icon("arrow-right.svg"), "Redo\tCtrl+Y", [this]() {
-        m_doc->undoStack.redo();
-    })->setEnabled(m_doc->undoStack.canRedo());
+    // ── Tracking (always available at bottom) ──
+    {
+        auto* trackMenu = menu.addMenu("Tracking");
+        auto* act = trackMenu->addAction("Track Value Changes");
+        act->setCheckable(true);
+        act->setChecked(m_trackValues);
+        connect(act, &QAction::toggled, this, &RcxController::setTrackValues);
+        trackMenu->addAction("Clear All History", [this]() {
+            resetChangeTracking();
+            refresh();
+            for (auto* ed : m_editors) ed->dismissHistoryPopup();
+        });
+    }
 
     // ── Kernel paging menu items ──
     if (m_doc->provider && m_doc->provider->hasKernelPaging()) {
