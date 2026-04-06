@@ -78,6 +78,7 @@ struct ComposeState {
 
     // Precomputed for O(1) lookups
     QHash<uint64_t, QVector<int>> childMap;
+    mutable QSet<uint64_t>        childMapSorted;  // tracks which entries are sorted
     QVector<int64_t>              absOffsets;  // indexed by node index
 
     // Per-scope column widths (containerId -> width for direct children)
@@ -188,10 +189,19 @@ static inline uint64_t resolveAddr(const ComposeState& state,
 }
 
 
-static const QVector<int>& childIndices(const ComposeState& state, uint64_t parentId) {
+static const QVector<int>& childIndices(ComposeState& state, uint64_t parentId) {
     static const QVector<int> kEmpty;
-    auto it = state.childMap.constFind(parentId);
-    return it == state.childMap.constEnd() ? kEmpty : it.value();
+    auto it = state.childMap.find(parentId);
+    if (it == state.childMap.end()) return kEmpty;
+    // Lazy sort: only sort children on first access
+    if (!state.childMapSorted.contains(parentId)) {
+        auto& children = it.value();
+        std::sort(children.begin(), children.end(), [&](int a, int b) {
+            return state.absOffsets[a] < state.absOffsets[b];
+        });
+        state.childMapSorted.insert(parentId);
+    }
+    return it.value();
 }
 
 void composeLeaf(ComposeState& state, const NodeTree& tree,
@@ -1136,12 +1146,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     for (int i = 0; i < tree.nodes.size(); i++)
         state.childMap[tree.nodes[i].parentId].append(i);
 
-    for (auto it = state.childMap.begin(); it != state.childMap.end(); ++it) {
-        QVector<int>& children = it.value();
-        std::sort(children.begin(), children.end(), [&](int a, int b) {
-            return tree.nodes[a].offset < tree.nodes[b].offset;
-        });
-    }
+    // Children are sorted lazily on first access in childIndices()
 
     // Pre-allocate output buffers (estimate ~3 lines per node, ~80 chars per line)
     state.meta.reserve(tree.nodes.size() * 3);
