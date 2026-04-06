@@ -2558,6 +2558,22 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             return true;
         }
         return false;
+    case Qt::Key_Up:
+    case Qt::Key_Down: {
+        int line, col;
+        m_sci->getCursorPosition(&line, &col);
+        int dir = (ke->key() == Qt::Key_Up) ? -1 : 1;
+        for (int i = line + dir; i >= 0 && i < m_meta.size(); i += dir) {
+            const auto& lm = m_meta[i];
+            if (lm.nodeId == 0 || lm.nodeId == kCommandRowId) continue;
+            if (lm.isContinuation) continue;
+            m_sci->setCursorPosition(i, 0);
+            m_sci->ensureLineVisible(i);
+            emit nodeClicked(i, lm.nodeId, ke->modifiers());
+            return true;
+        }
+        return true;
+    }
     case Qt::Key_Tab: {
         EditTarget order[] = {EditTarget::Name, EditTarget::Type, EditTarget::Value,
                               EditTarget::ArrayElementType, EditTarget::ArrayElementCount,
