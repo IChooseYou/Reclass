@@ -122,8 +122,8 @@ QString fmtDouble(double v) {
 }
 QString fmtBool(uint8_t v)    { return v ? QStringLiteral("true") : QStringLiteral("false"); }
 
-QString fmtPointer32(uint32_t v) { return hexVal(v); }
-QString fmtPointer64(uint64_t v) { return hexVal(v); }
+QString fmtPointer32(uint32_t v) { return v == 0 ? QStringLiteral("nullptr") : hexVal(v); }
+QString fmtPointer64(uint64_t v) { return v == 0 ? QStringLiteral("nullptr") : hexVal(v); }
 
 // ── Indentation ──
 
@@ -171,7 +171,9 @@ QString fmtStructFooter(const Node& node, int depth, int totalSize) {
     else
         footer += QStringLiteral("  +10h +100h +1000h Trim");
     if (totalSize > 0)
-        footer += QStringLiteral("  // 0x") + QString::number(totalSize, 16).toUpper();
+        footer += QStringLiteral("  // 0x%1 (%2)")
+            .arg(QString::number(totalSize, 16).toUpper())
+            .arg(totalSize);
     return footer;
 }
 

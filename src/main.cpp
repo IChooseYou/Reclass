@@ -2214,7 +2214,22 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     // Append Float/Close actions to any editor context menu
     connect(ctrl, &RcxController::contextMenuAboutToShow,
-            this, [this, dock](QMenu* menu, int /*line*/) {
+            this, [this, ctrl, dock](QMenu* menu, int /*line*/) {
+        // "Copy as C Struct" in the menu (generator linked in main app, not tests)
+        menu->addAction(makeIcon(":/vsicons/code.svg"), "Copy as C Struct", [this, ctrl]() {
+            uint64_t rootId = ctrl->viewRootId();
+            if (!rootId) {
+                for (const auto& n : ctrl->document()->tree.nodes)
+                    if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct) { rootId = n.id; break; }
+            }
+            if (rootId) {
+                const auto* aliases = ctrl->document()->typeAliases.isEmpty()
+                    ? nullptr : &ctrl->document()->typeAliases;
+                QApplication::clipboard()->setText(
+                    rcx::renderCpp(ctrl->document()->tree, rootId, aliases));
+                setAppStatus(QStringLiteral("Copied C struct to clipboard"));
+            }
+        });
         menu->addSeparator();
         menu->addAction(dock->isFloating() ? "Dock" : "Float", [dock]() {
             dock->setFloating(!dock->isFloating());

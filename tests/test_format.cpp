@@ -69,7 +69,7 @@ private slots:
     }
 
     void testFmtPointer64_null() {
-        QCOMPARE(fmt::fmtPointer64(0), QString("0x0"));
+        QCOMPARE(fmt::fmtPointer64(0), QStringLiteral("nullptr"));
     }
 
     void testFmtPointer64_nonNull() {
