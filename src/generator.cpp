@@ -31,6 +31,7 @@ static QString cTypeName(NodeKind kind) {
     case NodeKind::Hex16:     return QStringLiteral("uint16_t");
     case NodeKind::Hex32:     return QStringLiteral("uint32_t");
     case NodeKind::Hex64:     return QStringLiteral("uint64_t");
+    case NodeKind::Hex128:    return QStringLiteral("uint8_t");  // no C int128; emitted as array in emitField
     case NodeKind::Int8:      return QStringLiteral("int8_t");
     case NodeKind::Int16:     return QStringLiteral("int16_t");
     case NodeKind::Int32:     return QStringLiteral("int32_t");
@@ -444,6 +445,7 @@ static QString rustTypeName(NodeKind kind) {
     case NodeKind::Hex16:     return QStringLiteral("u16");
     case NodeKind::Hex32:     return QStringLiteral("u32");
     case NodeKind::Hex64:     return QStringLiteral("u64");
+    case NodeKind::Hex128:    return QStringLiteral("u128");
     case NodeKind::Int8:      return QStringLiteral("i8");
     case NodeKind::Int16:     return QStringLiteral("i16");
     case NodeKind::Int32:     return QStringLiteral("i32");
@@ -795,6 +797,7 @@ static QString csTypeName(NodeKind kind) {
     case NodeKind::Hex16:     return QStringLiteral("ushort");
     case NodeKind::Hex32:     return QStringLiteral("uint");
     case NodeKind::Hex64:     return QStringLiteral("ulong");
+    case NodeKind::Hex128:    return QStringLiteral("byte");  // emitted as fixed byte[16]
     case NodeKind::Int8:      return QStringLiteral("sbyte");
     case NodeKind::Int16:     return QStringLiteral("short");
     case NodeKind::Int32:     return QStringLiteral("int");
@@ -1040,6 +1043,7 @@ static QString pyTypeName(NodeKind kind) {
     case NodeKind::Hex16:     return QStringLiteral("ctypes.c_uint16");
     case NodeKind::Hex32:     return QStringLiteral("ctypes.c_uint32");
     case NodeKind::Hex64:     return QStringLiteral("ctypes.c_uint64");
+    case NodeKind::Hex128:    return QStringLiteral("ctypes.c_uint8 * 16");
     case NodeKind::Int8:      return QStringLiteral("ctypes.c_int8");
     case NodeKind::Int16:     return QStringLiteral("ctypes.c_int16");
     case NodeKind::Int32:     return QStringLiteral("ctypes.c_int32");
@@ -1389,7 +1393,7 @@ QString renderCpp(const NodeTree& tree, uint64_t rootStructId,
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
 
-    ctx.output += QStringLiteral("#pragma once\n\n");
+    ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     emitStruct(ctx, rootStructId);
 
@@ -1405,7 +1409,7 @@ QString renderCppTree(const NodeTree& tree, uint64_t rootStructId,
 
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
-    ctx.output += QStringLiteral("#pragma once\n\n");
+    ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
         emitStruct(ctx, sid);
@@ -1418,7 +1422,7 @@ QString renderCppAll(const NodeTree& tree,
                      bool emitAsserts) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
 
-    ctx.output += QStringLiteral("#pragma once\n\n");
+    ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     QVector<int> roots = ctx.childMap.value(0);
     std::sort(roots.begin(), roots.end(), [&](int a, int b) {
@@ -1490,7 +1494,7 @@ QString renderDefines(const NodeTree& tree, uint64_t rootStructId) {
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
-    ctx.output += QStringLiteral("#pragma once\n\n");
+    ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
     emitDefinesForStruct(ctx, rootStructId, QString(), 0);
     return ctx.output;
 }
@@ -1502,7 +1506,7 @@ QString renderDefinesTree(const NodeTree& tree, uint64_t rootStructId) {
 
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, nullptr, false};
-    ctx.output += QStringLiteral("#pragma once\n\n");
+    ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
         emitDefinesForStruct(ctx, sid, QString(), 0);
@@ -1512,7 +1516,7 @@ QString renderDefinesTree(const NodeTree& tree, uint64_t rootStructId) {
 
 QString renderDefinesAll(const NodeTree& tree) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
-    ctx.output += QStringLiteral("#pragma once\n\n");
+    ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     QVector<int> roots = ctx.childMap.value(0);
     std::sort(roots.begin(), roots.end(), [&](int a, int b) {

@@ -147,11 +147,20 @@ inline constexpr bool isMatrixKind(NodeKind k) {
 inline constexpr bool isFuncPtr(NodeKind k) {
     return k == NodeKind::FuncPtr32 || k == NodeKind::FuncPtr64;
 }
+inline constexpr bool isPointerKind(NodeKind k) {
+    return k == NodeKind::Pointer32 || k == NodeKind::Pointer64;
+}
+inline constexpr bool isContainerKind(NodeKind k) {
+    return k == NodeKind::Struct || k == NodeKind::Array;
+}
+inline constexpr bool isStringKind(NodeKind k) {
+    return k == NodeKind::UTF8 || k == NodeKind::UTF16;
+}
 // Hex types, pointer types, function pointers, and containers are not meaningful
 // primitive-pointer targets — dereferencing them produces the same output as void*.
 inline constexpr bool isValidPrimitivePtrTarget(NodeKind k) {
     if (isHexNode(k)) return false;
-    if (k == NodeKind::Pointer32 || k == NodeKind::Pointer64) return false;
+    if (isPointerKind(k)) return false;
     if (isFuncPtr(k)) return false;
     if (k == NodeKind::Struct || k == NodeKind::Array) return false;
     return true;
@@ -326,13 +335,9 @@ struct Node {
     QString resolvedClassKeyword() const {
         return classKeyword.isEmpty() ? QStringLiteral("struct") : classKeyword;
     }
-
-    // NOTE: isStringArray() was checking UInt8/UInt16 instead of UTF8/UTF16.
-    // Currently unused — commented out until a caller needs it.
-    // bool isStringArray() const {
-    //     return kind == NodeKind::Array &&
-    //            (elementKind == NodeKind::UTF8 || elementKind == NodeKind::UTF16);
-    // }
+    bool isUnion() const { return resolvedClassKeyword() == QStringLiteral("union"); }
+    bool isBitfield() const { return classKeyword == QStringLiteral("bitfield"); }
+    bool isEnum() const { return resolvedClassKeyword() == QStringLiteral("enum"); }
 };
 
 // ── NodeTree ──
