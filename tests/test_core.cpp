@@ -861,6 +861,159 @@ private slots:
         QVERIFY(foundScore);
         QVERIFY(foundSpeed);
     }
+    // ── New helpers tests ──
+
+    void testHex128Size() {
+        QCOMPARE(rcx::sizeForKind(rcx::NodeKind::Hex128), 16);
+    }
+
+    void testKindMetaO1() {
+        // Verify O(1) lookup matches every entry
+        for (const auto& m : rcx::kKindMeta) {
+            const auto* result = rcx::kindMeta(m.kind);
+            QVERIFY(result != nullptr);
+            QCOMPARE(result->kind, m.kind);
+            QCOMPARE(result->size, m.size);
+        }
+    }
+
+    void testIsPointerKind() {
+        QVERIFY(rcx::isPointerKind(rcx::NodeKind::Pointer32));
+        QVERIFY(rcx::isPointerKind(rcx::NodeKind::Pointer64));
+        QVERIFY(!rcx::isPointerKind(rcx::NodeKind::FuncPtr64));
+        QVERIFY(!rcx::isPointerKind(rcx::NodeKind::Hex64));
+    }
+
+    void testIsContainerKind() {
+        QVERIFY(rcx::isContainerKind(rcx::NodeKind::Struct));
+        QVERIFY(rcx::isContainerKind(rcx::NodeKind::Array));
+        QVERIFY(!rcx::isContainerKind(rcx::NodeKind::Hex64));
+        QVERIFY(!rcx::isContainerKind(rcx::NodeKind::Pointer64));
+    }
+
+    void testIsStringKind() {
+        QVERIFY(rcx::isStringKind(rcx::NodeKind::UTF8));
+        QVERIFY(rcx::isStringKind(rcx::NodeKind::UTF16));
+        QVERIFY(!rcx::isStringKind(rcx::NodeKind::Hex8));
+    }
+
+    void testNodeIsUnionBitfieldEnum() {
+        rcx::Node n;
+        n.kind = rcx::NodeKind::Struct;
+        n.classKeyword = QStringLiteral("union");
+        QVERIFY(n.isUnion());
+        QVERIFY(!n.isBitfield());
+        QVERIFY(!n.isEnum());
+
+        n.classKeyword = QStringLiteral("bitfield");
+        QVERIFY(n.isBitfield());
+
+        n.classKeyword = QStringLiteral("enum");
+        QVERIFY(n.isEnum());
+
+        n.classKeyword.clear();  // defaults to "struct"
+        QVERIFY(!n.isUnion());
+        QVERIFY(!n.isEnum());
+    }
+
+    void testKindFromTypeNameRoundTrip() {
+        for (const auto& m : rcx::kKindMeta) {
+            bool ok = false;
+            rcx::NodeKind result = rcx::kindFromTypeName(QString::fromLatin1(m.typeName), &ok);
+            QVERIFY(ok);
+            QCOMPARE(result, m.kind);
+        }
+    }
+
+    void testValueHistoryDedup() {
+        rcx::ValueHistory vh;
+        vh.record(QStringLiteral("42"));
+        vh.record(QStringLiteral("42"));  // same value, should not increment
+        QCOMPARE(vh.uniqueCount(), 1);
+        QCOMPARE(vh.last(), QStringLiteral("42"));
+    }
+
+    void testValueHistoryRingOverflow() {
+        rcx::ValueHistory vh;
+        for (int i = 0; i < 15; i++)
+            vh.record(QString::number(i));
+        QCOMPARE(vh.uniqueCount(), rcx::ValueHistory::kCapacity);
+        QCOMPARE(vh.last(), QStringLiteral("14"));
+    }
+
+    void testStructSpanCycleDetection() {
+        rcx::NodeTree tree;
+        rcx::Node a; a.kind = rcx::NodeKind::Struct; a.name = "A";
+        int ai = tree.addNode(a);
+        rcx::Node b; b.kind = rcx::NodeKind::Struct; b.name = "B";
+        b.parentId = tree.nodes[ai].id;
+        b.refId = tree.nodes[ai].id;  // cycle: B references A
+        tree.addNode(b);
+        // Should not infinite loop
+        int span = tree.structSpan(tree.nodes[ai].id);
+        QVERIFY(span >= 0);
+    }
+
+    void testDepthOfOrphan() {
+        rcx::NodeTree tree;
+        rcx::Node n;
+        n.parentId = 99999;  // nonexistent parent
+        int idx = tree.addNode(n);
+        QCOMPARE(tree.depthOf(idx), 0);
+    }
+
+    void testComputeOffsetNested() {
+        rcx::NodeTree tree;
+        tree.baseAddress = 0;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node child; child.kind = rcx::NodeKind::Struct;
+        child.parentId = rootId; child.offset = 16;
+        int ci = tree.addNode(child);
+        uint64_t childId = tree.nodes[ci].id;
+
+        rcx::Node leaf; leaf.kind = rcx::NodeKind::UInt32;
+        leaf.parentId = childId; leaf.offset = 8;
+        int li = tree.addNode(leaf);
+
+        QCOMPARE(tree.computeOffset(li), (int64_t)(0 + 16 + 8));
+    }
+
+    void testNormalizePreferAncestorsBasic() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node child; child.kind = rcx::NodeKind::UInt32;
+        child.parentId = rootId;
+        int ci = tree.addNode(child);
+        uint64_t childId = tree.nodes[ci].id;
+
+        QSet<uint64_t> ids = {rootId, childId};
+        auto result = tree.normalizePreferAncestors(ids);
+        QCOMPARE(result.size(), 1);
+        QVERIFY(result.contains(rootId));
+    }
+
+    void testNormalizePreferDescendantsBasic() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node child; child.kind = rcx::NodeKind::UInt32;
+        child.parentId = rootId;
+        int ci = tree.addNode(child);
+        uint64_t childId = tree.nodes[ci].id;
+
+        QSet<uint64_t> ids = {rootId, childId};
+        auto result = tree.normalizePreferDescendants(ids);
+        QCOMPARE(result.size(), 1);
+        QVERIFY(result.contains(childId));
+    }
 };
 
 QTEST_MAIN(TestCore)
