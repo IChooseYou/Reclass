@@ -2230,11 +2230,6 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 setAppStatus(QStringLiteral("Copied C struct to clipboard"));
             }
         });
-        menu->addSeparator();
-        menu->addAction(dock->isFloating() ? "Dock" : "Float", [dock]() {
-            dock->setFloating(!dock->isFloating());
-        });
-        menu->addAction("Close Tab", [dock]() { dock->close(); });
     });
 
     // Open a new tab with a plugin-provided provider (e.g. kernel physical memory)
