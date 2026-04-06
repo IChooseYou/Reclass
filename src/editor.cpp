@@ -2566,15 +2566,16 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         }
         return false;
     case Qt::Key_X:
-        if ((ke->modifiers() & Qt::ControlModifier) && !m_currentSelIds.isEmpty()) {
-            // Ctrl+X: copy address then delete (cut)
+        if (ke->modifiers() & Qt::ControlModifier) {
+            // Ctrl+X: copy the full line text (margin + content)
             int line, col;
             m_sci->getCursorPosition(&line, &col);
-            const LineMeta* lm = metaForLine(line);
-            if (lm && lm->offsetAddr != 0)
-                QApplication::clipboard()->setText(
-                    QStringLiteral("0x") + QString::number(lm->offsetAddr, 16).toUpper());
-            emit deleteSelectedRequested();
+            if (line >= 0 && line < m_meta.size()) {
+                QString margin = m_meta[line].offsetText;
+                QString lineText = textWithMargins().split('\n').value(line);
+                if (!lineText.isEmpty())
+                    QApplication::clipboard()->setText(lineText);
+            }
             return true;
         }
         return false;

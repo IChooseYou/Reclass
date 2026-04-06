@@ -3239,19 +3239,22 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         menu.addSeparator();
     }
 
-    menu.addAction(icon("arrow-left.svg"), "Undo", [this]() {
-        m_doc->undoStack.undo();
-    })->setEnabled(m_doc->undoStack.canUndo());
-    menu.addAction(icon("arrow-right.svg"), "Redo", [this]() {
-        m_doc->undoStack.redo();
-    })->setEnabled(m_doc->undoStack.canRedo());
+    // ── Fold ──
+    {
+        auto* foldMenu = menu.addMenu("Fold");
+        foldMenu->addAction("Collapse All\tCtrl+Shift+[", [this, editor]() {
+            emit editor->collapseAllRequested();
+        });
+        foldMenu->addAction("Expand All\tCtrl+Shift+]", [this, editor]() {
+            emit editor->expandAllRequested();
+        });
+    }
 
-    menu.addSeparator();
-
+    // ── Copy ──
     QMenu* copyMenu = menu.addMenu(icon("clippy.svg"), "Copy");
     if (hasNode) {
         uint64_t copyNodeId = m_doc->tree.nodes[nodeIdx].id;
-        copyMenu->addAction(icon("link.svg"), "Copy &Address", [this, copyNodeId]() {
+        copyMenu->addAction(icon("link.svg"), "Copy &Address\tCtrl+C", [this, copyNodeId]() {
             int ni = m_doc->tree.indexOfId(copyNodeId);
             if (ni < 0) return;
             int64_t off = m_doc->tree.computeOffset(ni);
@@ -3269,7 +3272,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
         copyMenu->addSeparator();
     }
-    copyMenu->addAction("Copy Line", [editor, line]() {
+    copyMenu->addAction("Copy Line\tCtrl+X", [editor, line]() {
         auto* sci = editor->scintilla();
         int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
         if (len > 0) {
@@ -3289,6 +3292,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     menu.addAction(icon("search.svg"), "Search...\tCtrl+F", [editor]() {
         QTimer::singleShot(0, editor, &RcxEditor::showFindBar);
     });
+    menu.addAction(icon("arrow-left.svg"), "Undo\tCtrl+Z", [this]() {
+        m_doc->undoStack.undo();
+    })->setEnabled(m_doc->undoStack.canUndo());
+    menu.addAction(icon("arrow-right.svg"), "Redo\tCtrl+Y", [this]() {
+        m_doc->undoStack.redo();
+    })->setEnabled(m_doc->undoStack.canRedo());
 
     // ── Kernel paging menu items ──
     if (m_doc->provider && m_doc->provider->hasKernelPaging()) {
