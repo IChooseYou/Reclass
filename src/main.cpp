@@ -1586,12 +1586,12 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
     // Create editor via controller (parent = tabWidget for ownership)
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
-    pane.editor->setRelativeOffsets(
-        QSettings("Reclass", "Reclass").value("relativeOffsets", true).toBool());
-    pane.editor->setHoverEffects(
-        QSettings("Reclass", "Reclass").value("hoverEffects", true).toBool());
-    pane.editor->setTypeTooltips(
-        QSettings("Reclass", "Reclass").value("typeTooltips", false).toBool());
+    {
+        QSettings s("Reclass", "Reclass");
+        pane.editor->setRelativeOffsets(s.value("relativeOffsets", true).toBool());
+        pane.editor->setHoverEffects(s.value("hoverEffects", true).toBool());
+        pane.editor->setTypeTooltips(s.value("typeTooltips", false).toBool());
+    }
     pane.editor->setPresentationMode(m_presentationMode);
     // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
     connect(pane.editor, &RcxEditor::relativeOffsetsChanged, this, [this](bool rel) {
@@ -3363,7 +3363,7 @@ void MainWindow::showOptionsDialog(int initialPage) {
         ? QSettings("Reclass", "Reclass").value("showIcon", false).toBool()
         : false;
     current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
-    current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
+    current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", rcx::kDefaultRefreshMs).toInt();
     current.generatorAsserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
     current.braceWrap = QSettings("Reclass", "Reclass").value("braceWrap", false).toBool();
 

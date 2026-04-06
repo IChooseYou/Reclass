@@ -4422,7 +4422,7 @@ void RcxController::setShowComments(bool v) {
 }
 
 void RcxController::setupAutoRefresh() {
-    int ms = QSettings("Reclass", "Reclass").value("refreshMs", 660).toInt();
+    int ms = QSettings("Reclass", "Reclass").value("refreshMs", kDefaultRefreshMs).toInt();
     m_refreshTimer = new QTimer(this);
     m_refreshTimer->setInterval(qMax(1, ms));
     connect(m_refreshTimer, &QTimer::timeout, this, &RcxController::onRefreshTick);

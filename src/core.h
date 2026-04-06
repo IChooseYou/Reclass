@@ -733,6 +733,7 @@ inline constexpr int kMaxTypeW    = 128; // Maximum type column width
 inline constexpr int kMinNameW    = 10;  // Minimum name column width (fits "field_0000")
 inline constexpr int kMaxNameW    = 128; // Maximum name column width
 inline constexpr int kCompactTypeW    = 20; // Type column cap for compact column mode
+inline constexpr int kDefaultRefreshMs = 660; // Auto-refresh interval (ms)
 
 inline ColumnSpan typeSpanFor(const LineMeta& lm, int typeW = kColType) {
     if (lm.lineKind != LineKind::Field || lm.isContinuation || lm.isMemberLine) return {};
