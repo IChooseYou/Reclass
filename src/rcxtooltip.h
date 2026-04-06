@@ -24,6 +24,14 @@ namespace rcx {
 //   tip->showAt(QPoint(midX, lineBottom));  // arrow tip at this point
 //   tip->dismiss();
 
+// Rich text span for per-segment coloring in tooltip body
+struct TipSpan {
+    QString text;
+    QColor  color;  // invalid = use default body color
+    bool    bold = false;
+};
+using TipLine = QVector<TipSpan>;
+
 class RcxTooltip : public QWidget {
 public:
     static constexpr int kArrowH = 8;
@@ -60,6 +68,24 @@ public:
         if (title == m_title && body == m_body && isVisible()) return;
         m_title = title; m_body = body;
         m_lines = body.split('\n');
+        m_richLines.clear();
+        m_font = font;
+        m_font.setPointSizeF(font.pointSizeF() * 0.9);
+        m_bold = m_font; m_bold.setBold(true);
+        recalc();
+    }
+
+    void populateRich(const QString& title, const QVector<TipLine>& richBody, const QFont& font) {
+        m_title = title;
+        m_richLines = richBody;
+        m_body.clear();
+        m_lines.clear();
+        // Build plain lines for width calculation
+        for (const auto& rl : richBody) {
+            QString plain;
+            for (const auto& s : rl) plain += s.text;
+            m_lines.append(plain);
+        }
         m_font = font;
         m_font.setPointSizeF(font.pointSizeF() * 0.9);
         m_bold = m_font; m_bold.setBold(true);
@@ -136,9 +162,25 @@ protected:
             cy += 1 + kGap;
         }
         p.setFont(m_font); p.setPen(m_bodyCol);
-        for (const auto& l : m_lines) {
-            p.drawText(QPointF(kPad, cy + bf.ascent()), l);
-            cy += bf.lineSpacing();
+        if (!m_richLines.isEmpty()) {
+            QFont boldBody = m_font; boldBody.setBold(true);
+            QFontMetrics bbf(boldBody);
+            for (int li = 0; li < m_richLines.size(); li++) {
+                qreal cx = kPad;
+                for (const auto& span : m_richLines[li]) {
+                    p.setFont(span.bold ? boldBody : m_font);
+                    p.setPen(span.color.isValid() ? span.color : m_bodyCol);
+                    QFontMetrics sfm(span.bold ? boldBody : m_font);
+                    p.drawText(QPointF(cx, cy + sfm.ascent()), span.text);
+                    cx += sfm.horizontalAdvance(span.text);
+                }
+                cy += bf.lineSpacing();
+            }
+        } else {
+            for (const auto& l : m_lines) {
+                p.drawText(QPointF(kPad, cy + bf.ascent()), l);
+                cy += bf.lineSpacing();
+            }
         }
     }
 
@@ -163,6 +205,7 @@ private:
 
     QString m_title, m_body;
     QStringList m_lines;
+    QVector<TipLine> m_richLines;
     QFont m_font, m_bold;
     QColor m_bg{30, 30, 30}, m_border{60, 60, 60};
     QColor m_titleCol{220, 220, 220}, m_bodyCol{180, 180, 180}, m_sepCol{60, 60, 60};

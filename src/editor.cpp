@@ -4379,19 +4379,32 @@ void RcxEditor::applyHoverCursor() {
                             auto* m = kindMeta(k);
                             return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
                         };
-                        // Column width = longest typeName in this size group
-                        int colW = 0;
-                        for (auto k : variants) colW = qMax(colW, kn(k).size());
-                        auto pad = [&](NodeKind k) { return kn(k).leftJustified(colW); };
+                        // Column width = longest typeName in this size group + 1
+                        int colW = 1;
+                        for (auto k : variants) colW = qMax(colW, kn(k).size() + 1);
+                        auto pad = [&](const QString& s) { return s.leftJustified(colW); };
+
+                        const auto& theme = ThemeManager::instance().current();
+                        QColor cDim    = theme.textMuted;   // prev/next types
+                        QColor cBright = theme.text;         // current type
+                        QColor cAccent = theme.indHoverSpan; // arrows/key labels
 
                         QString tipTitle = kn(lm.nodeKind) + QStringLiteral("  (%1 byte%2)")
                             .arg(sz).arg(sz > 1 ? "s" : "");
 
                         // Row 1: Left/Right type carousel
-                        QString tipBody =
-                            QStringLiteral(" \u25C0  ") + pad(variants[prevIdx])
-                          + QStringLiteral("  [ ") + pad(lm.nodeKind) + QStringLiteral(" ]  ")
-                          + pad(variants[nextIdx]) + QStringLiteral("  \u25B6");
+                        QVector<TipLine> richBody;
+                        {
+                            TipLine row;
+                            row.append({QStringLiteral(" \u25C0 "), cAccent, false});
+                            row.append({pad(kn(variants[prevIdx])), cDim, false});
+                            row.append({QStringLiteral(" "), {}, false});
+                            row.append({kn(lm.nodeKind), cBright, true});
+                            row.append({QStringLiteral(" "), {}, false});
+                            row.append({pad(kn(variants[nextIdx])), cDim, false});
+                            row.append({QStringLiteral(" \u25B6"), cAccent, false});
+                            richBody.append(row);
+                        }
 
                         // Row 2: Space hex-size carousel (only for hex nodes)
                         if (isHexNode(lm.nodeKind)) {
@@ -4405,10 +4418,14 @@ void RcxEditor::applyHoverCursor() {
                             if (hi >= 0) {
                                 int hprev = (hi - 1 + 5) % 5;
                                 int hnext = (hi + 1) % 5;
-                                tipBody += QStringLiteral("\n")
-                                    + QStringLiteral(" \u2423  ") + pad(hexCycle[hprev])
-                                    + QStringLiteral("  [ ") + pad(lm.nodeKind) + QStringLiteral(" ]  ")
-                                    + pad(hexCycle[hnext]);
+                                TipLine row2;
+                                row2.append({QStringLiteral(" \u2423 "), cAccent, false});
+                                row2.append({pad(kn(hexCycle[hprev])), cDim, false});
+                                row2.append({QStringLiteral(" "), {}, false});
+                                row2.append({kn(lm.nodeKind), cBright, true});
+                                row2.append({QStringLiteral(" "), {}, false});
+                                row2.append({pad(kn(hexCycle[hnext])), cDim, false});
+                                richBody.append(row2);
                             }
                         }
 
@@ -4424,22 +4441,21 @@ void RcxEditor::applyHoverCursor() {
                             };
                         }
                         auto* tip = static_cast<RcxTooltip*>(m_arrowTooltip);
-                        const auto& theme = ThemeManager::instance().current();
                         tip->setTheme(theme.backgroundAlt, theme.border,
                                       theme.text, theme.textDim, theme.border);
-                        tip->populate(tipTitle, tipBody, editorFont());
-                        long posA = posFromCol(m_sci, h.line, span.start);
-                        long posB = posFromCol(m_sci, h.line, span.end);
-                        int xA = (int)m_sci->SendScintilla(
-                            QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posA);
-                        int xB = (int)m_sci->SendScintilla(
-                            QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posB);
+                        tip->populateRich(tipTitle, richBody, editorFont());
+                        // Anchor at the name column (right of type) so tooltip
+                        // is centered over the visible content, not clipped at left edge
+                        int nameCol = kFoldCol + lm.depth * kTreeIndent + lm.effectiveTypeW + kSepWidth;
+                        long posName = posFromCol(m_sci, h.line, nameCol);
+                        int xMid = (int)m_sci->SendScintilla(
+                            QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posName);
                         int py = (int)m_sci->SendScintilla(
-                            QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, posA);
+                            QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, posName);
                         int lh = (int)m_sci->SendScintilla(
                             QsciScintillaBase::SCI_TEXTHEIGHT, (unsigned long)h.line);
                         QPoint anchor = m_sci->viewport()->mapToGlobal(
-                            QPoint((xA + xB) / 2, py + lh));
+                            QPoint(xMid, py + lh));
                         tip->showAt(anchor);
                         showTip = true;
                     }
