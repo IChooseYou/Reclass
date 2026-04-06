@@ -100,6 +100,8 @@ signals:
     void appendBytesRequested(uint64_t structId, int byteCount);
     void trimHexRequested(uint64_t structId);
     void appendEnumMembersRequested(uint64_t enumId, int count);
+    void deleteSelectedRequested();
+    void duplicateSelectedRequested();
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;

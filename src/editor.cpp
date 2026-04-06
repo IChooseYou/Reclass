@@ -562,7 +562,7 @@ void RcxEditor::setupScintilla() {
     m_sci->setIndentationsUseTabs(false);
 
     // Line spacing for readability
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT, (long)2);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT, (long)4);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRADESCENT, (long)2);
 
     // Disable native selection rendering — we use markers for selection
@@ -2537,6 +2537,15 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     case Qt::Key_Return:
     case Qt::Key_Enter:
         return beginInlineEdit(EditTarget::Value);
+    case Qt::Key_Delete:
+        emit deleteSelectedRequested();
+        return true;
+    case Qt::Key_D:
+        if (ke->modifiers() & Qt::ControlModifier) {
+            emit duplicateSelectedRequested();
+            return true;
+        }
+        return false;
     case Qt::Key_Insert:
         if (ke->modifiers() & Qt::ShiftModifier)
             emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex32);
