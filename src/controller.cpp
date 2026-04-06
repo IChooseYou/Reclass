@@ -614,7 +614,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             if (nodeIdx >= m_doc->tree.nodes.size()) break;
             const Node& node = m_doc->tree.nodes[nodeIdx];
             // Enum member name edit
-            if (node.resolvedClassKeyword() == QStringLiteral("enum")
+            if (node.isEnum()
                 && subLine >= 0 && subLine < node.enumMembers.size()) {
                 auto members = node.enumMembers;
                 members[subLine].first = text;
@@ -697,7 +697,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             // Enum member value edit
             if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
                 const Node& node = m_doc->tree.nodes[nodeIdx];
-                if (node.resolvedClassKeyword() == QStringLiteral("enum")
+                if (node.isEnum()
                     && subLine >= 0 && subLine < node.enumMembers.size()) {
                     bool ok;
                     int64_t val = text.toLongLong(&ok);
@@ -1412,8 +1412,7 @@ void RcxController::dissolveUnion(uint64_t unionId) {
     int ui = m_doc->tree.indexOfId(unionId);
     if (ui < 0) return;
     const Node& unionNode = m_doc->tree.nodes[ui];
-    if (unionNode.kind != NodeKind::Struct
-        || unionNode.resolvedClassKeyword() != QStringLiteral("union")) return;
+    if (unionNode.kind != NodeKind::Struct || !unionNode.isUnion()) return;
 
     uint64_t parentId = unionNode.parentId;
     int unionOffset = unionNode.offset;
@@ -2186,7 +2185,7 @@ void RcxController::toggleBitfieldBit(uint64_t nodeId, int memberIdx) {
     int ni = m_doc->tree.indexOfId(nodeId);
     if (ni < 0) return;
     const Node& node = m_doc->tree.nodes[ni];
-    if (node.resolvedClassKeyword() != QStringLiteral("bitfield")) return;
+    if (!node.isBitfield()) return;
     if (memberIdx < 0 || memberIdx >= node.bitfieldMembers.size()) return;
     if (!m_doc->provider || !m_doc->provider->isWritable()) return;
 
@@ -2216,7 +2215,7 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
     int ni = m_doc->tree.indexOfId(nodeId);
     if (ni < 0) return;
     const Node& node = m_doc->tree.nodes[ni];
-    if (node.resolvedClassKeyword() != QStringLiteral("bitfield")) return;
+    if (!node.isBitfield()) return;
     if (memberIdx < 0 || memberIdx >= node.bitfieldMembers.size()) return;
     if (!m_doc->provider || !m_doc->provider->isWritable()) return;
 
@@ -2575,14 +2574,14 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         uint64_t parentId = node.parentId;
 
         // ── Member line: enum or bitfield member ──
-        bool isEnumMember = node.resolvedClassKeyword() == QStringLiteral("enum")
+        bool isEnumMember = node.isEnum()
             && !node.enumMembers.isEmpty()
             && subLine >= 0 && subLine < node.enumMembers.size();
-        bool isBitfieldMember = node.resolvedClassKeyword() == QStringLiteral("bitfield")
+        bool isBitfieldMember = node.isBitfield()
             && !node.bitfieldMembers.isEmpty()
             && subLine >= 0 && subLine < node.bitfieldMembers.size();
 
-        bool isEnumNode = node.resolvedClassKeyword() == QStringLiteral("enum");
+        bool isEnumNode = node.isEnum();
 
         if (isEnumMember || isBitfieldMember) {
             if (isEnumMember) {
@@ -3062,12 +3061,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             {
                 uint64_t targetUnionId = 0;
                 if (node.kind == NodeKind::Struct
-                    && node.resolvedClassKeyword() == QStringLiteral("union")) {
+                    && node.isUnion()) {
                     targetUnionId = nodeId;
                 } else if (node.parentId != 0) {
                     int pi = m_doc->tree.indexOfId(node.parentId);
                     if (pi >= 0 && m_doc->tree.nodes[pi].kind == NodeKind::Struct
-                        && m_doc->tree.nodes[pi].resolvedClassKeyword() == QStringLiteral("union")) {
+                        && m_doc->tree.nodes[pi].isUnion()) {
                         targetUnionId = node.parentId;
                     }
                 }
@@ -3289,7 +3288,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // Follow Physical Frame — on a PTE bitfield, extract PhysAddr and open
         if (hasNode) {
             const auto& node = m_doc->tree.nodes[nodeIdx];
-            if (node.classKeyword == QStringLiteral("bitfield")) {
+            if (node.isBitfield()) {
                 for (const auto& bf : node.bitfieldMembers) {
                     if (bf.name == QStringLiteral("PhysAddr")) {
                         int bitOff = bf.bitOffset;

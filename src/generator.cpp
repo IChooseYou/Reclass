@@ -236,7 +236,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
         // Emit the field
         if (child.kind == NodeKind::Struct) {
             // Bitfield container — emit inline bitfield members
-            if (child.classKeyword == QStringLiteral("bitfield")
+            if (child.isBitfield()
                 && !child.bitfieldMembers.isEmpty()) {
                 QString bfType = ctx.cType(child.elementKind);
                 if (bfType.isEmpty()) bfType = QStringLiteral("uint32_t");
@@ -593,7 +593,7 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
         }
 
         if (child.kind == NodeKind::Struct) {
-            if (child.classKeyword == QStringLiteral("bitfield")
+            if (child.isBitfield()
                 && !child.bitfieldMembers.isEmpty()) {
                 // Rust has no native bitfields — emit container + comment
                 QString bfType = rustType(ctx, child.elementKind);
@@ -869,7 +869,7 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
         QString oc = offsetComment(absOffset);
 
         if (child.kind == NodeKind::Struct) {
-            if (child.classKeyword == QStringLiteral("bitfield")
+            if (child.isBitfield()
                 && !child.bitfieldMembers.isEmpty()) {
                 QString bfType = csType(ctx, child.elementKind);
                 if (bfType.isEmpty()) bfType = QStringLiteral("uint");
@@ -1143,7 +1143,7 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
         QString oc = offsetComment(absOffset);
 
         if (child.kind == NodeKind::Struct) {
-            if (child.classKeyword == QStringLiteral("bitfield")
+            if (child.isBitfield()
                 && !child.bitfieldMembers.isEmpty()) {
                 QString bfType = pyTypeName(child.elementKind);
                 if (bfType.isEmpty()) bfType = QStringLiteral("ctypes.c_uint32");

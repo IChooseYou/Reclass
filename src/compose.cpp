@@ -432,7 +432,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
 
     if (!node.collapsed || isArrayChild || isRootHeader) {
         // Enum with members: render name = value lines instead of offset-based fields
-        if (node.resolvedClassKeyword() == QStringLiteral("enum") && !node.enumMembers.isEmpty()) {
+        if (node.isEnum() && !node.enumMembers.isEmpty()) {
             int childDepth = depth + 1;
             int maxNameLen = 4;
             for (const auto& m : node.enumMembers)
@@ -487,7 +487,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         }
 
         // Bitfield with members: render name : width = value lines
-        if (node.resolvedClassKeyword() == QStringLiteral("bitfield")
+        if (node.isBitfield()
             && !node.bitfieldMembers.isEmpty()) {
             int childDepth = depth + 1;
             int maxNameLen = 4;
