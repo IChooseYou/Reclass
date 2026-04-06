@@ -4364,7 +4364,7 @@ void RcxEditor::applyHoverCursor() {
             }
         }
         // ── Type cycling tooltip on non-container field type column ──
-        if (!showTip && tokenHit && t == EditTarget::Type
+        if (!showTip && m_typeTooltips && tokenHit && t == EditTarget::Type
             && h.line > 0 && h.line < m_meta.size()) {
             const auto& lm = m_meta[h.line];
             int sz = sizeForKind(lm.nodeKind);

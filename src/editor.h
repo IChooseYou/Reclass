@@ -41,6 +41,8 @@ public:
     void setPresentationMode(bool on) { m_presentationMode = on; }
     void setHoverEffects(bool on);
     bool hoverEffects() const { return m_hoverEffects; }
+    void setTypeTooltips(bool on) { m_typeTooltips = on; }
+    bool typeTooltips() const { return m_typeTooltips; }
     void showFindBar();
     void dismissHistoryPopup();
     void dismissAllPopups();
@@ -200,6 +202,7 @@ private:
 
     // ── Hover effects toggle ──
     bool m_hoverEffects = true;
+    bool m_typeTooltips = false;
 
     // ── Presentation mode (smooth scroll + focus glow) ──
     bool m_presentationMode = false;

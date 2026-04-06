@@ -1067,6 +1067,16 @@ void MainWindow::createMenus() {
                 if (pane.editor) pane.editor->setHoverEffects(checked);
     });
 
+    auto* actTypeTooltips = view->addAction("Type &Tooltips");
+    actTypeTooltips->setCheckable(true);
+    actTypeTooltips->setChecked(settings.value("typeTooltips", false).toBool());
+    connect(actTypeTooltips, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("typeTooltips", checked);
+        for (auto& tab : m_tabs)
+            for (auto& pane : tab.panes)
+                if (pane.editor) pane.editor->setTypeTooltips(checked);
+    });
+
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
     {
@@ -1571,6 +1581,8 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         QSettings("Reclass", "Reclass").value("relativeOffsets", true).toBool());
     pane.editor->setHoverEffects(
         QSettings("Reclass", "Reclass").value("hoverEffects", true).toBool());
+    pane.editor->setTypeTooltips(
+        QSettings("Reclass", "Reclass").value("typeTooltips", false).toBool());
     pane.editor->setPresentationMode(m_presentationMode);
     // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
     connect(pane.editor, &RcxEditor::relativeOffsetsChanged, this, [this](bool rel) {
