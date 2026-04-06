@@ -2854,73 +2854,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         if (addedQuickConvert)
             menu.addSeparator();
-        addedQuickConvert = false;
-
-        if (node.kind == NodeKind::Hex64) {
-            menu.addAction("Change to uint64_t\tU", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::UInt64);
-            });
-            menu.addAction("Change to float\tF", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::Double);
-            });
-            addedQuickConvert = true;
-        } else if (node.kind == NodeKind::Hex32) {
-            menu.addAction("Change to uint32_t\tU", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::UInt32);
-            });
-            menu.addAction("Change to float\tF", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::Float);
-            });
-            addedQuickConvert = true;
-        } else if (node.kind == NodeKind::Hex16) {
-            menu.addAction("Change to int16_t\tS", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::Int16);
-            });
-            addedQuickConvert = true;
-        }
-        if (node.kind == NodeKind::Hex64 || isPointerKind(node.kind)) {
-            menu.addAction("Change to ptr\tP", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, sizeForKind(m_doc->tree.nodes[ni].kind) >= 8
-                    ? NodeKind::Pointer64 : NodeKind::Pointer32);
-            });
-            addedQuickConvert = true;
-        }
-        if (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64) {
-            menu.addAction("Change to fnptr64", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::FuncPtr64);
-            });
-            addedQuickConvert = true;
-        }
-        if (node.kind == NodeKind::Hex32 || node.kind == NodeKind::Pointer32) {
-            menu.addAction("Change to fnptr32", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::FuncPtr32);
-            });
-            addedQuickConvert = true;
-        }
-        if (node.kind == NodeKind::FuncPtr64) {
-            menu.addAction("Change to ptr64", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::Pointer64);
-            });
-            addedQuickConvert = true;
-        }
-        if (node.kind == NodeKind::FuncPtr32) {
-            menu.addAction("Change to ptr32", [this, nodeId]() {
-                int ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) changeNodeKind(ni, NodeKind::Pointer32);
-            });
-            addedQuickConvert = true;
-        }
-        if (addedQuickConvert)
-            menu.addSeparator();
 
         // ── Hex byte / ASCII inline editing ──
         if (isHexNode(node.kind) && m_doc->provider->isWritable()) {
@@ -2984,6 +2917,45 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         {
             auto* convertMenu = menu.addMenu(icon("symbol-structure.svg"), "Convert");
             bool hasConvert = false;
+
+            // Quick-convert shortcuts (with keyboard hint)
+            if (node.kind == NodeKind::Hex64) {
+                convertMenu->addAction("uint64_t\tU", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::UInt64); });
+                convertMenu->addAction("double\tF", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::Double); });
+                hasConvert = true;
+            } else if (node.kind == NodeKind::Hex32) {
+                convertMenu->addAction("uint32_t\tU", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::UInt32); });
+                convertMenu->addAction("float\tF", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::Float); });
+                hasConvert = true;
+            } else if (node.kind == NodeKind::Hex16) {
+                convertMenu->addAction("int16_t\tS", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::Int16); });
+                hasConvert = true;
+            }
+            if (sizeForKind(node.kind) >= 4) {
+                convertMenu->addAction("ptr\tP", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni,
+                        sizeForKind(m_doc->tree.nodes[ni].kind) >= 8 ? NodeKind::Pointer64 : NodeKind::Pointer32); });
+                hasConvert = true;
+            }
+            if (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64)
+                convertMenu->addAction("fnptr64", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::FuncPtr64); });
+            if (node.kind == NodeKind::Hex32 || node.kind == NodeKind::Pointer32)
+                convertMenu->addAction("fnptr32", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::FuncPtr32); });
+            if (node.kind == NodeKind::FuncPtr64)
+                convertMenu->addAction("ptr64", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::Pointer64); });
+            if (node.kind == NodeKind::FuncPtr32)
+                convertMenu->addAction("ptr32", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::Pointer32); });
+            if (hasConvert)
+                convertMenu->addSeparator();
 
             // "Change to ptr*" — convert any pointer-sized node to typed pointer
             {
