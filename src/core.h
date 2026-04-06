@@ -22,7 +22,7 @@ namespace rcx {
 // ── Node kind enum ──
 
 enum class NodeKind : uint8_t {
-    Hex8, Hex16, Hex32, Hex64,
+    Hex8, Hex16, Hex32, Hex64, Hex128,
     Int8, Int16, Int32, Int64,
     UInt8, UInt16, UInt32, UInt64,
     Float, Double, Bool,
@@ -43,7 +43,7 @@ namespace rcx { // reopen
 
 enum KindFlags : uint32_t {
     KF_None       = 0,
-    KF_HexPreview = 1 << 0,  // Hex8..Hex64 (ASCII+hex layout)
+    KF_HexPreview = 1 << 0,  // Hex8..Hex128 (ASCII+hex layout)
     KF_Container  = 1 << 1,  // Struct/Array
     KF_String     = 1 << 2,  // UTF8/UTF16
     KF_Vector     = 1 << 3,  // Vec2/3/4
@@ -67,6 +67,7 @@ inline constexpr KindMeta kKindMeta[] = {
     {NodeKind::Hex16,     "Hex16",     "hex16",       2,  1,  2, KF_HexPreview},
     {NodeKind::Hex32,     "Hex32",     "hex32",       4,  1,  4, KF_HexPreview},
     {NodeKind::Hex64,     "Hex64",     "hex64",       8,  1,  8, KF_HexPreview},
+    {NodeKind::Hex128,    "Hex128",    "hex128",     16,  1, 16, KF_HexPreview},
     {NodeKind::Int8,      "Int8",      "int8_t",      1,  1,  1, KF_None},
     {NodeKind::Int16,     "Int16",     "int16_t",     2,  1,  2, KF_None},
     {NodeKind::Int32,     "Int32",     "int32_t",     4,  1,  4, KF_None},
@@ -92,9 +93,12 @@ inline constexpr KindMeta kKindMeta[] = {
     {NodeKind::Array,     "Array",     "array",       0,  1,  1, KF_Container},
 };
 
+static_assert(std::size(kKindMeta) == static_cast<size_t>(NodeKind::Array) + 1,
+              "kKindMeta table must match NodeKind enum");
+
 inline constexpr const KindMeta* kindMeta(NodeKind k) {
-    for (const auto& m : kKindMeta)
-        if (m.kind == k) return &m;
+    auto i = static_cast<unsigned>(k);
+    if (i < std::size(kKindMeta)) return &kKindMeta[i];
     return nullptr;
 }
 
@@ -129,7 +133,7 @@ inline constexpr uint32_t flagsFor(NodeKind k) {
     return m ? m->flags : 0;
 }
 inline constexpr bool isHexNode(NodeKind k) {
-    return k >= NodeKind::Hex8 && k <= NodeKind::Hex64;
+    return k >= NodeKind::Hex8 && k <= NodeKind::Hex128;
 }
 inline constexpr bool isHexPreview(NodeKind k) {
     return isHexNode(k);
