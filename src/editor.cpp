@@ -2600,6 +2600,183 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         }
         return true;
     }
+    // ── Hex node quick-type shortcuts ──
+    case Qt::Key_Space: {
+        // Cycle hex size: 8→16→32→64→128→8
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+        if (!lm || !isHexNode(lm->nodeKind)) return false;
+        static constexpr NodeKind cycle[] = {
+            NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+            NodeKind::Hex64, NodeKind::Hex128
+        };
+        int cur = -1;
+        for (int i = 0; i < 5; i++) if (cycle[i] == lm->nodeKind) { cur = i; break; }
+        if (cur < 0) return false;
+        NodeKind next = cycle[(cur + 1) % 5];
+        emit quickTypeChangeRequested(ni, next);
+        return true;
+    }
+    case Qt::Key_1: case Qt::Key_2: case Qt::Key_3: case Qt::Key_4: case Qt::Key_5: {
+        // 1=Hex8, 2=Hex16, 3=Hex32, 4=Hex64, 5=Hex128
+        if (ke->modifiers() != Qt::NoModifier) return false;
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+        if (!lm || !isHexNode(lm->nodeKind)) return false;
+        static constexpr NodeKind sizes[] = {
+            NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+            NodeKind::Hex64, NodeKind::Hex128
+        };
+        emit quickTypeChangeRequested(ni, sizes[ke->key() - Qt::Key_1]);
+        return true;
+    }
+    case Qt::Key_P: {
+        // P = convert to pointer (size-appropriate)
+        if (ke->modifiers() != Qt::NoModifier) return false;
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+        if (!lm || !isHexNode(lm->nodeKind)) return false;
+        int sz = sizeForKind(lm->nodeKind);
+        NodeKind target = (sz >= 8) ? NodeKind::Pointer64
+                        : (sz >= 4) ? NodeKind::Pointer32
+                        : NodeKind::Pointer32;
+        emit quickTypeChangeRequested(ni, target);
+        return true;
+    }
+    case Qt::Key_F: {
+        // F = convert to float (from 4-byte hex) or double (from 8-byte)
+        if (ke->modifiers() != Qt::NoModifier) return false;
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+        if (!lm || !isHexNode(lm->nodeKind)) return false;
+        int sz = sizeForKind(lm->nodeKind);
+        if (sz == 4) emit quickTypeChangeRequested(ni, NodeKind::Float);
+        else if (sz == 8) emit quickTypeChangeRequested(ni, NodeKind::Double);
+        else return false;
+        return true;
+    }
+    case Qt::Key_S: {
+        // S = toggle signed int ↔ hex (same size)
+        if (ke->modifiers() != Qt::NoModifier) return false;
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+        if (!lm) return false;
+        NodeKind k = lm->nodeKind;
+        NodeKind target;
+        switch (k) {
+        case NodeKind::Hex8:  target = NodeKind::Int8;  break;
+        case NodeKind::Hex16: target = NodeKind::Int16; break;
+        case NodeKind::Hex32: target = NodeKind::Int32; break;
+        case NodeKind::Hex64: target = NodeKind::Int64; break;
+        case NodeKind::Int8:  target = NodeKind::Hex8;  break;
+        case NodeKind::Int16: target = NodeKind::Hex16; break;
+        case NodeKind::Int32: target = NodeKind::Hex32; break;
+        case NodeKind::Int64: target = NodeKind::Hex64; break;
+        default: return false;
+        }
+        emit quickTypeChangeRequested(ni, target);
+        return true;
+    }
+    case Qt::Key_U: {
+        // U = toggle unsigned int ↔ hex (same size)
+        if (ke->modifiers() != Qt::NoModifier) return false;
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+        if (!lm) return false;
+        NodeKind k = lm->nodeKind;
+        NodeKind target;
+        switch (k) {
+        case NodeKind::Hex8:  target = NodeKind::UInt8;  break;
+        case NodeKind::Hex16: target = NodeKind::UInt16; break;
+        case NodeKind::Hex32: target = NodeKind::UInt32; break;
+        case NodeKind::Hex64: target = NodeKind::UInt64; break;
+        case NodeKind::UInt8:  target = NodeKind::Hex8;  break;
+        case NodeKind::UInt16: target = NodeKind::Hex16; break;
+        case NodeKind::UInt32: target = NodeKind::Hex32; break;
+        case NodeKind::UInt64: target = NodeKind::Hex64; break;
+        default: return false;
+        }
+        emit quickTypeChangeRequested(ni, target);
+        return true;
+    }
+    case Qt::Key_Left:
+    case Qt::Key_Right: {
+        // Cycle through same-size type variants
+        if (ke->modifiers() != Qt::NoModifier) return false;
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+        if (!lm) return false;
+        int dir = (ke->key() == Qt::Key_Right) ? 1 : -1;
+        emit cycleSameSizeTypeRequested(ni, dir);
+        return true;
+    }
+    // ── General navigation shortcuts ──
+    case Qt::Key_Escape:
+        if (ke->modifiers() == Qt::NoModifier) {
+            // Clear selection (deselect all)
+            emit nodeClicked(-1, 0, Qt::NoModifier);
+            return true;
+        }
+        return false;
+    case Qt::Key_Home: {
+        // Jump to first data node
+        for (int i = 0; i < m_meta.size(); i++) {
+            const auto& lm = m_meta[i];
+            if (lm.nodeId != 0 && lm.nodeId != kCommandRowId && !lm.isContinuation) {
+                m_sci->setCursorPosition(i, 0);
+                m_sci->ensureLineVisible(i);
+                emit nodeClicked(i, lm.nodeId, Qt::NoModifier);
+                return true;
+            }
+        }
+        return true;
+    }
+    case Qt::Key_End: {
+        // Jump to last data node
+        for (int i = m_meta.size() - 1; i >= 0; i--) {
+            const auto& lm = m_meta[i];
+            if (lm.nodeId != 0 && lm.nodeId != kCommandRowId
+                && !lm.isContinuation && lm.lineKind != LineKind::Footer) {
+                m_sci->setCursorPosition(i, 0);
+                m_sci->ensureLineVisible(i);
+                emit nodeClicked(i, lm.nodeId, Qt::NoModifier);
+                return true;
+            }
+        }
+        return true;
+    }
+    case Qt::Key_A:
+        if (ke->modifiers() & Qt::ControlModifier) {
+            // Select all siblings of current node
+            int ni = currentNodeIndex();
+            if (ni < 0) return true;
+            // Find all lines with the same parent and emit shift-click on first/last
+            const LineMeta* curLm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
+            if (!curLm) return true;
+            // Click first node without modifier, then shift-click last to range-select
+            int first = -1, last = -1;
+            for (int i = 0; i < m_meta.size(); i++) {
+                const auto& lm = m_meta[i];
+                if (lm.nodeId == 0 || lm.nodeId == kCommandRowId || lm.isContinuation) continue;
+                if (lm.lineKind == LineKind::Footer) continue;
+                if (first < 0) first = i;
+                last = i;
+            }
+            if (first >= 0 && last >= 0) {
+                emit nodeClicked(first, m_meta[first].nodeId, Qt::NoModifier);
+                if (last != first)
+                    emit nodeClicked(last, m_meta[last].nodeId, Qt::ShiftModifier);
+            }
+            return true;
+        }
+        return false;
     default:
         return false;
     }

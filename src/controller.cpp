@@ -353,6 +353,42 @@ void RcxController::connectEditor(RcxEditor* editor) {
         }
     });
 
+    // Quick type change (Space, 1-5, P, F, S, U keys)
+    connect(editor, &RcxEditor::quickTypeChangeRequested,
+            this, [this](int nodeIdx, NodeKind targetKind) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        const auto& node = m_doc->tree.nodes[nodeIdx];
+        if (isHexNode(targetKind) && isHexNode(node.kind)) {
+            int curSz = sizeForKind(node.kind);
+            int tgtSz = sizeForKind(targetKind);
+            if (tgtSz <= curSz)
+                changeNodeKind(nodeIdx, targetKind);
+            else
+                joinHexNodes(node.id, targetKind);
+        } else {
+            changeNodeKind(nodeIdx, targetKind);
+        }
+    });
+
+    // Left/Right arrow: cycle through same-size type variants
+    connect(editor, &RcxEditor::cycleSameSizeTypeRequested,
+            this, [this](int nodeIdx, int direction) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        NodeKind cur = m_doc->tree.nodes[nodeIdx].kind;
+        int sz = sizeForKind(cur);
+        // Build list of same-size types
+        QVector<NodeKind> variants;
+        for (const auto& m : kKindMeta) {
+            if (m.size == sz && m.kind != NodeKind::Struct && m.kind != NodeKind::Array)
+                variants.append(m.kind);
+        }
+        if (variants.size() <= 1) return;
+        int idx = variants.indexOf(cur);
+        if (idx < 0) return;
+        int next = (idx + direction + variants.size()) % variants.size();
+        changeNodeKind(nodeIdx, variants[next]);
+    });
+
     // Insert key shortcut
     connect(editor, &RcxEditor::insertAboveRequested,
             this, [this](int nodeIdx, NodeKind kind) {
@@ -3375,6 +3411,12 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
             return makeMemberSelId(nid, lm.subLine);
         return nid;
     };
+
+    // Escape / deselect: nodeId=0 means clear selection
+    if (nodeId == 0) {
+        clearSelection();
+        return;
+    }
 
     uint64_t selId = effectiveId(line, nodeId);
 

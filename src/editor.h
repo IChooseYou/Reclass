@@ -102,6 +102,8 @@ signals:
     void appendEnumMembersRequested(uint64_t enumId, int count);
     void deleteSelectedRequested();
     void duplicateSelectedRequested();
+    void quickTypeChangeRequested(int nodeIdx, NodeKind targetKind);
+    void cycleSameSizeTypeRequested(int nodeIdx, int direction);  // -1=prev, +1=next
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
