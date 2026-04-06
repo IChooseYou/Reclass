@@ -2575,15 +2575,27 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return true;
     }
     case Qt::Key_Tab: {
-        EditTarget order[] = {EditTarget::Name, EditTarget::Type, EditTarget::Value,
+        // Core targets for all field nodes; Type opens popup so put it last
+        EditTarget order[] = {EditTarget::Name, EditTarget::Value, EditTarget::Comment,
                               EditTarget::ArrayElementType, EditTarget::ArrayElementCount,
-                              EditTarget::PointerTarget, EditTarget::Comment};
+                              EditTarget::PointerTarget, EditTarget::Type};
         constexpr int N = 7;
+        // Determine current node kind for filtering
+        int curLine, curCol;
+        m_sci->getCursorPosition(&curLine, &curCol);
+        const LineMeta* curLm = metaForLine(curLine);
+        NodeKind nk = curLm ? curLm->nodeKind : NodeKind::Hex8;
+        bool isArray = curLm && curLm->isArrayHeader;
+        bool isPtr = (nk == NodeKind::Pointer32 || nk == NodeKind::Pointer64);
+
         int start = 0;
         for (int i = 0; i < N; i++)
             if (order[i] == m_lastTabTarget) { start = (i + 1) % N; break; }
         for (int i = 0; i < N; i++) {
             EditTarget t = order[(start + i) % N];
+            // Skip targets that don't apply to this node kind
+            if ((t == EditTarget::ArrayElementType || t == EditTarget::ArrayElementCount) && !isArray) continue;
+            if (t == EditTarget::PointerTarget && !isPtr) continue;
             if (beginInlineEdit(t)) { m_lastTabTarget = t; return true; }
         }
         return true;
