@@ -1126,6 +1126,93 @@ private slots:
         }
         QVERIFY(found);
     }
+
+    void testBatchChangeKind() {
+        // Change field_u32 and field_float to Hex64
+        QVector<int> indices;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const auto& n = m_doc->tree.nodes[i];
+            if (n.name == "field_u32" || n.name == "field_float")
+                indices.append(i);
+        }
+        QCOMPARE(indices.size(), 2);
+        m_ctrl->batchChangeKind(indices, NodeKind::Hex64);
+        // Both should now be Hex64
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "field_u32" || n.name == "field_float")
+                QCOMPARE(n.kind, NodeKind::Hex64);
+        }
+    }
+
+    void testConvertToTypedPointer() {
+        // Convert field_hex (Hex32) to typed pointer
+        uint64_t hexId = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_hex") { hexId = n.id; break; }
+        QVERIFY(hexId != 0);
+
+        m_ctrl->convertToTypedPointer(hexId);
+        int ni = m_doc->tree.indexOfId(hexId);
+        QVERIFY(ni >= 0);
+        // Should be a pointer now with a refId
+        const auto& node = m_doc->tree.nodes[ni];
+        QVERIFY(node.kind == NodeKind::Pointer64 || node.kind == NodeKind::Pointer32);
+        QVERIFY(node.refId != 0);
+    }
+
+    void testRenameNodeUndoRedo() {
+        uint64_t u8Id = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_u8") { u8Id = n.id; break; }
+        QVERIFY(u8Id != 0);
+
+        int idx = m_doc->tree.indexOfId(u8Id);
+        m_ctrl->renameNode(idx, "renamed_field");
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u8Id)].name, QStringLiteral("renamed_field"));
+
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u8Id)].name, QStringLiteral("field_u8"));
+
+        m_doc->undoStack.redo();
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u8Id)].name, QStringLiteral("renamed_field"));
+    }
+
+    void testInsertNodeAboveShiftsOffsets() {
+        // Find field_float at offset 4
+        int floatIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "field_float") { floatIdx = i; break; }
+        QVERIFY(floatIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[floatIdx].offset, 4);
+
+        // Insert 8 bytes above field_float → should shift float to offset 12
+        m_ctrl->insertNodeAbove(floatIdx, NodeKind::Hex64, "inserted");
+
+        // Re-find field_float (index may have changed)
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "field_float")
+                QCOMPARE(n.offset, 12);  // shifted by 8
+        }
+    }
+
+    void testDeleteRootStruct() {
+        // Add a second root struct, then delete it
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        rcx::Node root2;
+        root2.kind = NodeKind::Struct;
+        root2.structTypeName = "Deletable";
+        root2.name = "del";
+        root2.parentId = 0;
+        int ri = m_doc->tree.addNode(root2);
+        uint64_t r2Id = m_doc->tree.nodes[ri].id;
+        int countBefore = m_doc->tree.nodes.size();
+
+        m_ctrl->deleteRootStruct(r2Id);
+        QVERIFY(m_doc->tree.indexOfId(r2Id) < 0);
+        QVERIFY(m_doc->tree.nodes.size() < countBefore);
+        // Original root should still exist
+        QVERIFY(m_doc->tree.indexOfId(rootId) >= 0);
+    }
 };
 
 QTEST_MAIN(TestController)
