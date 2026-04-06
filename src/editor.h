@@ -41,8 +41,6 @@ public:
     void setPresentationMode(bool on) { m_presentationMode = on; }
     void setHoverEffects(bool on);
     bool hoverEffects() const { return m_hoverEffects; }
-    void setTypeTooltips(bool on) { m_typeTooltips = on; }
-    bool typeTooltips() const { return m_typeTooltips; }
     void showFindBar();
     void dismissHistoryPopup();
     void dismissAllPopups();
@@ -203,11 +201,7 @@ private:
 
     // ── Hover effects toggle ──
     bool m_hoverEffects = true;
-    bool m_typeTooltips = false;
 
-    // ── Click cycle: select(0) → tooltip(1) → type picker(2) → back to 0 ──
-    uint64_t m_clickCycleNodeId = 0;
-    int      m_clickCycleState = 0;  // 0=fresh select, 1=tooltip shown, 2=type picker
 
     // ── Presentation mode (smooth scroll + focus glow) ──
     bool m_presentationMode = false;

@@ -1323,150 +1323,8 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     applyHoverHighlight();
     applyHoverCursor();
 
-    // ── Type cycling tooltip (selection-driven, below last selected line) ──
-    if (m_typeTooltips && !selIds.isEmpty()) {
-        // Find the common NodeKind across all selected non-container nodes
-        NodeKind commonKind = NodeKind::Hex8;
-        int commonSize = 0;
-        bool first = true;
-        bool allSameKind = true;
-        int lastSelLine = -1;
-        for (uint64_t selId : selIds) {
-            uint64_t nid = selId & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                     | kMemberBit | kMemberSubMask);
-            auto it = m_nodeLineIndex.constFind(nid);
-            if (it == m_nodeLineIndex.constEnd()) continue;
-            for (int ln : *it) {
-                if (ln >= m_meta.size()) continue;
-                const auto& lm = m_meta[ln];
-                if (lm.lineKind != LineKind::Field || lm.isContinuation) continue;
-                int sz = sizeForKind(lm.nodeKind);
-                if (sz <= 0) continue;
-                if (first) { commonKind = lm.nodeKind; commonSize = sz; first = false; }
-                else if (lm.nodeKind != commonKind) allSameKind = false;
-                if (sz != commonSize) { commonSize = 0; break; }
-                if (ln > lastSelLine) lastSelLine = ln;
-                break;  // only check first line per node
-            }
-            if (commonSize == 0) break;
-        }
-
-        if (commonSize > 0 && lastSelLine >= 0) {
-            int sz = commonSize;
-            NodeKind curKind = commonKind;
-            QVector<NodeKind> variants;
-            for (const auto& m : kKindMeta)
-                if (m.size == sz && m.kind != NodeKind::Struct && m.kind != NodeKind::Array)
-                    variants.append(m.kind);
-            int curIdx = variants.indexOf(curKind);
-            if (curIdx >= 0 && variants.size() > 1) {
-                int prevIdx = (curIdx - 1 + variants.size()) % variants.size();
-                int nextIdx = (curIdx + 1) % variants.size();
-                auto kn = [](NodeKind k) {
-                    auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
-                };
-                int colW = 1;
-                for (auto k : variants) colW = qMax(colW, kn(k).size() + 1);
-                auto pad = [&](const QString& s) { return s.leftJustified(colW); };
-
-                const auto& theme = ThemeManager::instance().current();
-                QColor cDim = theme.textMuted, cBright = theme.text, cAccent = theme.indHoverSpan;
-                int count = selIds.size();
-
-                // Title: clear statement of what this is
-                QString tipTitle;
-                if (!allSameKind)
-                    tipTitle = QStringLiteral("Change Type  (%1 bytes \u00D7%2 fields)").arg(sz).arg(count);
-                else if (count > 1)
-                    tipTitle = QStringLiteral("Change Type  (%1 \u00D7%2)").arg(kn(curKind)).arg(count);
-                else
-                    tipTitle = QStringLiteral("Change Type");
-
-                QVector<TipLine> richBody;
-
-                // Row 1: what Left arrow does
-                { TipLine row;
-                  row.append({QStringLiteral(" \u2190 "), cAccent, false, true});
-                  row.append({QStringLiteral("  change to  "), cDim, false, false});
-                  row.append({kn(variants[prevIdx]), cBright, true, false});
-                  richBody.append(row); }
-
-                // Row 2: what Right arrow does
-                { TipLine row;
-                  row.append({QStringLiteral(" \u2192 "), cAccent, false, true});
-                  row.append({QStringLiteral("  change to  "), cDim, false, false});
-                  row.append({kn(variants[nextIdx]), cBright, true, false});
-                  richBody.append(row); }
-
-                // Row 3: Space resize (hex nodes show next size, others show "convert to hex")
-                static constexpr NodeKind hexCycle[] = {
-                    NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
-                    NodeKind::Hex64, NodeKind::Hex128 };
-                { TipLine row;
-                  if (isHexNode(curKind)) {
-                      int hi = -1;
-                      for (int i = 0; i < 5; i++) if (hexCycle[i] == curKind) { hi = i; break; }
-                      if (hi >= 0) {
-                          row.append({QStringLiteral("Spc"), cAccent, false, true});
-                          row.append({QStringLiteral("  resize to  "), cDim, false, false});
-                          row.append({kn(hexCycle[(hi+1)%5]), cBright, true, false});
-                      }
-                  } else {
-                      NodeKind hexEquiv = NodeKind::Hex8;
-                      for (auto hk : hexCycle) if (sizeForKind(hk) == sz) { hexEquiv = hk; break; }
-                      row.append({QStringLiteral("Spc"), cAccent, false, true});
-                      row.append({QStringLiteral("  convert to "), cDim, false, false});
-                      row.append({kn(hexEquiv), cBright, true, false});
-                  }
-                  if (!row.isEmpty()) richBody.append(row); }
-
-                // Row 4: shortcut hints
-                { TipLine row;
-                  row.append({QStringLiteral("P"), cAccent, false, true});
-                  row.append({QStringLiteral(" ptr  "), cDim, false, false});
-                  row.append({QStringLiteral("F"), cAccent, false, true});
-                  row.append({QStringLiteral(" float  "), cDim, false, false});
-                  row.append({QStringLiteral("S"), cAccent, false, true});
-                  row.append({QStringLiteral(" signed  "), cDim, false, false});
-                  row.append({QStringLiteral("U"), cAccent, false, true});
-                  row.append({QStringLiteral(" unsigned"), cDim, false, false});
-                  richBody.append(row); }
-
-                if (!m_arrowTooltip) {
-                    m_arrowTooltip = new RcxTooltip(this);
-                    static_cast<RcxTooltip*>(m_arrowTooltip)->onMouseMove =
-                        [this](QMouseEvent* e) {
-                        QPoint gp = e->globalPosition().toPoint();
-                        QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
-                        m_lastHoverPos = vp;
-                        m_hoverInside = m_sci->viewport()->rect().contains(vp);
-                        applyHoverCursor();
-                    };
-                }
-                auto* tip = static_cast<RcxTooltip*>(m_arrowTooltip);
-                tip->setTheme(theme.backgroundAlt, theme.border,
-                              theme.text, theme.textDim, theme.border);
-                tip->populateRich(tipTitle, richBody, editorFont());
-                // Anchor below the last selected line
-                int nameCol = kFoldCol + m_meta[lastSelLine].depth * kTreeIndent
-                            + m_meta[lastSelLine].effectiveTypeW + kSepWidth;
-                long posName = posFromCol(m_sci, lastSelLine, nameCol);
-                int xMid = (int)m_sci->SendScintilla(
-                    QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posName);
-                int py = (int)m_sci->SendScintilla(
-                    QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, posName);
-                int lh = (int)m_sci->SendScintilla(
-                    QsciScintillaBase::SCI_TEXTHEIGHT, (unsigned long)lastSelLine);
-                tip->showAt(m_sci->viewport()->mapToGlobal(QPoint(xMid, py + lh)));
-            } else {
-                if (m_arrowTooltip) static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
-            }
-        } else {
-            if (m_arrowTooltip) static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
-        }
-    } else {
-        if (m_arrowTooltip) static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
-    }
+    // Dismiss type tooltip on selection change (tooltip is hover-only on command row now)
+    if (m_arrowTooltip) static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
 }
 
 void RcxEditor::setHoverEffects(bool on) {
@@ -2481,48 +2339,14 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool alreadySelected = m_currentSelIds.contains(h.nodeId);
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
-                // ── Click cycle on same node: select → type picker → select → ... ──
-                if (alreadySelected && plain && m_currentSelIds.size() == 1) {
-                    if (h.nodeId == m_clickCycleNodeId && m_clickCycleState == 1) {
-                        // State 1 → open type picker (state 2)
-                        m_clickCycleState = 2;
-                        auto* lm = metaForLine(h.line);
-                        if (lm && lm->nodeIdx >= 0 && sizeForKind(lm->nodeKind) > 0) {
-                            if (m_arrowTooltip)
-                                static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
-                            m_pendingClickNodeId = 0;
-                            return beginInlineEdit(EditTarget::Type, h.line);
-                        }
-                        // Fallback: not a type-editable node, try inline edit
-                        int tLine, tCol; EditTarget t;
-                        if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
-                            m_pendingClickNodeId = 0;
-                            return beginInlineEdit(t, tLine, tCol);
-                        }
-                    } else if (h.nodeId == m_clickCycleNodeId && m_clickCycleState == 2) {
-                        // State 2 → back to tooltip (state 1)
-                        m_clickCycleState = 1;
-                        // Re-select to trigger tooltip via applySelectionOverlay
-                        m_sci->setCursorPosition(h.line, 0);
-                        emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
+                // Click on already-selected node → edit the clicked token
+                // (type column opens picker, name opens rename, value opens value edit)
+                int tLine, tCol; EditTarget t;
+                if (alreadySelected && plain) {
+                    if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                         m_pendingClickNodeId = 0;
-                        return true;
-                    } else {
-                        // Same node, state 0 → advance to 1 (tooltip shown by selection)
-                        m_clickCycleNodeId = h.nodeId;
-                        m_clickCycleState = 1;
-                        int tLine, tCol; EditTarget t;
-                        if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
-                            m_pendingClickNodeId = 0;
-                            return beginInlineEdit(t, tLine, tCol);
-                        }
+                        return beginInlineEdit(t, tLine, tCol);
                     }
-                }
-
-                // Different node or modifier click → reset cycle
-                if (h.nodeId != m_clickCycleNodeId) {
-                    m_clickCycleNodeId = h.nodeId;
-                    m_clickCycleState = 1;  // first select shows tooltip
                 }
 
                 m_dragging = true;
