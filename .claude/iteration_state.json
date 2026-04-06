@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "currentIteration": 211,
+  "currentIteration": 225,
   "totalPlanned": 300,
-  "completedSummary": "211 iterations. All 14 headless tests pass. 70 tests added.",
+  "completedSummary": "225 iterations. All 14 headless tests pass. 79 tests added.",
   "batchLog": [
     {"batch": "1-10", "focus": "keyboard shortcuts + code quality"},
     {"batch": "11-20", "focus": "hex type cycling + navigation"},
@@ -18,18 +18,16 @@
     {"batch": "91-100", "focus": "structSpan perf + JSON round-trip", "testsAdded": 4},
     {"batch": "101-110", "focus": "cycle display + footer size"},
     {"batch": "111-125", "focus": "5 more controller tests", "testsAdded": 5},
-    {"batch": "126", "focus": "type tooltip: selection-driven, multi-select, below"},
-    {"batch": "127-140", "focus": "reorder fields, Ctrl+C address, 5 undo/redo tests", "testsAdded": 5},
-    {"batch": "141-155", "focus": "keycap icons, click cycling, isUnion/isBitfield helpers"},
-    {"batch": "156-166", "focus": "tooltip removal, discoverable context menu shortcuts"},
-    {"batch": "167-176", "focus": "-0.0f fix, forward decls, safety guards, tests", "testsAdded": 5},
-    {"batch": "177-181", "focus": "PageUp/Down, Ctrl+G go-to-offset"},
-    {"batch": "182-186", "focus": "static field dedup, Ctrl+X cut, collapse/expand all"},
-    {"batch": "187-191", "focus": "nullptr display, footer hex+decimal, Copy as C Struct"},
-    {"batch": "192-201", "focus": "Python CFUNCTYPE, dedup prep, 5 generator tests", "testsAdded": 5},
-    {"batch": "202-211", "focus": "lazy childMap sorting in compose (perf for large SDKs)"}
+    {"batch": "126-155", "focus": "tooltip experiments, helpers, shortcuts"},
+    {"batch": "156-166", "focus": "discoverable context menu shortcuts"},
+    {"batch": "167-181", "focus": "-0.0f, forward decls, PageUp/Down, Ctrl+G", "testsAdded": 5},
+    {"batch": "182-191", "focus": "static field dedup, Ctrl+X, collapse all, nullptr, Copy C"},
+    {"batch": "192-201", "focus": "Python CFUNCTYPE, 5 generator tests", "testsAdded": 5},
+    {"batch": "202-211", "focus": "lazy childMap sorting, menu Float/Close removal"},
+    {"batch": "212-221", "focus": "generator prepareChildren dedup (-86 LOC), menu cleanup"},
+    {"batch": "222-225", "focus": "4 controller tests: collapse/expand, nullptr, batch remove", "testsAdded": 4}
   ],
-  "totalTestsAdded": 70,
+  "totalTestsAdded": 79,
   "queue": [],
   "failed": []
 }
