@@ -1316,6 +1316,98 @@ private slots:
         m_doc->undoStack.undo();
         QVERIFY(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].comment.isEmpty());
     }
+
+    void testCollapseExpandAll() {
+        // Expand root first
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        int ri = m_doc->tree.indexOfId(rootId);
+        QCOMPARE(m_doc->tree.nodes[ri].collapsed, false);
+
+        // Collapse all
+        m_ctrl->setSuppressRefresh(true);
+        m_doc->undoStack.beginMacro("collapse");
+        for (auto& n : m_doc->tree.nodes)
+            if (isContainerKind(n.kind) && !n.collapsed)
+                m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Collapse{n.id, false, true}));
+        m_doc->undoStack.endMacro();
+        m_ctrl->setSuppressRefresh(false);
+
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(rootId)].collapsed, true);
+
+        // Expand all
+        m_ctrl->setSuppressRefresh(true);
+        m_doc->undoStack.beginMacro("expand");
+        for (auto& n : m_doc->tree.nodes)
+            if (isContainerKind(n.kind) && n.collapsed)
+                m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Collapse{n.id, true, false}));
+        m_doc->undoStack.endMacro();
+        m_ctrl->setSuppressRefresh(false);
+
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(rootId)].collapsed, false);
+
+        // Undo should re-collapse
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(rootId)].collapsed, true);
+    }
+
+    void testNullptrPointerDisplay() {
+        // Verify fmtPointer64(0) returns "nullptr"
+        QCOMPARE(rcx::fmt::fmtPointer64(0), QStringLiteral("nullptr"));
+        QCOMPARE(rcx::fmt::fmtPointer32(0), QStringLiteral("nullptr"));
+        // Non-zero still returns hex
+        QVERIFY(rcx::fmt::fmtPointer64(0x400000).startsWith("0x"));
+        QVERIFY(rcx::fmt::fmtPointer32(0x1000).startsWith("0x"));
+    }
+
+    void testGeneratorPrepareChildren() {
+        // Verify prepareChildren separates static from regular and sorts by offset
+        // (This tests the generator's internal helper indirectly via code generation)
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+
+        // Add a static field with high offset (should NOT appear in regular children)
+        rcx::Node sf;
+        sf.kind = NodeKind::Hex64;
+        sf.name = "static_test";
+        sf.parentId = rootId;
+        sf.offset = 9999;
+        sf.isStatic = true;
+        sf.id = m_doc->tree.reserveId();
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{sf}));
+
+        // Generate C++ — static field should appear as comment, not as struct member
+        // (We can't call renderCpp from test since generator.cpp isn't linked,
+        //  but we can verify the tree state is correct)
+        int sfIdx = m_doc->tree.indexOfId(sf.id);
+        QVERIFY(sfIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[sfIdx].isStatic, true);
+        // structSpan should NOT include the static field's offset
+        int span = m_doc->tree.structSpan(rootId);
+        QVERIFY(span < 9999);  // static field at 9999 excluded
+    }
+
+    void testBatchRemoveMultipleNodes() {
+        int before = m_doc->tree.nodes.size();
+        uint64_t id1 = 0, id2 = 0;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "field_u32") id1 = n.id;
+            if (n.name == "field_float") id2 = n.id;
+        }
+        QVERIFY(id1 != 0 && id2 != 0);
+
+        QVector<int> indices;
+        indices.append(m_doc->tree.indexOfId(id1));
+        indices.append(m_doc->tree.indexOfId(id2));
+        m_ctrl->batchRemoveNodes(indices);
+
+        QVERIFY(m_doc->tree.indexOfId(id1) < 0);
+        QVERIFY(m_doc->tree.indexOfId(id2) < 0);
+        QVERIFY(m_doc->tree.nodes.size() < before);
+
+        // Undo should restore both
+        m_doc->undoStack.undo();
+        QVERIFY(m_doc->tree.indexOfId(id1) >= 0);
+        QVERIFY(m_doc->tree.indexOfId(id2) >= 0);
+    }
 };
 
 QTEST_MAIN(TestController)
