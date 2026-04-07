@@ -2770,6 +2770,83 @@ private slots:
         QVERIFY2(foundDepth2TreeChar,
                  qPrintable("No depth-2 lines with tree chars found:\n" + result.text));
     }
+    void testPrimitiveArrayElementCountFour() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "S"; root.name = "s"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        rcx::Node arr; arr.kind = rcx::NodeKind::Array;
+        arr.name = "values"; arr.parentId = tree.nodes[ri].id;
+        arr.offset = 0; arr.arrayLen = 4; arr.elementKind = rcx::NodeKind::UInt32;
+        arr.collapsed = false;
+        tree.addNode(arr);
+        rcx::NullProvider prov;
+        auto result = rcx::compose(tree, prov);
+        int elemCount = 0;
+        for (const auto& lm : result.meta)
+            if (lm.isArrayElement) elemCount++;
+        QCOMPARE(elemCount, 4);
+    }
+
+    void testBitfieldMembersThree() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "S"; root.name = "s"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        rcx::Node bf; bf.kind = rcx::NodeKind::Struct;
+        bf.name = "flags"; bf.parentId = tree.nodes[ri].id;
+        bf.classKeyword = QStringLiteral("bitfield");
+        bf.elementKind = rcx::NodeKind::Hex32;
+        bf.offset = 0; bf.collapsed = false;
+        bf.bitfieldMembers = {
+            {QStringLiteral("active"), 0, 1},
+            {QStringLiteral("level"), 1, 3},
+            {QStringLiteral("mode"), 4, 4}
+        };
+        tree.addNode(bf);
+        rcx::NullProvider prov;
+        auto result = rcx::compose(tree, prov);
+        QVERIFY(result.text.contains("active"));
+        QVERIFY(result.text.contains("level"));
+        QVERIFY(result.text.contains("mode"));
+        int memberCount = 0;
+        for (const auto& lm : result.meta)
+            if (lm.isMemberLine) memberCount++;
+        QCOMPARE(memberCount, 3);
+    }
+
+    void testComposeWithComments() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "S"; root.name = "s"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        rcx::Node f; f.kind = rcx::NodeKind::Int32;
+        f.name = "health"; f.parentId = tree.nodes[ri].id;
+        f.offset = 0; f.comment = QStringLiteral("player HP");
+        tree.addNode(f);
+        rcx::NullProvider prov;
+        auto withComments = rcx::compose(tree, prov, 0, false, false, false, false, true);
+        QVERIFY(withComments.text.contains("player HP"));
+        auto withoutComments = rcx::compose(tree, prov, 0, false, false, false, false, false);
+        QVERIFY(!withoutComments.text.contains("player HP"));
+    }
+
+    void testComposeWithBraceWrap() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "S"; root.name = "s"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        rcx::Node f; f.kind = rcx::NodeKind::Int32;
+        f.name = "x"; f.parentId = tree.nodes[ri].id; f.offset = 0;
+        tree.addNode(f);
+        rcx::NullProvider prov;
+        auto result = rcx::compose(tree, prov, 0, false, false, true);
+        // With braceWrap, there should be a line that is just "{"
+        bool foundBrace = false;
+        for (const auto& line : result.text.split('\n'))
+            if (line.trimmed() == QStringLiteral("{")) { foundBrace = true; break; }
+        QVERIFY(foundBrace);
+    }
 };
 
 QTEST_MAIN(TestCompose)

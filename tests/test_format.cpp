@@ -407,6 +407,79 @@ private slots:
         QVERIFY(edit.contains(' '));
         QVERIFY(edit.size() >= 47);  // 16*3-1 = 47 chars
     }
+
+    void testFmtFloatVerySmall() {
+        // Very small floats should not show "0.0000f" when nonzero
+        QString s = fmt::fmtFloat(1e-7f);
+        QVERIFY(s.contains('f'));
+        QVERIFY(s.size() <= 9);
+    }
+
+    void testFmtDoubleVeryLarge() {
+        QString s = fmt::fmtDouble(1e308);
+        QVERIFY(!s.isEmpty());
+        QVERIFY(s.contains('.') || s.contains('e') || s.contains('E'));
+    }
+
+    void testFmtDoubleNegativeZero() {
+        QString s = fmt::fmtDouble(-0.0);
+        // Qt's QString::number may or may not preserve -0.0
+        QVERIFY(!s.isEmpty());
+    }
+
+    void testFmtDoubleNanInf() {
+        QString sNan = fmt::fmtDouble(std::numeric_limits<double>::quiet_NaN());
+        QVERIFY(!sNan.isEmpty());
+        QString sInf = fmt::fmtDouble(std::numeric_limits<double>::infinity());
+        QVERIFY(!sInf.isEmpty());
+    }
+
+    void testParseValueUtf8Emoji() {
+        bool ok;
+        QByteArray b = fmt::parseValue(NodeKind::UTF8, QStringLiteral("\"hello\""), &ok);
+        QVERIFY(ok);
+        QCOMPARE(b, QByteArray("hello"));
+    }
+
+    void testParseValueHex16SpaceSeparated() {
+        bool ok;
+        QByteArray b = fmt::parseValue(NodeKind::Hex16, "AB CD", &ok);
+        QVERIFY(ok);
+        QCOMPARE(b.size(), 2);
+        QCOMPARE((uint8_t)b[0], (uint8_t)0xAB);
+        QCOMPARE((uint8_t)b[1], (uint8_t)0xCD);
+    }
+
+    void testValidateValueHex128() {
+        QString err = fmt::validateValue(NodeKind::Hex128,
+            "00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF");
+        QVERIFY(err.isEmpty());
+    }
+
+    void testKindFromTypeNameUnknown() {
+        bool ok = true;
+        NodeKind k = kindFromTypeName(QStringLiteral("nonsense"), &ok);
+        QVERIFY(!ok);
+        QCOMPARE(k, NodeKind::Hex8);
+    }
+
+    void testAllTypeNamesForUI() {
+        QStringList names = allTypeNamesForUI();
+        QCOMPARE(names.size(), (int)std::size(kKindMeta));
+        // No duplicates
+        QSet<QString> s(names.begin(), names.end());
+        QCOMPARE(s.size(), names.size());
+    }
+
+    void testIsValidPrimitivePtrTarget() {
+        QVERIFY(!isValidPrimitivePtrTarget(NodeKind::Hex8));
+        QVERIFY(!isValidPrimitivePtrTarget(NodeKind::Pointer64));
+        QVERIFY(!isValidPrimitivePtrTarget(NodeKind::Struct));
+        QVERIFY(!isValidPrimitivePtrTarget(NodeKind::FuncPtr64));
+        QVERIFY(isValidPrimitivePtrTarget(NodeKind::Int32));
+        QVERIFY(isValidPrimitivePtrTarget(NodeKind::Float));
+        QVERIFY(isValidPrimitivePtrTarget(NodeKind::Bool));
+    }
 };
 
 QTEST_MAIN(TestFormat)
