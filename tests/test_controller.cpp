@@ -1408,6 +1408,87 @@ private slots:
         QVERIFY(m_doc->tree.indexOfId(id1) >= 0);
         QVERIFY(m_doc->tree.indexOfId(id2) >= 0);
     }
+
+    void testSetNodeValueBool() {
+        // Add a Bool field and write true/false
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        Node boolNode; boolNode.kind = NodeKind::Bool;
+        boolNode.name = "alive"; boolNode.parentId = rootId;
+        boolNode.offset = 50; boolNode.id = m_doc->tree.reserveId();
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{boolNode}));
+        int bi = m_doc->tree.indexOfId(boolNode.id);
+        QVERIFY(bi >= 0);
+        // Write true — should succeed (provider is writable)
+        m_ctrl->setNodeValue(bi, 0, QStringLiteral("true"));
+        // Read back
+        uint8_t val = m_doc->provider->readU8(50);
+        QCOMPARE(val, (uint8_t)1);
+    }
+
+    void testSetNodeValueNegativeInt() {
+        // Write -128 to an Int8 field
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        Node i8; i8.kind = NodeKind::Int8; i8.name = "temp";
+        i8.parentId = rootId; i8.offset = 51; i8.id = m_doc->tree.reserveId();
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{i8}));
+        int idx = m_doc->tree.indexOfId(i8.id);
+        QVERIFY(idx >= 0);
+        m_ctrl->setNodeValue(idx, 0, QStringLiteral("-128"));
+        int8_t val = (int8_t)m_doc->provider->readU8(51);
+        QCOMPARE(val, (int8_t)-128);
+    }
+
+    void testValueHistoryClear() {
+        ValueHistory vh;
+        vh.record(QStringLiteral("1"));
+        vh.record(QStringLiteral("2"));
+        QCOMPARE(vh.uniqueCount(), 2);
+        vh.clear();
+        QCOMPARE(vh.uniqueCount(), 0);
+        QCOMPARE(vh.heatLevel(), 0);
+    }
+
+    void testMultiSelectBatchCycleType() {
+        // Select field_u32 (UInt32) and field_float (Float) — both 4 bytes
+        // Batch change to Hex32 should work on both
+        uint64_t u32Id = 0, floatId = 0;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.name == "field_u32") u32Id = n.id;
+            if (n.name == "field_float") floatId = n.id;
+        }
+        QVERIFY(u32Id != 0 && floatId != 0);
+        QVector<int> indices;
+        indices.append(m_doc->tree.indexOfId(u32Id));
+        indices.append(m_doc->tree.indexOfId(floatId));
+        m_ctrl->batchChangeKind(indices, NodeKind::Hex32);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].kind, NodeKind::Hex32);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(floatId)].kind, NodeKind::Hex32);
+        // Undo
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(u32Id)].kind, NodeKind::UInt32);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(floatId)].kind, NodeKind::Float);
+    }
+
+    void testNodeToJsonOmitsDefaults() {
+        Node n;
+        n.id = 1; n.kind = NodeKind::Int32; n.name = "x";
+        QJsonObject json = n.toJson();
+        // isStatic defaults to false — should NOT be in JSON
+        QVERIFY(!json.contains("isStatic"));
+        // isRelative defaults to false
+        QVERIFY(!json.contains("isRelative"));
+        // ptrDepth defaults to 0
+        QVERIFY(!json.contains("ptrDepth"));
+    }
+
+    void testNodeToJsonIncludesIsRelative() {
+        Node n;
+        n.id = 1; n.kind = NodeKind::Pointer64; n.name = "rva";
+        n.isRelative = true;
+        QJsonObject json = n.toJson();
+        QVERIFY(json.contains("isRelative"));
+        QCOMPARE(json["isRelative"].toBool(), true);
+    }
 };
 
 QTEST_MAIN(TestController)

@@ -1642,6 +1642,80 @@ private slots:
         // Non-null should still be hex
         QVERIFY(rcx::fmt::fmtPointer64(0x1234).startsWith("0x"));
     }
+
+    void testCppHex128InUnion() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "U"; root.name = "u";
+        root.classKeyword = QStringLiteral("union");
+        int ri = tree.addNode(root);
+        rcx::Node f; f.kind = rcx::NodeKind::Hex128;
+        f.name = "big"; f.parentId = tree.nodes[ri].id; f.offset = 0;
+        tree.addNode(f);
+        QString cpp = rcx::renderCpp(tree, tree.nodes[ri].id);
+        QVERIFY(cpp.contains("union U"));
+        QVERIFY(cpp.contains("0x10") || cpp.contains("uint8_t"));
+    }
+
+    void testRustFuncPtrOption() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "VT"; root.name = "vt";
+        int ri = tree.addNode(root);
+        rcx::Node fp; fp.kind = rcx::NodeKind::FuncPtr64;
+        fp.name = "fn"; fp.parentId = tree.nodes[ri].id; fp.offset = 0;
+        tree.addNode(fp);
+        QString rs = rcx::renderRust(tree, tree.nodes[ri].id);
+        QVERIFY(rs.contains("Option<unsafe extern"));
+    }
+
+    void testCSharpVec3() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "V"; root.name = "v";
+        int ri = tree.addNode(root);
+        rcx::Node f; f.kind = rcx::NodeKind::Vec3;
+        f.name = "pos"; f.parentId = tree.nodes[ri].id; f.offset = 0;
+        tree.addNode(f);
+        QString cs = rcx::renderCSharp(tree, tree.nodes[ri].id);
+        QVERIFY(cs.contains("fixed float"));
+        QVERIFY(cs.contains("[3]"));
+    }
+
+    void testDefinesEnumMembers() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "Status"; root.name = "s";
+        root.classKeyword = QStringLiteral("enum");
+        root.enumMembers = {{QStringLiteral("OK"), 0}, {QStringLiteral("ERR"), 1}};
+        tree.addNode(root);
+        QString def = rcx::renderDefines(tree, tree.nodes[0].id);
+        QVERIFY(def.contains("Status_OK 0"));
+        QVERIFY(def.contains("Status_ERR 1"));
+    }
+
+    void testCppStaticFieldComment() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "S"; root.name = "s";
+        int ri = tree.addNode(root);
+        rcx::Node sf; sf.kind = rcx::NodeKind::Hex64;
+        sf.name = "vtable"; sf.parentId = tree.nodes[ri].id;
+        sf.offset = 0; sf.isStatic = true;
+        sf.offsetExpr = QStringLiteral("base + 0x10");
+        tree.addNode(sf);
+        QString cpp = rcx::renderCpp(tree, tree.nodes[ri].id);
+        QVERIFY(cpp.contains("// static:"));
+        QVERIFY(cpp.contains("vtable"));
+    }
+
+    void testCppTypeAliases() {
+        auto tree = makeSimpleStruct();
+        QHash<rcx::NodeKind, QString> aliases;
+        aliases[rcx::NodeKind::Int32] = QStringLiteral("LONG");
+        QString cpp = rcx::renderCpp(tree, tree.nodes[0].id, &aliases);
+        QVERIFY(cpp.contains("LONG"));
+    }
 };
 
 QTEST_MAIN(TestGenerator)
