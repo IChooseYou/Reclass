@@ -2179,15 +2179,24 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 }
             }
 
-            QString main;
-            if (node.parentId == 0)
-                main = rootName;
-            else if (!rootName.isEmpty())
-                main = rootName + "." + node.name;
-            else
-                main = node.name;
+            auto* km = rcx::kindMeta(node.kind);
+            QString typeName = km ? QString::fromLatin1(km->typeName) : QStringLiteral("?");
 
-            QString dimPart = QString("  +0x%1").arg(node.offset, 2, 16, QChar('0'));
+            int selCount = ctrl->selectedIds().size();
+            QString main;
+            if (selCount > 1) {
+                main = QStringLiteral("%1 \u00D7%2").arg(typeName).arg(selCount);
+            } else if (node.parentId == 0) {
+                main = rootName;
+            } else if (!rootName.isEmpty()) {
+                main = rootName + "." + node.name;
+            } else {
+                main = node.name;
+            }
+
+            QString dimPart;
+            if (selCount <= 1)
+                dimPart = QString("  +0x%1").arg(node.offset, 2, 16, QChar('0'));
 
             // Show keyboard hints with variant position for non-container nodes
             {
@@ -2201,7 +2210,8 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                         }
                     }
                     if (total > 1)
-                        dimPart += QStringLiteral("  \u2190\u2192 type (%1/%2)").arg(pos).arg(total);
+                        dimPart += QStringLiteral("  \u2190\u2192 %1 (%2/%3)")
+                            .arg(typeName).arg(pos).arg(total);
                     dimPart += QStringLiteral("  P=ptr F=float S=int U=uint");
                 }
             }

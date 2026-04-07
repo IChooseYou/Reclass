@@ -365,6 +365,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             if (indices.size() > 1) {
                 batchChangeKind(indices, targetKind);
+                int ni = m_doc->tree.indexOfId(
+                    *m_selIds.begin() & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                          | kMemberBit | kMemberSubMask));
+                if (ni >= 0) emit nodeSelected(ni);
                 return;
             }
         }
@@ -380,6 +384,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
         } else {
             changeNodeKind(nodeIdx, targetKind);
         }
+        // Re-emit so status bar updates with new type
+        nodeIdx = m_doc->tree.indexOfId(m_doc->tree.nodes[nodeIdx].id);
+        if (nodeIdx >= 0) emit nodeSelected(nodeIdx);
     });
 
     // Left/Right arrow: cycle through same-size type variants
@@ -408,10 +415,18 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             if (indices.size() > 1) {
                 batchChangeKind(indices, target);
+                // Re-emit so status bar updates with new type
+                int ni = m_doc->tree.indexOfId(
+                    *m_selIds.begin() & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                          | kMemberBit | kMemberSubMask));
+                if (ni >= 0) emit nodeSelected(ni);
                 return;
             }
         }
         changeNodeKind(nodeIdx, target);
+        // Re-emit so status bar updates with new type after ←→
+        nodeIdx = m_doc->tree.indexOfId(m_doc->tree.nodes[nodeIdx].id);
+        if (nodeIdx >= 0) emit nodeSelected(nodeIdx);
     });
 
     // Insert key shortcut
