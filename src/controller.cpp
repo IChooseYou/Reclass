@@ -3403,9 +3403,8 @@ void RcxController::batchChangeKind(const QVector<int>& nodeIndices, NodeKind ne
     idSet = m_doc->tree.normalizePreferDescendants(idSet);
     if (idSet.isEmpty()) return;
 
-    // Clear selection before batch change
-    m_selIds.clear();
-    m_anchorLine = -1;
+    // Preserve selection across batch change so user can keep pressing ←→
+    QSet<uint64_t> savedSel = m_selIds;
 
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QString("Change type of %1 nodes").arg(idSet.size()));
@@ -3415,6 +3414,9 @@ void RcxController::batchChangeKind(const QVector<int>& nodeIndices, NodeKind ne
     }
     m_doc->undoStack.endMacro();
     m_suppressRefresh = false;
+
+    // Restore selection (node IDs are preserved across kind changes)
+    m_selIds = savedSel;
     refresh();
 }
 
