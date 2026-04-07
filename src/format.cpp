@@ -115,6 +115,8 @@ QString fmtFloat(float v) {
     return v < 0 ? QStringLiteral("-99999+f") : QStringLiteral("99999+f");
 }
 QString fmtDouble(double v) {
+    if (std::isnan(v)) return QStringLiteral("NaN");
+    if (std::isinf(v)) return v > 0 ? QStringLiteral("inf") : QStringLiteral("-inf");
     QString s = QString::number(v, 'g', 6);
     if (!s.contains('.') && !s.contains('e') && !s.contains('E'))
         s += QStringLiteral(".0");

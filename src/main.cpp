@@ -3383,7 +3383,6 @@ void MainWindow::editTheme() {
     }
 }
 
-// TODO: when adding more and more options, this func becomes very clunky. Fix
 void MainWindow::showOptionsDialog() { showOptionsDialog(-1); }
 
 void MainWindow::showOptionsDialog(int initialPage) {

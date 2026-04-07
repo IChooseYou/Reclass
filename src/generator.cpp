@@ -187,17 +187,6 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
 
     auto [children, staticIdxs] = ctx.prepareChildren(structId);
 
-    // Deduplicate field names (append _2, _3, etc. for duplicates)
-    QHash<QString, int> nameCount;
-    auto uniqueName = [&](const QString& raw) -> QString {
-        QString name = sanitizeIdent(raw.isEmpty()
-            ? QStringLiteral("field_%1").arg(0, 2, 16, QChar('0')) : raw);
-        int& count = nameCount[name];
-        count++;
-        return (count > 1) ? name + QStringLiteral("_%1").arg(count) : name;
-    };
-    Q_UNUSED(uniqueName)  // used in future dedup pass
-
     // Helper: emit a padding/hex run as a single collapsed byte array
     auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
@@ -1091,8 +1080,7 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = QStringLiteral("        ");  // 2 levels for inside _fields_
 
-    auto [children, staticIdxs_] = ctx.prepareChildren(structId);
-    Q_UNUSED(staticIdxs_)
+    auto [children, staticIdxs] = ctx.prepareChildren(structId);
 
     auto emitPadField = [&](int relOffset, int size) {
         if (size <= 0) return;
@@ -1302,7 +1290,15 @@ static void emitPythonStruct(GenContext& ctx, uint64_t structId) {
 
     emitPythonStructBody(ctx, structId, isUnion, 0);
 
-    ctx.output += QStringLiteral("    ]\n\n");
+    ctx.output += QStringLiteral("    ]\n");
+
+    // Emit static field comments
+    for (int si : ctx.prepareChildren(structId).second) {
+        const Node& sf = ctx.tree.nodes[si];
+        ctx.output += QStringLiteral("    # static: %1 %2 @ %3\n")
+            .arg(pyTypeName(sf.kind), sanitizeIdent(sf.name), sf.offsetExpr);
+    }
+    ctx.output += QStringLiteral("\n");
 
     ctx.visiting.remove(structId);
 }
