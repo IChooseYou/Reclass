@@ -1123,6 +1123,96 @@ private slots:
         // Static field at offset 1000 should NOT inflate structSpan
         QCOMPARE(tree.structSpan(rootId), 4); // just the UInt32
     }
+
+    void testSubtreeIndices() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+        rcx::Node c1; c1.kind = rcx::NodeKind::Int32; c1.parentId = rootId;
+        tree.addNode(c1);
+        rcx::Node c2; c2.kind = rcx::NodeKind::Float; c2.parentId = rootId;
+        tree.addNode(c2);
+        auto sub = tree.subtreeIndices(rootId);
+        QCOMPARE(sub.size(), 3);  // root + 2 children
+    }
+
+    void testAddNodeAutoId() {
+        rcx::NodeTree tree;
+        rcx::Node n1; n1.id = 0;  // 0 = auto-assign
+        int i1 = tree.addNode(n1);
+        rcx::Node n2; n2.id = 0;
+        int i2 = tree.addNode(n2);
+        QVERIFY(tree.nodes[i1].id != tree.nodes[i2].id);
+        QVERIFY(tree.nodes[i1].id > 0);
+        QVERIFY(tree.nodes[i2].id > 0);
+    }
+
+    void testReserveIdMonotonic() {
+        rcx::NodeTree tree;
+        uint64_t a = tree.reserveId();
+        uint64_t b = tree.reserveId();
+        uint64_t c = tree.reserveId();
+        QVERIFY(b > a);
+        QVERIFY(c > b);
+    }
+
+    void testChildrenOfEmpty() {
+        rcx::NodeTree tree;
+        auto kids = tree.childrenOf(999);
+        QCOMPARE(kids.size(), 0);
+    }
+
+    void testIndexOfIdNotFound() {
+        rcx::NodeTree tree;
+        rcx::Node n; tree.addNode(n);
+        QCOMPARE(tree.indexOfId(99999), -1);
+    }
+
+    void testNodeByteSizeUtf8() {
+        rcx::Node n;
+        n.kind = rcx::NodeKind::UTF8;
+        n.strLen = 32;
+        QCOMPARE(n.byteSize(), 32);
+    }
+
+    void testNodeByteSizeUtf16() {
+        rcx::Node n;
+        n.kind = rcx::NodeKind::UTF16;
+        n.strLen = 16;
+        QCOMPARE(n.byteSize(), 32);  // 16 * 2
+    }
+
+    void testNodeByteSizeArray() {
+        rcx::Node n;
+        n.kind = rcx::NodeKind::Array;
+        n.elementKind = rcx::NodeKind::Int32;
+        n.arrayLen = 10;
+        QCOMPARE(n.byteSize(), 40);  // 10 * 4
+    }
+
+    void testNodeByteSizeBitfield() {
+        rcx::Node n;
+        n.kind = rcx::NodeKind::Struct;
+        n.classKeyword = QStringLiteral("bitfield");
+        n.elementKind = rcx::NodeKind::Hex32;
+        QCOMPARE(n.byteSize(), 4);  // container size
+    }
+
+    void testHelperFunctions() {
+        // Batch test all the inline helpers
+        QVERIFY(rcx::isHexNode(rcx::NodeKind::Hex8));
+        QVERIFY(rcx::isHexNode(rcx::NodeKind::Hex128));
+        QVERIFY(!rcx::isHexNode(rcx::NodeKind::Int32));
+        QVERIFY(rcx::isVectorKind(rcx::NodeKind::Vec2));
+        QVERIFY(rcx::isVectorKind(rcx::NodeKind::Vec4));
+        QVERIFY(!rcx::isVectorKind(rcx::NodeKind::Float));
+        QVERIFY(rcx::isMatrixKind(rcx::NodeKind::Mat4x4));
+        QVERIFY(!rcx::isMatrixKind(rcx::NodeKind::Vec4));
+        QVERIFY(rcx::isFuncPtr(rcx::NodeKind::FuncPtr32));
+        QVERIFY(rcx::isFuncPtr(rcx::NodeKind::FuncPtr64));
+        QVERIFY(!rcx::isFuncPtr(rcx::NodeKind::Pointer64));
+    }
 };
 
 QTEST_MAIN(TestCore)
