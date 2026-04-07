@@ -2189,9 +2189,22 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
             QString dimPart = QString("  +0x%1").arg(node.offset, 2, 16, QChar('0'));
 
-            // Show keyboard hints for all non-container nodes
-            if (sizeForKind(node.kind) > 0)
-                dimPart += QStringLiteral("  \u2190\u2192=cycle type  P=ptr F=float S=int U=uint");
+            // Show keyboard hints with variant position for non-container nodes
+            {
+                int sz = sizeForKind(node.kind);
+                if (sz > 0) {
+                    int pos = 0, total = 0;
+                    for (const auto& m : rcx::kKindMeta) {
+                        if (m.size == sz && !rcx::isContainerKind(m.kind)) {
+                            total++;
+                            if (m.kind == node.kind) pos = total;
+                        }
+                    }
+                    if (total > 1)
+                        dimPart += QStringLiteral("  \u2190\u2192 type (%1/%2)").arg(pos).arg(total);
+                    dimPart += QStringLiteral("  P=ptr F=float S=int U=uint");
+                }
+            }
 
             auto* ap = findActiveSplitPane();
             if (ap && ap->viewMode == VM_Rendered)
