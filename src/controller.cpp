@@ -353,6 +353,22 @@ void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::quickTypeChangeRequested,
             this, [this](int nodeIdx, NodeKind targetKind) {
         if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+
+        // Apply to ALL selected nodes when multi-selected
+        if (m_selIds.size() > 1) {
+            QVector<int> indices;
+            for (uint64_t sid : m_selIds) {
+                uint64_t nid = sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                       | kMemberBit | kMemberSubMask);
+                int ni = m_doc->tree.indexOfId(nid);
+                if (ni >= 0) indices.append(ni);
+            }
+            if (indices.size() > 1) {
+                batchChangeKind(indices, targetKind);
+                return;
+            }
+        }
+
         const auto& node = m_doc->tree.nodes[nodeIdx];
         if (isHexNode(targetKind) && isHexNode(node.kind)) {
             int curSz = sizeForKind(node.kind);
@@ -372,17 +388,30 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
         NodeKind cur = m_doc->tree.nodes[nodeIdx].kind;
         int sz = sizeForKind(cur);
-        // Build list of same-size types
         QVector<NodeKind> variants;
-        for (const auto& m : kKindMeta) {
-            if (m.size == sz && m.kind != NodeKind::Struct && m.kind != NodeKind::Array)
-                variants.append(m.kind);
-        }
+        for (const auto& m : kKindMeta)
+            if (m.size == sz && !isContainerKind(m.kind)) variants.append(m.kind);
         if (variants.size() <= 1) return;
         int idx = variants.indexOf(cur);
         if (idx < 0) return;
-        int next = (idx + direction + variants.size()) % variants.size();
-        changeNodeKind(nodeIdx, variants[next]);
+        NodeKind target = variants[(idx + direction + variants.size()) % variants.size()];
+
+        // Apply to ALL selected nodes of the same size
+        if (m_selIds.size() > 1) {
+            QVector<int> indices;
+            for (uint64_t sid : m_selIds) {
+                uint64_t nid = sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                       | kMemberBit | kMemberSubMask);
+                int ni = m_doc->tree.indexOfId(nid);
+                if (ni >= 0 && sizeForKind(m_doc->tree.nodes[ni].kind) == sz)
+                    indices.append(ni);
+            }
+            if (indices.size() > 1) {
+                batchChangeKind(indices, target);
+                return;
+            }
+        }
+        changeNodeKind(nodeIdx, target);
     });
 
     // Insert key shortcut
