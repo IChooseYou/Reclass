@@ -1246,15 +1246,22 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
                 cmd::Rename{node.id, node.name, autoName}));
         }
 
-        // Insert hex nodes to fill the gap (largest first for alignment)
+        // Insert hex nodes to fill the gap.
+        // When shrinking between hex sizes (hex→smaller hex), use same-size
+        // padding so the cycle is reversible (join consumes exact pairs).
+        // For non-hex conversions, use largest-first for compactness.
+        bool hexToHex = isHexNode(node.kind) && isHexNode(newKind);
         int padOffset = baseOffset;
         while (gap > 0) {
             NodeKind padKind;
             int padSize;
-            if (gap >= 8)      { padKind = NodeKind::Hex64; padSize = 8; }
-            else if (gap >= 4) { padKind = NodeKind::Hex32; padSize = 4; }
-            else if (gap >= 2) { padKind = NodeKind::Hex16; padSize = 2; }
-            else               { padKind = NodeKind::Hex8;  padSize = 1; }
+            if (hexToHex) {
+                padKind = newKind;
+                padSize = newSize;
+            } else if (gap >= 8) { padKind = NodeKind::Hex64; padSize = 8; }
+            else if (gap >= 4)   { padKind = NodeKind::Hex32; padSize = 4; }
+            else if (gap >= 2)   { padKind = NodeKind::Hex16; padSize = 2; }
+            else                 { padKind = NodeKind::Hex8;  padSize = 1; }
 
             insertNode(parentId, padOffset, padKind,
                        QString("pad_%1").arg(padOffset, 2, 16, QChar('0')));
@@ -2243,30 +2250,38 @@ void RcxController::hideHexToolbar() {
 void RcxController::joinHexNodes(uint64_t nodeId, NodeKind targetKind) {
     int ni = m_doc->tree.indexOfId(nodeId);
     if (ni < 0) return;
-    const auto& node = m_doc->tree.nodes[ni];
-    int curSz = sizeForKind(node.kind);
+    // Save fields by value — references invalidate after tree mutations
+    const int origOffset = m_doc->tree.nodes[ni].offset;
+    const uint64_t origParentId = m_doc->tree.nodes[ni].parentId;
+    const QString origName = m_doc->tree.nodes[ni].name;
+    int curSz = sizeForKind(m_doc->tree.nodes[ni].kind);
     int tgtSz = sizeForKind(targetKind);
     if (tgtSz <= curSz) return;
 
-    // Collect adjacent hex nodes by byte range (any hex kind, not just same)
+    // Collect adjacent hex nodes by byte range (any hex kind)
     QVector<int> mergeIndices;
     mergeIndices.append(ni);
-    uint64_t parentId = node.parentId;
     int accumulated = curSz;
-    int nextOff = node.offset + curSz;
-    for (int i = ni + 1; i < m_doc->tree.nodes.size() && accumulated < tgtSz; i++) {
-        const auto& sib = m_doc->tree.nodes[i];
-        if (sib.parentId != parentId) break;
-        if (sib.offset != nextOff) break;
-        if (!isHexNode(sib.kind)) break;
-        int sibSz = sizeForKind(sib.kind);
-        mergeIndices.append(i);
+    int nextOff = origOffset + curSz;
+    // Repeatedly scan for the node at exactly nextOff
+    while (accumulated < tgtSz) {
+        int found = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const auto& sib = m_doc->tree.nodes[i];
+            if (sib.parentId == origParentId && sib.offset == nextOff && isHexNode(sib.kind)) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) break;
+        int sibSz = sizeForKind(m_doc->tree.nodes[found].kind);
+        mergeIndices.append(found);
         accumulated += sibSz;
         nextOff += sibSz;
     }
     if (accumulated < tgtSz) {
         emit statusHint(QStringLiteral("Cannot resize: need %1 bytes at +0x%2, only %3 available")
-            .arg(tgtSz).arg(QString::number(node.offset, 16).toUpper()).arg(accumulated));
+            .arg(tgtSz).arg(QString::number(origOffset, 16).toUpper()).arg(accumulated));
         return;
     }
 
@@ -2287,12 +2302,12 @@ void RcxController::joinHexNodes(uint64_t nodeId, NodeKind targetKind) {
             cmd::Remove{m_doc->tree.nodes[idx].id, subtree, {}}));
     }
 
-    // Insert one joined node
+    // Insert one joined node (use saved values — tree was mutated above)
     Node joined;
     joined.kind = targetKind;
-    joined.name = node.name;
-    joined.parentId = parentId;
-    joined.offset = node.offset;
+    joined.name = origName;
+    joined.parentId = origParentId;
+    joined.offset = origOffset;
     joined.id = m_doc->tree.reserveId();
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{joined, {}}));
 

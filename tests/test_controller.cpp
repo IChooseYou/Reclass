@@ -1574,6 +1574,291 @@ private slots:
         QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(hexId)].kind, NodeKind::Hex64);
         QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(h2.id)].kind, NodeKind::Hex64);
     }
+
+    // ── Space hex resize stress tests ──
+
+    void testSpaceCycleFullCircle() {
+        // Create a clean tree with a single hex64 at offset 0
+        rcx::NodeTree tree;
+        tree.baseAddress = 0;
+        rcx::Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "Test"; root.name = "t"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h; h.kind = NodeKind::Hex64; h.name = "field";
+        h.parentId = rootId; h.offset = 0;
+        int hi = tree.addNode(h);
+        uint64_t origId = tree.nodes[hi].id;
+
+        // Setup controller with this tree
+        auto doc = new RcxDocument();
+        doc->tree = tree;
+        QByteArray buf(64, '\0');
+        doc->provider = std::make_unique<BufferProvider>(buf);
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        // Verify initial state
+        QCOMPARE(doc->tree.nodes[doc->tree.indexOfId(origId)].kind, NodeKind::Hex64);
+        QCOMPARE(doc->tree.nodes[doc->tree.indexOfId(origId)].offset, 0);
+
+        // Step 1: hex64 → hex8 (shrink)
+        int ni = doc->tree.indexOfId(origId);
+        ctrl->changeNodeKind(ni, NodeKind::Hex8);
+        ni = doc->tree.indexOfId(origId);
+        QVERIFY2(ni >= 0, "Node ID should survive shrink");
+        QCOMPARE(doc->tree.nodes[ni].kind, NodeKind::Hex8);
+        QCOMPARE(doc->tree.nodes[ni].offset, 0);
+
+        // Count total children — should be more than 1 (hex8 + padding)
+        auto kids = doc->tree.childrenOf(rootId);
+        QVERIFY2(kids.size() > 1, qPrintable(QString("Expected padding nodes, got %1 kids").arg(kids.size())));
+
+        // Verify no overlapping offsets
+        QSet<int> offsets;
+        int totalBytes = 0;
+        for (int ci : kids) {
+            const auto& n = doc->tree.nodes[ci];
+            QVERIFY2(!offsets.contains(n.offset),
+                qPrintable(QString("OVERLAP at offset %1").arg(n.offset)));
+            offsets.insert(n.offset);
+            totalBytes += sizeForKind(n.kind);
+        }
+        QCOMPARE(totalBytes, 8);  // original 8 bytes preserved
+
+        // Step 2: hex8 → hex16 (join with adjacent hex8)
+        ni = doc->tree.indexOfId(origId);
+        ctrl->joinHexNodes(origId, NodeKind::Hex16);
+        // origId is gone — find the new node at offset 0
+        uint64_t newId = 0;
+        for (const auto& n : doc->tree.nodes)
+            if (n.parentId == rootId && n.offset == 0) { newId = n.id; break; }
+        QVERIFY2(newId != 0, "Should find joined node at offset 0");
+        QCOMPARE(doc->tree.nodes[doc->tree.indexOfId(newId)].kind, NodeKind::Hex16);
+
+        // Step 3: hex16 → hex32
+        ctrl->joinHexNodes(newId, NodeKind::Hex32);
+        newId = 0;
+        for (const auto& n : doc->tree.nodes)
+            if (n.parentId == rootId && n.offset == 0) { newId = n.id; break; }
+        QVERIFY2(newId != 0, "Should find joined node at offset 0");
+        QCOMPARE(doc->tree.nodes[doc->tree.indexOfId(newId)].kind, NodeKind::Hex32);
+
+        // Step 4: hex32 → hex64
+        ctrl->joinHexNodes(newId, NodeKind::Hex64);
+        newId = 0;
+        for (const auto& n : doc->tree.nodes)
+            if (n.parentId == rootId && n.offset == 0) { newId = n.id; break; }
+        QVERIFY2(newId != 0, "Should find joined node at offset 0");
+        QCOMPARE(doc->tree.nodes[doc->tree.indexOfId(newId)].kind, NodeKind::Hex64);
+
+        // Verify we're back to 1 child
+        kids = doc->tree.childrenOf(rootId);
+        QCOMPARE(kids.size(), 1);
+        QCOMPARE(doc->tree.nodes[kids[0]].offset, 0);
+        QCOMPARE(sizeForKind(doc->tree.nodes[kids[0]].kind), 8);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    void testSpaceNoOverlapAfterGrow() {
+        // hex64 at +0, hex32 at +8 (different kinds, adjacent)
+        // Join hex64+hex32 should NOT create overlap
+        rcx::NodeTree tree;
+        tree.baseAddress = 0;
+        rcx::Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "T"; root.name = "t"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h1; h1.kind = NodeKind::Hex64; h1.name = "a";
+        h1.parentId = rootId; h1.offset = 0;
+        tree.addNode(h1);
+        rcx::Node h2; h2.kind = NodeKind::Hex32; h2.name = "b";
+        h2.parentId = rootId; h2.offset = 8;
+        tree.addNode(h2);
+        rcx::Node h3; h3.kind = NodeKind::Hex32; h3.name = "c";
+        h3.parentId = rootId; h3.offset = 12;
+        tree.addNode(h3);
+
+        // Total: 16 bytes at +0..+15
+
+        auto doc = new RcxDocument();
+        doc->tree = tree;
+        QByteArray buf(64, '\0');
+        doc->provider = std::make_unique<BufferProvider>(buf);
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        // Try to join h1 (hex64 @0) with neighbors to make... well,
+        // joinHexNodes needs tgtSz > curSz. No hex kind > 8 except hex128.
+        // Skip this — test joining hex32+hex32 → hex64 instead
+        uint64_t h2Id = doc->tree.nodes[2].id;  // hex32 at +8
+        uint64_t h3Id = doc->tree.nodes[3].id;  // hex32 at +12
+
+        // Verify no overlap before
+        auto kids = doc->tree.childrenOf(rootId);
+        QSet<int> offsBefore;
+        for (int ci : kids) {
+            QVERIFY2(!offsBefore.contains(doc->tree.nodes[ci].offset),
+                "Overlap before join");
+            offsBefore.insert(doc->tree.nodes[ci].offset);
+        }
+
+        // Join hex32@8 + hex32@12 → hex64@8
+        ctrl->joinHexNodes(h2Id, NodeKind::Hex64);
+
+        // Verify no overlap after
+        kids = doc->tree.childrenOf(rootId);
+        QSet<int> offsAfter;
+        for (int ci : kids) {
+            QVERIFY2(!offsAfter.contains(doc->tree.nodes[ci].offset),
+                qPrintable(QString("OVERLAP at +%1 after join").arg(doc->tree.nodes[ci].offset)));
+            offsAfter.insert(doc->tree.nodes[ci].offset);
+        }
+
+        // Should now be: hex64@0 + hex64@8 = 2 nodes
+        QCOMPARE(kids.size(), 2);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    void testSpaceSelectionSurvivesJoin() {
+        rcx::NodeTree tree;
+        tree.baseAddress = 0;
+        rcx::Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "T"; root.name = "t"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h1; h1.kind = NodeKind::Hex32; h1.name = "a";
+        h1.parentId = rootId; h1.offset = 0;
+        int i1 = tree.addNode(h1);
+        rcx::Node h2; h2.kind = NodeKind::Hex32; h2.name = "b";
+        h2.parentId = rootId; h2.offset = 4;
+        tree.addNode(h2);
+
+        auto doc = new RcxDocument();
+        doc->tree = tree;
+        QByteArray buf(64, '\0');
+        doc->provider = std::make_unique<BufferProvider>(buf);
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        // Select the first node
+        uint64_t h1Id = doc->tree.nodes[i1].id;
+        ctrl->handleNodeClick(ctrl->primaryEditor(), 1, h1Id, Qt::NoModifier);
+        QVERIFY(ctrl->selectedIds().contains(h1Id));
+
+        // Join hex32@0 + hex32@4 → hex64@0
+        ctrl->joinHexNodes(h1Id, NodeKind::Hex64);
+
+        // Selection should have transferred to the new joined node
+        QVERIFY2(!ctrl->selectedIds().isEmpty(),
+            "Selection should not be empty after join");
+        // The new node should be at offset 0 with kind Hex64
+        uint64_t selId = *ctrl->selectedIds().begin();
+        int selIdx = doc->tree.indexOfId(selId);
+        QVERIFY(selIdx >= 0);
+        QCOMPARE(doc->tree.nodes[selIdx].kind, NodeKind::Hex64);
+        QCOMPARE(doc->tree.nodes[selIdx].offset, 0);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    void testSpaceRapidCycleNoCorruption() {
+        // Simulate pressing Space 20 times rapidly on a hex64
+        // The tree should not have overlapping offsets at any point
+        rcx::NodeTree tree;
+        tree.baseAddress = 0;
+        rcx::Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "T"; root.name = "t"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h; h.kind = NodeKind::Hex64; h.name = "field";
+        h.parentId = rootId; h.offset = 0;
+        tree.addNode(h);
+
+        auto doc = new RcxDocument();
+        doc->tree = tree;
+        QByteArray buf(64, '\0');
+        doc->provider = std::make_unique<BufferProvider>(buf);
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        // The hex cycle: 8→16→32→64→8→16→...
+        static constexpr NodeKind hexCycle[] = {
+            NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32, NodeKind::Hex64 };
+        int curCycleIdx = 3;  // start at hex64
+
+        for (int press = 0; press < 20; press++) {
+            int nextCycleIdx = (curCycleIdx + 1) % 4;
+            NodeKind target = hexCycle[nextCycleIdx];
+
+            // Find the node at offset 0
+            uint64_t nodeId = 0;
+            for (const auto& n : doc->tree.nodes)
+                if (n.parentId == rootId && n.offset == 0 && isHexNode(n.kind))
+                    { nodeId = n.id; break; }
+            QVERIFY2(nodeId != 0, qPrintable(QString("No hex node at offset 0 on press %1").arg(press)));
+
+            int ni = doc->tree.indexOfId(nodeId);
+            NodeKind curKind = doc->tree.nodes[ni].kind;
+            int curSz = sizeForKind(curKind);
+            int tgtSz = sizeForKind(target);
+
+            if (tgtSz > curSz)
+                ctrl->joinHexNodes(nodeId, target);
+            else if (tgtSz < curSz)
+                ctrl->changeNodeKind(ni, target);
+
+            // Verify NO overlapping offsets
+            doc->tree.invalidateIdCache();
+            auto kids = doc->tree.childrenOf(rootId);
+            QMap<int, NodeKind> offMap;
+            for (int ci : kids) {
+                const auto& n = doc->tree.nodes[ci];
+                if (offMap.contains(n.offset)) {
+                    QString dump;
+                    for (int di : kids)
+                        dump += QStringLiteral("  +%1 %2(%3)\n")
+                            .arg(doc->tree.nodes[di].offset)
+                            .arg(kindToString(doc->tree.nodes[di].kind))
+                            .arg(sizeForKind(doc->tree.nodes[di].kind));
+                    QVERIFY2(false, qPrintable(
+                        QStringLiteral("OVERLAP at +%1 on press %2: %3 vs %4\nAll nodes:\n%5")
+                            .arg(n.offset).arg(press)
+                            .arg(kindToString(offMap.value(n.offset, NodeKind::Hex8)))
+                            .arg(kindToString(n.kind)).arg(dump)));
+                }
+                offMap[n.offset] = n.kind;
+            }
+
+            // Verify total bytes = 8 (always)
+            int total = 0;
+            for (int ci : kids)
+                total += sizeForKind(doc->tree.nodes[ci].kind);
+            QCOMPARE(total, 8);
+
+            curCycleIdx = nextCycleIdx;
+        }
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
 };
 
 QTEST_MAIN(TestController)

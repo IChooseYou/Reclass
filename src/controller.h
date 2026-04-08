@@ -197,7 +197,9 @@ private:
     QPointer<HexToolbarPopup> m_hexToolbar;
     void showHexToolbar(RcxEditor* editor, int nodeIdx);
     void hideHexToolbar();
+public:
     void joinHexNodes(uint64_t nodeId, NodeKind targetKind);
+private:
 
     // ── Auto-refresh state ──
     using PageMap = QHash<uint64_t, QByteArray>;
