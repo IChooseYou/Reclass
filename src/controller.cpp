@@ -15,6 +15,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QMenu>
+#include <QWidgetAction>
 #include <QInputDialog>
 #include <QDialog>
 #include <QVBoxLayout>
@@ -2547,13 +2548,52 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 }
                 int ci = variants.indexOf(commonKind);
                 if (ci >= 0 && variants.size() > 1) {
-                    auto* nm = kindMeta(variants[(ci + 1) % variants.size()]);
-                    menu.addAction(QStringLiteral("Next Type: %1 (%2/%3)\t\u2192")
-                        .arg(QString::fromLatin1(nm->typeName))
-                        .arg(ci + 1).arg(variants.size()),
-                        [this, collectIndices, variants, ci]() {
-                            batchChangeKind(collectIndices(), variants[(ci + 1) % variants.size()]);
-                        });
+                    auto kn = [](NodeKind k) {
+                        auto* m = kindMeta(k);
+                        return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
+                    };
+                    int prevI = (ci - 1 + variants.size()) % variants.size();
+                    int nextI = (ci + 1) % variants.size();
+                    const auto& theme = ThemeManager::instance().current();
+
+                    auto* row = new QWidget;
+                    auto* hl = new QHBoxLayout(row);
+                    hl->setContentsMargins(8, 2, 8, 2);
+                    hl->setSpacing(0);
+                    QString btnCss = QStringLiteral(
+                        "QPushButton { background: transparent; color: %1;"
+                        " border: none; padding: 4px 8px; text-align: left; }"
+                        "QPushButton:hover { background: %2; color: %3; }")
+                        .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
+                    auto* prevBtn = new QPushButton(
+                        QStringLiteral("\u2190  %1").arg(kn(variants[prevI])), row);
+                    prevBtn->setCursor(Qt::PointingHandCursor);
+                    prevBtn->setStyleSheet(btnCss);
+                    hl->addWidget(prevBtn);
+                    auto* label = new QLabel(
+                        QStringLiteral("  %1 (%2/%3)  ")
+                            .arg(kn(commonKind)).arg(ci + 1).arg(variants.size()), row);
+                    label->setAlignment(Qt::AlignCenter);
+                    label->setStyleSheet(QStringLiteral("color: %1; padding: 4px 4px;")
+                        .arg(theme.text.name()));
+                    hl->addWidget(label);
+                    auto* nextBtn = new QPushButton(
+                        QStringLiteral("%1  \u2192").arg(kn(variants[nextI])), row);
+                    nextBtn->setCursor(Qt::PointingHandCursor);
+                    nextBtn->setStyleSheet(btnCss);
+                    nextBtn->setLayoutDirection(Qt::RightToLeft);
+                    hl->addWidget(nextBtn);
+                    auto* wa = new QWidgetAction(&menu);
+                    wa->setDefaultWidget(row);
+                    menu.addAction(wa);
+                    connect(prevBtn, &QPushButton::clicked, &menu, [this, &menu, collectIndices, variants, prevI]() {
+                        menu.close();
+                        batchChangeKind(collectIndices(), variants[prevI]);
+                    });
+                    connect(nextBtn, &QPushButton::clicked, &menu, [this, &menu, collectIndices, variants, nextI]() {
+                        menu.close();
+                        batchChangeKind(collectIndices(), variants[nextI]);
+                    });
                 }
                 // "Resize" for multi-select hex nodes
                 if (isHexNode(commonKind)) {
@@ -2902,7 +2942,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // ── Quick-convert + discoverable shortcuts ──
         bool addedQuickConvert = false;
 
-        // "Next Type" shows what → arrow does (discoverable!)
+        // "← prev | current (N/M) | next →" type cycling row
         {
             int sz = sizeForKind(node.kind);
             if (sz > 0) {
@@ -2917,13 +2957,68 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 }
                 int ci = variants.indexOf(node.kind);
                 if (ci >= 0 && variants.size() > 1) {
-                    auto* nextMeta = kindMeta(variants[(ci + 1) % variants.size()]);
-                    menu.addAction(QStringLiteral("Next Type: %1 (%2/%3)\t\u2192")
-                        .arg(QString::fromLatin1(nextMeta->typeName))
-                        .arg(ci + 1).arg(variants.size()),
-                        [this, nodeIdx, variants, ci]() {
-                            changeNodeKind(nodeIdx, variants[(ci + 1) % variants.size()]);
-                        });
+                    auto kn = [](NodeKind k) {
+                        auto* m = kindMeta(k);
+                        return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
+                    };
+                    int prevI = (ci - 1 + variants.size()) % variants.size();
+                    int nextI = (ci + 1) % variants.size();
+                    const auto& theme = ThemeManager::instance().current();
+
+                    auto* row = new QWidget;
+                    auto* hl = new QHBoxLayout(row);
+                    hl->setContentsMargins(8, 2, 8, 2);
+                    hl->setSpacing(0);
+
+                    // Shared button style
+                    QFont btnFont = row->font();
+                    btnFont.setPointSize(btnFont.pointSize());
+                    QString btnCss = QStringLiteral(
+                        "QPushButton { background: transparent; color: %1;"
+                        " border: none; padding: 4px 8px; text-align: left; }"
+                        "QPushButton:hover { background: %2; color: %3; }")
+                        .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
+
+                    // ← prev button
+                    auto* prevBtn = new QPushButton(
+                        QStringLiteral("\u2190  %1").arg(kn(variants[prevI])), row);
+                    prevBtn->setFont(btnFont);
+                    prevBtn->setCursor(Qt::PointingHandCursor);
+                    prevBtn->setStyleSheet(btnCss);
+                    hl->addWidget(prevBtn);
+
+                    // Center label: current (pos/total)
+                    auto* label = new QLabel(
+                        QStringLiteral("  %1 (%2/%3)  ")
+                            .arg(kn(node.kind)).arg(ci + 1).arg(variants.size()), row);
+                    label->setFont(btnFont);
+                    label->setAlignment(Qt::AlignCenter);
+                    label->setStyleSheet(QStringLiteral("color: %1; padding: 4px 4px;")
+                        .arg(theme.text.name()));
+                    hl->addWidget(label);
+
+                    // → next button
+                    auto* nextBtn = new QPushButton(
+                        QStringLiteral("%1  \u2192").arg(kn(variants[nextI])), row);
+                    nextBtn->setFont(btnFont);
+                    nextBtn->setCursor(Qt::PointingHandCursor);
+                    nextBtn->setStyleSheet(btnCss);
+                    nextBtn->setLayoutDirection(Qt::RightToLeft);
+                    hl->addWidget(nextBtn);
+
+                    auto* wa = new QWidgetAction(&menu);
+                    wa->setDefaultWidget(row);
+                    menu.addAction(wa);
+
+                    connect(prevBtn, &QPushButton::clicked, &menu, [this, &menu, nodeIdx, variants, prevI]() {
+                        menu.close();
+                        changeNodeKind(nodeIdx, variants[prevI]);
+                    });
+                    connect(nextBtn, &QPushButton::clicked, &menu, [this, &menu, nodeIdx, variants, nextI]() {
+                        menu.close();
+                        changeNodeKind(nodeIdx, variants[nextI]);
+                    });
+
                     addedQuickConvert = true;
                 }
             }
