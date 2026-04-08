@@ -166,6 +166,7 @@ public:
 signals:
     void nodeSelected(int nodeIdx);
     void selectionChanged(int count);
+    void statusHint(const QString& text);  // brief status bar message
     void contextMenuAboutToShow(QMenu* menu, int line);
     void requestOpenProviderTab(const QString& pluginId, const QString& target,
                                 const QString& title);
@@ -214,6 +215,10 @@ private:
     bool            m_readInFlight = false;
 
     QVector<RcxDocument*>* m_projectDocs = nullptr;
+
+    // ── Undo grouping for rapid ←→ cycling ──
+    QTimer*  m_cycleMacroTimer = nullptr;
+    bool     m_cycleMacroOpen = false;
 
     void connectEditor(RcxEditor* editor);
     void appendBytesDialog(QWidget* parent, uint64_t targetId);

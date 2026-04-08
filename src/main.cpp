@@ -2202,16 +2202,22 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             {
                 int sz = sizeForKind(node.kind);
                 if (sz > 0) {
+                    // Build filtered variant list (matches what ←→ actually cycles through)
+                    bool curIsString = rcx::isStringKind(node.kind);
+                    bool curIsVector = rcx::isVectorKind(node.kind);
                     int pos = 0, total = 0;
                     for (const auto& m : rcx::kKindMeta) {
-                        if (m.size == sz && !rcx::isContainerKind(m.kind)) {
-                            total++;
-                            if (m.kind == node.kind) pos = total;
-                        }
+                        if (m.size != sz || rcx::isContainerKind(m.kind)) continue;
+                        if (!curIsString && rcx::isStringKind(m.kind)) continue;
+                        if (!curIsVector && rcx::isVectorKind(m.kind)) continue;
+                        total++;
+                        if (m.kind == node.kind) pos = total;
                     }
                     if (total > 1)
                         dimPart += QStringLiteral("  \u2190\u2192 %1 (%2/%3)")
                             .arg(typeName).arg(pos).arg(total);
+                    else if (total <= 1 && sz > 0)
+                        dimPart += QStringLiteral("  (no variants for %1 bytes)").arg(sz);
                     dimPart += QStringLiteral("  P=ptr F=float S=int U=uint");
                 }
             }
@@ -2234,6 +2240,8 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         if (count > 1)
             setAppStatus(QString("%1 nodes selected").arg(count));
     });
+    connect(ctrl, &RcxController::statusHint,
+            this, [this](const QString& text) { setAppStatus(text); });
 
     // Append Float/Close actions to any editor context menu
     connect(ctrl, &RcxController::contextMenuAboutToShow,

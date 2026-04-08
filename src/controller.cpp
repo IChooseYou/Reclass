@@ -395,13 +395,41 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
         NodeKind cur = m_doc->tree.nodes[nodeIdx].kind;
         int sz = sizeForKind(cur);
+        // Build filtered variant list: exclude string/vector unless already that type
+        bool curIsString = isStringKind(cur);
+        bool curIsVector = isVectorKind(cur);
         QVector<NodeKind> variants;
-        for (const auto& m : kKindMeta)
-            if (m.size == sz && !isContainerKind(m.kind)) variants.append(m.kind);
-        if (variants.size() <= 1) return;
+        for (const auto& m : kKindMeta) {
+            if (m.size != sz || isContainerKind(m.kind)) continue;
+            if (!curIsString && isStringKind(m.kind)) continue;
+            if (!curIsVector && isVectorKind(m.kind)) continue;
+            variants.append(m.kind);
+        }
+        if (variants.size() <= 1) {
+            emit statusHint(QStringLiteral("No type variants for %1-byte fields").arg(sz));
+            return;
+        }
         int idx = variants.indexOf(cur);
         if (idx < 0) return;
         NodeKind target = variants[(idx + direction + variants.size()) % variants.size()];
+
+        // Group rapid ←→ presses into a single undo macro
+        if (!m_cycleMacroTimer) {
+            m_cycleMacroTimer = new QTimer(this);
+            m_cycleMacroTimer->setSingleShot(true);
+            m_cycleMacroTimer->setInterval(800);
+            connect(m_cycleMacroTimer, &QTimer::timeout, this, [this]() {
+                if (m_cycleMacroOpen) {
+                    m_doc->undoStack.endMacro();
+                    m_cycleMacroOpen = false;
+                }
+            });
+        }
+        if (!m_cycleMacroOpen) {
+            m_doc->undoStack.beginMacro(QStringLiteral("Cycle type"));
+            m_cycleMacroOpen = true;
+        }
+        m_cycleMacroTimer->start();  // restart the 800ms timer
 
         // Apply to ALL selected nodes of the same size
         if (m_selIds.size() > 1) {
@@ -2500,6 +2528,49 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         if (addedQuickConvert || (anyNonHex && allConvertible))
             menu.addSeparator();
 
+        // "Next Type →" for multi-select (same size, filtered variants)
+        if (allSame) {
+            int sz = sizeForKind(commonKind);
+            if (sz > 0) {
+                bool curStr = isStringKind(commonKind);
+                bool curVec = isVectorKind(commonKind);
+                QVector<NodeKind> variants;
+                for (const auto& m : kKindMeta) {
+                    if (m.size != sz || isContainerKind(m.kind)) continue;
+                    if (!curStr && isStringKind(m.kind)) continue;
+                    if (!curVec && isVectorKind(m.kind)) continue;
+                    variants.append(m.kind);
+                }
+                int ci = variants.indexOf(commonKind);
+                if (ci >= 0 && variants.size() > 1) {
+                    auto* nm = kindMeta(variants[(ci + 1) % variants.size()]);
+                    menu.addAction(QStringLiteral("Next Type: %1 (%2/%3)\t\u2192")
+                        .arg(QString::fromLatin1(nm->typeName))
+                        .arg(ci + 1).arg(variants.size()),
+                        [this, collectIndices, variants, ci]() {
+                            batchChangeKind(collectIndices(), variants[(ci + 1) % variants.size()]);
+                        });
+                }
+                // "Resize" for multi-select hex nodes
+                if (isHexNode(commonKind)) {
+                    static constexpr NodeKind hexCycle[] = {
+                        NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+                        NodeKind::Hex64, NodeKind::Hex128 };
+                    int hi = -1;
+                    for (int i = 0; i < 5; i++) if (hexCycle[i] == commonKind) { hi = i; break; }
+                    if (hi >= 0) {
+                        auto* nm = kindMeta(hexCycle[(hi + 1) % 5]);
+                        menu.addAction(QStringLiteral("Resize to %1\tSpace")
+                            .arg(QString::fromLatin1(nm->typeName)),
+                            [this, collectIndices, hexCycle, hi]() {
+                                batchChangeKind(collectIndices(), hexCycle[(hi + 1) % 5]);
+                            });
+                    }
+                }
+                menu.addSeparator();
+            }
+        }
+
         menu.addAction(icon("symbol-structure.svg"), QString("Change type of %1 nodes...").arg(count),
                        [this, ids, collectIndices]() {
             QStringList types;
@@ -2831,14 +2902,21 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         {
             int sz = sizeForKind(node.kind);
             if (sz > 0) {
+                bool curStr = isStringKind(node.kind);
+                bool curVec = isVectorKind(node.kind);
                 QVector<NodeKind> variants;
-                for (const auto& m : kKindMeta)
-                    if (m.size == sz && !isContainerKind(m.kind)) variants.append(m.kind);
+                for (const auto& m : kKindMeta) {
+                    if (m.size != sz || isContainerKind(m.kind)) continue;
+                    if (!curStr && isStringKind(m.kind)) continue;
+                    if (!curVec && isVectorKind(m.kind)) continue;
+                    variants.append(m.kind);
+                }
                 int ci = variants.indexOf(node.kind);
                 if (ci >= 0 && variants.size() > 1) {
                     auto* nextMeta = kindMeta(variants[(ci + 1) % variants.size()]);
-                    menu.addAction(QStringLiteral("Next Type: %1\t\u2192")
-                        .arg(QString::fromLatin1(nextMeta->typeName)),
+                    menu.addAction(QStringLiteral("Next Type: %1 (%2/%3)\t\u2192")
+                        .arg(QString::fromLatin1(nextMeta->typeName))
+                        .arg(ci + 1).arg(variants.size()),
                         [this, nodeIdx, variants, ci]() {
                             changeNodeKind(nodeIdx, variants[(ci + 1) % variants.size()]);
                         });
