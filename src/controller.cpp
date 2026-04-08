@@ -2556,42 +2556,43 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     int nextI = (ci + 1) % variants.size();
                     const auto& theme = ThemeManager::instance().current();
 
+                    QSettings _ms("Reclass", "Reclass");
+                    QFont btnFont(_ms.value("font", "JetBrains Mono").toString(), 10);
+                    btnFont.setFixedPitch(true);
                     auto* row = new QWidget;
                     auto* hl = new QHBoxLayout(row);
                     hl->setContentsMargins(8, 2, 8, 2);
                     hl->setSpacing(0);
                     QString btnCss = QStringLiteral(
                         "QPushButton { background: transparent; color: %1;"
-                        " border: none; padding: 4px 8px; text-align: left; }"
+                        " border: none; padding: 3px 6px; border-radius: 2px; }"
                         "QPushButton:hover { background: %2; color: %3; }")
                         .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
-                    auto* prevBtn = new QPushButton(
-                        QStringLiteral("\u2190  %1").arg(kn(variants[prevI])), row);
+                    auto* prevBtn = new QPushButton(QStringLiteral("\u2190 %1").arg(kn(variants[prevI])), row);
+                    prevBtn->setFont(btnFont);
                     prevBtn->setCursor(Qt::PointingHandCursor);
                     prevBtn->setStyleSheet(btnCss);
                     hl->addWidget(prevBtn);
-                    auto* label = new QLabel(
-                        QStringLiteral("  %1 (%2/%3)  ")
-                            .arg(kn(commonKind)).arg(ci + 1).arg(variants.size()), row);
+                    auto* label = new QLabel(QStringLiteral(" %1/%2 ").arg(ci + 1).arg(variants.size()), row);
+                    label->setFont(btnFont);
                     label->setAlignment(Qt::AlignCenter);
-                    label->setStyleSheet(QStringLiteral("color: %1; padding: 4px 4px;")
-                        .arg(theme.text.name()));
+                    label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
                     hl->addWidget(label);
-                    auto* nextBtn = new QPushButton(
-                        QStringLiteral("%1  \u2192").arg(kn(variants[nextI])), row);
+                    auto* nextBtn = new QPushButton(QStringLiteral("%1 \u2192").arg(kn(variants[nextI])), row);
+                    nextBtn->setFont(btnFont);
                     nextBtn->setCursor(Qt::PointingHandCursor);
                     nextBtn->setStyleSheet(btnCss);
-                    nextBtn->setLayoutDirection(Qt::RightToLeft);
                     hl->addWidget(nextBtn);
                     auto* wa = new QWidgetAction(&menu);
                     wa->setDefaultWidget(row);
                     menu.addAction(wa);
-                    connect(prevBtn, &QPushButton::clicked, &menu, [this, &menu, collectIndices, variants, prevI]() {
-                        menu.close();
+                    QMenu* menuPtr = &menu;
+                    connect(prevBtn, &QPushButton::clicked, this, [this, menuPtr, collectIndices, variants, prevI]() {
+                        menuPtr->close();
                         batchChangeKind(collectIndices(), variants[prevI]);
                     });
-                    connect(nextBtn, &QPushButton::clicked, &menu, [this, &menu, collectIndices, variants, nextI]() {
-                        menu.close();
+                    connect(nextBtn, &QPushButton::clicked, this, [this, menuPtr, collectIndices, variants, nextI]() {
+                        menuPtr->close();
                         batchChangeKind(collectIndices(), variants[nextI]);
                     });
                 }
@@ -2970,52 +2971,44 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     hl->setContentsMargins(8, 2, 8, 2);
                     hl->setSpacing(0);
 
-                    // Shared button style
-                    QFont btnFont = row->font();
-                    btnFont.setPointSize(btnFont.pointSize());
+                    QSettings _s("Reclass", "Reclass");
+                    QFont btnFont(_s.value("font", "JetBrains Mono").toString(), 10);
+                    btnFont.setFixedPitch(true);
                     QString btnCss = QStringLiteral(
                         "QPushButton { background: transparent; color: %1;"
-                        " border: none; padding: 4px 8px; text-align: left; }"
+                        " border: none; padding: 3px 6px; border-radius: 2px; }"
                         "QPushButton:hover { background: %2; color: %3; }")
                         .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
 
-                    // ← prev button
-                    auto* prevBtn = new QPushButton(
-                        QStringLiteral("\u2190  %1").arg(kn(variants[prevI])), row);
+                    auto* prevBtn = new QPushButton(QStringLiteral("\u2190 %1").arg(kn(variants[prevI])), row);
                     prevBtn->setFont(btnFont);
                     prevBtn->setCursor(Qt::PointingHandCursor);
                     prevBtn->setStyleSheet(btnCss);
                     hl->addWidget(prevBtn);
 
-                    // Center label: current (pos/total)
-                    auto* label = new QLabel(
-                        QStringLiteral("  %1 (%2/%3)  ")
-                            .arg(kn(node.kind)).arg(ci + 1).arg(variants.size()), row);
+                    auto* label = new QLabel(QStringLiteral(" %1/%2 ").arg(ci + 1).arg(variants.size()), row);
                     label->setFont(btnFont);
                     label->setAlignment(Qt::AlignCenter);
-                    label->setStyleSheet(QStringLiteral("color: %1; padding: 4px 4px;")
-                        .arg(theme.text.name()));
+                    label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
                     hl->addWidget(label);
 
-                    // → next button
-                    auto* nextBtn = new QPushButton(
-                        QStringLiteral("%1  \u2192").arg(kn(variants[nextI])), row);
+                    auto* nextBtn = new QPushButton(QStringLiteral("%1 \u2192").arg(kn(variants[nextI])), row);
                     nextBtn->setFont(btnFont);
                     nextBtn->setCursor(Qt::PointingHandCursor);
                     nextBtn->setStyleSheet(btnCss);
-                    nextBtn->setLayoutDirection(Qt::RightToLeft);
                     hl->addWidget(nextBtn);
 
                     auto* wa = new QWidgetAction(&menu);
                     wa->setDefaultWidget(row);
                     menu.addAction(wa);
 
-                    connect(prevBtn, &QPushButton::clicked, &menu, [this, &menu, nodeIdx, variants, prevI]() {
-                        menu.close();
+                    QMenu* menuPtr = &menu;
+                    connect(prevBtn, &QPushButton::clicked, this, [this, menuPtr, nodeIdx, variants, prevI]() {
+                        menuPtr->close();
                         changeNodeKind(nodeIdx, variants[prevI]);
                     });
-                    connect(nextBtn, &QPushButton::clicked, &menu, [this, &menu, nodeIdx, variants, nextI]() {
-                        menu.close();
+                    connect(nextBtn, &QPushButton::clicked, this, [this, menuPtr, nodeIdx, variants, nextI]() {
+                        menuPtr->close();
                         changeNodeKind(nodeIdx, variants[nextI]);
                     });
 
