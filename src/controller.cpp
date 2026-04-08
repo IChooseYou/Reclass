@@ -378,10 +378,32 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (isHexNode(targetKind) && isHexNode(node.kind)) {
             int curSz = sizeForKind(node.kind);
             int tgtSz = sizeForKind(targetKind);
-            if (tgtSz <= curSz)
-                changeNodeKind(nodeIdx, targetKind);
-            else
+            if (tgtSz < curSz) {
+                // Shrink: split into halves until target size reached
+                // e.g. hex64→hex32: split once. hex64→hex8: split 3 times.
+                uint64_t nid = node.id;
+                m_suppressRefresh = true;
+                m_doc->undoStack.beginMacro(QStringLiteral("Resize hex"));
+                while (sizeForKind(m_doc->tree.nodes[m_doc->tree.indexOfId(nid)].kind) > tgtSz) {
+                    splitHexNode(nid);
+                    // After split, nid is removed — the first half gets a new ID.
+                    // Find the node at the original offset.
+                    int origOff = node.offset;
+                    nid = 0;
+                    for (const auto& n : m_doc->tree.nodes) {
+                        if (n.parentId == node.parentId && n.offset == origOff && isHexNode(n.kind)) {
+                            nid = n.id; break;
+                        }
+                    }
+                    if (nid == 0) break;
+                }
+                m_doc->undoStack.endMacro();
+                m_suppressRefresh = false;
+                refresh();
+            } else if (tgtSz > curSz) {
                 joinHexNodes(node.id, targetKind);
+            }
+            // tgtSz == curSz: no-op (same size)
         } else {
             changeNodeKind(nodeIdx, targetKind);
         }
@@ -2242,21 +2264,29 @@ void RcxController::joinHexNodes(uint64_t nodeId, NodeKind targetKind) {
     const auto& node = m_doc->tree.nodes[ni];
     int curSz = sizeForKind(node.kind);
     int tgtSz = sizeForKind(targetKind);
-    int needed = tgtSz / curSz;  // total nodes needed (including this one)
-    if (needed <= 1) return;
+    if (tgtSz <= curSz) return;
 
-    // Collect the nodes to merge
+    // Collect adjacent hex nodes by byte range (any hex kind, not just same)
     QVector<int> mergeIndices;
     mergeIndices.append(ni);
     uint64_t parentId = node.parentId;
+    int accumulated = curSz;
     int nextOff = node.offset + curSz;
-    for (int i = ni + 1; i < m_doc->tree.nodes.size() && mergeIndices.size() < needed; i++) {
+    for (int i = ni + 1; i < m_doc->tree.nodes.size() && accumulated < tgtSz; i++) {
         const auto& sib = m_doc->tree.nodes[i];
-        if (sib.parentId != parentId || sib.offset != nextOff || sib.kind != node.kind) break;
+        if (sib.parentId != parentId) break;
+        if (sib.offset != nextOff) break;
+        if (!isHexNode(sib.kind)) break;
+        int sibSz = sizeForKind(sib.kind);
         mergeIndices.append(i);
-        nextOff += curSz;
+        accumulated += sibSz;
+        nextOff += sibSz;
     }
-    if (mergeIndices.size() < needed) return;
+    if (accumulated < tgtSz) {
+        emit statusHint(QStringLiteral("Cannot resize: need %1 bytes at +0x%2, only %3 available")
+            .arg(tgtSz).arg(QString::number(node.offset, 16).toUpper()).arg(accumulated));
+        return;
+    }
 
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Join Hex nodes"));
@@ -2619,16 +2649,16 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                         QStringLiteral("\u2190\u2192"),
                         [this, collectIndices](NodeKind k) { batchChangeKind(collectIndices(), k); }));
                 }
-                // Resize row for multi-select hex nodes
-                if (isHexNode(commonKind)) {
+                // Resize row for multi-select hex nodes (no hex128)
+                if (isHexNode(commonKind) && commonKind != NodeKind::Hex128) {
                     static constexpr NodeKind hexCycle[] = {
                         NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
-                        NodeKind::Hex64, NodeKind::Hex128 };
+                        NodeKind::Hex64 };
                     int hi = -1;
-                    for (int i = 0; i < 5; i++) if (hexCycle[i] == commonKind) { hi = i; break; }
+                    for (int i = 0; i < 4; i++) if (hexCycle[i] == commonKind) { hi = i; break; }
                     if (hi >= 0) {
                         QVector<NodeKind> hv = {NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
-                                                 NodeKind::Hex64, NodeKind::Hex128};
+                                                 NodeKind::Hex64};
                         menu.addAction(makeCycleRow(&menu, hv, hi,
                             QStringLiteral("Spc"),
                             [this, collectIndices](NodeKind k) { batchChangeKind(collectIndices(), k); }));
@@ -2991,25 +3021,46 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             }
         }
 
-        // Hex resize row: ← smaller | Spc | larger →
-        if (isHexNode(node.kind)) {
+        // Hex resize row: ← smaller | Spc | larger → (no hex128)
+        if (isHexNode(node.kind) && node.kind != NodeKind::Hex128) {
             static constexpr NodeKind hexCycle[] = {
                 NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
-                NodeKind::Hex64, NodeKind::Hex128 };
+                NodeKind::Hex64 };
             int hi = -1;
-            for (int i = 0; i < 5; i++) if (hexCycle[i] == node.kind) { hi = i; break; }
+            for (int i = 0; i < 4; i++) if (hexCycle[i] == node.kind) { hi = i; break; }
             if (hi >= 0) {
                 QVector<NodeKind> hv = {NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
-                                         NodeKind::Hex64, NodeKind::Hex128};
+                                         NodeKind::Hex64};
                 menu.addAction(makeCycleRow(&menu, hv, hi,
                     QStringLiteral("Spc"),
                     [this, nodeId](NodeKind k) {
+                        // Use quickTypeChangeRequested path (split for shrink, join for grow)
                         int ni = m_doc->tree.indexOfId(nodeId);
                         if (ni < 0) return;
-                        if (sizeForKind(k) > sizeForKind(m_doc->tree.nodes[ni].kind))
+                        int curSz = sizeForKind(m_doc->tree.nodes[ni].kind);
+                        int tgtSz = sizeForKind(k);
+                        if (tgtSz > curSz)
                             joinHexNodes(nodeId, k);
-                        else
-                            changeNodeKind(ni, k);
+                        else if (tgtSz < curSz) {
+                            // Split down to target size
+                            m_suppressRefresh = true;
+                            m_doc->undoStack.beginMacro(QStringLiteral("Resize hex"));
+                            uint64_t nid = nodeId;
+                            while (nid) {
+                                int idx = m_doc->tree.indexOfId(nid);
+                                if (idx < 0 || sizeForKind(m_doc->tree.nodes[idx].kind) <= tgtSz) break;
+                                int off = m_doc->tree.nodes[idx].offset;
+                                uint64_t pid = m_doc->tree.nodes[idx].parentId;
+                                splitHexNode(nid);
+                                nid = 0;
+                                for (const auto& n : m_doc->tree.nodes)
+                                    if (n.parentId == pid && n.offset == off && isHexNode(n.kind))
+                                        { nid = n.id; break; }
+                            }
+                            m_doc->undoStack.endMacro();
+                            m_suppressRefresh = false;
+                            refresh();
+                        }
                     }));
                 addedQuickConvert = true;
             }
@@ -3028,34 +3079,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 editor->setHexEditPending(true);
                 editor->beginInlineEdit(EditTarget::Name, line);
             });
-            // Downsize / Upsize options
-            if (node.kind != NodeKind::Hex8) {
-                static constexpr NodeKind hexDown[] = {
-                    NodeKind::Hex8, NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32, NodeKind::Hex64};
-                int hi = -1;
-                static constexpr NodeKind hexList[] = {
-                    NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32, NodeKind::Hex64, NodeKind::Hex128};
-                for (int i = 0; i < 5; i++) if (hexList[i] == node.kind) { hi = i; break; }
-                if (hi > 0) {
-                    auto* dm = kindMeta(hexList[hi - 1]);
-                    menu.addAction(QStringLiteral("Downsize to %1 (split)").arg(QString::fromLatin1(dm->typeName)),
-                        [this, nodeId]() { splitHexNode(nodeId); });
-                }
-            }
-            if (node.kind != NodeKind::Hex128) {
-                static constexpr NodeKind hexList[] = {
-                    NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32, NodeKind::Hex64, NodeKind::Hex128};
-                int hi = -1;
-                for (int i = 0; i < 5; i++) if (hexList[i] == node.kind) { hi = i; break; }
-                if (hi >= 0 && hi < 4) {
-                    auto* um = kindMeta(hexList[hi + 1]);
-                    menu.addAction(QStringLiteral("Upsize to %1 (join)\tSpace").arg(QString::fromLatin1(um->typeName)),
-                        [this, nodeId, hexList, hi]() {
-                            int ni = m_doc->tree.indexOfId(nodeId);
-                            if (ni >= 0) joinHexNodes(nodeId, hexList[hi + 1]);
-                        });
-                }
-            }
             menu.addSeparator();
         }
 

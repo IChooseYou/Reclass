@@ -2673,7 +2673,7 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         if (sz <= 0) return false;  // skip containers
         static constexpr NodeKind hexCycle[] = {
             NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
-            NodeKind::Hex64, NodeKind::Hex128
+            NodeKind::Hex64
         };
         if (!isHexNode(lm->nodeKind)) {
             // Convert to hex equivalent of same size
@@ -2686,10 +2686,11 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             return false;
         }
         int cur = -1;
-        for (int i = 0; i < 5; i++) if (hexCycle[i] == lm->nodeKind) { cur = i; break; }
-        if (cur < 0) return false;
+        constexpr int N = 4;
+        for (int i = 0; i < N; i++) if (hexCycle[i] == lm->nodeKind) { cur = i; break; }
+        if (cur < 0) return false;  // hex128 or unknown — not in cycle
         int dir = (ke->modifiers() & Qt::ShiftModifier) ? -1 : 1;
-        NodeKind next = hexCycle[(cur + dir + 5) % 5];
+        NodeKind next = hexCycle[(cur + dir + N) % N];
         emit quickTypeChangeRequested(ni, next);
         return true;
     }
