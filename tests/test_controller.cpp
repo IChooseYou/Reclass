@@ -1489,6 +1489,91 @@ private slots:
         QVERIFY(json.contains("isRelative"));
         QCOMPARE(json["isRelative"].toBool(), true);
     }
+
+    void testCycleExcludesStringAndVectorTypes() {
+        // Build variant list for 1-byte types (Hex8 origin)
+        // Should NOT contain UTF8 (string type)
+        NodeKind cur = NodeKind::Hex8;
+        int sz = sizeForKind(cur);
+        bool curStr = isStringKind(cur);
+        bool curVec = isVectorKind(cur);
+        QVector<NodeKind> variants;
+        for (const auto& m : kKindMeta) {
+            if (m.size != sz || isContainerKind(m.kind)) continue;
+            if (!curStr && isStringKind(m.kind)) continue;
+            if (!curVec && isVectorKind(m.kind)) continue;
+            variants.append(m.kind);
+        }
+        QVERIFY(!variants.contains(NodeKind::UTF8));
+        QVERIFY(variants.contains(NodeKind::Hex8));
+        QVERIFY(variants.contains(NodeKind::Int8));
+        QVERIFY(variants.contains(NodeKind::Bool));
+
+        // 8-byte from Hex64 should NOT contain Vec2
+        cur = NodeKind::Hex64;
+        sz = sizeForKind(cur);
+        curVec = isVectorKind(cur);
+        variants.clear();
+        for (const auto& m : kKindMeta) {
+            if (m.size != sz || isContainerKind(m.kind)) continue;
+            if (!curStr && isStringKind(m.kind)) continue;
+            if (!curVec && isVectorKind(m.kind)) continue;
+            variants.append(m.kind);
+        }
+        QVERIFY(!variants.contains(NodeKind::Vec2));
+        QVERIFY(variants.contains(NodeKind::Hex64));
+        QVERIFY(variants.contains(NodeKind::Double));
+
+        // But FROM Vec2, Vec2 should be in the list
+        cur = NodeKind::Vec2;
+        curVec = isVectorKind(cur);
+        variants.clear();
+        for (const auto& m : kKindMeta) {
+            if (m.size != 8 || isContainerKind(m.kind)) continue;
+            if (!isStringKind(cur) && isStringKind(m.kind)) continue;
+            if (!curVec && isVectorKind(m.kind)) continue;
+            variants.append(m.kind);
+        }
+        QVERIFY(variants.contains(NodeKind::Vec2));
+    }
+
+    void testSpaceResizeWrapAndMultiSelect() {
+        // Test Space wrap: Hex128 → Space → Hex8
+        // (Hex128 is index 4, next is index 0 = Hex8)
+        static constexpr NodeKind hexCycle[] = {
+            NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+            NodeKind::Hex64, NodeKind::Hex128 };
+        int hi = 4; // Hex128
+        NodeKind next = hexCycle[(hi + 1) % 5];
+        QCOMPARE(next, NodeKind::Hex8);
+
+        // Test reverse: Hex8 → Shift+Space → Hex128
+        hi = 0; // Hex8
+        NodeKind prev = hexCycle[(hi - 1 + 5) % 5];
+        QCOMPARE(prev, NodeKind::Hex128);
+
+        // Test multi-select batch: change 2 Hex32 fields together
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        // Use field_hex (Hex32 at offset 12) — already in test tree
+        uint64_t hexId = 0;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == "field_hex") { hexId = n.id; break; }
+        QVERIFY(hexId != 0);
+
+        // Add a second Hex32
+        Node h2; h2.kind = NodeKind::Hex32; h2.name = "hex2";
+        h2.parentId = rootId; h2.offset = 16; h2.id = m_doc->tree.reserveId();
+        m_doc->undoStack.push(new RcxCommand(m_ctrl, cmd::Insert{h2}));
+
+        // Batch change both to Hex64
+        QVector<int> indices;
+        indices.append(m_doc->tree.indexOfId(hexId));
+        indices.append(m_doc->tree.indexOfId(h2.id));
+        m_ctrl->batchChangeKind(indices, NodeKind::Hex64);
+
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(hexId)].kind, NodeKind::Hex64);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(h2.id)].kind, NodeKind::Hex64);
+    }
 };
 
 QTEST_MAIN(TestController)

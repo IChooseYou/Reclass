@@ -441,8 +441,12 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 if (ni >= 0 && sizeForKind(m_doc->tree.nodes[ni].kind) == sz)
                     indices.append(ni);
             }
+            int skipped = (int)m_selIds.size() - indices.size();
             if (indices.size() > 1) {
                 batchChangeKind(indices, target);
+                if (skipped > 0)
+                    emit statusHint(QStringLiteral("Changed %1 nodes (%2 skipped: different size)")
+                        .arg(indices.size()).arg(skipped));
                 // Re-emit so status bar updates with new type
                 int ni = m_doc->tree.indexOfId(
                     *m_selIds.begin() & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
