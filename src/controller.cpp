@@ -2408,6 +2408,50 @@ void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
     refresh();
 }
 
+// Helper: create a prev ← center → next button row for a context menu
+static QWidgetAction* makeCycleRow(QMenu* menu, const QString& prevText,
+                                    const QString& centerText, const QString& nextText,
+                                    std::function<void()> onPrev, std::function<void()> onNext) {
+    const auto& theme = ThemeManager::instance().current();
+    QSettings s("Reclass", "Reclass");
+    QFont font(s.value("font", "JetBrains Mono").toString(), 10);
+    font.setFixedPitch(true);
+    QString css = QStringLiteral(
+        "QPushButton { background: transparent; color: %1;"
+        " border: none; padding: 3px 6px; border-radius: 2px; }"
+        "QPushButton:hover { background: %2; color: %3; }")
+        .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
+
+    auto* row = new QWidget;
+    auto* hl = new QHBoxLayout(row);
+    hl->setContentsMargins(8, 2, 8, 2);
+    hl->setSpacing(0);
+
+    auto* prev = new QPushButton(QStringLiteral("\u2190 ") + prevText, row);
+    prev->setFont(font); prev->setCursor(Qt::PointingHandCursor); prev->setStyleSheet(css);
+    hl->addWidget(prev);
+
+    auto* label = new QLabel(QStringLiteral(" %1 ").arg(centerText), row);
+    label->setFont(font); label->setAlignment(Qt::AlignCenter);
+    label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
+    hl->addWidget(label);
+
+    auto* next = new QPushButton(nextText + QStringLiteral(" \u2192"), row);
+    next->setFont(font); next->setCursor(Qt::PointingHandCursor); next->setStyleSheet(css);
+    hl->addWidget(next);
+
+    auto* wa = new QWidgetAction(menu);
+    wa->setDefaultWidget(row);
+
+    QObject::connect(prev, &QPushButton::clicked, menu, [menu, fn = std::move(onPrev)]() {
+        menu->close(); fn();
+    });
+    QObject::connect(next, &QPushButton::clicked, menu, [menu, fn = std::move(onNext)]() {
+        menu->close(); fn();
+    });
+    return wa;
+}
+
 void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                                      int subLine, const QPoint& globalPos) {
     auto icon = [](const char* name) { return QIcon(QStringLiteral(":/vsicons/%1").arg(name)); };
@@ -2554,49 +2598,17 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     };
                     int prevI = (ci - 1 + variants.size()) % variants.size();
                     int nextI = (ci + 1) % variants.size();
-                    const auto& theme = ThemeManager::instance().current();
-
-                    QSettings _ms("Reclass", "Reclass");
-                    QFont btnFont(_ms.value("font", "JetBrains Mono").toString(), 10);
-                    btnFont.setFixedPitch(true);
-                    auto* row = new QWidget;
-                    auto* hl = new QHBoxLayout(row);
-                    hl->setContentsMargins(8, 2, 8, 2);
-                    hl->setSpacing(0);
-                    QString btnCss = QStringLiteral(
-                        "QPushButton { background: transparent; color: %1;"
-                        " border: none; padding: 3px 6px; border-radius: 2px; }"
-                        "QPushButton:hover { background: %2; color: %3; }")
-                        .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
-                    auto* prevBtn = new QPushButton(QStringLiteral("\u2190 %1").arg(kn(variants[prevI])), row);
-                    prevBtn->setFont(btnFont);
-                    prevBtn->setCursor(Qt::PointingHandCursor);
-                    prevBtn->setStyleSheet(btnCss);
-                    hl->addWidget(prevBtn);
-                    auto* label = new QLabel(QStringLiteral(" %1/%2 ").arg(ci + 1).arg(variants.size()), row);
-                    label->setFont(btnFont);
-                    label->setAlignment(Qt::AlignCenter);
-                    label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
-                    hl->addWidget(label);
-                    auto* nextBtn = new QPushButton(QStringLiteral("%1 \u2192").arg(kn(variants[nextI])), row);
-                    nextBtn->setFont(btnFont);
-                    nextBtn->setCursor(Qt::PointingHandCursor);
-                    nextBtn->setStyleSheet(btnCss);
-                    hl->addWidget(nextBtn);
-                    auto* wa = new QWidgetAction(&menu);
-                    wa->setDefaultWidget(row);
-                    menu.addAction(wa);
-                    QMenu* menuPtr = &menu;
-                    connect(prevBtn, &QPushButton::clicked, this, [this, menuPtr, collectIndices, variants, prevI]() {
-                        menuPtr->close();
-                        batchChangeKind(collectIndices(), variants[prevI]);
-                    });
-                    connect(nextBtn, &QPushButton::clicked, this, [this, menuPtr, collectIndices, variants, nextI]() {
-                        menuPtr->close();
-                        batchChangeKind(collectIndices(), variants[nextI]);
-                    });
+                    menu.addAction(makeCycleRow(&menu,
+                        kn(variants[prevI]),
+                        QStringLiteral("%1/%2").arg(ci + 1).arg(variants.size()),
+                        kn(variants[nextI]),
+                        [this, collectIndices, variants, prevI]() { batchChangeKind(collectIndices(), variants[prevI]); },
+                        [this, collectIndices, variants, nextI]() { batchChangeKind(collectIndices(), variants[nextI]); }));
                 }
-                // "Resize" for multi-select hex nodes
+                // Resize row for multi-select hex nodes
+                auto kn2 = [](NodeKind k) {
+                    auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
+                };
                 if (isHexNode(commonKind)) {
                     static constexpr NodeKind hexCycle[] = {
                         NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
@@ -2604,12 +2616,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     int hi = -1;
                     for (int i = 0; i < 5; i++) if (hexCycle[i] == commonKind) { hi = i; break; }
                     if (hi >= 0) {
-                        auto* nm = kindMeta(hexCycle[(hi + 1) % 5]);
-                        menu.addAction(QStringLiteral("Resize to %1\tSpace")
-                            .arg(QString::fromLatin1(nm->typeName)),
-                            [this, collectIndices, hexCycle, hi]() {
-                                batchChangeKind(collectIndices(), hexCycle[(hi + 1) % 5]);
-                            });
+                        int hPrev = (hi - 1 + 5) % 5, hNext = (hi + 1) % 5;
+                        menu.addAction(makeCycleRow(&menu,
+                            kn2(hexCycle[hPrev]), QStringLiteral("Spc"), kn2(hexCycle[hNext]),
+                            [this, collectIndices, hexCycle, hPrev]() { batchChangeKind(collectIndices(), hexCycle[hPrev]); },
+                            [this, collectIndices, hexCycle, hNext]() { batchChangeKind(collectIndices(), hexCycle[hNext]); }));
                     }
                 }
                 menu.addSeparator();
@@ -2959,65 +2970,22 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 int ci = variants.indexOf(node.kind);
                 if (ci >= 0 && variants.size() > 1) {
                     auto kn = [](NodeKind k) {
-                        auto* m = kindMeta(k);
-                        return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
+                        auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
                     };
                     int prevI = (ci - 1 + variants.size()) % variants.size();
                     int nextI = (ci + 1) % variants.size();
-                    const auto& theme = ThemeManager::instance().current();
-
-                    auto* row = new QWidget;
-                    auto* hl = new QHBoxLayout(row);
-                    hl->setContentsMargins(8, 2, 8, 2);
-                    hl->setSpacing(0);
-
-                    QSettings _s("Reclass", "Reclass");
-                    QFont btnFont(_s.value("font", "JetBrains Mono").toString(), 10);
-                    btnFont.setFixedPitch(true);
-                    QString btnCss = QStringLiteral(
-                        "QPushButton { background: transparent; color: %1;"
-                        " border: none; padding: 3px 6px; border-radius: 2px; }"
-                        "QPushButton:hover { background: %2; color: %3; }")
-                        .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
-
-                    auto* prevBtn = new QPushButton(QStringLiteral("\u2190 %1").arg(kn(variants[prevI])), row);
-                    prevBtn->setFont(btnFont);
-                    prevBtn->setCursor(Qt::PointingHandCursor);
-                    prevBtn->setStyleSheet(btnCss);
-                    hl->addWidget(prevBtn);
-
-                    auto* label = new QLabel(QStringLiteral(" %1/%2 ").arg(ci + 1).arg(variants.size()), row);
-                    label->setFont(btnFont);
-                    label->setAlignment(Qt::AlignCenter);
-                    label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
-                    hl->addWidget(label);
-
-                    auto* nextBtn = new QPushButton(QStringLiteral("%1 \u2192").arg(kn(variants[nextI])), row);
-                    nextBtn->setFont(btnFont);
-                    nextBtn->setCursor(Qt::PointingHandCursor);
-                    nextBtn->setStyleSheet(btnCss);
-                    hl->addWidget(nextBtn);
-
-                    auto* wa = new QWidgetAction(&menu);
-                    wa->setDefaultWidget(row);
-                    menu.addAction(wa);
-
-                    QMenu* menuPtr = &menu;
-                    connect(prevBtn, &QPushButton::clicked, this, [this, menuPtr, nodeIdx, variants, prevI]() {
-                        menuPtr->close();
-                        changeNodeKind(nodeIdx, variants[prevI]);
-                    });
-                    connect(nextBtn, &QPushButton::clicked, this, [this, menuPtr, nodeIdx, variants, nextI]() {
-                        menuPtr->close();
-                        changeNodeKind(nodeIdx, variants[nextI]);
-                    });
-
+                    menu.addAction(makeCycleRow(&menu,
+                        kn(variants[prevI]),
+                        QStringLiteral("%1/%2").arg(ci + 1).arg(variants.size()),
+                        kn(variants[nextI]),
+                        [this, nodeIdx, variants, prevI]() { changeNodeKind(nodeIdx, variants[prevI]); },
+                        [this, nodeIdx, variants, nextI]() { changeNodeKind(nodeIdx, variants[nextI]); }));
                     addedQuickConvert = true;
                 }
             }
         }
 
-        // Hex resize row: ← smaller | size | larger →
+        // Hex resize row: ← smaller | Spc | larger →
         if (isHexNode(node.kind)) {
             static constexpr NodeKind hexCycle[] = {
                 NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
@@ -3030,53 +2998,21 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 };
                 int hPrev = (hi - 1 + 5) % 5;
                 int hNext = (hi + 1) % 5;
-                const auto& theme = ThemeManager::instance().current();
-                QSettings _hs("Reclass", "Reclass");
-                QFont hFont(_hs.value("font", "JetBrains Mono").toString(), 10);
-                hFont.setFixedPitch(true);
-
-                auto* hRow = new QWidget;
-                auto* hLay = new QHBoxLayout(hRow);
-                hLay->setContentsMargins(8, 2, 8, 2);
-                hLay->setSpacing(0);
-                QString hBtnCss = QStringLiteral(
-                    "QPushButton { background: transparent; color: %1;"
-                    " border: none; padding: 3px 6px; border-radius: 2px; }"
-                    "QPushButton:hover { background: %2; color: %3; }")
-                    .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
-
-                auto* hPrevBtn = new QPushButton(QStringLiteral("\u2190 %1").arg(kn(hexCycle[hPrev])), hRow);
-                hPrevBtn->setFont(hFont); hPrevBtn->setCursor(Qt::PointingHandCursor);
-                hPrevBtn->setStyleSheet(hBtnCss);
-                hLay->addWidget(hPrevBtn);
-                auto* hLabel = new QLabel(QStringLiteral(" Spc "), hRow);
-                hLabel->setFont(hFont); hLabel->setAlignment(Qt::AlignCenter);
-                hLabel->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
-                hLay->addWidget(hLabel);
-                auto* hNextBtn = new QPushButton(QStringLiteral("%1 \u2192").arg(kn(hexCycle[hNext])), hRow);
-                hNextBtn->setFont(hFont); hNextBtn->setCursor(Qt::PointingHandCursor);
-                hNextBtn->setStyleSheet(hBtnCss);
-                hLay->addWidget(hNextBtn);
-
-                auto* hWa = new QWidgetAction(&menu);
-                hWa->setDefaultWidget(hRow);
-                menu.addAction(hWa);
-                QMenu* menuP = &menu;
-                connect(hPrevBtn, &QPushButton::clicked, this, [this, menuP, nodeId, hexCycle, hPrev]() {
-                    menuP->close();
-                    int ni = m_doc->tree.indexOfId(nodeId);
-                    if (ni >= 0) changeNodeKind(ni, hexCycle[hPrev]);
-                });
-                connect(hNextBtn, &QPushButton::clicked, this, [this, menuP, nodeId, hexCycle, hNext]() {
-                    menuP->close();
-                    int ni = m_doc->tree.indexOfId(nodeId);
-                    if (ni >= 0) {
-                        if (sizeForKind(hexCycle[hNext]) > sizeForKind(m_doc->tree.nodes[ni].kind))
-                            joinHexNodes(nodeId, hexCycle[hNext]);
-                        else
-                            changeNodeKind(ni, hexCycle[hNext]);
-                    }
-                });
+                menu.addAction(makeCycleRow(&menu,
+                    kn(hexCycle[hPrev]), QStringLiteral("Spc"), kn(hexCycle[hNext]),
+                    [this, nodeId, hexCycle, hPrev]() {
+                        int ni = m_doc->tree.indexOfId(nodeId);
+                        if (ni >= 0) changeNodeKind(ni, hexCycle[hPrev]);
+                    },
+                    [this, nodeId, hexCycle, hNext]() {
+                        int ni = m_doc->tree.indexOfId(nodeId);
+                        if (ni >= 0) {
+                            if (sizeForKind(hexCycle[hNext]) > sizeForKind(m_doc->tree.nodes[ni].kind))
+                                joinHexNodes(nodeId, hexCycle[hNext]);
+                            else
+                                changeNodeKind(ni, hexCycle[hNext]);
+                        }
+                    }));
                 addedQuickConvert = true;
             }
         }
