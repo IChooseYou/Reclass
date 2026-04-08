@@ -379,31 +379,13 @@ void RcxController::connectEditor(RcxEditor* editor) {
             int curSz = sizeForKind(node.kind);
             int tgtSz = sizeForKind(targetKind);
             if (tgtSz < curSz) {
-                // Shrink: split into halves until target size reached
-                // e.g. hex64→hex32: split once. hex64→hex8: split 3 times.
-                uint64_t nid = node.id;
-                m_suppressRefresh = true;
-                m_doc->undoStack.beginMacro(QStringLiteral("Resize hex"));
-                while (sizeForKind(m_doc->tree.nodes[m_doc->tree.indexOfId(nid)].kind) > tgtSz) {
-                    splitHexNode(nid);
-                    // After split, nid is removed — the first half gets a new ID.
-                    // Find the node at the original offset.
-                    int origOff = node.offset;
-                    nid = 0;
-                    for (const auto& n : m_doc->tree.nodes) {
-                        if (n.parentId == node.parentId && n.offset == origOff && isHexNode(n.kind)) {
-                            nid = n.id; break;
-                        }
-                    }
-                    if (nid == 0) break;
-                }
-                m_doc->undoStack.endMacro();
-                m_suppressRefresh = false;
-                refresh();
+                // Shrink: changeNodeKind inserts hex padding for freed bytes.
+                // These padding nodes can be joined back later (reversible cycle).
+                changeNodeKind(nodeIdx, targetKind);
             } else if (tgtSz > curSz) {
+                // Grow: consume adjacent hex nodes to fill the target size.
                 joinHexNodes(node.id, targetKind);
             }
-            // tgtSz == curSz: no-op (same size)
         } else {
             changeNodeKind(nodeIdx, targetKind);
         }
@@ -2288,6 +2270,11 @@ void RcxController::joinHexNodes(uint64_t nodeId, NodeKind targetKind) {
         return;
     }
 
+    // Save merged node IDs before removal (for selection transfer)
+    QVector<uint64_t> mergedIds;
+    for (int j : mergeIndices)
+        mergedIds.append(m_doc->tree.nodes[j].id);
+
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Join Hex nodes"));
 
@@ -2308,6 +2295,13 @@ void RcxController::joinHexNodes(uint64_t nodeId, NodeKind targetKind) {
     joined.offset = node.offset;
     joined.id = m_doc->tree.reserveId();
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{joined, {}}));
+
+    // Transfer selection from merged nodes to the new joined node
+    bool wasSelected = m_selIds.remove(nodeId);
+    for (uint64_t mid : mergedIds)
+        wasSelected |= m_selIds.remove(mid);
+    if (wasSelected)
+        m_selIds.insert(joined.id);
 
     m_doc->undoStack.endMacro();
     m_suppressRefresh = false;
@@ -3034,33 +3028,14 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 menu.addAction(makeCycleRow(&menu, hv, hi,
                     QStringLiteral("Spc"),
                     [this, nodeId](NodeKind k) {
-                        // Use quickTypeChangeRequested path (split for shrink, join for grow)
                         int ni = m_doc->tree.indexOfId(nodeId);
                         if (ni < 0) return;
                         int curSz = sizeForKind(m_doc->tree.nodes[ni].kind);
                         int tgtSz = sizeForKind(k);
                         if (tgtSz > curSz)
                             joinHexNodes(nodeId, k);
-                        else if (tgtSz < curSz) {
-                            // Split down to target size
-                            m_suppressRefresh = true;
-                            m_doc->undoStack.beginMacro(QStringLiteral("Resize hex"));
-                            uint64_t nid = nodeId;
-                            while (nid) {
-                                int idx = m_doc->tree.indexOfId(nid);
-                                if (idx < 0 || sizeForKind(m_doc->tree.nodes[idx].kind) <= tgtSz) break;
-                                int off = m_doc->tree.nodes[idx].offset;
-                                uint64_t pid = m_doc->tree.nodes[idx].parentId;
-                                splitHexNode(nid);
-                                nid = 0;
-                                for (const auto& n : m_doc->tree.nodes)
-                                    if (n.parentId == pid && n.offset == off && isHexNode(n.kind))
-                                        { nid = n.id; break; }
-                            }
-                            m_doc->undoStack.endMacro();
-                            m_suppressRefresh = false;
-                            refresh();
-                        }
+                        else if (tgtSz < curSz)
+                            changeNodeKind(ni, k);  // inserts padding for freed bytes
                     }));
                 addedQuickConvert = true;
             }
