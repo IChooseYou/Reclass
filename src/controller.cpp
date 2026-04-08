@@ -3024,7 +3024,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     };
                     menu.addAction(makeCycleRow(&menu, variants, ci,
                         QStringLiteral("\u2190\u2192"),
-                        [this, nodeIdx](NodeKind k) { changeNodeKind(nodeIdx, k); }));
+                        [this, nodeId](NodeKind k) {
+                            int ni = m_doc->tree.indexOfId(nodeId);
+                            if (ni >= 0) changeNodeKind(ni, k);
+                        }));
                     addedQuickConvert = true;
                 }
             }
@@ -3040,17 +3043,25 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             if (hi >= 0) {
                 QVector<NodeKind> hv = {NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
                                          NodeKind::Hex64};
+                int nodeOff = node.offset;
+                uint64_t nodePid = node.parentId;
                 menu.addAction(makeCycleRow(&menu, hv, hi,
                     QStringLiteral("Spc"),
-                    [this, nodeId](NodeKind k) {
-                        int ni = m_doc->tree.indexOfId(nodeId);
+                    [this, nodeOff, nodePid](NodeKind k) {
+                        // Find the current hex node at this offset (ID may have changed after join)
+                        uint64_t nid = 0;
+                        for (const auto& n : m_doc->tree.nodes)
+                            if (n.parentId == nodePid && n.offset == nodeOff && isHexNode(n.kind))
+                                { nid = n.id; break; }
+                        if (nid == 0) return;
+                        int ni = m_doc->tree.indexOfId(nid);
                         if (ni < 0) return;
                         int curSz = sizeForKind(m_doc->tree.nodes[ni].kind);
                         int tgtSz = sizeForKind(k);
                         if (tgtSz > curSz)
-                            joinHexNodes(nodeId, k);
+                            joinHexNodes(nid, k);
                         else if (tgtSz < curSz)
-                            changeNodeKind(ni, k);  // inserts padding for freed bytes
+                            changeNodeKind(ni, k);
                     }));
                 addedQuickConvert = true;
             }
