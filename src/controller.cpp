@@ -3017,7 +3017,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             }
         }
 
-        // Hex resize shortcut
+        // Hex resize row: ← smaller | size | larger →
         if (isHexNode(node.kind)) {
             static constexpr NodeKind hexCycle[] = {
                 NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
@@ -3025,13 +3025,58 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             int hi = -1;
             for (int i = 0; i < 5; i++) if (hexCycle[i] == node.kind) { hi = i; break; }
             if (hi >= 0) {
-                auto* nm = kindMeta(hexCycle[(hi + 1) % 5]);
-                menu.addAction(QStringLiteral("Resize to %1\tSpace")
-                    .arg(QString::fromLatin1(nm->typeName)),
-                    [this, nodeId, hexCycle, hi]() {
-                        int ni = m_doc->tree.indexOfId(nodeId);
-                        if (ni >= 0) changeNodeKind(ni, hexCycle[(hi + 1) % 5]);
-                    });
+                auto kn = [](NodeKind k) {
+                    auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
+                };
+                int hPrev = (hi - 1 + 5) % 5;
+                int hNext = (hi + 1) % 5;
+                const auto& theme = ThemeManager::instance().current();
+                QSettings _hs("Reclass", "Reclass");
+                QFont hFont(_hs.value("font", "JetBrains Mono").toString(), 10);
+                hFont.setFixedPitch(true);
+
+                auto* hRow = new QWidget;
+                auto* hLay = new QHBoxLayout(hRow);
+                hLay->setContentsMargins(8, 2, 8, 2);
+                hLay->setSpacing(0);
+                QString hBtnCss = QStringLiteral(
+                    "QPushButton { background: transparent; color: %1;"
+                    " border: none; padding: 3px 6px; border-radius: 2px; }"
+                    "QPushButton:hover { background: %2; color: %3; }")
+                    .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
+
+                auto* hPrevBtn = new QPushButton(QStringLiteral("\u2190 %1").arg(kn(hexCycle[hPrev])), hRow);
+                hPrevBtn->setFont(hFont); hPrevBtn->setCursor(Qt::PointingHandCursor);
+                hPrevBtn->setStyleSheet(hBtnCss);
+                hLay->addWidget(hPrevBtn);
+                auto* hLabel = new QLabel(QStringLiteral(" Spc "), hRow);
+                hLabel->setFont(hFont); hLabel->setAlignment(Qt::AlignCenter);
+                hLabel->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
+                hLay->addWidget(hLabel);
+                auto* hNextBtn = new QPushButton(QStringLiteral("%1 \u2192").arg(kn(hexCycle[hNext])), hRow);
+                hNextBtn->setFont(hFont); hNextBtn->setCursor(Qt::PointingHandCursor);
+                hNextBtn->setStyleSheet(hBtnCss);
+                hLay->addWidget(hNextBtn);
+
+                auto* hWa = new QWidgetAction(&menu);
+                hWa->setDefaultWidget(hRow);
+                menu.addAction(hWa);
+                QMenu* menuP = &menu;
+                connect(hPrevBtn, &QPushButton::clicked, this, [this, menuP, nodeId, hexCycle, hPrev]() {
+                    menuP->close();
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni >= 0) changeNodeKind(ni, hexCycle[hPrev]);
+                });
+                connect(hNextBtn, &QPushButton::clicked, this, [this, menuP, nodeId, hexCycle, hNext]() {
+                    menuP->close();
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni >= 0) {
+                        if (sizeForKind(hexCycle[hNext]) > sizeForKind(m_doc->tree.nodes[ni].kind))
+                            joinHexNodes(nodeId, hexCycle[hNext]);
+                        else
+                            changeNodeKind(ni, hexCycle[hNext]);
+                    }
+                });
                 addedQuickConvert = true;
             }
         }
