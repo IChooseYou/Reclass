@@ -2408,10 +2408,13 @@ void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
     refresh();
 }
 
-// Helper: create a prev ← center → next button row for a context menu
-static QWidgetAction* makeCycleRow(QMenu* menu, const QString& prevText,
-                                    const QString& centerText, const QString& nextText,
-                                    std::function<void()> onPrev, std::function<void()> onNext) {
+// Helper: create a prev ← center → next button row for a context menu.
+// The row stays open — user can click ← or → multiple times to cycle.
+// Labels update after each click to reflect the new position.
+static QWidgetAction* makeCycleRow(QMenu* menu,
+                                    const QVector<NodeKind>& variants, int startIdx,
+                                    const QString& centerLabel,
+                                    std::function<void(NodeKind)> onSelect) {
     const auto& theme = ThemeManager::instance().current();
     QSettings s("Reclass", "Reclass");
     QFont font(s.value("font", "JetBrains Mono").toString(), 10);
@@ -2421,33 +2424,53 @@ static QWidgetAction* makeCycleRow(QMenu* menu, const QString& prevText,
         " border: none; padding: 3px 6px; border-radius: 2px; }"
         "QPushButton:hover { background: %2; color: %3; }")
         .arg(theme.textDim.name(), theme.hover.name(), theme.text.name());
+    auto kn = [](NodeKind k) {
+        auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
+    };
 
     auto* row = new QWidget;
     auto* hl = new QHBoxLayout(row);
     hl->setContentsMargins(8, 2, 8, 2);
     hl->setSpacing(0);
 
-    auto* prev = new QPushButton(QStringLiteral("\u2190 ") + prevText, row);
+    auto* prev = new QPushButton(row);
     prev->setFont(font); prev->setCursor(Qt::PointingHandCursor); prev->setStyleSheet(css);
     hl->addWidget(prev);
 
-    auto* label = new QLabel(QStringLiteral(" %1 ").arg(centerText), row);
+    auto* label = new QLabel(row);
     label->setFont(font); label->setAlignment(Qt::AlignCenter);
     label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textMuted.name()));
     hl->addWidget(label);
 
-    auto* next = new QPushButton(nextText + QStringLiteral(" \u2192"), row);
+    auto* next = new QPushButton(row);
     next->setFont(font); next->setCursor(Qt::PointingHandCursor); next->setStyleSheet(css);
     hl->addWidget(next);
+
+    // Shared mutable index — updated on each click, labels refresh
+    auto idx = std::make_shared<int>(startIdx);
+    int N = variants.size();
+    auto refresh = [=]() {
+        int pi = (*idx - 1 + N) % N;
+        int ni = (*idx + 1) % N;
+        prev->setText(QStringLiteral("\u2190 %1").arg(kn(variants[pi])));
+        label->setText(QStringLiteral(" %1 ").arg(centerLabel));
+        next->setText(QStringLiteral("%1 \u2192").arg(kn(variants[ni])));
+    };
+    refresh();
 
     auto* wa = new QWidgetAction(menu);
     wa->setDefaultWidget(row);
 
-    QObject::connect(prev, &QPushButton::clicked, menu, [menu, fn = std::move(onPrev)]() {
-        menu->close(); fn();
+    // Don't close menu — user can click repeatedly to cycle
+    QObject::connect(prev, &QPushButton::clicked, menu, [=]() {
+        *idx = (*idx - 1 + N) % N;
+        onSelect(variants[*idx]);
+        refresh();
     });
-    QObject::connect(next, &QPushButton::clicked, menu, [menu, fn = std::move(onNext)]() {
-        menu->close(); fn();
+    QObject::connect(next, &QPushButton::clicked, menu, [=]() {
+        *idx = (*idx + 1) % N;
+        onSelect(variants[*idx]);
+        refresh();
     });
     return wa;
 }
@@ -2592,23 +2615,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 }
                 int ci = variants.indexOf(commonKind);
                 if (ci >= 0 && variants.size() > 1) {
-                    auto kn = [](NodeKind k) {
-                        auto* m = kindMeta(k);
-                        return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
-                    };
-                    int prevI = (ci - 1 + variants.size()) % variants.size();
-                    int nextI = (ci + 1) % variants.size();
-                    menu.addAction(makeCycleRow(&menu,
-                        kn(variants[prevI]),
-                        QStringLiteral("%1/%2").arg(ci + 1).arg(variants.size()),
-                        kn(variants[nextI]),
-                        [this, collectIndices, variants, prevI]() { batchChangeKind(collectIndices(), variants[prevI]); },
-                        [this, collectIndices, variants, nextI]() { batchChangeKind(collectIndices(), variants[nextI]); }));
+                    menu.addAction(makeCycleRow(&menu, variants, ci,
+                        QStringLiteral("\u2190\u2192"),
+                        [this, collectIndices](NodeKind k) { batchChangeKind(collectIndices(), k); }));
                 }
                 // Resize row for multi-select hex nodes
-                auto kn2 = [](NodeKind k) {
-                    auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
-                };
                 if (isHexNode(commonKind)) {
                     static constexpr NodeKind hexCycle[] = {
                         NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
@@ -2616,11 +2627,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     int hi = -1;
                     for (int i = 0; i < 5; i++) if (hexCycle[i] == commonKind) { hi = i; break; }
                     if (hi >= 0) {
-                        int hPrev = (hi - 1 + 5) % 5, hNext = (hi + 1) % 5;
-                        menu.addAction(makeCycleRow(&menu,
-                            kn2(hexCycle[hPrev]), QStringLiteral("Spc"), kn2(hexCycle[hNext]),
-                            [this, collectIndices, hexCycle, hPrev]() { batchChangeKind(collectIndices(), hexCycle[hPrev]); },
-                            [this, collectIndices, hexCycle, hNext]() { batchChangeKind(collectIndices(), hexCycle[hNext]); }));
+                        QVector<NodeKind> hv = {NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+                                                 NodeKind::Hex64, NodeKind::Hex128};
+                        menu.addAction(makeCycleRow(&menu, hv, hi,
+                            QStringLiteral("Spc"),
+                            [this, collectIndices](NodeKind k) { batchChangeKind(collectIndices(), k); }));
                     }
                 }
                 menu.addSeparator();
@@ -2972,14 +2983,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     auto kn = [](NodeKind k) {
                         auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
                     };
-                    int prevI = (ci - 1 + variants.size()) % variants.size();
-                    int nextI = (ci + 1) % variants.size();
-                    menu.addAction(makeCycleRow(&menu,
-                        kn(variants[prevI]),
-                        QStringLiteral("%1/%2").arg(ci + 1).arg(variants.size()),
-                        kn(variants[nextI]),
-                        [this, nodeIdx, variants, prevI]() { changeNodeKind(nodeIdx, variants[prevI]); },
-                        [this, nodeIdx, variants, nextI]() { changeNodeKind(nodeIdx, variants[nextI]); }));
+                    menu.addAction(makeCycleRow(&menu, variants, ci,
+                        QStringLiteral("\u2190\u2192"),
+                        [this, nodeIdx](NodeKind k) { changeNodeKind(nodeIdx, k); }));
                     addedQuickConvert = true;
                 }
             }
@@ -2993,25 +2999,17 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             int hi = -1;
             for (int i = 0; i < 5; i++) if (hexCycle[i] == node.kind) { hi = i; break; }
             if (hi >= 0) {
-                auto kn = [](NodeKind k) {
-                    auto* m = kindMeta(k); return m ? QString::fromLatin1(m->typeName) : QStringLiteral("?");
-                };
-                int hPrev = (hi - 1 + 5) % 5;
-                int hNext = (hi + 1) % 5;
-                menu.addAction(makeCycleRow(&menu,
-                    kn(hexCycle[hPrev]), QStringLiteral("Spc"), kn(hexCycle[hNext]),
-                    [this, nodeId, hexCycle, hPrev]() {
+                QVector<NodeKind> hv = {NodeKind::Hex8, NodeKind::Hex16, NodeKind::Hex32,
+                                         NodeKind::Hex64, NodeKind::Hex128};
+                menu.addAction(makeCycleRow(&menu, hv, hi,
+                    QStringLiteral("Spc"),
+                    [this, nodeId](NodeKind k) {
                         int ni = m_doc->tree.indexOfId(nodeId);
-                        if (ni >= 0) changeNodeKind(ni, hexCycle[hPrev]);
-                    },
-                    [this, nodeId, hexCycle, hNext]() {
-                        int ni = m_doc->tree.indexOfId(nodeId);
-                        if (ni >= 0) {
-                            if (sizeForKind(hexCycle[hNext]) > sizeForKind(m_doc->tree.nodes[ni].kind))
-                                joinHexNodes(nodeId, hexCycle[hNext]);
-                            else
-                                changeNodeKind(ni, hexCycle[hNext]);
-                        }
+                        if (ni < 0) return;
+                        if (sizeForKind(k) > sizeForKind(m_doc->tree.nodes[ni].kind))
+                            joinHexNodes(nodeId, k);
+                        else
+                            changeNodeKind(ni, k);
                     }));
                 addedQuickConvert = true;
             }
