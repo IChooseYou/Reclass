@@ -114,6 +114,8 @@ add_executable(Reclass
     src/pluginmanager.h
     src/typeselectorpopup.h
     src/typeselectorpopup.cpp
+    src/hextoolbarpopup.h
+    src/hextoolbarpopup.cpp
     src/themes/theme.h
     src/themes/theme.cpp
     src/themes/thememanager.h
@@ -288,6 +290,8 @@ foreach(_f
     \"${CMAKE_SOURCE_DIR}/src/editor.cpp\"
     \"${CMAKE_SOURCE_DIR}/src/controller.h\"
     \"${CMAKE_SOURCE_DIR}/src/controller.cpp\"
+    \"${CMAKE_SOURCE_DIR}/src/hextoolbarpopup.h\"
+    \"${CMAKE_SOURCE_DIR}/src/hextoolbarpopup.cpp\"
     \"${CMAKE_SOURCE_DIR}/src/compose.cpp\"
     \"${CMAKE_SOURCE_DIR}/src/format.cpp\"
     \"${CMAKE_SOURCE_DIR}/src/generator.cpp\"
@@ -421,7 +425,7 @@ if(BUILD_TESTING)
     if(BUILD_UI_TESTS)
 
         add_executable(test_controller tests/test_controller.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -435,7 +439,7 @@ if(BUILD_TESTING)
         add_test(NAME test_controller COMMAND test_controller)
 
         add_executable(test_context_menu tests/test_context_menu.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -449,7 +453,7 @@ if(BUILD_TESTING)
         add_test(NAME test_context_menu COMMAND test_context_menu)
 
         add_executable(test_source_management tests/test_source_management.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -481,7 +485,7 @@ if(BUILD_TESTING)
         add_test(NAME test_rendered_view COMMAND test_rendered_view)
 
         add_executable(test_type_selector tests/test_type_selector.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -495,7 +499,7 @@ if(BUILD_TESTING)
         add_test(NAME test_type_selector COMMAND test_type_selector)
 
         add_executable(test_type_visibility tests/test_type_visibility.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -522,7 +526,7 @@ if(BUILD_TESTING)
         add_test(NAME test_titlebar_border COMMAND test_titlebar_border)
 
         add_executable(test_source_provider tests/test_source_provider.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
@@ -607,7 +611,7 @@ if(BUILD_TESTING)
         # ── Training2: SDK Building Course (hands-on lessons with screenshots) ──
         set(TRAINING2_SRCS
             src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-            src/controller.cpp src/symbolstore.cpp src/processpicker.cpp
+            src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp src/processpicker.cpp
             src/processpicker.ui src/providerregistry.cpp src/typeselectorpopup.cpp
             src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         set(TRAINING2_LIBS

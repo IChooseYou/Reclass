@@ -329,8 +329,9 @@ public:
             QColor hov    = opt->palette.color(QPalette::Mid);    // theme.hover
             QColor accent = opt->palette.color(QPalette::Link);   // theme.indHoverSpan
 
-            // Bottom separator (horizontal, near status bar) — keep invisible
-            if (!vertical && w && r.y() > w->height() * 3 / 4) {
+            // Top/bottom horizontal separators — keep invisible (prevents double
+            // border lines near menu bar and status bar)
+            if (!vertical && w && (r.y() < w->height() / 4 || r.y() > w->height() * 3 / 4)) {
                 p->fillRect(r, bg);
                 return;
             }
@@ -371,13 +372,22 @@ public:
         // Kill the status bar item frame and panel border
         if (elem == PE_FrameStatusBarItem || elem == PE_PanelStatusBar)
             return;
-        // Kill Fusion's frame outline on QScintilla (window.darker(140) = ~#171717)
-        if (elem == PE_Frame && w && w->inherits("QsciScintilla"))
-            return;
+        // Kill Fusion's frame outlines in dock area (prevents double borders near tab bar)
+        if (elem == PE_Frame) {
+            if (w && w->inherits("QsciScintilla"))
+                return;
+            // Suppress frame for any widget inside a QDockWidget
+            for (auto* pw = w ? w->parentWidget() : nullptr; pw; pw = pw->parentWidget()) {
+                if (qobject_cast<const QDockWidget*>(pw))
+                    return;
+                if (qobject_cast<const QMainWindow*>(pw))
+                    break;
+            }
+        }
         // Transparent menu bar background (no CSS needed)
         if (elem == PE_PanelMenuBar)
             return;
-        // Dock tab bar base line — use theme border color instead of Fusion default
+        // Dock tab bar base line — single 1px border between tab bar and content
         if (elem == PE_FrameTabBarBase) {
             if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
                 if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
