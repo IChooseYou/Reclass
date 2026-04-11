@@ -2,6 +2,7 @@
 #include <QFrame>
 #include <QFont>
 #include <QVector>
+#include <QHash>
 #include <QString>
 #include <QStringList>
 #include <cstdint>
@@ -41,7 +42,17 @@ struct TypeEntry {
     int         alignment     = 0;               // natural alignment in bytes
     int         fieldCount    = 0;               // child field count (composite only)
     QStringList fieldSummary;                     // first ~6 fields: "0x00: float x"
+
+    // Kind-group for visual grouping + coloring (Hex/Int/UInt/Float/Ptr/Vec/Str/Ctr)
+    QString     kindGroup;
 };
+
+// Kind-group string for a NodeKind (Hex/Int/UInt/Float/Ptr/Vec/Str/Ctr)
+QString kindGroupFor(NodeKind k);
+// Per-group accent color (returns theme-derived color for each kind group)
+QColor kindGroupColor(const QString& group);
+// Dimmed variant (for size bar background)
+QColor kindGroupDimColor(const QString& group);
 
 // ── Parsed type spec (shared between popup filter and inline edit) ──
 
@@ -77,6 +88,11 @@ public:
     /// Force native window creation to avoid cold-start delay.
     void warmUp();
 
+    /// One-time per-process primer: absorbs ~300ms DLL/style/font init cost.
+    /// Call early (e.g. from main() or MainWindow constructor) so the first
+    /// user-visible popup open is fast on all platforms.
+    static void preload();
+
 signals:
     void typeSelected(const TypeEntry& entry, const QString& fullText);
     void createNewTypeRequested(int modifierId, int arrayCount);
@@ -86,6 +102,7 @@ signals:
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
 
 private:
     QLabel*           m_titleLabel   = nullptr;
@@ -104,12 +121,19 @@ private:
     QLineEdit*        m_arrayCountEdit = nullptr;
     QButtonGroup*     m_modGroup     = nullptr;
 
-    // Category filter checkboxes
+    // Kind-group filter chips (Hex, Int, UInt, Float, Ptr, Vec, Str, Ctr)
     QWidget*          m_chipRow      = nullptr;
-    QAbstractButton*  m_chipPrim     = nullptr;
-    QAbstractButton*  m_chipTypes    = nullptr;
-    QAbstractButton*  m_chipEnums    = nullptr;
+    QHash<QString, QAbstractButton*> m_groupChips;
     QLabel*           m_statusLabel  = nullptr;
+
+    QLabel*           m_footerLabel  = nullptr;
+
+    // Detail pane (togglable right panel)
+    QWidget*          m_detailPane   = nullptr;
+    QLabel*           m_detailContent = nullptr;
+    QToolButton*      m_detailBtn    = nullptr;  // toggle button in sort toolbar
+    bool              m_showDetail   = false;
+    bool              m_compact      = false;
 
     QVector<TypeEntry> m_allTypes;
     QVector<TypeEntry> m_filteredTypes;
@@ -123,8 +147,15 @@ private:
     QFont              m_font;
     int                m_cachedMaxNameLen = 0; // longest displayName length (chars)
 
+    // Sort toolbar state
+    enum SortMode { SortGroup, SortName, SortSize, SortAlign };
+    SortMode           m_sortMode = SortGroup;
+    int                m_sortDir  = 1;  // 1=ascending, -1=descending
+    QVector<QToolButton*> m_sortBtns;
+
     void applyFilter(const QString& text);
     void updateModifierPreview();
+    void updateDetailPane();
     void acceptCurrent();
     void acceptIndex(int row);
     int  nextSelectableRow(int from, int direction) const;

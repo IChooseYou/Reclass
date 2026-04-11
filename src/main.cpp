@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "typeselectorpopup.h"
 #include "providerregistry.h"
 #include <QInputDialog>
 #include "generator.h"
@@ -1371,6 +1372,7 @@ public:
     QColor colBase;     // normal text
     QColor colDim;      // dimmed suffix text
     QColor colBright;   // highlight sweep
+    QColor colSep;      // vertical separator between sections
 
 protected:
     void paintEvent(QPaintEvent*) override {
@@ -1391,10 +1393,17 @@ protected:
                 QFontMetrics fm(font());
                 int tw = fm.horizontalAdvance(m_text);
                 p.drawText(r, m_align, m_text);
+
+                // Vertical separator between main text and dim suffix
+                int sepGap = fm.horizontalAdvance(' ');
+                int sepX = r.left() + tw + sepGap;
+                QColor sc = colSep.isValid() ? colSep : palette().color(QPalette::Dark);
+                p.fillRect(sepX, r.top() + 4, 1, r.height() - 8, sc);
+
                 QColor dc = colDim.isValid() ? colDim : c;
                 p.setPen(dc);
                 QRect sr = r;
-                sr.setLeft(r.left() + tw);
+                sr.setLeft(sepX + sepGap);
                 p.drawText(sr, m_align, m_dimSuffix);
             }
             return;
@@ -1536,6 +1545,7 @@ void MainWindow::createStatusBar() {
         m_statusLabel->colBase   = t.textDim;
         m_statusLabel->colDim    = t.textMuted;
         m_statusLabel->colBright = t.indHoverSpan;
+        m_statusLabel->colSep    = t.border;
     }
 
     // Sync status bar font to global editor font (10pt monospace)
@@ -2229,6 +2239,35 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                     else if (total <= 1 && sz > 0)
                         dimPart += QStringLiteral("  (no variants for %1 bytes)").arg(sz);
                     dimPart += QStringLiteral("  P=ptr F=float S=int U=uint");
+                }
+            }
+
+            // Append struct/enum info with name
+            {
+                uint64_t sizeRootId = ctrl->viewRootId();
+                if (sizeRootId == 0) {
+                    for (const auto& n : ctrl->document()->tree.nodes)
+                        if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct)
+                            { sizeRootId = n.id; break; }
+                }
+                if (sizeRootId != 0) {
+                    int ri = ctrl->document()->tree.indexOfId(sizeRootId);
+                    if (ri >= 0) {
+                        const auto& rn = ctrl->document()->tree.nodes[ri];
+                        QString rname = rn.structTypeName.isEmpty() ? rn.name : rn.structTypeName;
+                        if (rn.isEnum()) {
+                            int memberCount = rn.enumMembers.size();
+                            dimPart += QStringLiteral("%1: %2 members")
+                                .arg(rname).arg(memberCount);
+                        } else {
+                            int structSz = ctrl->document()->tree.structSpan(sizeRootId);
+                            if (structSz > 0)
+                                dimPart += QStringLiteral("%1: 0x%2 (%3)")
+                                    .arg(rname)
+                                    .arg(QString::number(structSz, 16).toUpper())
+                                    .arg(structSz);
+                        }
+                    }
                 }
             }
 
@@ -3149,6 +3188,7 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_statusLabel->colBase   = theme.textDim;
         m_statusLabel->colDim    = theme.textMuted;
         m_statusLabel->colBright = theme.indHoverSpan;
+        m_statusLabel->colSep    = theme.border;
     }
     // Status bar chrome
     {
@@ -3397,7 +3437,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             sci->setMarginsBackgroundColor(theme.background.darker(115));
             sci->setMarginsForegroundColor(theme.textDim);
 
-            // Debug view (no lexer — just paper/text colors)
+            // Debug view — update paper/caret colors and restyle
             if (pane.debugView) {
                 const QColor dbg = theme.background.darker(115);
                 pane.debugView->setPaper(dbg);
@@ -3408,6 +3448,9 @@ void MainWindow::applyTheme(const Theme& theme) {
                 pane.debugView->setSelectionForegroundColor(theme.text);
                 pane.debugView->setMarginsBackgroundColor(dbg);
                 pane.debugView->setMarginsForegroundColor(theme.textDim);
+                applyDebugStyles(pane.debugView);
+                if (pane.viewMode == VM_Debug)
+                    updateDebugView(tab, pane);
             }
         }
     }
@@ -3691,7 +3734,9 @@ void MainWindow::setupDebugSci(QsciScintilla* sci) {
     sci->setMarginWidth(1, 0);
     sci->setMarginWidth(2, 0);
 
-    // No lexer — plain monochrome text for diagnostic readability
+    // Container lexer — we style manually per-character in updateDebugView
+    sci->SendScintilla(QsciScintillaBase::SCI_SETLEXER, 2 /*SCLEX_CONTAINER*/);
+
     const QColor editorBg = theme.background.darker(115);
     sci->setPaper(editorBg);
     sci->setColor(theme.text);
@@ -3700,6 +3745,49 @@ void MainWindow::setupDebugSci(QsciScintilla* sci) {
     sci->setCaretLineBackgroundColor(theme.hover);
     sci->setSelectionBackgroundColor(theme.selection);
     sci->setSelectionForegroundColor(theme.text);
+
+    applyDebugStyles(sci);
+}
+
+void MainWindow::applyDebugStyles(QsciScintilla* sci) {
+    const auto& theme = ThemeManager::instance().current();
+    const QColor editorBg = theme.background.darker(115);
+
+    QSettings settings("Reclass", "Reclass");
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QFont f(fontName, 12);
+    f.setFixedPitch(true);
+
+    // Style 0: default text
+    // Style 1: offset (before |) — dim
+    // Style 2: pipe separator — border/accent
+    // Style 3: bracket markers [>] [v] etc — accent
+    // Style 4: middle dots (visible spaces) — faint
+    // Style 5: meta comment ## — comment color
+    // Style 6: meta keys (L=, nKind=, depth=) — dim
+    // Style 7: meta values (numbers, kind names) — number/type color
+    // Style 8: flags (static, cont, member, fold) — keyword color
+    struct StyleDef { int id; QColor fg; };
+    StyleDef styles[] = {
+        {0, theme.text},
+        {1, theme.textDim},
+        {2, theme.border.lighter(150)},
+        {3, theme.syntaxPreproc},
+        {4, theme.textFaint},
+        {5, theme.syntaxComment},
+        {6, theme.textDim},
+        {7, theme.syntaxNumber},
+        {8, theme.syntaxKeyword},
+    };
+    for (auto& s : styles) {
+        sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE, (long)s.id,
+            (long)(s.fg.red() | (s.fg.green() << 8) | (s.fg.blue() << 16)));
+        sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK, (long)s.id,
+            (long)(editorBg.red() | (editorBg.green() << 8) | (editorBg.blue() << 16)));
+        sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFONT, (long)s.id,
+            fontName.toUtf8().constData());
+        sci->SendScintilla(QsciScintillaBase::SCI_STYLESETSIZE, (long)s.id, (long)12);
+    }
 }
 
 // ── View mode / generator switching ──
@@ -3905,12 +3993,143 @@ void MainWindow::updateDebugView(TabState& tab, SplitPane& pane) {
     QString text = generateDebugText(pane.editor);
     pane.debugView->setReadOnly(false);
     pane.debugView->setText(text);
+
+    // Apply syntax highlighting
+    styleDebugText(pane.debugView, text);
+
     pane.debugView->setReadOnly(true);
 
     // Adjust margin width for line count
     int lineCount = pane.debugView->lines();
     int digits = qMax(5, QString::number(lineCount).size() + 2);
     pane.debugView->setMarginWidth(0, QString(digits, '0') + QStringLiteral("  "));
+}
+
+void MainWindow::styleDebugText(QsciScintilla* sci, const QString& text) {
+    // Style IDs (matching applyDebugStyles):
+    // 0=text, 1=offset, 2=pipe, 3=bracket markers, 4=middle dots,
+    // 5=meta comment, 6=meta keys, 7=meta values, 8=flags/keywords
+    QByteArray utf8 = text.toUtf8();
+    int len = utf8.size();
+    if (len == 0) return;
+
+    QByteArray styles(len, '\0');  // style per byte
+
+    // State machine per line
+    int i = 0;
+    while (i < len) {
+        // Find end of line
+        int lineEnd = utf8.indexOf('\n', i);
+        if (lineEnd < 0) lineEnd = len;
+
+        // Phase 1: offset region (before first '|')
+        int pipePos = -1;
+        for (int j = i; j < lineEnd; j++) {
+            if (utf8[j] == '|') { pipePos = j; break; }
+        }
+
+        if (pipePos >= 0) {
+            // Offset text
+            for (int j = i; j < pipePos; j++)
+                styles[j] = 1;
+            // Pipe
+            styles[pipePos] = 2;
+
+            // Phase 2: content after pipe, before ##
+            int metaPos = -1;
+            // Search for "  ## " which marks metadata
+            for (int j = pipePos + 1; j < lineEnd - 4; j++) {
+                if (utf8[j] == ' ' && utf8[j+1] == ' ' && utf8[j+2] == '#' && utf8[j+3] == '#') {
+                    metaPos = j;
+                    break;
+                }
+            }
+            int contentEnd = (metaPos >= 0) ? metaPos : lineEnd;
+
+            // Style content region
+            for (int j = pipePos + 1; j < contentEnd; j++) {
+                unsigned char ch = (unsigned char)utf8[j];
+                if (ch == 0xC2 && j + 1 < contentEnd && (unsigned char)utf8[j+1] == 0xB7) {
+                    // UTF-8 for U+00B7 middle dot (visible space)
+                    styles[j] = 4;
+                    styles[j+1] = 4;
+                    j++; // skip second byte
+                } else if (ch == '[') {
+                    // Bracket marker: find closing ]
+                    int closeB = -1;
+                    for (int k = j + 1; k < qMin(j + 5, contentEnd); k++) {
+                        if (utf8[k] == ']') { closeB = k; break; }
+                    }
+                    if (closeB >= 0) {
+                        for (int k = j; k <= closeB; k++)
+                            styles[k] = 3;
+                        j = closeB;
+                    }
+                }
+                // else: stays 0 (default text)
+            }
+
+            // Phase 3: metadata region (after ##)
+            if (metaPos >= 0) {
+                // "  ## " prefix
+                for (int j = metaPos; j < qMin(metaPos + 4, lineEnd); j++)
+                    styles[j] = 5;
+
+                // Parse key=value pairs and keywords in meta region
+                int mStart = metaPos + 4;
+                int j = mStart;
+                while (j < lineEnd) {
+                    // Skip spaces
+                    if (utf8[j] == ' ') { styles[j] = 5; j++; continue; }
+
+                    // Check for key=value: scan for '='
+                    int eqPos = -1;
+                    int tokEnd = j;
+                    while (tokEnd < lineEnd && utf8[tokEnd] != ' ')
+                        tokEnd++;
+                    for (int k = j; k < tokEnd; k++) {
+                        if (utf8[k] == '=') { eqPos = k; break; }
+                    }
+
+                    if (eqPos >= 0) {
+                        // key part (before =)
+                        for (int k = j; k <= eqPos; k++)
+                            styles[k] = 6;
+                        // value part (after =)
+                        for (int k = eqPos + 1; k < tokEnd; k++)
+                            styles[k] = 7;
+                    } else {
+                        // Standalone token — check if it's a LineKind or flag
+                        QByteArray tok = utf8.mid(j, tokEnd - j);
+                        if (tok == "CmdRow" || tok == "Blank" || tok == "Header"
+                            || tok == "Field" || tok == "Cont" || tok == "Footer"
+                            || tok == "ArrSep") {
+                            // LineKind — use type color
+                            for (int k = j; k < tokEnd; k++)
+                                styles[k] = 7;
+                        } else if (tok == "static" || tok == "cont" || tok == "member"
+                                   || tok == "arrElem" || tok == "fold+" || tok == "fold-") {
+                            // Flags — keyword color
+                            for (int k = j; k < tokEnd; k++)
+                                styles[k] = 8;
+                        } else {
+                            // Unknown meta token
+                            for (int k = j; k < tokEnd; k++)
+                                styles[k] = 5;
+                        }
+                    }
+                    j = tokEnd;
+                }
+            }
+        }
+        // else: no pipe found, leave as default style 0
+
+        i = lineEnd + 1; // skip \n
+    }
+
+    // Apply styles to Scintilla
+    sci->SendScintilla(QsciScintillaBase::SCI_STARTSTYLING, (long)0, (long)0x1f);
+    sci->SendScintilla(QsciScintillaBase::SCI_SETSTYLINGEX, (long)len, styles.constData());
 }
 
 void MainWindow::updateAllDebugPanes(TabState& tab) {
@@ -6987,6 +7206,11 @@ int main(int argc, char* argv[]) {
 
     // Global theme
     applyGlobalTheme(rcx::ThemeManager::instance().current());
+
+    // Pre-pay Qt's one-time DLL/style/font init so first popup open is instant.
+    // Must run after theme (palette needs to be set) but before MainWindow
+    // (which may trigger popup creation via controller).
+    rcx::TypeSelectorPopup::preload();
 
     rcx::MainWindow window;
     window.setWindowIcon(QIcon(":/icons/class.png"));
