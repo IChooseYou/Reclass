@@ -195,6 +195,8 @@ private:
     uint64_t findRootStructForNode(const NodeTree& tree, uint64_t nodeId) const;
     void setupRenderedSci(QsciScintilla* sci);
     void setupDebugSci(QsciScintilla* sci);
+    void applyDebugStyles(QsciScintilla* sci);
+    void styleDebugText(QsciScintilla* sci, const QString& text);
 
     SplitPane createSplitPane(TabState& tab);
     void applyTheme(const Theme& theme);
