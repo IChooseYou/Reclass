@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "currentIteration": 300,
-  "totalPlanned": 300,
-  "completedSummary": "300 iterations COMPLETE. All 14 headless tests pass. 117 tests added.",
-  "totalTestsAdded": 117,
-  "queue": [],
-  "failed": []
-}

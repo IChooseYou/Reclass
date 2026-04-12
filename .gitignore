@@ -15,3 +15,4 @@ plugins/RcNetPluginCompatLayer/bridge/obj
 plugins/RcNetPluginCompatLayer/bridge/bin
 .cache
 *.DS_Store
+.claude/
