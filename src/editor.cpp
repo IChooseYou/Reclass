@@ -969,6 +969,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         int trimStart = ft.indexOf(QStringLiteral("Trim"));
         if (trimStart >= 0)
             fillIndicatorCols(IND_CMD_PILL, i, trimStart, trimStart + 4);
+        int topStart = ft.indexOf(QStringLiteral("Top"));
+        if (topStart >= 0)
+            fillIndicatorCols(IND_CMD_PILL, i, topStart, topStart + 3);
     }
 
     // Apply type inference hint coloring (green, same as comment annotations)
@@ -2323,6 +2326,11 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                     emit trimHexRequested(nid);
                     return true;
                 }
+                int topStart = ft.indexOf(QStringLiteral("Top"));
+                if (topStart >= 0 && h.col >= topStart && h.col < topStart + 3) {
+                    m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, (unsigned long)0);
+                    return true;
+                }
             }
             // CommandRow: try chevron/ADDR edit or consume
             if (h.nodeId == kCommandRowId) {
@@ -3200,6 +3208,21 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         return true;
     }
 
+    // Source: handled by SourceChooserPopup, not inline edit
+    if (target == EditTarget::Source) {
+        // Position popup below the source span in the command row
+        QString cmdText = getLineText(m_sci, 0);
+        ColumnSpan srcSpan = commandRowSrcSpan(cmdText);
+        int col = srcSpan.valid ? srcSpan.start : 0;
+        long srcPos = m_sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN, 0UL, (long)col);
+        int lineH = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
+        int sx = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, srcPos);
+        int sy = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, srcPos);
+        QPoint pos = m_sci->viewport()->mapToGlobal(QPoint(sx, sy + lineH));
+        emit sourcePopupRequested(pos);
+        return true;
+    }
+
     if (m_editState.active) return false;
     m_hoveredNodeId = 0;
     m_hoveredLine = -1;
@@ -3472,11 +3495,8 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         // No inline hint — the hover tooltip already shows examples
     }
 
-    // Note: Type, ArrayElementType, PointerTarget are handled by TypeSelectorPopup
+    // Note: Type, ArrayElementType, PointerTarget, Source are handled by popups
     // and exit early above (never reach here).
-    if (target == EditTarget::Source)
-        QTimer::singleShot(0, this, &RcxEditor::showSourcePicker);
-    // RootClassType is no longer editable via click — use right-click conversion instead
     // Refresh hover cursor so value history popup appears with Set buttons immediately
     if (target == EditTarget::Value)
         QTimer::singleShot(0, this, &RcxEditor::applyHoverCursor);
@@ -3633,39 +3653,8 @@ void RcxEditor::showTypeListFiltered(const QString& filter) {
 }
 
 void RcxEditor::showSourcePicker() {
-    if (!m_editState.active || m_editState.target != EditTarget::Source)
-        return;
-    QMenu menu;
-    QFont menuFont = editorFont();
-    int zoom = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
-    menuFont.setPointSize(menuFont.pointSize() + zoom);
-    menu.setFont(menuFont);
-
-    ProviderRegistry::populateSourceMenu(&menu, m_savedSourceDisplay);
-
-    int lineH = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
-    int x = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION,
-                                       0, m_editState.posStart);
-    int y = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION,
-                                       0, m_editState.posStart);
-    QPoint pos = m_sci->viewport()->mapToGlobal(QPoint(x, y + lineH));
-
-    QAction* sel = menu.exec(pos);
-    if (sel) {
-        const LineMeta* lm = metaForLine(m_editState.line);
-        uint64_t addr = lm ? lm->offsetAddr : 0;
-        auto info = endInlineEdit();
-        // Route via action data (set by populateSourceMenu)
-        QString text = sel->data().toString();
-        if (text.isEmpty()) {
-            // Plugin action (e.g. "Unload Driver") — already handled by its own lambda
-            cancelInlineEdit();
-            return;
-        }
-        emit inlineEditCommitted(info.nodeIdx, info.subLine, info.target, text, addr);
-    } else {
-        cancelInlineEdit();
-    }
+    // Replaced by SourceChooserPopup — Source target now early-returns
+    // from beginInlineEdit() and emits sourcePopupRequested().
 }
 
 void RcxEditor::updateTypeListFilter() {
@@ -4057,6 +4046,7 @@ void RcxEditor::applyHoverCursor() {
         if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000)
             tryPill(QStringLiteral("+10"), add10Start);
         tryPill(QStringLiteral("Trim"), ft.indexOf(QStringLiteral("Trim")));
+        tryPill(QStringLiteral("Top"), ft.indexOf(QStringLiteral("Top")));
     }
 
     // Value history popup on hover (read-only, no buttons)
@@ -4341,6 +4331,9 @@ void RcxEditor::applyHoverCursor() {
             desired = Qt::PointingHandCursor;
         int trimStart = ft.indexOf(QStringLiteral("Trim"));
         if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4)
+            desired = Qt::PointingHandCursor;
+        int topStart = ft.indexOf(QStringLiteral("Top"));
+        if (topStart >= 0 && h.col >= topStart && h.col < topStart + 3)
             desired = Qt::PointingHandCursor;
     } else if (tokenHit) {
         // Check if mouse is actually over trimmed text content (not column padding)

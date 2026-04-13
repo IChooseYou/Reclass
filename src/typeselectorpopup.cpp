@@ -210,6 +210,7 @@ QColor kindGroupColor(const QString& group) {
     if (group == QStringLiteral("Vec"))   return t.syntaxType;     // teal
     if (group == QStringLiteral("Str"))   return t.syntaxString;   // salmon
     if (group == QStringLiteral("Ctr"))   return t.indDataChanged; // green
+    if (group == QStringLiteral("Common")) return t.syntaxPreproc;  // grey
     return t.text;
 }
 
@@ -555,7 +556,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         layout->addLayout(row);
     }
 
-    // ── Kind-group chips (Hex, Int, UInt, Float, Ptr, Vec, Str, Ctr) ──
+    // ── Kind-group chips (Hex, Int, Float, Ptr) ──
     {
         m_chipRow = new QWidget;
         auto* chipLayout = new QHBoxLayout(m_chipRow);
@@ -563,7 +564,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         chipLayout->setSpacing(2);
 
         // Consolidated filter chips: Hex, Int (signed+unsigned+bool), Float, Ptr
-        // Vec/Str/Ctr always visible — too niche to need a toggle
+        // Vec/Str/Ctr/Common always visible — too niche to need a toggle
         static const char* groups[] = {"Hex","Int","Float","Ptr"};
         static const char* labels[] = {"Hex","Int","Float","Ptr"};
         auto refilter = [this]() { applyFilter(m_filterEdit->text()); };
@@ -1655,8 +1656,8 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     } else {
         // ── No filter: build list with current sort mode ──
         // Bucket by kindGroup, count all, filter by enabled groups
-        static const char* kGroupOrder[] = {"Hex","Int","Float","Ptr","Vec","Str","Ctr"};
-        static const char* kGroupLabels[] = {"Hex","Int / Bool","Float","Pointer / FuncPtr","Vec / Mat","String","Container"};
+        static const char* kGroupOrder[] = {"Hex","Int","Float","Ptr","Vec","Str","Ctr","Common"};
+        static const char* kGroupLabels[] = {"Hex","Int / Bool","Float","Pointer / FuncPtr","Vec / Mat","String","Type","Common Types"};
         QHash<QString, QVector<TypeEntry>> buckets;
         for (auto& t : m_allTypes) {
             if (t.entryKind == TypeEntry::Section) continue;
@@ -1695,7 +1696,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
 
         if (m_sortMode == SortGroup) {
             // Group view: per-kindGroup sections
-            for (int gi = 0; gi < 7; gi++) {
+            for (int gi = 0; gi < 8; gi++) {
                 QString g = QString::fromLatin1(kGroupOrder[gi]);
                 auto& items = buckets[g];
                 if (items.isEmpty()) continue;

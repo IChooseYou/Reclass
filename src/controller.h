@@ -14,6 +14,7 @@ namespace rcx {
 
 class RcxController;
 class TypeSelectorPopup;
+class SourceChooserPopup;
 class HexToolbarPopup;
 struct TypeEntry;
 enum class TypePopupMode;
@@ -115,7 +116,7 @@ public:
     void applyCommand(const Command& cmd, bool isUndo);
     void refresh();
     void applyTypePopupResult(TypePopupMode mode, int nodeIdx, const TypeEntry& entry, const QString& fullText);
-    uint64_t findOrCreateStructByName(const QString& typeName);
+    uint64_t findOrCreateStructByName(const QString& typeName, int depth = 0);
 
     // Selection
     void handleNodeClick(RcxEditor* source, int line, uint64_t nodeId,
@@ -192,6 +193,11 @@ private:
     // ── Cached type selector popup (avoids ~350ms cold-start on first show) ──
     QPointer<TypeSelectorPopup> m_cachedPopup;
     int m_typePopupGen = 0;  // generation counter for deferred content loading
+
+    // ── Cached source chooser popup ──
+    QPointer<SourceChooserPopup> m_cachedSourcePopup;
+    void showSourcePopup(RcxEditor* editor, QPoint globalPos);
+    SourceChooserPopup* ensureSourcePopup(RcxEditor* editor);
 
     // ── Hex toolbar popup (auto-shows on hex node selection) ──
     QPointer<HexToolbarPopup> m_hexToolbar;

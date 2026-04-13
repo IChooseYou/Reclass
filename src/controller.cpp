@@ -2,7 +2,9 @@
 #include "addressparser.h"
 #include "symbolstore.h"
 #include "typeselectorpopup.h"
+#include "sourcechooserpopup.h"
 #include "hextoolbarpopup.h"
+#include "commontypes.h"
 #include <cmath>
 #include <cstring>
 #include "providerregistry.h"
@@ -277,8 +279,12 @@ RcxEditor* RcxController::addSplitEditor(QWidget* parent) {
     if (!m_cachedPopup) {
         QPointer<RcxEditor> safeEditor = editor;
         QTimer::singleShot(0, this, [this, safeEditor]() {
-            if (!m_cachedPopup && !m_editors.isEmpty() && safeEditor)
-                ensurePopup(safeEditor);
+            if (!m_editors.isEmpty() && safeEditor) {
+                if (!m_cachedPopup)
+                    ensurePopup(safeEditor);
+                if (!m_cachedSourcePopup)
+                    ensureSourcePopup(safeEditor);
+            }
         });
     }
     return editor;
@@ -319,6 +325,12 @@ void RcxController::connectEditor(RcxEditor* editor) {
             mode = TypePopupMode::ArrayElement;
         // PointerTarget is handled as FieldType — modifiers * / ** will be pre-selected
         showTypePopup(editor, mode, nodeIdx, globalPos);
+    });
+
+    // Source chooser popup
+    connect(editor, &RcxEditor::sourcePopupRequested,
+            this, [this, editor](QPoint globalPos) {
+        showSourcePopup(editor, globalPos);
     });
 
     // Delete key shortcut
@@ -3751,18 +3763,6 @@ void RcxController::updateCommandRow() {
     if (row2.isEmpty())
         row2 = QStringLiteral("struct NoName") + brace;
 
-    // Append struct total size
-    uint64_t sizeRootId = m_viewRootId;
-    if (sizeRootId == 0) {
-        for (const auto& n : m_doc->tree.nodes)
-            if (n.parentId == 0 && n.kind == NodeKind::Struct) { sizeRootId = n.id; break; }
-    }
-    if (sizeRootId != 0) {
-        int sz = m_doc->tree.structSpan(sizeRootId);
-        if (sz > 0)
-            row2 += QStringLiteral("  // 0x%1").arg(QString::number(sz, 16).toUpper());
-    }
-
     QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral("  ") + row2;
 
     for (auto* ed : m_editors) {
@@ -3783,6 +3783,155 @@ TypeSelectorPopup* RcxController::ensurePopup(RcxEditor* editor) {
     // Disconnect previous signals so we can reconnect fresh
     m_cachedPopup->disconnect(this);
     return m_cachedPopup;
+}
+
+SourceChooserPopup* RcxController::ensureSourcePopup(RcxEditor* editor) {
+    if (!m_cachedSourcePopup) {
+        m_cachedSourcePopup = new SourceChooserPopup(editor);
+        connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
+                m_cachedSourcePopup, &SourceChooserPopup::applyTheme);
+        m_cachedSourcePopup->warmUp();
+    }
+    m_cachedSourcePopup->disconnect(this);
+    return m_cachedSourcePopup;
+}
+
+void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
+    // Toggle: dismiss if already visible
+    if (m_cachedSourcePopup && m_cachedSourcePopup->isVisible()) {
+        m_cachedSourcePopup->hide();
+        return;
+    }
+    auto* popup = ensureSourcePopup(editor);
+
+    // Build entries from saved sources + registered providers
+    QVector<SourceEntry> entries;
+
+    // Section: saved sources (if any)
+    if (!m_savedSources.isEmpty()) {
+        SourceEntry hdr;
+        hdr.entryKind = SourceEntry::SectionHeader;
+        hdr.displayName = QStringLiteral("Saved Sources");
+        hdr.enabled = false;
+        entries.append(hdr);
+
+        for (int i = 0; i < m_savedSources.size(); i++) {
+            const auto& ss = m_savedSources[i];
+            SourceEntry e;
+            e.entryKind = SourceEntry::SavedSource;
+            e.displayName = ss.displayName;
+            e.providerIdentifier = ss.kind;
+            e.providerTarget = ss.providerTarget;
+            e.filePath = ss.filePath;
+            e.savedIndex = i;
+            e.isActive = (i == m_activeSourceIdx);
+            e.kindLabel = kindLabelFor(ss.kind);
+            e.iconPath = iconForProvider(ss.kind);
+
+            // Extract PID from providerTarget "1234:processname"
+            if (!ss.providerTarget.isEmpty() && ss.providerTarget.contains(':'))
+                e.pid = ss.providerTarget.section(':', 0, 0);
+
+            // Base address
+            if (!ss.baseAddressFormula.isEmpty())
+                e.baseAddress = ss.baseAddressFormula;
+            else if (ss.baseAddress != 0)
+                e.baseAddress = QStringLiteral("0x") +
+                    QString::number(ss.baseAddress, 16).toUpper();
+
+            // Architecture (from active provider if this is the active source)
+            if (e.isActive && m_doc->provider)
+                e.arch = (m_doc->tree.pointerSize >= 8)
+                    ? QStringLiteral("x64") : QStringLiteral("x86");
+
+            entries.append(e);
+        }
+    }
+
+    // Section: available providers
+    {
+        SourceEntry hdr;
+        hdr.entryKind = SourceEntry::SectionHeader;
+        hdr.displayName = QStringLiteral("Providers");
+        hdr.enabled = false;
+        entries.append(hdr);
+
+        // File provider (always available)
+        {
+            SourceEntry e;
+            e.entryKind = SourceEntry::ProviderAction;
+            e.displayName = QStringLiteral("Open File");
+            e.providerIdentifier = QStringLiteral("File");
+            e.iconPath = iconForProvider(QStringLiteral("File"));
+            entries.append(e);
+        }
+
+        // Registered plugin providers
+        const auto& providers = ProviderRegistry::instance().providers();
+        for (const auto& prov : providers) {
+            SourceEntry e;
+            e.entryKind = SourceEntry::ProviderAction;
+            e.displayName = prov.name;
+            e.providerIdentifier = prov.name;
+            e.dllFileName = prov.dllFileName;
+            e.kindLabel = kindLabelFor(prov.identifier);
+            e.iconPath = iconForProvider(prov.identifier);
+            entries.append(e);
+        }
+    }
+
+    // Clear All action (only if saved sources exist)
+    if (!m_savedSources.isEmpty()) {
+        SourceEntry e;
+        e.entryKind = SourceEntry::ClearAction;
+        e.displayName = QStringLiteral("Clear All");
+        e.iconPath = QStringLiteral(":/vsicons/clear-all.svg");
+        entries.append(e);
+    }
+
+    // Configure and show popup
+    QSettings settings("Reclass", "Reclass");
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QFont font(fontName, 12);
+    font.setFixedPitch(true);
+    auto* sci = editor->scintilla();
+    int zoom = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
+    font.setPointSize(font.pointSize() + zoom);
+
+    font.setPointSize(font.pointSize() - 1);  // slightly smaller than editor
+    popup->setFont(font);
+    popup->applyTheme(ThemeManager::instance().current());
+    popup->setSources(entries);
+
+    connect(popup, &SourceChooserPopup::sourceSelected,
+            this, [this](int idx) { switchToSavedSource(idx); });
+    connect(popup, &SourceChooserPopup::providerSelected,
+            this, [this](const QString& id) { selectSource(id); });
+    connect(popup, &SourceChooserPopup::clearRequested,
+            this, [this]() { clearSources(); });
+
+    popup->popup(globalPos);
+
+    // Deferred liveness probe for saved sources
+    QTimer::singleShot(0, this, [this]() {
+        if (!m_cachedSourcePopup || !m_cachedSourcePopup->isVisible()) return;
+        QVector<bool> alive;
+        for (int i = 0; i < m_savedSources.size(); i++) {
+            const auto& ss = m_savedSources[i];
+            if (i == m_activeSourceIdx) {
+                // Active source: check the current provider
+                alive.append(m_doc->provider && m_doc->provider->isValid());
+            } else if (ss.kind == QStringLiteral("File")) {
+                alive.append(QFile::exists(ss.filePath));
+            } else {
+                // For non-active process sources, assume alive
+                // (probing would require creating a temporary provider)
+                alive.append(true);
+            }
+        }
+        if (m_cachedSourcePopup)
+            m_cachedSourcePopup->setLivenessResults(alive);
+    });
 }
 
 void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
@@ -3925,6 +4074,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                 e.enabled       = enabled;
                 e.sizeBytes     = m.size;
                 e.alignment     = m.align;
+                e.kindGroup     = kindGroupFor(m.kind);
                 entries.append(e);
             }
         };
@@ -4076,9 +4226,11 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         }
         }
 
+        // Deduplicate by name — shared between cross-doc and common-types blocks
+        QSet<QString> localNames;
+
         // Add types from other open documents
         if (m_projectDocs) {
-            QSet<QString> localNames;
             for (const auto& e : entries)
                 if (e.entryKind == TypeEntry::Composite)
                     localNames.insert(e.displayName);
@@ -4099,6 +4251,43 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                     e.sizeBytes    = doc->tree.structSpan(n.id);
                     entries.append(e);
                 }
+            }
+        }
+
+        // Add built-in common types (reuse localNames from cross-doc block above)
+        if (mode != TypePopupMode::Root) {
+            if (!m_projectDocs) {
+                // No cross-doc block ran — build the name set now
+                for (const auto& e : entries)
+                    if (e.entryKind == TypeEntry::Composite)
+                        localNames.insert(e.displayName);
+            }
+            for (int ci = 0; ci < kCommonTypeCount; ci++) {
+                const auto& ct = kCommonTypes[ci];
+                QString name = QString::fromLatin1(ct.name);
+                if (localNames.contains(name)) continue;
+                TypeEntry e;
+                e.entryKind    = TypeEntry::Composite;
+                e.structId     = 0;
+                e.displayName  = name;
+                e.classKeyword = QString::fromLatin1(ct.classKeyword);
+                e.category     = TypeEntry::CatType;
+                e.sizeBytes    = ct.totalSize;
+                e.fieldCount   = ct.fieldCount;
+                int maxAlign = 1;
+                for (int fi = 0; fi < ct.fieldCount; fi++)
+                    maxAlign = qMax(maxAlign, alignmentFor(ct.fields[fi].kind));
+                e.alignment    = maxAlign;
+                e.kindGroup    = QStringLiteral("Common");
+                for (int fi = 0; fi < qMin(ct.fieldCount, 6); fi++) {
+                    const auto& f = ct.fields[fi];
+                    auto* km = kindMeta(f.kind);
+                    QString tn = km ? QString::fromLatin1(km->typeName) : QStringLiteral("?");
+                    e.fieldSummary << QStringLiteral("0x%1: %2 %3")
+                        .arg(f.offset, 2, 16, QChar('0'))
+                        .arg(tn, QString::fromLatin1(f.name));
+                }
+                entries.append(e);
             }
         }
 
@@ -4335,31 +4524,69 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
     }
 }
 
-uint64_t RcxController::findOrCreateStructByName(const QString& typeName) {
+uint64_t RcxController::findOrCreateStructByName(const QString& typeName, int depth) {
+    if (depth > 8) return 0;  // prevent runaway recursion on cyclic type graphs
+
     // Check if it already exists locally
     for (const auto& n : m_doc->tree.nodes) {
         if (n.parentId == 0 && n.kind == NodeKind::Struct
             && (n.structTypeName == typeName || (n.structTypeName.isEmpty() && n.name == typeName)))
             return n.id;
     }
-    // Import: create a new root struct with that name + default hex fields
+
     bool wasSuppressed = m_suppressRefresh;
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Import type"));
-    Node n;
-    n.kind = NodeKind::Struct;
-    n.structTypeName = typeName;
-    n.name = QStringLiteral("instance");
-    n.parentId = 0;
-    n.offset = 0;
-    n.id = m_doc->tree.reserveId();
-    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
-    for (int i = 0; i < 8; i++)
-        insertNode(n.id, i * 8, NodeKind::Hex64,
-                   QString("field_%1").arg(i * 8, 2, 16, QChar('0')));
+
+    Node root;
+    root.kind = NodeKind::Struct;
+    root.structTypeName = typeName;
+    root.name = QStringLiteral("instance");
+    root.parentId = 0;
+    root.offset = 0;
+    root.id = m_doc->tree.reserveId();
+
+    // Check if this is a built-in common type with a predefined layout
+    const CommonType* ct = findCommonType(typeName);
+    if (ct) {
+        root.classKeyword = QString::fromLatin1(ct->classKeyword);
+        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{root}));
+
+        for (int i = 0; i < ct->fieldCount; i++) {
+            const auto& f = ct->fields[i];
+            Node child;
+            child.kind = f.kind;
+            child.name = QString::fromLatin1(f.name);
+            child.parentId = root.id;
+            child.offset = f.offset;
+            child.id = m_doc->tree.reserveId();
+
+            if (f.ptrTarget && f.ptrTarget[0] != '\0'
+                && (f.kind == NodeKind::Pointer64 || f.kind == NodeKind::Pointer32)) {
+                QString targetName = QString::fromLatin1(f.ptrTarget);
+                if (targetName != typeName) {
+                    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{child}));
+                    uint64_t targetId = findOrCreateStructByName(targetName, depth + 1);
+                    if (targetId != 0) {
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangePointerRef{child.id, 0, targetId}));
+                    }
+                    continue;
+                }
+            }
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{child}));
+        }
+    } else {
+        // Unknown type: create with default hex64 fields
+        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{root}));
+        for (int i = 0; i < 8; i++)
+            insertNode(root.id, i * 8, NodeKind::Hex64,
+                       QString("field_%1").arg(i * 8, 2, 16, QChar('0')));
+    }
+
     m_doc->undoStack.endMacro();
     m_suppressRefresh = wasSuppressed;
-    return n.id;
+    return root.id;
 }
 
 void RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target) {

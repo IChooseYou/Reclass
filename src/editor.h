@@ -94,6 +94,7 @@ signals:
     void inlineEditCancelled();
     void typeSelectorRequested();
     void typePickerRequested(EditTarget target, int nodeIdx, QPoint globalPos);
+    void sourcePopupRequested(QPoint globalPos);
     void insertAboveRequested(int nodeIdx, NodeKind kind);
     void commentEditRequested();
     void relativeOffsetsChanged(bool relative);

@@ -114,6 +114,8 @@ add_executable(Reclass
     src/pluginmanager.h
     src/typeselectorpopup.h
     src/typeselectorpopup.cpp
+    src/sourcechooserpopup.h
+    src/sourcechooserpopup.cpp
     src/hextoolbarpopup.h
     src/hextoolbarpopup.cpp
     src/themes/theme.h
@@ -427,7 +429,7 @@ if(BUILD_TESTING)
         add_executable(test_controller tests/test_controller.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         target_include_directories(test_controller PRIVATE src third_party/fadec)
         target_link_libraries(test_controller PRIVATE
@@ -441,7 +443,7 @@ if(BUILD_TESTING)
         add_executable(test_context_menu tests/test_context_menu.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         target_include_directories(test_context_menu PRIVATE src third_party/fadec)
         target_link_libraries(test_context_menu PRIVATE
@@ -455,7 +457,7 @@ if(BUILD_TESTING)
         add_executable(test_source_management tests/test_source_management.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         target_include_directories(test_source_management PRIVATE src third_party/fadec)
         target_link_libraries(test_source_management PRIVATE
@@ -487,7 +489,7 @@ if(BUILD_TESTING)
         add_executable(test_type_selector tests/test_type_selector.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         target_include_directories(test_type_selector PRIVATE src third_party/fadec)
         target_link_libraries(test_type_selector PRIVATE
@@ -501,7 +503,7 @@ if(BUILD_TESTING)
         add_executable(test_type_visibility tests/test_type_visibility.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         target_include_directories(test_type_visibility PRIVATE src third_party/fadec)
         target_link_libraries(test_type_visibility PRIVATE
@@ -528,7 +530,7 @@ if(BUILD_TESTING)
         add_executable(test_source_provider tests/test_source_provider.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
-        src/typeselectorpopup.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
         src/resources.qrc)
         target_include_directories(test_source_provider PRIVATE src third_party/fadec)
@@ -612,7 +614,7 @@ if(BUILD_TESTING)
         set(TRAINING2_SRCS
             src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
             src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp src/processpicker.cpp
-            src/processpicker.ui src/providerregistry.cpp src/typeselectorpopup.cpp
+            src/processpicker.ui src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
             src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         set(TRAINING2_LIBS
             ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test

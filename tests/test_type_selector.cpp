@@ -1733,14 +1733,14 @@ private slots:
         QVERIFY(model != nullptr);
         QStringList items = model->stringList();
 
-        // Should contain kind-group section headers (Int/Bool for int32_t, Container for struct/enum)
-        bool hasIntSection = false, hasCtrSection = false;
+        // Should contain kind-group section headers (Int/Bool for int32_t, Type for struct/enum)
+        bool hasIntSection = false, hasTypeSection = false;
         for (const auto& item : items) {
             if (item.contains(QStringLiteral("Int"))) hasIntSection = true;
-            if (item.contains(QStringLiteral("Container"))) hasCtrSection = true;
+            if (item.contains(QStringLiteral("Type"))) hasTypeSection = true;
         }
         QVERIFY2(hasIntSection, "Missing 'Int' section header");
-        QVERIFY2(hasCtrSection, "Missing 'Container' section header");
+        QVERIFY2(hasTypeSection, "Missing 'Type' section header");
     }
 
     // ── Test: struct embed auto-selects the current composite in popup ──
