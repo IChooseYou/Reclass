@@ -7,7 +7,7 @@
 #include "startpage.h"
 #include "generator.h"
 #include "workspace_model.h"
-namespace rcx { class SymbolDownloader; }
+namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; }
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -223,6 +223,15 @@ private:
     QTimer*               m_workspaceRebuildTimer = nullptr;
     QTimer*               m_workspaceSearchTimer  = nullptr;
     void updateBorderColor(const QColor& color);
+
+    // Dock overlay drag system
+    DockOverlay*       m_dockOverlay      = nullptr;
+    DockDragDetector*  m_dockDragDetector = nullptr;
+    Qt::DockWidgetArea m_dragOrigArea     = Qt::NoDockWidgetArea;
+    QDockWidget*       m_dragOrigPeer     = nullptr;
+    void setupDockOverlay();
+    void onDockDragStarted(QDockWidget* dock, QPoint globalPos);
+    void onDockDropRequested(QDockWidget* source, QDockWidget* target, int zone);
 
     // Scanner dock
     QDockWidget*          m_scannerDock      = nullptr;

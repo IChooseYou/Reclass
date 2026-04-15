@@ -116,6 +116,7 @@ add_executable(Reclass
     src/typeselectorpopup.cpp
     src/sourcechooserpopup.h
     src/sourcechooserpopup.cpp
+    src/dockoverlay.h
     src/hextoolbarpopup.h
     src/hextoolbarpopup.cpp
     src/themes/theme.h

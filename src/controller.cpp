@@ -4470,14 +4470,18 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                     newEffectiveSize = m_doc->tree.structSpan(nodeId);
                 // Array-of-Struct: byteSize() and structSpan() both return 0
                 // because sizeForKind(Struct)==0. Compute from refId span × arrayLen.
+                // Use int64_t to prevent overflow with large arrays.
                 if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Array
                     && updatedNode.elementKind == NodeKind::Struct && updatedNode.refId != 0) {
                     int elemSpan = m_doc->tree.structSpan(updatedNode.refId);
-                    newEffectiveSize = elemSpan * updatedNode.arrayLen;
+                    int64_t product = (int64_t)elemSpan * updatedNode.arrayLen;
+                    newEffectiveSize = (int)qMin(product, (int64_t)INT_MAX);
                 }
                 if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Array
-                    && updatedNode.elementKind != NodeKind::Struct)
-                    newEffectiveSize = sizeForKind(updatedNode.elementKind) * updatedNode.arrayLen;
+                    && updatedNode.elementKind != NodeKind::Struct) {
+                    int64_t product = (int64_t)sizeForKind(updatedNode.elementKind) * updatedNode.arrayLen;
+                    newEffectiveSize = (int)qMin(product, (int64_t)INT_MAX);
+                }
                 int sizeDelta = newEffectiveSize - oldEffectiveSize;
                 if (sizeDelta != 0 && oldEffectiveSize > 0) {
                     int oldEnd = nodeOffset + oldEffectiveSize;

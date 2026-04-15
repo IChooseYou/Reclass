@@ -569,6 +569,7 @@ public:
 };
 
 #include "dock_tab_buttons.h"
+#include "dockoverlay.h"
 
 static void applyGlobalTheme(const rcx::Theme& theme) {
     QPalette pal;
@@ -790,6 +791,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Install global event filter for Ctrl+Click UI inspection
     qApp->installEventFilter(this);
 
+    // Dock overlay drag system
+    setupDockOverlay();
+
     // Ensure border overlay is on top after initial layout settles
     QTimer::singleShot(0, this, [this]() {
         if (m_borderOverlay) {
@@ -967,23 +971,44 @@ void MainWindow::createMenus() {
     // View
     auto* view = m_menuBar->addMenu("&View");
     Qt5Qt6AddAction(view, "&Reset Windows", QKeySequence::UnknownKey, QIcon(), this, [this](bool) {
-        // Re-tabify all doc docks into a single group (collapses splits)
-        if (m_docDocks.isEmpty()) return;
-        auto* first = m_docDocks.first();
-        for (int i = 1; i < m_docDocks.size(); ++i) {
-            tabifyDockWidget(first, m_docDocks[i]);
-            m_docDocks[i]->show();
+        // Re-dock all floating docks
+        for (auto* dock : m_docDocks) {
+            if (dock->isFloating()) {
+                dock->setFloating(false);
+                dock->show();
+            }
         }
-        // Merge all sentinels back; keep only the first, delete extras
-        for (int i = 0; i < m_sentinelDocks.size(); ++i) {
-            if (i == 0)
-                tabifyDockWidget(first, m_sentinelDocks[i]);
-            else
-                delete m_sentinelDocks[i];
+        if (m_workspaceDock && m_workspaceDock->isFloating())
+            m_workspaceDock->setFloating(false);
+        if (m_scannerDock && m_scannerDock->isFloating())
+            m_scannerDock->setFloating(false);
+        if (m_symbolsDock && m_symbolsDock->isFloating())
+            m_symbolsDock->setFloating(false);
+
+        // Re-tabify all doc docks into a single group
+        if (!m_docDocks.isEmpty()) {
+            auto* first = m_docDocks.first();
+            for (int i = 1; i < m_docDocks.size(); ++i) {
+                tabifyDockWidget(first, m_docDocks[i]);
+                m_docDocks[i]->show();
+            }
+            // Merge sentinels back; keep only one
+            for (int i = 0; i < m_sentinelDocks.size(); ++i) {
+                if (i == 0)
+                    tabifyDockWidget(first, m_sentinelDocks[i]);
+                else
+                    delete m_sentinelDocks[i];
+            }
+            if (m_sentinelDocks.size() > 1)
+                m_sentinelDocks.resize(1);
+            if (m_activeDocDock) m_activeDocDock->raise();
         }
-        if (m_sentinelDocks.size() > 1)
-            m_sentinelDocks.resize(1);
-        if (m_activeDocDock) m_activeDocDock->raise();
+
+        // Hide sidebar docks (default state)
+        if (m_workspaceDock) m_workspaceDock->hide();
+        if (m_scannerDock) m_scannerDock->hide();
+        if (m_symbolsDock) m_symbolsDock->hide();
+
         QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
     });
     view->addSeparator();
@@ -2413,6 +2438,149 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 }
 
 // ── Setup dock tab bars ──
+// ── Dock overlay drag system ──
+
+void MainWindow::setupDockOverlay() {
+    m_dockOverlay = new DockOverlay(this);
+    m_dockDragDetector = new DockDragDetector(this, this);
+
+    connect(m_dockDragDetector, &DockDragDetector::dragStarted,
+            this, &MainWindow::onDockDragStarted);
+    connect(m_dockOverlay, &DockOverlay::dropRequested,
+            this, [this](QDockWidget* source, QDockWidget* target, DropZone zone) {
+        onDockDropRequested(source, target, static_cast<int>(zone));
+    });
+    connect(m_dockOverlay, &DockOverlay::dragCancelled, this, [this](QDockWidget* dock) {
+        if (!dock) return;
+        // Restore to original position
+        if (m_dragOrigPeer) {
+            dock->setFloating(false);
+            tabifyDockWidget(m_dragOrigPeer, dock);
+        } else if (m_dragOrigArea != Qt::NoDockWidgetArea) {
+            dock->setFloating(false);
+            addDockWidget(m_dragOrigArea, dock);
+        } else {
+            dock->setFloating(false);
+        }
+        dock->show();
+        dock->raise();
+        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+    });
+}
+
+void MainWindow::onDockDragStarted(QDockWidget* dock, QPoint globalPos) {
+    if (!dock || !m_dockOverlay) return;
+
+    QString title = dock->windowTitle();
+    const auto& theme = ThemeManager::instance().current();
+    m_dockOverlay->setAccentColor(theme.indHoverSpan);
+
+    // Remember where the dock was for cancel restoration
+    m_dragOrigArea = dockWidgetArea(dock);
+    m_dragOrigPeer = nullptr;
+    auto tabified = tabifiedDockWidgets(dock);
+    for (auto* peer : tabified) {
+        if (peer != dock && !peer->objectName().startsWith(QStringLiteral("_sentinel_"))) {
+            m_dragOrigPeer = static_cast<QDockWidget*>(peer);
+            break;
+        }
+    }
+
+    // Detach the dock from its tab group and make it float (hidden)
+    dock->setFloating(true);
+    dock->hide();
+
+    m_dockOverlay->beginDrag(dock, title);
+
+    // Position the overlay cursor at the initial drag point
+    QPoint localPos = m_dockOverlay->mapFromGlobal(globalPos);
+    QMouseEvent fakeMove(QEvent::MouseMove, localPos,
+                         globalPos, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(m_dockOverlay, &fakeMove);
+}
+
+void MainWindow::onDockDropRequested(QDockWidget* source, QDockWidget* target, int zoneInt) {
+    auto zone = static_cast<DropZone>(zoneInt);
+    if (!source) return;
+
+    // Map edge zones to QMainWindow dock areas
+    auto edgeToArea = [](DropZone z) -> Qt::DockWidgetArea {
+        switch (z) {
+        case DropZone::EdgeLeft:   return Qt::LeftDockWidgetArea;
+        case DropZone::EdgeRight:  return Qt::RightDockWidgetArea;
+        case DropZone::EdgeTop:    return Qt::TopDockWidgetArea;
+        case DropZone::EdgeBottom: return Qt::BottomDockWidgetArea;
+        default: return Qt::NoDockWidgetArea;
+        }
+    };
+
+    // Map split zones to orientation + dock area
+    auto splitToOrientation = [](DropZone z) -> Qt::Orientation {
+        return (z == DropZone::Left || z == DropZone::Right)
+            ? Qt::Horizontal : Qt::Vertical;
+    };
+
+    source->show();
+
+    if (zone == DropZone::Float) {
+        // Leave floating at cursor position
+        source->setFloating(true);
+        source->move(QCursor::pos() - QPoint(50, 10));
+        source->show();
+    } else if (zone == DropZone::Center && target) {
+        // Tabify with target
+        source->setFloating(false);
+        tabifyDockWidget(target, source);
+        source->show();
+        source->raise();
+    } else if (zone == DropZone::Left || zone == DropZone::Right ||
+               zone == DropZone::Top || zone == DropZone::Bottom) {
+        if (target) {
+            // Split: add source next to target with specified orientation
+            Qt::DockWidgetArea area = dockWidgetArea(target);
+            if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
+            source->setFloating(false);
+            splitDockWidget(target, source, splitToOrientation(zone));
+            // For Right/Bottom, the split puts source after target (correct).
+            // For Left/Top, we need to swap the order.
+            if (zone == DropZone::Left || zone == DropZone::Top) {
+                // Qt's splitDockWidget always adds second widget after first.
+                // To put source before target, we re-do the split in reverse.
+                removeDockWidget(source);
+                removeDockWidget(target);
+                addDockWidget(area, source, splitToOrientation(zone));
+                splitDockWidget(source, target, splitToOrientation(zone));
+                source->show();
+                target->show();
+            }
+        }
+    } else if (zone >= DropZone::EdgeLeft && zone <= DropZone::EdgeBottom) {
+        Qt::DockWidgetArea area = edgeToArea(zone);
+        source->setFloating(false);
+        addDockWidget(area, source);
+        source->show();
+    }
+
+    // Re-setup tab bars since dock arrangement changed
+    QTimer::singleShot(0, this, [this]() {
+        // Add sentinels to any dock groups that need them
+        for (auto* dock : m_docDocks) {
+            if (dock->isFloating() || !dock->isVisible()) continue;
+            auto tabified = tabifiedDockWidgets(dock);
+            bool hasSentinel = false;
+            for (auto* td : tabified)
+                if (m_sentinelDocks.contains(static_cast<QDockWidget*>(td)))
+                    hasSentinel = true;
+            if (!hasSentinel && tabified.isEmpty()) {
+                auto* s = createSentinelDock();
+                tabifyDockWidget(dock, s);
+                dock->raise();
+            }
+        }
+        setupDockTabBars();
+    });
+}
+
 // Installs pin/close buttons, context menu, font, and style on all
 // dock tab bars owned by this QMainWindow. Safe to call repeatedly —
 // skips tabs that already have buttons and tab bars that already have
@@ -2499,9 +2667,11 @@ void MainWindow::setupDockTabBars() {
             tabBar->setTabButton(i, QTabBar::RightSide, btns);
         }
 
-        // Middle-click close + context menu (install only once)
+        // Middle-click close + context menu + drag detection (install only once)
         if (tabBar->contextMenuPolicy() == Qt::CustomContextMenu) continue;
         tabBar->installEventFilter(this);
+        if (m_dockDragDetector)
+            tabBar->installEventFilter(m_dockDragDetector);
         tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(tabBar, &QTabBar::customContextMenuRequested,
                 this, [this, tabBar](const QPoint& pos) {
