@@ -135,6 +135,18 @@ struct ComposeState {
             text += lineText;
         }
 
+        // Auto-detect trailing '{' for braceCol (avoids per-char IPC scan in editor)
+        if (lm.braceCol < 0 && (lm.lineKind == LineKind::Header
+                                 || lm.lineKind == LineKind::CommandRow)) {
+            int len = lineText.size();
+            for (int p = len - 1; p >= 0; --p) {
+                QChar ch = lineText[p];
+                if (ch == ' ' || ch == '\t') continue;
+                if (ch == '{') lm.braceCol = p;
+                break;
+            }
+        }
+
         meta.append(std::move(lm));
         currentLine++;
     }
@@ -209,6 +221,14 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                  int depth, uint64_t absAddr, uint64_t scopeId) {
     const Node& node = tree.nodes[nodeIdx];
 
+    // Resolve parent's absolute address for relative offset display
+    uint64_t parentAbsAddr = 0;
+    if (depth > 0) {
+        int pi = tree.indexOfId(node.parentId);
+        if (pi >= 0 && pi < state.absOffsets.size())
+            parentAbsAddr = state.absOffsets[pi];
+    }
+
     // Get per-scope widths (falls back to global if no scope entry)
     int typeW = state.effectiveTypeW(scopeId);
     int nameW = state.effectiveNameW(scopeId);
@@ -252,6 +272,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         lm.offsetText      = fmt::fmtOffsetMargin(absAddr, isCont, state.offsetHexDigits);
         lm.offsetAddr      = absAddr;
         lm.ptrBase         = state.currentPtrBase;
+        lm.parentAddr      = parentAbsAddr;
         lm.markerMask      = computeMarkers(node, prov, absAddr, isCont, depth);
         lm.foldLevel       = computeFoldLevel(depth, false);
         lm.effectiveTypeW  = lineTypeW;
@@ -589,6 +610,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 lm.lineKind   = LineKind::Field;
                 lm.nodeKind   = node.elementKind;
                 lm.isArrayElement = true;
+                lm.parentAddr = absAddr;
                 lm.arrayElementIdx = i;
                 lm.offsetText = fmt::fmtOffsetMargin(elemAddr, false, state.offsetHexDigits);
                 lm.offsetAddr = elemAddr;

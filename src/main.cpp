@@ -2398,8 +2398,16 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 if (!dockGuard) return;
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
-                    updateAllRenderedPanes(*it2);
-                    updateAllDebugPanes(*it2);
+                    // Only regenerate rendered/debug panes if any are actually visible
+                    bool hasRendered = false, hasDebug = false;
+                    for (const auto& pane : it2->panes) {
+                        if (pane.viewMode == VM_Rendered && pane.rendered && pane.rendered->isVisible())
+                            hasRendered = true;
+                        if (pane.viewMode == VM_Debug && pane.debugView && pane.debugView->isVisible())
+                            hasDebug = true;
+                    }
+                    if (hasRendered) updateAllRenderedPanes(*it2);
+                    if (hasDebug) updateAllDebugPanes(*it2);
                     dockGuard->setWindowTitle(tabTitle(*it2));
                 }
                 updateWindowTitle();
@@ -4704,11 +4712,22 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     }
 
     auto* doc = new RcxDocument(this);
+
+    // Show progress for large files
+    setAppStatus(QStringLiteral("Loading %1...").arg(QFileInfo(filePath).fileName()));
+    QApplication::processEvents();
+
     if (!doc->load(filePath)) {
         QMessageBox::warning(this, "Error", "Failed to load: " + filePath);
+        setAppStatus({});
         delete doc;
         return nullptr;
     }
+
+    int nodeCount = doc->tree.nodes.size();
+    if (nodeCount > 5000)
+        setAppStatus(QStringLiteral("Composing %1 nodes...").arg(nodeCount));
+    QApplication::processEvents();
 
     // Close all existing tabs so the project replaces the current state
     QDockWidget* dock;
@@ -4723,6 +4742,13 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     }
     m_workspaceDock->show();
     addRecentFile(filePath);
+
+    int classCount = 0;
+    for (const auto& n : doc->tree.nodes)
+        if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
+    setAppStatus(QStringLiteral("Loaded %1 (%2 classes, %3 nodes)")
+        .arg(QFileInfo(filePath).fileName()).arg(classCount).arg(nodeCount));
+
     return dock;
 }
 

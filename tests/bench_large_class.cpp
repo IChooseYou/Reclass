@@ -66,7 +66,11 @@ private slots:
     void initTestCase();
     void benchCompose();
     void benchComposeLarge();
+    void benchCompose45K();
     void benchApplyDocument();
+    void benchApplyDocument45K();
+    void benchRemoveNode45K();
+    void benchChangeKind45K();
     void benchHoverHighlight();
     void benchSelectionOverlay();
     void benchHoverHighlightRepeated();
@@ -77,7 +81,7 @@ public:
 
 void BenchLargeClass::initTestCase()
 {
-    m_tree = buildLargeTree(500);
+    m_tree = buildLargeTree(2000);
 
     // Create buffer large enough for all fields
     QByteArray buf(0x10000, '\0');
@@ -143,6 +147,37 @@ void BenchLargeClass::benchComposeLarge()
     QVERIFY(elapsed > 0);
 }
 
+void BenchLargeClass::benchCompose45K()
+{
+    NodeTree bigTree = buildLargeTree(45000);
+    QByteArray buf(0x100000, '\0');
+    for (int i = 0; i < buf.size(); ++i) buf[i] = (char)(i & 0xFF);
+    BufferProvider bigProv(buf, QStringLiteral("bench_45k"));
+
+    // Warmup
+    { ComposeResult w = rcx::compose(bigTree, bigProv); Q_UNUSED(w); }
+
+    const int ITERS = 5;
+    QElapsedTimer timer;
+
+    timer.start();
+    for (int i = 0; i < ITERS; ++i) {
+        ComposeResult r = rcx::compose(bigTree, bigProv);
+        Q_UNUSED(r);
+    }
+    qint64 elapsed = timer.elapsed();
+
+    ComposeResult r = rcx::compose(bigTree, bigProv);
+    qDebug() << "";
+    qDebug() << "=== Compose Benchmark (45000 fields) ===";
+    qDebug() << "  Tree:" << bigTree.nodes.size() << "nodes,"
+             << r.meta.size() << "lines," << r.text.size() << "chars";
+    qDebug() << "  Iterations:" << ITERS;
+    qDebug() << "  Total:" << elapsed << "ms";
+    qDebug() << "  Per-compose:" << (double)elapsed / ITERS << "ms";
+    QVERIFY(elapsed > 0);
+}
+
 void BenchLargeClass::benchApplyDocument()
 {
     RcxEditor editor;
@@ -157,11 +192,167 @@ void BenchLargeClass::benchApplyDocument()
     qint64 elapsed = timer.elapsed();
 
     qDebug() << "";
-    qDebug() << "=== ApplyDocument Benchmark (500 fields) ===";
+    qDebug() << "=== ApplyDocument Benchmark (2000 fields) ===";
     qDebug() << "  Iterations:" << ITERS;
     qDebug() << "  Total:" << elapsed << "ms";
     qDebug() << "  Per-apply:" << (double)elapsed / ITERS << "ms";
     QVERIFY(elapsed > 0);
+}
+
+void BenchLargeClass::benchApplyDocument45K()
+{
+    NodeTree bigTree = buildLargeTree(45000);
+    QByteArray buf(0x100000, '\0');
+    for (int i = 0; i < buf.size(); ++i) buf[i] = (char)(i & 0xFF);
+    BufferProvider bigProv(buf, QStringLiteral("bench_45k_apply"));
+
+    ComposeResult bigResult = rcx::compose(bigTree, bigProv);
+    qDebug() << "";
+    qDebug() << "=== ApplyDocument Benchmark (45000 fields) ===";
+    qDebug() << "  Lines:" << bigResult.meta.size()
+             << "Text:" << bigResult.text.size() << "chars";
+
+    RcxEditor editor;
+    editor.resize(800, 600);
+
+    // Warmup
+    editor.applyDocument(bigResult);
+
+    const int ITERS = 3;
+    QElapsedTimer timer;
+
+    timer.start();
+    for (int i = 0; i < ITERS; ++i)
+        editor.applyDocument(bigResult);
+    qint64 elapsed = timer.elapsed();
+
+    qDebug() << "  Iterations:" << ITERS;
+    qDebug() << "  Total:" << elapsed << "ms";
+    qDebug() << "  Per-apply:" << (double)elapsed / ITERS << "ms";
+    QVERIFY(elapsed > 0);
+}
+
+void BenchLargeClass::benchRemoveNode45K()
+{
+    // Benchmark the expensive operations that happen during removeNode on 45K tree:
+    // structSpan (without childMap), childrenOf, subtreeIndices, compose, applyDocument
+    NodeTree tree = buildLargeTree(45000);
+    QByteArray buf(0x100000, '\0');
+    for (int i = 0; i < buf.size(); ++i) buf[i] = (char)(i & 0xFF);
+    BufferProvider prov(buf, QStringLiteral("bench_rm"));
+
+    qDebug() << "";
+    qDebug() << "=== RemoveNode Component Costs (45000 fields) ===";
+
+    QElapsedTimer timer;
+
+    // 1. structSpan WITHOUT childMap (the removeNode path)
+    timer.start();
+    for (int i = 0; i < 5; ++i) {
+        int s = tree.structSpan(1);
+        Q_UNUSED(s);
+    }
+    qDebug() << "  structSpan(root) no childMap x5:" << timer.elapsed() << "ms"
+             << "(" << timer.elapsed() / 5.0 << "ms each)";
+
+    // 2. structSpan WITH childMap
+    QHash<uint64_t, QVector<int>> childMap;
+    for (int i = 0; i < tree.nodes.size(); i++)
+        childMap[tree.nodes[i].parentId].append(i);
+    timer.start();
+    for (int i = 0; i < 5; ++i) {
+        int s = tree.structSpan(1, &childMap);
+        Q_UNUSED(s);
+    }
+    qDebug() << "  structSpan(root) WITH childMap x5:" << timer.elapsed() << "ms"
+             << "(" << timer.elapsed() / 5.0 << "ms each)";
+
+    // 3. childrenOf (triggers cache rebuild)
+    tree.invalidateIdCache();
+    timer.start();
+    auto kids = tree.childrenOf(1);
+    qDebug() << "  childrenOf(root) cold cache:" << timer.elapsed() << "ms (" << kids.size() << "children)";
+
+    timer.start();
+    kids = tree.childrenOf(1);
+    qDebug() << "  childrenOf(root) warm cache:" << timer.elapsed() << "ms";
+
+    // 4. subtreeIndices
+    tree.invalidateIdCache();
+    timer.start();
+    auto sub = tree.subtreeIndices(1);
+    qDebug() << "  subtreeIndices(root) cold cache:" << timer.elapsed() << "ms (" << sub.size() << "nodes)";
+
+    // 5. invalidateIdCache + reaccess
+    timer.start();
+    for (int i = 0; i < 10; ++i) {
+        tree.invalidateIdCache();
+        tree.indexOfId(1);  // triggers rebuild
+    }
+    qDebug() << "  invalidate+rebuild idCache x10:" << timer.elapsed() << "ms"
+             << "(" << timer.elapsed() / 10.0 << "ms each)";
+
+    // 6. Full compose
+    timer.start();
+    ComposeResult r = rcx::compose(tree, prov);
+    qDebug() << "  compose:" << timer.elapsed() << "ms";
+
+    // 7. Full applyDocument
+    RcxEditor editor;
+    editor.resize(800, 600);
+    timer.start();
+    editor.applyDocument(r);
+    qDebug() << "  applyDocument:" << timer.elapsed() << "ms";
+
+    // Total simulated removeNode cost
+    qDebug() << "  --- Simulated total: structSpan + childrenOf + subtreeIndices + compose + apply ---";
+
+    QVERIFY(true);
+}
+
+void BenchLargeClass::benchChangeKind45K()
+{
+    NodeTree tree = buildLargeTree(45000);
+    QByteArray buf(0x100000, '\0');
+    for (int i = 0; i < buf.size(); ++i) buf[i] = (char)(i & 0xFF);
+    BufferProvider prov(buf, QStringLiteral("bench_ck"));
+
+    qDebug() << "";
+    qDebug() << "=== ChangeKind Component Costs (45000 fields) ===";
+
+    QElapsedTimer timer;
+
+    // Simulate offset adjustment: iterate 45K siblings
+    auto siblings = tree.childrenOf(1);
+    timer.start();
+    QVector<std::pair<uint64_t, int>> adjs;
+    for (int si : siblings) {
+        auto& sib = tree.nodes[si];
+        if (sib.offset >= 100)
+            adjs.push_back({sib.id, sib.offset - 4});
+    }
+    qDebug() << "  Build offset adjustments (" << adjs.size() << "siblings):" << timer.elapsed() << "ms";
+
+    // Apply adjustments (simulates what applyCommand does)
+    timer.start();
+    for (auto& [id, newOff] : adjs) {
+        int idx = tree.indexOfId(id);
+        if (idx >= 0) tree.nodes[idx].offset = newOff;
+    }
+    qDebug() << "  Apply offset adjustments:" << timer.elapsed() << "ms";
+
+    // Simulate clearHistoryForAdjs: subtreeIndices per adjusted sibling (OLD path)
+    timer.start();
+    int totalDescendants = 0;
+    for (int i = 0; i < qMin((int)adjs.size(), 100); ++i) {
+        auto sub = tree.subtreeIndices(adjs[i].first);
+        totalDescendants += sub.size();
+    }
+    qint64 sample100 = timer.elapsed();
+    qDebug() << "  subtreeIndices x100 siblings (sample):" << sample100 << "ms"
+             << "(extrapolated full 45K:" << (sample100 * adjs.size() / 100) << "ms)";
+
+    QVERIFY(true);
 }
 
 void BenchLargeClass::benchHoverHighlight()

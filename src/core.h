@@ -389,10 +389,12 @@ struct NodeTree {
     QVector<int> subtreeIndices(uint64_t nodeId) const {
         int idx = indexOfId(nodeId);
         if (idx < 0) return {};
-        // Build parent→children map
-        QHash<uint64_t, QVector<int>> childMap;
-        for (int i = 0; i < nodes.size(); i++)
-            childMap[nodes[i].parentId].append(i);
+        // Reuse cached childMap instead of rebuilding from scratch each call
+        if (m_childCache.isEmpty() && !nodes.isEmpty()) {
+            for (int i = 0; i < nodes.size(); i++)
+                m_childCache[nodes[i].parentId].append(i);
+        }
+        const auto& childMap = m_childCache;
         // BFS with visited guard
         QVector<int> result;
         QSet<uint64_t> visited;
@@ -649,6 +651,8 @@ struct LineMeta {
     int      typeHintStart  = -1;      // Character offset where hint text starts in line text (-1 = none)
     QVector<NodeKind> typeHintKinds;   // Suggested kinds from inference (empty = no hint)
     int      commentStart   = -1;      // Character offset where "// comment" starts in line text (-1 = none)
+    int      braceCol       = -1;      // Column of trailing '{' on header lines (-1 = none); avoids per-char IPC scan
+    uint64_t parentAddr     = 0;       // Absolute address of enclosing container (for relative offset display)
 };
 
 inline bool isSyntheticLine(const LineMeta& lm) {

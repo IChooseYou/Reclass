@@ -1077,10 +1077,15 @@ void RcxController::refresh() {
 
     // Mark lines whose node data changed since last refresh
     if (!m_changedOffsets.isEmpty()) {
+        // Build childMap once for structSpan lookups (avoids O(N) cache rebuilds per call)
+        QHash<uint64_t, QVector<int>> childMap;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            childMap[m_doc->tree.nodes[i].parentId].append(i);
+
         for (auto& lm : m_lastResult.meta) {
             if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
-            int64_t offset = m_doc->tree.computeOffset(lm.nodeIdx);
-            if (offset < 0) continue;
+            // Use compose's precomputed absolute address (avoids per-line parent-chain walk)
+            int64_t offset = (int64_t)(lm.offsetAddr - m_doc->tree.baseAddress);
             const Node& node = m_doc->tree.nodes[lm.nodeIdx];
 
             if (isHexPreview(node.kind)) {
@@ -1096,7 +1101,7 @@ void RcxController::refresh() {
             } else {
                 // Use structSpan for containers (byteSize returns 0 for Array-of-Struct)
                 int sz = (node.kind == NodeKind::Struct || node.kind == NodeKind::Array)
-                    ? m_doc->tree.structSpan(node.id) : node.byteSize();
+                    ? m_doc->tree.structSpan(node.id, &childMap) : node.byteSize();
                 for (int64_t b = offset; b < offset + sz; b++) {
                     if (m_changedOffsets.contains(b)) {
                         lm.dataChanged = true;
@@ -1667,12 +1672,43 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
     auto clearHistoryForAdjs = [&](const QVector<cmd::OffsetAdj>& adjs) {
         if (adjs.isEmpty()) return;
         m_refreshGen++;  // discard in-flight async read (stale layout)
+        // Build childMap once for all subtree lookups (avoids O(N²) rebuilds)
+        QHash<uint64_t, QVector<int>> adjChildMap;
+        bool hasContainers = false;
         for (const auto& adj : adjs) {
-            // Clear the adjusted node itself
             clearNodeHistory(adj.nodeId);
-            // Clear all descendants (their effective address also shifted)
-            for (int ci : tree.subtreeIndices(adj.nodeId))
-                clearNodeHistory(tree.nodes[ci].id);
+            int ai = tree.indexOfId(adj.nodeId);
+            if (ai >= 0 && (tree.nodes[ai].kind == NodeKind::Struct
+                         || tree.nodes[ai].kind == NodeKind::Array))
+                hasContainers = true;
+        }
+        // Only build childMap if any adjusted nodes are containers with children
+        if (hasContainers) {
+            for (int i = 0; i < tree.nodes.size(); i++)
+                adjChildMap[tree.nodes[i].parentId].append(i);
+        }
+        for (const auto& adj : adjs) {
+            int ai = tree.indexOfId(adj.nodeId);
+            if (ai < 0) continue;
+            const Node& n = tree.nodes[ai];
+            if (n.kind != NodeKind::Struct && n.kind != NodeKind::Array)
+                continue;  // leaf node — already cleared above, no descendants
+            // Clear all descendants
+            QVector<uint64_t> stack;
+            QSet<uint64_t> visited;
+            stack.append(adj.nodeId);
+            visited.insert(adj.nodeId);
+            while (!stack.isEmpty()) {
+                uint64_t pid = stack.takeLast();
+                for (int ci : adjChildMap.value(pid)) {
+                    uint64_t cid = tree.nodes[ci].id;
+                    if (!visited.contains(cid)) {
+                        visited.insert(cid);
+                        stack.append(cid);
+                        clearNodeHistory(cid);
+                    }
+                }
+            }
         }
     };
 
@@ -4461,6 +4497,7 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
         // ── Post-mutation sibling offset adjustment ──
         // After all kind/refId/arrayMeta changes, compute the new effective size.
         // If it differs from oldEffectiveSize, shift siblings to prevent overlap/gaps.
+        // Batch all offset changes in a single macro to avoid N refresh() calls.
         {
             int ni = m_doc->tree.indexOfId(nodeId);
             if (ni >= 0) {
@@ -4486,6 +4523,9 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                 if (sizeDelta != 0 && oldEffectiveSize > 0) {
                     int oldEnd = nodeOffset + oldEffectiveSize;
                     auto siblings = m_doc->tree.childrenOf(parentId);
+                    bool wasSuppressed2 = m_suppressRefresh;
+                    m_suppressRefresh = true;
+                    m_doc->undoStack.beginMacro(QStringLiteral("Adjust sibling offsets"));
                     for (int si : siblings) {
                         const auto& sib = m_doc->tree.nodes[si];
                         if (sib.id == nodeId || sib.isStatic) continue;
@@ -4495,6 +4535,9 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                                                   sib.offset + sizeDelta}));
                         }
                     }
+                    m_doc->undoStack.endMacro();
+                    m_suppressRefresh = wasSuppressed2;
+                    if (!m_suppressRefresh) refresh();
                 }
             }
         }

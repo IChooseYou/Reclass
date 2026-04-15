@@ -576,6 +576,9 @@ void RcxEditor::setupScintilla() {
     // Vertical scrollbar: don't allow scrolling past the last line
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETENDATLASTLINE, 1);
 
+    // Cache entire document layout to avoid re-measuring lines across styling passes
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETLAYOUTCACHE, 3L);  // SC_CACHE_DOCUMENT
+
     // Editable-field indicator - HIDDEN (no visual)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_EDITABLE, 5 /*INDIC_HIDDEN*/);
@@ -924,17 +927,20 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     applyLineAttributes(result.meta);
     applyHexDimming(result.meta);
 
-    // Build line-text cache for indicator passes (avoids redundant Scintilla IPC)
+    // Build line-text cache from compose text directly (avoids per-line Scintilla IPC).
+    // The compose text includes fold-indicator prefixes (3 chars) added by emitLine(),
+    // but indicator column positions already account for this via kFoldCol offset.
     QVector<QString> lineTexts(result.meta.size());
-    for (int i = 0; i < result.meta.size(); i++) {
-        const auto& lm = result.meta[i];
-        if (lm.heatLevel > 0 || isFuncPtr(lm.nodeKind) ||
-            lm.nodeKind == NodeKind::Pointer32 ||
-            lm.nodeKind == NodeKind::Pointer64 ||
-            lm.lineKind == LineKind::Footer ||
-            lm.typeHintStart >= 0 ||
-            lm.commentStart >= 0)
-            lineTexts[i] = getLineText(m_sci, i);
+    {
+        int lineIdx = 0;
+        int start = 0;
+        for (int i = 0; i <= result.text.size() && lineIdx < result.meta.size(); i++) {
+            if (i == result.text.size() || result.text[i] == '\n') {
+                lineTexts[lineIdx] = result.text.mid(start, i - start);
+                lineIdx++;
+                start = i + 1;
+            }
+        }
     }
     applyHeatmapHighlight(result.meta, lineTexts);
     applySymbolColoring(result.meta, lineTexts);
@@ -1163,6 +1169,9 @@ void RcxEditor::reformatMargins() {
             uint64_t parentAddr = base;
             if (lm.ptrBase != 0) {
                 parentAddr = lm.ptrBase;
+            } else if (lm.parentAddr != 0) {
+                // Use precomputed parent address from compose (avoids O(N) backward scan)
+                parentAddr = lm.parentAddr;
             } else {
                 for (int j = i - 1; j >= 0; j--) {
                     const auto& pLm = m_meta[j];
@@ -1256,16 +1265,9 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta) {
             long pos, len; lineRangeNoEol(m_sci, i, pos, len);
             if (len > 0)
                 m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, len);
-        } else if (meta[i].lineKind == LineKind::Header ||
-                   meta[i].lineKind == LineKind::CommandRow) {
-            long endPos = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION, (unsigned long)i);
-            for (long p = endPos - 1; p >= 0; --p) {
-                int ch = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETCHARAT, (unsigned long)p);
-                if (ch == ' ' || ch == '\t') continue;
-                if (ch == '{')
-                    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, p, 1);
-                break;
-            }
+        } else if (meta[i].braceCol >= 0) {
+            // Use precomputed brace column from compose (avoids per-character IPC scan)
+            fillIndicatorCols(IND_HEX_DIM, i, meta[i].braceCol, meta[i].braceCol + 1);
         }
     }
 
