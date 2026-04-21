@@ -4495,12 +4495,16 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
             if (!m_suppressRefresh) refresh();
         }
         // ── Post-mutation sibling offset adjustment ──
-        // After all kind/refId/arrayMeta changes, compute the new effective size.
-        // If it differs from oldEffectiveSize, shift siblings to prevent overlap/gaps.
-        // Batch all offset changes in a single macro to avoid N refresh() calls.
+        // Only runs for Struct/Array targets: changeNodeKind() forces newSize=0
+        // for those kinds (see controller.cpp ~L1237) so its shrink/grow path
+        // never fires, and this block is responsible for shifting siblings.
+        // For primitives/pointers, changeNodeKind() already handled siblings
+        // (padding on shrink, offset shift on grow) — running this block for
+        // those cases would double-shift and break offsets of fields below.
         {
             int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni >= 0) {
+            if (ni >= 0 && (m_doc->tree.nodes[ni].kind == NodeKind::Struct
+                            || m_doc->tree.nodes[ni].kind == NodeKind::Array)) {
                 const Node& updatedNode = m_doc->tree.nodes[ni];
                 int newEffectiveSize = updatedNode.byteSize();
                 if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Struct)
