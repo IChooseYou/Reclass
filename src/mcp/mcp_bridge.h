@@ -101,6 +101,9 @@ private:
     QJsonObject toolThemeSet(const QJsonObject& args);
     QJsonObject toolThemeSave(const QJsonObject& args);
     QJsonObject toolThemeRevert(const QJsonObject& args);
+    QJsonObject toolBookmarksList(const QJsonObject& args);
+    QJsonObject toolBookmarksAdd(const QJsonObject& args);
+    QJsonObject toolBookmarksRemove(const QJsonObject& args);
 
     // Helpers
     QJsonObject makeTextResult(const QString& text, bool isError = false);

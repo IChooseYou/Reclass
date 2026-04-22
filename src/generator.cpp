@@ -36,10 +36,13 @@ static QString cTypeName(NodeKind kind) {
     case NodeKind::Int16:     return QStringLiteral("int16_t");
     case NodeKind::Int32:     return QStringLiteral("int32_t");
     case NodeKind::Int64:     return QStringLiteral("int64_t");
+    case NodeKind::Int128:    return QStringLiteral("__int128");
     case NodeKind::UInt8:     return QStringLiteral("uint8_t");
     case NodeKind::UInt16:    return QStringLiteral("uint16_t");
     case NodeKind::UInt32:    return QStringLiteral("uint32_t");
     case NodeKind::UInt64:    return QStringLiteral("uint64_t");
+    case NodeKind::UInt128:   return QStringLiteral("unsigned __int128");
+    case NodeKind::Float16:   return QStringLiteral("_Float16");
     case NodeKind::Float:     return QStringLiteral("float");
     case NodeKind::Double:    return QStringLiteral("double");
     case NodeKind::Bool:      return QStringLiteral("bool");
@@ -469,10 +472,13 @@ static QString rustTypeName(NodeKind kind) {
     case NodeKind::Int16:     return QStringLiteral("i16");
     case NodeKind::Int32:     return QStringLiteral("i32");
     case NodeKind::Int64:     return QStringLiteral("i64");
+    case NodeKind::Int128:    return QStringLiteral("i128");
     case NodeKind::UInt8:     return QStringLiteral("u8");
     case NodeKind::UInt16:    return QStringLiteral("u16");
     case NodeKind::UInt32:    return QStringLiteral("u32");
     case NodeKind::UInt64:    return QStringLiteral("u64");
+    case NodeKind::UInt128:   return QStringLiteral("u128");
+    case NodeKind::Float16:   return QStringLiteral("f16");
     case NodeKind::Float:     return QStringLiteral("f32");
     case NodeKind::Double:    return QStringLiteral("f64");
     case NodeKind::Bool:      return QStringLiteral("bool");
@@ -811,10 +817,13 @@ static QString csTypeName(NodeKind kind) {
     case NodeKind::Int16:     return QStringLiteral("short");
     case NodeKind::Int32:     return QStringLiteral("int");
     case NodeKind::Int64:     return QStringLiteral("long");
+    case NodeKind::Int128:    return QStringLiteral("Int128");
     case NodeKind::UInt8:     return QStringLiteral("byte");
     case NodeKind::UInt16:    return QStringLiteral("ushort");
     case NodeKind::UInt32:    return QStringLiteral("uint");
     case NodeKind::UInt64:    return QStringLiteral("ulong");
+    case NodeKind::UInt128:   return QStringLiteral("UInt128");
+    case NodeKind::Float16:   return QStringLiteral("Half");
     case NodeKind::Float:     return QStringLiteral("float");
     case NodeKind::Double:    return QStringLiteral("double");
     case NodeKind::Bool:      return QStringLiteral("bool");
@@ -1047,10 +1056,13 @@ static QString pyTypeName(NodeKind kind) {
     case NodeKind::Int16:     return QStringLiteral("ctypes.c_int16");
     case NodeKind::Int32:     return QStringLiteral("ctypes.c_int32");
     case NodeKind::Int64:     return QStringLiteral("ctypes.c_int64");
+    case NodeKind::Int128:    return QStringLiteral("ctypes.c_int8 * 16");
     case NodeKind::UInt8:     return QStringLiteral("ctypes.c_uint8");
     case NodeKind::UInt16:    return QStringLiteral("ctypes.c_uint16");
     case NodeKind::UInt32:    return QStringLiteral("ctypes.c_uint32");
     case NodeKind::UInt64:    return QStringLiteral("ctypes.c_uint64");
+    case NodeKind::UInt128:   return QStringLiteral("ctypes.c_uint8 * 16");
+    case NodeKind::Float16:   return QStringLiteral("ctypes.c_uint16");  // no native half
     case NodeKind::Float:     return QStringLiteral("ctypes.c_float");
     case NodeKind::Double:    return QStringLiteral("ctypes.c_double");
     case NodeKind::Bool:      return QStringLiteral("ctypes.c_bool");

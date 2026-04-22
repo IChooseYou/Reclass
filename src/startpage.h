@@ -128,7 +128,45 @@ protected:
 
     void resizeEvent(QResizeEvent* e) override { QWidget::resizeEvent(e); update(); }
     void leaveEvent(QEvent*) override { m_hz = HZ_None; m_hi = -1; setCursor(Qt::ArrowCursor); update(); }
-    void keyPressEvent(QKeyEvent* e) override { if (e->key() == Qt::Key_Escape) reject(); }
+    // Escape dismisses the splash AND creates a new class — same as clicking
+    // outside or clicking the "New Class" card. User has no patience for
+    // landing on a blank window; always drop them somewhere usable.
+    void keyPressEvent(QKeyEvent* e) override {
+        if (e->key() == Qt::Key_Escape) {
+            emit newClass();
+            return;
+        }
+        QDialog::keyPressEvent(e);
+    }
+
+    // Install a qApp-level event filter while visible so we can catch clicks
+    // outside the splash's geometry — modal QDialogs otherwise block those
+    // events from reaching anyone. Click-outside behaves like the "New Class"
+    // card: the splash dismisses and a new class is created. Matches the
+    // "I want to click out of things easily" UX expectation of a welcome
+    // screen (VS Code, Rider, etc. all do this).
+    bool event(QEvent* e) override {
+        if (e->type() == QEvent::Show)
+            QCoreApplication::instance()->installEventFilter(this);
+        else if (e->type() == QEvent::Hide)
+            QCoreApplication::instance()->removeEventFilter(this);
+        return QDialog::event(e);
+    }
+
+    bool eventFilter(QObject* obj, QEvent* e) override {
+        if (e->type() == QEvent::MouseButtonPress) {
+            auto* me = static_cast<QMouseEvent*>(e);
+            QPoint global = me->globalPosition().toPoint();
+            QRect myRect(mapToGlobal(QPoint(0, 0)), size());
+            if (!myRect.contains(global)) {
+                // Outside click → dismiss + new class. newClass() is already
+                // wired in MainWindow to close the splash and create a class.
+                emit newClass();
+                return true;  // consume so the underlying widget doesn't act
+            }
+        }
+        return QDialog::eventFilter(obj, e);
+    }
 
 private:
     enum HZ { HZ_None, HZ_Entry, HZ_Group, HZ_Card, HZ_Continue };

@@ -693,8 +693,29 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         // For arrays, render children as condensed (no header/footer for struct elements)
         bool childrenAreArrayElements = (node.kind == NodeKind::Array);
         int elementIdx = 0;
+        // Gap-ruler tracking: accumulate consecutive unnamed (padding) children's
+        // bytes; when we reach the next named child, emit a "+0xN gap" marker line.
+        int gapBytes = 0;
         for (int ri = 0; ri < regular.size(); ri++) {
             int childIdx = regular[ri];
+            const Node& child = tree.nodes[childIdx];
+            // Emit gap-ruler line just before a named field that follows padding.
+            if (!childrenAreArrayElements && !child.name.isEmpty() && gapBytes > 0) {
+                LineMeta gm;
+                gm.nodeIdx    = -1;        // non-interactive
+                gm.nodeId     = 0;
+                gm.depth      = childDepth;
+                gm.lineKind   = LineKind::Continuation;
+                gm.isContinuation = true;
+                gm.parentAddr = absAddr;
+                gm.foldLevel  = computeFoldLevel(childDepth, false);
+                uint64_t gapStartAddr = absAddr + (uint64_t)child.offset - (uint64_t)gapBytes;
+                gm.offsetText = fmt::fmtOffsetMargin(gapStartAddr, false, state.offsetHexDigits);
+                gm.offsetAddr = gapStartAddr;
+                QString body = fmt::indent(childDepth)
+                             + QStringLiteral("[+0x%1 gap]").arg(gapBytes, 0, 16);
+                state.emitLine(body, std::move(gm));
+            }
             // A regular child has more siblings if there are more regular children
             // or if static fields follow after all regular children
             bool hasMore = (ri < regular.size() - 1)
@@ -706,6 +727,16 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                         childrenAreArrayElements, node.id,
                         childrenAreArrayElements ? elementIdx++ : -1,
                         childrenAreArrayElements ? absAddr : 0);
+            // Update gap accumulation: empty-name children contribute, named ones reset.
+            if (!childrenAreArrayElements) {
+                if (child.name.isEmpty()) {
+                    int sz = (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
+                           ? tree.structSpan(child.id, &state.childMap) : child.byteSize();
+                    gapBytes += sz;
+                } else {
+                    gapBytes = 0;
+                }
+            }
         }
 
         // ── Static fields: render after regular children, before footer ──

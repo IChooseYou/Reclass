@@ -552,6 +552,44 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // bookmarks.list / add / remove
+    tools.append(QJsonObject{
+        {"name", "bookmarks.list"},
+        {"description", "List bookmarks for the active project. Returns array of {name, addressFormula, address}."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"}}}
+            }}
+        }}
+    });
+    tools.append(QJsonObject{
+        {"name", "bookmarks.add"},
+        {"description", "Add a bookmark to the active project. addressFormula is an AddressParser expression "
+                        "such as '<game.exe>+0x12340' or '0x7ff7e0001234'. Survives base-address rebases."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"}}},
+                {"name", QJsonObject{{"type", "string"}}},
+                {"addressFormula", QJsonObject{{"type", "string"}}}
+            }},
+            {"required", QJsonArray{"name", "addressFormula"}}
+        }}
+    });
+    tools.append(QJsonObject{
+        {"name", "bookmarks.remove"},
+        {"description", "Remove a bookmark by name (first match) or by 0-based index."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"}}},
+                {"name", QJsonObject{{"type", "string"}}},
+                {"index", QJsonObject{{"type", "integer"}}}
+            }}
+        }}
+    });
+
     // 6. status.set
     tools.append(QJsonObject{
         {"name", "status.set"},
@@ -965,6 +1003,9 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "theme.set")     result = toolThemeSet(args);
     else if (toolName == "theme.save")    result = toolThemeSave(args);
     else if (toolName == "theme.revert")  result = toolThemeRevert(args);
+    else if (toolName == "bookmarks.list")   result = toolBookmarksList(args);
+    else if (toolName == "bookmarks.add")    result = toolBookmarksAdd(args);
+    else if (toolName == "bookmarks.remove") result = toolBookmarksRemove(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
     // Presentation mode: brief focus glow for single-node tools (not tree.apply, which handles its own)
@@ -1271,7 +1312,7 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             n.classKeyword = op.value("classKeyword").toString();
             n.strLen = qBound(1, (int)parseInteger(op.value("strLen"), 64), 1000000);
             n.elementKind = kindFromString(op.value("elementKind").toString("UInt8"));
-            n.arrayLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), 1000000);
+            n.arrayLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), kMaxArrayLen);
             n.ptrDepth = qBound(0, (int)parseInteger(op.value("ptrDepth"), 0), 2);
             n.isStatic = op.value("isStatic").toBool(false);
             n.offsetExpr = op.value("offsetExpr").toString();
@@ -1428,7 +1469,7 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             int idx = tree.indexOfId(nid.toULongLong());
             if (idx >= 0) {
                 NodeKind newElemKind = kindFromString(op.value("elementKind").toString());
-                int newLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), 1000000);
+                int newLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), kMaxArrayLen);
                 doc->undoStack.push(new RcxCommand(ctrl,
                     cmd::ChangeArrayMeta{tree.nodes[idx].id,
                         tree.nodes[idx].elementKind, newElemKind,
@@ -3033,6 +3074,53 @@ QJsonObject McpBridge::toolThemeSave(const QJsonObject&) {
 QJsonObject McpBridge::toolThemeRevert(const QJsonObject&) {
     ThemeManager::instance().revertPreview();
     return makeTextResult("Theme reverted to original.");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: bookmarks.list / add / remove
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolBookmarksList(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab || !tab->doc) return makeTextResult("No active project.");
+    QJsonArray out;
+    for (const auto& b : tab->doc->tree.bookmarks) {
+        QJsonObject o;
+        o["name"] = b.name;
+        o["addressFormula"] = b.addressFormula;
+        out.append(o);
+    }
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+}
+
+QJsonObject McpBridge::toolBookmarksAdd(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab || !tab->ctrl) return makeTextResult("No active project.");
+    QString name = args.value("name").toString().trimmed();
+    QString formula = args.value("addressFormula").toString().trimmed();
+    if (name.isEmpty() || formula.isEmpty())
+        return makeTextResult("Both name and addressFormula are required.");
+    tab->ctrl->addBookmark(name, formula);
+    return makeTextResult(QStringLiteral("Bookmark added: %1 -> %2").arg(name, formula));
+}
+
+QJsonObject McpBridge::toolBookmarksRemove(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab || !tab->ctrl) return makeTextResult("No active project.");
+    auto& bms = tab->doc->tree.bookmarks;
+    int idx = -1;
+    if (args.contains("index")) {
+        idx = (int)parseInteger(args.value("index"));
+    } else {
+        QString name = args.value("name").toString();
+        for (int i = 0; i < bms.size(); i++)
+            if (bms[i].name == name) { idx = i; break; }
+    }
+    if (idx < 0 || idx >= bms.size())
+        return makeTextResult("Bookmark not found.");
+    QString removed = bms[idx].name;
+    tab->ctrl->removeBookmark(idx);
+    return makeTextResult(QStringLiteral("Removed bookmark: %1").arg(removed));
 }
 
 // ════════════════════════════════════════════════════════════════════

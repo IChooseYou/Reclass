@@ -46,8 +46,12 @@ public:
     QSize sizeHint() const override {
         QFontMetrics fm(font());
         QString text = chipText();
-        // pip(5) + gap(3) + text + pad(6)
-        return QSize(5 + 3 + fm.horizontalAdvance(text) + 6, fm.height() + 2);
+        // Natural width: pip(5) + gap(4) + text + 16px total horizontal pad
+        // (split as 8 on each side at paint time, since the block is centred).
+        // Chips are further equalized to the row's max width by
+        // TypeSelectorPopup so the 4-chip row reads as a uniform strip even
+        // when digit counts differ between labels.
+        return QSize(5 + 4 + fm.horizontalAdvance(text) + 16, fm.height() + 4);
     }
 
     QSize minimumSizeHint() const override { return sizeHint(); }
@@ -63,15 +67,22 @@ protected:
 
         if (hov) p.fillRect(rect(), t.hover);
 
-        // Pip (5x5)
-        int pipSz = 5;
-        int x = 3;
+        // Centre the pip + text block horizontally. Combined with chips being
+        // equalized to a uniform width, this yields consistent visual spacing
+        // on both sides of every chip regardless of how many digits its count
+        // has. (Previously content hugged the left edge and each chip had
+        // different right-over-run, making the row look ragged.)
+        const int pipSz = 5;
+        const int gap   = 4;
         QFontMetrics fm(font());
+        int textW  = fm.horizontalAdvance(chipText());
+        int blockW = pipSz + gap + textW;
+        int x      = (width() - blockW) / 2;
         int baseline = (height() + fm.ascent() - fm.descent()) / 2;
-        p.fillRect(x, (height() - pipSz) / 2, pipSz, pipSz, chk ? gc : t.textFaint);
-        x += pipSz + 3;
 
-        // Text at baseline
+        p.fillRect(x, (height() - pipSz) / 2, pipSz, pipSz, chk ? gc : t.textFaint);
+        x += pipSz + gap;
+
         p.setPen(chk ? gc : t.textMuted);
         p.setFont(font());
         p.drawText(x, baseline, chipText());
@@ -83,9 +94,11 @@ protected:
 private:
     QString chipText() const {
         if (m_count < 0) return m_label;
+        // Space between label and count so "Int(11)" reads as "Int (11)" —
+        // less cramped and avoids visual collision with neighbouring chips.
         if (m_totalCount >= 0 && m_totalCount != m_count)
-            return QStringLiteral("%1(%2/%3)").arg(m_label).arg(m_count).arg(m_totalCount);
-        return QStringLiteral("%1(%2)").arg(m_label).arg(m_count);
+            return QStringLiteral("%1 (%2/%3)").arg(m_label).arg(m_count).arg(m_totalCount);
+        return QStringLiteral("%1 (%2)").arg(m_label).arg(m_count);
     }
 
     QString m_label;
@@ -226,11 +239,11 @@ QColor kindGroupDimColor(const QString& group) {
 QString kindGroupFor(NodeKind k) {
     if (isHexNode(k))                     return QStringLiteral("Hex");
     if (k == NodeKind::Int8  || k == NodeKind::Int16  ||
-        k == NodeKind::Int32 || k == NodeKind::Int64  ||
+        k == NodeKind::Int32 || k == NodeKind::Int64  || k == NodeKind::Int128 ||
         k == NodeKind::UInt8  || k == NodeKind::UInt16 ||
-        k == NodeKind::UInt32 || k == NodeKind::UInt64 ||
+        k == NodeKind::UInt32 || k == NodeKind::UInt64 || k == NodeKind::UInt128 ||
         k == NodeKind::Bool)              return QStringLiteral("Int");
-    if (k == NodeKind::Float || k == NodeKind::Double)  return QStringLiteral("Float");
+    if (k == NodeKind::Float16 || k == NodeKind::Float || k == NodeKind::Double)  return QStringLiteral("Float");
     if (isPointerKind(k) || isFuncPtr(k)) return QStringLiteral("Ptr");
     if (isVectorKind(k) || isMatrixKind(k)) return QStringLiteral("Vec");
     if (isStringKind(k))                  return QStringLiteral("Str");
@@ -1775,6 +1788,18 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             chip->setCount(visible, total);
         else
             chip->setCount(total);
+    }
+    // Equalize chip widths to the widest natural size so the row reads as a
+    // uniform strip. Without this, "Hex (4)" and "Int (11)" end up different
+    // widths, and with a 2px QHBoxLayout spacing between them the row looks
+    // ragged. Chips with shorter content simply gain extra symmetric padding
+    // (centring in paintEvent keeps their pip+text block visually balanced).
+    {
+        int maxW = 0;
+        for (auto* chip : m_groupChips)
+            maxW = qMax(maxW, chip->sizeHint().width());
+        for (auto* chip : m_groupChips)
+            chip->setFixedWidth(maxW);
     }
 
     if (m_statusLabel) {

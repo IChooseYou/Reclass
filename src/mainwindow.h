@@ -17,6 +17,7 @@ namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetecto
 #include <QStandardItemModel>
 #include <QSortFilterProxyModel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMap>
 #include <QButtonGroup>
 #include <QJsonArray>
@@ -94,6 +95,11 @@ public:
     bool project_save(QDockWidget* dock = nullptr, bool saveAs = false);
     void project_close(QDockWidget* dock = nullptr);
 
+    // Layout presets — wired from TitleBarWidget::layoutPresetSelected.
+    // Sets visibility of workspace/symbols/scanner docks per preset.
+    // Values match rcx::LayoutPreset enum in titlebar.h.
+    void applyLayoutPreset(int preset);
+
 private:
     enum ViewMode { VM_Reclass, VM_Rendered, VM_Debug };
 
@@ -168,6 +174,22 @@ private:
 
     void createMenus();
     void applyMenuBarTitleCase(bool titleCase);
+
+    // ── Sidebar dock placement ──
+    // Single entry point for positioning a sidebar dock (workspace, bookmarks,
+    // symbols, scanner). If another sidebar dock is already visible+docked in
+    // the target area, tabifies with it — new panel becomes a tab instead of
+    // subdividing the area. Otherwise positions next to the first doc dock
+    // (horizontal side-dock) or in the requested area, then resizes to the
+    // remembered size from QSettings (falling back to preferredSize).
+    void placeSidebarDock(QDockWidget* dock, Qt::DockWidgetArea area,
+                          int preferredSize = -1);
+    // Persist / restore dock size under ui/dock.<objectName>.size.
+    void saveDockSize(QDockWidget* dock);
+    int  loadDockSize(QDockWidget* dock, int fallback) const;
+    // Guard to prevent visibilityChanged → placeSidebarDock → show() →
+    // visibilityChanged recursion when a dock is tabified on becoming visible.
+    bool m_placingSidebar = false;
     void createStatusBar();
     void showPluginsDialog();
     void populateSourceMenu();
@@ -271,6 +293,15 @@ private:
     QHash<QString, CachedModuleTypes> m_cachedModuleTypes;
 
     void createSymbolsDock();
+
+    // Bookmarks dock
+    QDockWidget* m_bookmarksDock   = nullptr;
+    QListWidget* m_bookmarksList   = nullptr;
+    QLineEdit*   m_bookmarksFilter = nullptr;
+    void createBookmarksDock();
+    void refreshBookmarksDock();
+    void promptAddBookmark();
+    void navigateBookmark(int idx);
     void rebuildSymbolsModel();
     void rebuildTypesModel();
     void populateTypesModuleItem(QStandardItem* moduleItem);

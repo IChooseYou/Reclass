@@ -1,10 +1,60 @@
 #include "core.h"
 #include "addressparser.h"
+#include <QtEndian>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 
 namespace rcx::fmt {
+
+// ── IEEE 754 half-precision (binary16) ↔ single-precision ──
+
+static float halfToFloat(uint16_t h) {
+    uint32_t s = uint32_t(h & 0x8000) << 16;
+    uint32_t e = (h >> 10) & 0x1f;
+    uint32_t m = h & 0x3ff;
+    uint32_t b;
+    if (e == 0) {
+        if (m == 0) { b = s; }
+        else {
+            // Subnormal: renormalize into single-precision normal form.
+            while ((m & 0x400) == 0) { m <<= 1; e--; }
+            e++; m &= 0x3ff;
+            b = s | ((e + 112) << 23) | (m << 13);
+        }
+    } else if (e == 0x1f) {
+        b = s | 0x7f800000 | (m << 13);   // inf or NaN
+    } else {
+        b = s | ((e + 112) << 23) | (m << 13);
+    }
+    float f; memcpy(&f, &b, 4); return f;
+}
+
+static uint16_t floatToHalf(float f) {
+    uint32_t b; memcpy(&b, &f, 4);
+    uint32_t s = (b >> 16) & 0x8000;
+    int32_t  e = int32_t((b >> 23) & 0xff) - 127;
+    uint32_t m = b & 0x7fffff;
+    if (e == 128) {                            // inf / NaN
+        return uint16_t(s | 0x7c00 | (m ? 0x200 : 0));
+    }
+    if (e > 15) return uint16_t(s | 0x7c00);   // overflow → inf
+    if (e < -14) {
+        if (e < -24) return uint16_t(s);       // underflow → 0
+        m |= 0x800000;
+        int shift = -e - 14 + 13;
+        uint32_t hm = m >> shift;
+        if ((m >> (shift - 1)) & 1) hm++;      // round to nearest
+        return uint16_t(s | hm);
+    }
+    uint32_t hm = m >> 13;
+    if ((m >> 12) & 1) {                       // round to nearest even
+        hm++;
+        if (hm == 0x400) { hm = 0; e++; if (e > 15) return uint16_t(s | 0x7c00); }
+    }
+    return uint16_t(s | ((e + 15) << 10) | hm);
+}
 
 // ── Column layout ──
 // COL_TYPE and COL_NAME use shared constants from core.h (kColType, kColName)
@@ -88,6 +138,48 @@ QString fmtUInt8(uint8_t v)   { return hexVal(v); }
 QString fmtUInt16(uint16_t v) { return hexVal(v); }
 QString fmtUInt32(uint32_t v) { return hexVal(v); }
 QString fmtUInt64(uint64_t v) { return hexVal(v); }
+
+QString fmtFloat16(uint16_t bits) {
+    // Render via the same fixed-width path as fmtFloat, suffixed 'h' to distinguish.
+    float f = halfToFloat(bits);
+    if (std::isnan(f)) return QStringLiteral("NaN");
+    if (std::isinf(f)) return f > 0 ? QStringLiteral("infh") : QStringLiteral("-infh");
+    QString s = QString::number(f, 'g', 4);
+    return s + QStringLiteral("h");
+}
+
+// ── 128-bit integers (native __int128 on GCC/Clang) ──
+
+#if defined(__SIZEOF_INT128__)
+using rcx_int128  = __int128;
+using rcx_uint128 = unsigned __int128;
+#else
+#error "128-bit integer support required"
+#endif
+
+static QString fmtUInt128Impl(rcx_uint128 v) {
+    if (v == 0) return QStringLiteral("0");
+    char buf[40];
+    int pos = 0;
+    while (v != 0) { buf[pos++] = char('0' + (uint32_t)(v % 10)); v /= 10; }
+    QString out; out.reserve(pos);
+    while (pos > 0) out.append(QLatin1Char(buf[--pos]));
+    return out;
+}
+
+QString fmtInt128(const void* data) {
+    rcx_int128 v; memcpy(&v, data, 16);
+    if (v < 0) {
+        rcx_uint128 u = (rcx_uint128)(-(v + 1)) + 1;  // two's complement negate without UB
+        return QStringLiteral("-") + fmtUInt128Impl(u);
+    }
+    return fmtUInt128Impl((rcx_uint128)v);
+}
+
+QString fmtUInt128(const void* data) {
+    rcx_uint128 v; memcpy(&v, data, 16);
+    return fmtUInt128Impl(v);
+}
 
 QString fmtFloat(float v) {
     // Fixed 7-char body: digits + "." + decimals + "f"
@@ -270,11 +362,17 @@ enum class ValueMode { Display, Editable };
 static QString readValueImpl(const Node& node, const Provider& prov,
                              uint64_t addr, int subLine, ValueMode mode) {
     const bool display = (mode == ValueMode::Display);
+    const bool be = node.bigEndian;
+    auto rU16 = [&](uint64_t a) { uint16_t v = prov.readU16(a); return be ? qbswap(v) : v; };
+    auto rU32 = [&](uint64_t a) { uint32_t v = prov.readU32(a); return be ? qbswap(v) : v; };
+    auto rU64 = [&](uint64_t a) { uint64_t v = prov.readU64(a); return be ? qbswap(v) : v; };
+    auto rF32 = [&](uint64_t a) { uint32_t v = prov.readU32(a); if (be) v = qbswap(v); float f; memcpy(&f, &v, 4); return f; };
+    auto rF64 = [&](uint64_t a) { uint64_t v = prov.readU64(a); if (be) v = qbswap(v); double f; memcpy(&f, &v, 8); return f; };
     switch (node.kind) {
     case NodeKind::Hex8:      return display ? hexVal(prov.readU8(addr))  : rawHex(prov.readU8(addr), 2);
-    case NodeKind::Hex16:     return display ? hexVal(prov.readU16(addr)) : rawHex(prov.readU16(addr), 4);
-    case NodeKind::Hex32:     return display ? hexVal(prov.readU32(addr)) : rawHex(prov.readU32(addr), 8);
-    case NodeKind::Hex64:     return display ? hexVal(prov.readU64(addr)) : rawHex(prov.readU64(addr), 16);
+    case NodeKind::Hex16:     return display ? hexVal(rU16(addr)) : rawHex(rU16(addr), 4);
+    case NodeKind::Hex32:     return display ? hexVal(rU32(addr)) : rawHex(rU32(addr), 8);
+    case NodeKind::Hex64:     return display ? hexVal(rU64(addr)) : rawHex(rU64(addr), 16);
     case NodeKind::Hex128: {
         // 16-byte hex: read as two uint64 (low + high)
         QByteArray b = prov.readBytes(addr, 16);
@@ -288,6 +386,7 @@ static QString readValueImpl(const Node& node, const Provider& prov,
             }
             return hex;
         }
+        if (be) std::reverse(b.begin(), b.end());
         // Display: "0x" + 32 hex digits (big-endian display)
         uint64_t hi = 0, lo = 0;
         memcpy(&lo, b.constData(), 8);
@@ -297,15 +396,23 @@ static QString readValueImpl(const Node& node, const Provider& prov,
              + QString::number(lo, 16).toUpper().rightJustified(16, '0');
     }
     case NodeKind::Int8:      return fmtInt8((int8_t)prov.readU8(addr));
-    case NodeKind::Int16:     return fmtInt16((int16_t)prov.readU16(addr));
-    case NodeKind::Int32:     return fmtInt32((int32_t)prov.readU32(addr));
-    case NodeKind::Int64:     return fmtInt64((int64_t)prov.readU64(addr));
+    case NodeKind::Int16:     return fmtInt16((int16_t)rU16(addr));
+    case NodeKind::Int32:     return fmtInt32((int32_t)rU32(addr));
+    case NodeKind::Int64:     return fmtInt64((int64_t)rU64(addr));
+    case NodeKind::Int128:
+    case NodeKind::UInt128: {
+        QByteArray b = prov.readBytes(addr, 16);
+        if (b.size() < 16) b.resize(16);
+        if (be) std::reverse(b.begin(), b.end());
+        return (node.kind == NodeKind::Int128) ? fmtInt128(b.constData()) : fmtUInt128(b.constData());
+    }
     case NodeKind::UInt8:     return fmtUInt8(prov.readU8(addr));
-    case NodeKind::UInt16:    return fmtUInt16(prov.readU16(addr));
-    case NodeKind::UInt32:    return fmtUInt32(prov.readU32(addr));
-    case NodeKind::UInt64:    return fmtUInt64(prov.readU64(addr));
-    case NodeKind::Float:     { auto s = fmtFloat(prov.readF32(addr));   return display ? s : s.trimmed(); }
-    case NodeKind::Double:    { auto s = fmtDouble(prov.readF64(addr));  return display ? s : s.trimmed(); }
+    case NodeKind::UInt16:    return fmtUInt16(rU16(addr));
+    case NodeKind::UInt32:    return fmtUInt32(rU32(addr));
+    case NodeKind::UInt64:    return fmtUInt64(rU64(addr));
+    case NodeKind::Float16:   { auto s = fmtFloat16(rU16(addr));         return display ? s : s.trimmed(); }
+    case NodeKind::Float:     { auto s = fmtFloat(rF32(addr));           return display ? s : s.trimmed(); }
+    case NodeKind::Double:    { auto s = fmtDouble(rF64(addr));          return display ? s : s.trimmed(); }
     case NodeKind::Bool:      return fmtBool(prov.readU8(addr));
     case NodeKind::Pointer32: {
         uint32_t val = prov.readU32(addr);
@@ -494,17 +601,31 @@ QByteArray parseAsciiValue(const QString& text, int expectedSize, bool* ok) {
     return result;
 }
 
-// Parse space-separated hex byte string into raw byte array (no endian conversion)
+// Parse hex byte string into raw byte array (no endian conversion).
+// Accepts two forms: "HH HH HH" (space-separated, requires exact 2-char groups)
+// or "HHHHHH" (no spaces, exact expectedSize*2 chars).
 static QByteArray parseHexBytes(const QString& s, int expectedSize, bool* ok) {
-    QString clean = s;
-    clean.remove(' ');
-    if (clean.size() != expectedSize * 2) { *ok = false; return {}; }
+    *ok = false;
+    const QString trimmed = s.trimmed();
     QByteArray result(expectedSize, Qt::Uninitialized);
-    for (int i = 0; i < expectedSize; i++) {
-        bool byteOk;
-        uint byte = clean.mid(i * 2, 2).toUInt(&byteOk, 16);
-        if (!byteOk) { *ok = false; return {}; }
-        result[i] = (char)byte;
+    if (trimmed.contains(' ')) {
+        const QStringList parts = trimmed.split(' ', Qt::SkipEmptyParts);
+        if (parts.size() != expectedSize) return {};
+        for (int i = 0; i < expectedSize; i++) {
+            if (parts[i].size() != 2) return {};
+            bool byteOk;
+            uint byte = parts[i].toUInt(&byteOk, 16);
+            if (!byteOk) return {};
+            result[i] = (char)byte;
+        }
+    } else {
+        if (trimmed.size() != expectedSize * 2) return {};
+        for (int i = 0; i < expectedSize; i++) {
+            bool byteOk;
+            uint byte = trimmed.mid(i * 2, 2).toUInt(&byteOk, 16);
+            if (!byteOk) return {};
+            result[i] = (char)byte;
+        }
     }
     *ok = true;
     return result;
@@ -619,6 +740,51 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
     case NodeKind::UInt16:  { int b = s.startsWith("0x",Qt::CaseInsensitive)?16:10; uint val = stripHex(s).toUInt(ok,b);              return parseIntChecked<uint16_t>(val, ok); }
     case NodeKind::UInt32:  { int b = s.startsWith("0x",Qt::CaseInsensitive)?16:10; qulonglong val = stripHex(s).toULongLong(ok,b);  return parseIntChecked<uint32_t>(val, ok); }
     case NodeKind::UInt64:  { int b = s.startsWith("0x",Qt::CaseInsensitive)?16:10; qulonglong val = stripHex(s).toULongLong(ok,b);   return *ok ? toBytes<uint64_t>(val) : QByteArray{}; }
+    case NodeKind::Int128:
+    case NodeKind::UInt128: {
+        // Parse decimal (optional leading '-' for signed), or "0x..." hex.
+        bool isHex = s.startsWith("0x", Qt::CaseInsensitive);
+        QString digits = isHex ? stripHex(s) : s;
+        bool neg = false;
+        if (!isHex && digits.startsWith('-')) { neg = true; digits = digits.mid(1); }
+        if (digits.isEmpty()) return {};
+        rcx_uint128 acc = 0;
+        int base = isHex ? 16 : 10;
+        for (QChar c : digits) {
+            int d = -1;
+            if (c.isDigit()) d = c.unicode() - '0';
+            else if (isHex && c >= 'a' && c <= 'f') d = 10 + (c.unicode() - 'a');
+            else if (isHex && c >= 'A' && c <= 'F') d = 10 + (c.unicode() - 'A');
+            if (d < 0 || d >= base) return {};
+            rcx_uint128 next = acc * (rcx_uint128)base + (rcx_uint128)d;
+            if (next < acc) return {};  // overflow
+            acc = next;
+        }
+        if (kind == NodeKind::Int128) {
+            // Signed range: [-(2^127), 2^127-1]
+            const rcx_uint128 signBit = (rcx_uint128)1 << 127;
+            if (neg) {
+                if (acc > signBit) return {};
+                acc = (rcx_uint128)(-(rcx_int128)acc);
+            } else {
+                if (acc >= signBit) return {};
+            }
+        } else if (neg) {
+            return {};  // unsigned can't be negative
+        }
+        *ok = true;
+        QByteArray out(16, Qt::Uninitialized);
+        memcpy(out.data(), &acc, 16);
+        return out;
+    }
+    case NodeKind::Float16: {
+        QString n = s.trimmed();
+        if (n.endsWith('h', Qt::CaseInsensitive)) n.chop(1);
+        if (n.endsWith('f', Qt::CaseInsensitive)) n.chop(1);
+        n.replace(',', '.');
+        float val = n.toFloat(ok);
+        return *ok ? toBytes<uint16_t>(floatToHalf(val)) : QByteArray{};
+    }
     case NodeKind::Float: {
         QString n = s.trimmed();
         if (n.endsWith('f', Qt::CaseInsensitive)) n.chop(1);
@@ -677,6 +843,27 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
     }
 }
 
+// Node-aware wrapper: applies bigEndian byte-swap to the parsed bytes
+// for scalar numeric kinds. Hex-byte forms ("HH HH HH") are already stored
+// in display order, so the swap applies uniformly to all scalar kinds.
+QByteArray parseValue(const Node& node, const QString& text, bool* ok) {
+    QByteArray out = parseValue(node.kind, text, ok);
+    if (!*ok || !node.bigEndian || out.isEmpty()) return out;
+    // Byte-swap scalar kinds that have an endian interpretation.
+    switch (node.kind) {
+    case NodeKind::Int16: case NodeKind::UInt16: case NodeKind::Hex16:
+    case NodeKind::Int32: case NodeKind::UInt32: case NodeKind::Hex32:
+    case NodeKind::Int64: case NodeKind::UInt64: case NodeKind::Hex64:
+    case NodeKind::Int128: case NodeKind::UInt128: case NodeKind::Hex128:
+    case NodeKind::Float16: case NodeKind::Float: case NodeKind::Double:
+        std::reverse(out.begin(), out.end());
+        break;
+    default:
+        break;
+    }
+    return out;
+}
+
 // ── Value validation (returns error message or empty string if valid) ──
 
 QString validateValue(NodeKind kind, const QString& text) {
@@ -687,7 +874,7 @@ QString validateValue(NodeKind kind, const QString& text) {
     bool isHexKind = isHexNode(kind)
                   || kind == NodeKind::Pointer32 || kind == NodeKind::Pointer64
                   || kind == NodeKind::FuncPtr32 || kind == NodeKind::FuncPtr64;
-    bool isIntKind = (kind >= NodeKind::Int8 && kind <= NodeKind::UInt64);
+    bool isIntKind = (kind >= NodeKind::Int8 && kind <= NodeKind::UInt128);
 
     if (isHexKind || isIntKind) {
         bool hasHexPrefix = s.startsWith("0x", Qt::CaseInsensitive);
@@ -704,7 +891,7 @@ QString validateValue(NodeKind kind, const QString& text) {
         } else {
             // Decimal mode: only digits (and leading minus for signed)
             int start = 0;
-            bool isSigned = (kind >= NodeKind::Int8 && kind <= NodeKind::Int64);
+            bool isSigned = (kind >= NodeKind::Int8 && kind <= NodeKind::Int128);
             if (isSigned && !digits.isEmpty() && digits[0] == '-') start = 1;
             for (int i = start; i < digits.size(); i++) {
                 if (!digits[i].isDigit())

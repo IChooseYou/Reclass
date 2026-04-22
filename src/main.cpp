@@ -703,8 +703,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Custom title bar (replaces native menu bar area in QMainWindow)
     m_titleBar = new TitleBarWidget(this);
     m_titleBar->applyTheme(ThemeManager::instance().current());
+    connect(m_titleBar, &TitleBarWidget::layoutPresetSelected,
+            this, &MainWindow::applyLayoutPreset);
     setMenuWidget(m_titleBar);
     m_menuBar = m_titleBar->menuBar();
+    // Sync the title bar toggle when workspace visibility changes through any
+    // other path (View menu item, dock close button, etc.) so the button's
+    // checked state always reflects reality. Deferred until after docks exist.
+    QTimer::singleShot(0, this, [this]() {
+        if (m_workspaceDock && m_titleBar) {
+            m_titleBar->setWorkspaceChecked(m_workspaceDock->isVisible());
+            connect(m_workspaceDock, &QDockWidget::visibilityChanged,
+                    m_titleBar, &TitleBarWidget::setWorkspaceChecked);
+        }
+    });
 #ifdef __linux__
     m_menuBar->setNativeMenuBar(false);
 #endif
@@ -749,6 +761,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createWorkspaceDock();
     createScannerDock();
     createSymbolsDock();
+    createBookmarksDock();
 
     createMenus();
     if (m_titleBar) m_titleBar->finalizeMenuBar();
@@ -967,6 +980,9 @@ void MainWindow::createMenus() {
     auto* edit = m_menuBar->addMenu("&Edit");
     Qt5Qt6AddAction(edit, "&Undo", QKeySequence::Undo, makeIcon(":/vsicons/arrow-left.svg"), this, &MainWindow::undo);
     Qt5Qt6AddAction(edit, "&Redo", QKeySequence::Redo, makeIcon(":/vsicons/arrow-right.svg"), this, &MainWindow::redo);
+    edit->addSeparator();
+    Qt5Qt6AddAction(edit, "Add &Bookmark...", QKeySequence(Qt::CTRL | Qt::Key_B), QIcon(),
+                    this, &MainWindow::promptAddBookmark);
 
     // View
     auto* view = m_menuBar->addMenu("&View");
@@ -1157,6 +1173,11 @@ void MainWindow::createMenus() {
         auto* symAct = m_symbolsDock->toggleViewAction();
         symAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Y));
         view->addAction(symAct);
+    }
+    if (m_bookmarksDock) {
+        auto* bmAct = m_bookmarksDock->toggleViewAction();
+        bmAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_B));
+        view->addAction(bmAct);
     }
 
     view->addSeparator();
@@ -2164,9 +2185,14 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 if (tab.activePaneIdx >= 0 && tab.activePaneIdx < tab.panes.size())
                     syncViewButtons(tab.panes[tab.activePaneIdx].viewMode);
             }
+            refreshBookmarksDock();
         }
         // Keep border overlay on top after dock rearrangements
         if (m_borderOverlay) m_borderOverlay->raise();
+    });
+    // Refresh bookmarks on document changes (e.g. add/remove)
+    connect(doc, &RcxDocument::documentChanged, this, [this, dock]() {
+        if (m_activeDocDock == dock) refreshBookmarksDock();
     });
 
     // Cleanup on close
@@ -4453,8 +4479,7 @@ void MainWindow::importFromSource() {
     }
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
-        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
+        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
     }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 classes from source").arg(classCount));
@@ -4653,8 +4678,7 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
 
     // Dock the first editor tab — don't force workspace open (user can open via View menu)
     if (m_docDocks.size() == 1 && m_workspaceDock) {
-        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
+        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
     }
 
     rebuildWorkspaceModelNow();
@@ -4698,8 +4722,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         }
         rebuildWorkspaceModel();
         if (!m_docDocks.isEmpty()) {
-        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
+        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
     }
     m_workspaceDock->show();
         int classCount = 0;
@@ -4737,8 +4760,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     }
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
-        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
+        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
     }
     m_workspaceDock->show();
     addRecentFile(filePath);
@@ -4783,6 +4805,22 @@ void MainWindow::closeAllDocDocks() {
     auto docks = m_docDocks;
     for (auto* dock : docks)
         dock->close();
+}
+
+void MainWindow::applyLayoutPreset(int preset) {
+    // Two-mode toggle: workspace on (Layout_Workspace) or off.
+    // Other docks (symbols, scanner) keep whatever state the user set via
+    // their own toggles — we don't touch them here.
+    if (!m_workspaceDock) return;
+    const bool showWorkspace = (preset == Layout_Workspace);
+    m_workspaceDock->setVisible(showWorkspace);
+
+    // Re-install tab bar buttons — a newly revealed tab bar needs them.
+    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+
+    QSettings("Reclass", "Reclass").setValue("layoutPreset", preset);
+    setAppStatus(showWorkspace ? QStringLiteral("Workspace shown")
+                               : QStringLiteral("Workspace hidden"));
 }
 
 
@@ -5292,6 +5330,9 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceSearch->setMinimumWidth(0);
     dockContainer->setMinimumWidth(0);
     m_workspaceDock->setWidget(dockContainer);
+    // Floor on dock width — prevents Qt's splitter from crushing workspace
+    // when another dock shares the area.
+    m_workspaceDock->setMinimumWidth(180);
     addDockWidget(Qt::TopDockWidgetArea, m_workspaceDock);
     m_workspaceDock->hide();
 
@@ -5474,6 +5515,8 @@ void MainWindow::createScannerDock() {
         m_scanDockTitle->setFont(f);
     }
     m_scannerDock->setWidget(m_scannerPanel);
+    // Floor on dock height — scanner has enough controls it needs real room.
+    m_scannerDock->setMinimumHeight(140);
     addDockWidget(Qt::BottomDockWidgetArea, m_scannerDock);
     m_scannerDock->hide();
 
@@ -6249,6 +6292,8 @@ void MainWindow::createSymbolsDock() {
     container->setMinimumWidth(0);
     container->setMinimumHeight(0);
     m_symbolsDock->setWidget(container);
+    // Symbols dock is taller and needs room for module list + symbol tree.
+    m_symbolsDock->setMinimumWidth(220);
     addDockWidget(Qt::RightDockWidgetArea, m_symbolsDock);
     m_symbolsDock->hide();
 
@@ -6310,6 +6355,144 @@ int MainWindow::loadPdbAndCacheTypes(const QString& pdbPath) {
     }
 
     return count;
+}
+
+// ── Bookmarks dock ──
+
+void MainWindow::createBookmarksDock() {
+    m_bookmarksDock = new QDockWidget("Bookmarks", this);
+    m_bookmarksDock->setObjectName("BookmarksDock");
+    m_bookmarksDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+
+    auto* container = new QWidget(m_bookmarksDock);
+    auto* layout = new QVBoxLayout(container);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(4);
+
+    m_bookmarksFilter = new QLineEdit(container);
+    m_bookmarksFilter->setPlaceholderText("Filter bookmarks...");
+    layout->addWidget(m_bookmarksFilter);
+
+    m_bookmarksList = new QListWidget(container);
+    m_bookmarksList->setContextMenuPolicy(Qt::CustomContextMenu);
+    layout->addWidget(m_bookmarksList, 1);
+
+    auto* btnRow = new QHBoxLayout();
+    auto* addBtn = new QPushButton("Add", container);
+    auto* removeBtn = new QPushButton("Remove", container);
+    btnRow->addWidget(addBtn);
+    btnRow->addWidget(removeBtn);
+    btnRow->addStretch();
+    layout->addLayout(btnRow);
+
+    m_bookmarksDock->setWidget(container);
+    // Minimum width stops Qt's splitter from crushing the dock below the
+    // point where content is readable when other docks share the area.
+    m_bookmarksDock->setMinimumWidth(180);
+    addDockWidget(Qt::LeftDockWidgetArea, m_bookmarksDock);
+    m_bookmarksDock->hide();  // hidden by default; toggle via View menu
+
+    // When the dock becomes visible via any path (View menu toggle, drag
+    // re-dock, MCP, etc.) tabify with the workspace if it's already open in
+    // the same area. Prevents the "open bookmarks → workspace gets squished
+    // by Qt's splitter" pathology. m_placingSidebar guards against signal
+    // recursion (placeSidebarDock calls show() which re-fires this signal).
+    connect(m_bookmarksDock, &QDockWidget::visibilityChanged, this,
+            [this](bool visible) {
+        if (!visible || m_placingSidebar) return;
+        placeSidebarDock(m_bookmarksDock, Qt::LeftDockWidgetArea, 240);
+    });
+
+    connect(addBtn, &QPushButton::clicked, this, &MainWindow::promptAddBookmark);
+    connect(removeBtn, &QPushButton::clicked, this, [this]() {
+        int row = m_bookmarksList->currentRow();
+        auto* c = activeController();
+        if (c && row >= 0) { c->removeBookmark(row); refreshBookmarksDock(); }
+    });
+    connect(m_bookmarksList, &QListWidget::itemActivated, this,
+            [this](QListWidgetItem* item) {
+        if (item) navigateBookmark(m_bookmarksList->row(item));
+    });
+    connect(m_bookmarksFilter, &QLineEdit::textChanged, this,
+            [this](const QString& text) {
+        for (int i = 0; i < m_bookmarksList->count(); i++) {
+            auto* it = m_bookmarksList->item(i);
+            it->setHidden(!text.isEmpty()
+                          && !it->text().contains(text, Qt::CaseInsensitive));
+        }
+    });
+    connect(m_bookmarksList, &QListWidget::customContextMenuRequested, this,
+            [this](const QPoint& pos) {
+        int row = m_bookmarksList->indexAt(pos).row();
+        if (row < 0) return;
+        QMenu menu;
+        menu.addAction("&Navigate", this, [this, row]() { navigateBookmark(row); });
+        menu.addAction("&Remove", this, [this, row]() {
+            auto* c = activeController();
+            if (c) { c->removeBookmark(row); refreshBookmarksDock(); }
+        });
+        menu.exec(m_bookmarksList->viewport()->mapToGlobal(pos));
+    });
+}
+
+void MainWindow::refreshBookmarksDock() {
+    if (!m_bookmarksList) return;
+    m_bookmarksList->clear();
+    auto* c = activeController();
+    if (!c) return;
+    const auto& bms = c->document()->tree.bookmarks;
+    for (const auto& b : bms) {
+        QString label = b.name + QStringLiteral("  ") + b.addressFormula;
+        m_bookmarksList->addItem(label);
+    }
+    QString filter = m_bookmarksFilter ? m_bookmarksFilter->text() : QString();
+    if (!filter.isEmpty()) {
+        for (int i = 0; i < m_bookmarksList->count(); i++) {
+            auto* it = m_bookmarksList->item(i);
+            it->setHidden(!it->text().contains(filter, Qt::CaseInsensitive));
+        }
+    }
+}
+
+void MainWindow::promptAddBookmark() {
+    auto* c = activeController();
+    if (!c) return;
+    QString defaultFormula = c->document()->tree.baseAddressFormula;
+    if (defaultFormula.isEmpty())
+        defaultFormula = QStringLiteral("0x") + QString::number(c->document()->tree.baseAddress, 16);
+    QDialog dlg(this);
+    dlg.setWindowTitle("Add Bookmark");
+    auto* form = new QVBoxLayout(&dlg);
+    auto* nameEdit = new QLineEdit(&dlg);
+    nameEdit->setPlaceholderText("Bookmark name");
+    auto* formulaEdit = new QLineEdit(defaultFormula, &dlg);
+    formulaEdit->setPlaceholderText("Address formula (e.g. <game.exe>+0x12340)");
+    form->addWidget(new QLabel("Name:", &dlg));
+    form->addWidget(nameEdit);
+    form->addWidget(new QLabel("Address:", &dlg));
+    form->addWidget(formulaEdit);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addWidget(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    nameEdit->setFocus();
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (nameEdit->text().trimmed().isEmpty()) return;
+    c->addBookmark(nameEdit->text(), formulaEdit->text());
+    refreshBookmarksDock();
+    if (m_bookmarksDock) m_bookmarksDock->show();
+}
+
+void MainWindow::navigateBookmark(int idx) {
+    auto* c = activeController();
+    if (!c) return;
+    const auto& bms = c->document()->tree.bookmarks;
+    if (idx < 0 || idx >= bms.size()) return;
+    QString err;
+    if (!c->navigateToFormula(bms[idx].addressFormula, &err)) {
+        QMessageBox::warning(this, "Bookmark",
+            QStringLiteral("Failed to evaluate '%1': %2").arg(bms[idx].addressFormula, err));
+    }
 }
 
 void MainWindow::rebuildSymbolsModel() {
@@ -6457,8 +6640,7 @@ void MainWindow::importSelectedTypes() {
 
     rebuildWorkspaceModel();
     if (!m_docDocks.isEmpty()) {
-        splitDockWidget(m_workspaceDock, m_docDocks.first(), Qt::Horizontal);
-        resizeDocks({m_workspaceDock}, {computeWorkspaceDockWidth()}, Qt::Horizontal);
+        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
     }
     m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 types into current project").arg(totalImported));
@@ -6775,6 +6957,81 @@ int MainWindow::computeWorkspaceDockWidth() const {
     int nameW = fm.horizontalAdvance(QString(maxChars, QChar('W')));
     int total = fm.height() + 4 + nameW + 30 + 24;
     return qBound(180, total, 420);
+}
+
+// ── Sidebar dock placement helpers ──
+
+// Single entry point for positioning a sidebar dock. Core rule: if another
+// sidebar dock is already visible and docked in the target area, tabify with
+// it instead of subdividing. Mirrors Visual Studio's behaviour where tool
+// windows in the same region tabify by default. Eliminates the "open
+// bookmarks → squish workspace" class of bug — extends to any future panel
+// without new code.
+void MainWindow::placeSidebarDock(QDockWidget* dock, Qt::DockWidgetArea area,
+                                   int preferredSize) {
+    if (!dock || m_placingSidebar) return;
+    m_placingSidebar = true;
+
+    // Find a visible, docked peer already living in the target area.
+    QDockWidget* peer = nullptr;
+    for (QDockWidget* other : {m_workspaceDock, m_bookmarksDock,
+                                m_symbolsDock, m_scannerDock}) {
+        if (!other || other == dock) continue;
+        if (!other->isVisible() || other->isFloating()) continue;
+        if (dockWidgetArea(other) != area) continue;
+        peer = other;
+        break;
+    }
+
+    if (peer) {
+        // Tabify with the existing neighbour. No resize — inherits peer's size.
+        tabifyDockWidget(peer, dock);
+    } else {
+        // No peer yet. Position next to the first doc dock for horizontal
+        // areas (keeps docs centred and sidebar flush to the edge) or drop
+        // into the area directly for vertical ones.
+        const bool horizontal = (area == Qt::LeftDockWidgetArea
+                                  || area == Qt::RightDockWidgetArea);
+        if (horizontal && !m_docDocks.isEmpty()) {
+            splitDockWidget(dock, m_docDocks.first(), Qt::Horizontal);
+        } else {
+            addDockWidget(area, dock);
+        }
+        // Restore remembered size, falling back to preferredSize (or the
+        // dynamic computeWorkspaceDockWidth for the workspace dock).
+        int def = preferredSize;
+        if (def < 0 && dock == m_workspaceDock) def = computeWorkspaceDockWidth();
+        if (def > 0) {
+            int sz = loadDockSize(dock, def);
+            resizeDocks({dock}, {sz},
+                        horizontal ? Qt::Horizontal : Qt::Vertical);
+        }
+    }
+    dock->show();
+    dock->raise();
+    // Tab bar styling needs to pick up the new tab (tabifyDockWidget path) or
+    // the new dock layout (split path).
+    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+    m_placingSidebar = false;
+}
+
+void MainWindow::saveDockSize(QDockWidget* dock) {
+    if (!dock || dock->isFloating()) return;
+    Qt::DockWidgetArea a = dockWidgetArea(dock);
+    if (a == Qt::NoDockWidgetArea) return;
+    const bool horizontal = (a == Qt::LeftDockWidgetArea
+                              || a == Qt::RightDockWidgetArea);
+    int size = horizontal ? dock->width() : dock->height();
+    if (size <= 0) return;
+    QSettings s("Reclass", "Reclass");
+    s.setValue(QStringLiteral("ui/dock.%1.size").arg(dock->objectName()), size);
+}
+
+int MainWindow::loadDockSize(QDockWidget* dock, int fallback) const {
+    if (!dock) return fallback;
+    QSettings s("Reclass", "Reclass");
+    return s.value(QStringLiteral("ui/dock.%1.size").arg(dock->objectName()),
+                   fallback).toInt();
 }
 
 void MainWindow::addRecentFile(const QString& path) {
@@ -7315,6 +7572,15 @@ MainWindow::InspectionResult MainWindow::inspectAt(QWidget* widget, QPoint local
 void MainWindow::showStartPage() {
     if (m_startPage) return;
 
+    // Preload a new class behind the splash. Dismissing the splash — via
+    // outside-click, Esc, or the "New Class" card — just hides it and reveals
+    // the preloaded class instantly, no "blank window" flash. The other
+    // cards (Open, Import*, recent files, Tutorial) auto-replace the
+    // preloaded tab when their action succeeds (closeAllDocDocks runs inside
+    // project_open / the import_* paths).
+    if (m_tabs.isEmpty())
+        newClass();
+
     m_startPage = new StartPageWidget(this);
     m_startPage->applyTheme(ThemeManager::instance().current());
 
@@ -7323,33 +7589,32 @@ void MainWindow::showStartPage() {
              qBound(560, int(height() * 0.85), height() - 20));
     m_startPage->setFixedSize(sz);
 
-    // Wire start page signals — each closes the dialog then performs action
-    connect(m_startPage, &StartPageWidget::openProject, this, [this]() {
-        dismissStartPage();
-        openFile();
-        if (m_tabs.isEmpty()) showStartPage();
-    });
+    // Wire start page signals. All "dismiss-only" paths (newClass card, Esc,
+    // outside-click) just hide the splash — preloaded class is the landing.
     connect(m_startPage, &StartPageWidget::newClass, this, [this]() {
         dismissStartPage();
-        newClass();
+    });
+    connect(m_startPage, &StartPageWidget::openProject, this, [this]() {
+        dismissStartPage();
+        openFile();  // cancel → preloaded stays; success → replaced
     });
     connect(m_startPage, &StartPageWidget::importSource, this, [this]() {
         dismissStartPage();
         importFromSource();
-        if (m_tabs.isEmpty()) showStartPage();
     });
     connect(m_startPage, &StartPageWidget::importXml, this, [this]() {
         dismissStartPage();
         importReclassXml();
-        if (m_tabs.isEmpty()) showStartPage();
     });
     connect(m_startPage, &StartPageWidget::importPdb, this, [this]() {
         dismissStartPage();
         importPdb();
-        if (m_tabs.isEmpty()) showStartPage();
     });
     connect(m_startPage, &StartPageWidget::continueClicked, this, [this]() {
         dismissStartPage();
+        // selfTest creates its own demo tabs; drop the preloaded class first
+        // so we don't stack an unrelated scratch class on top of the demo.
+        { ClosingGuard guard(m_closingAll); closeAllDocDocks(); }
         selfTest();
     });
     connect(m_startPage, &StartPageWidget::fileSelected, this, [this](const QString& path) {
@@ -7360,9 +7625,15 @@ void MainWindow::showStartPage() {
         dismissStartPage();
     });
 
-    // Center over main window and show as application-modal
+    // Center over main window. Shown non-modally so clicks on the main
+    // window reach StartPageWidget's qApp-level event filter — QDialog::open()
+    // makes it window-modal, which filters outside-clicks away before our
+    // filter can see them. The filter in startpage.h now catches any click
+    // outside the splash rect and triggers newClass().
     m_startPage->move(geometry().center() - m_startPage->rect().center());
-    m_startPage->open();
+    m_startPage->show();
+    m_startPage->raise();
+    m_startPage->activateWindow();
 }
 
 void MainWindow::dismissStartPage() {

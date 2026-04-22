@@ -1843,6 +1843,10 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].isStatic = isUndo ? c.oldVal : c.newVal;
+        } else if constexpr (std::is_same_v<T, cmd::ToggleBigEndian>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0)
+                tree.nodes[idx].bigEndian = isUndo ? c.oldVal : c.newVal;
         } else if constexpr (std::is_same_v<T, cmd::ChangeComment>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
@@ -1891,7 +1895,12 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
         int expectedSize = sizeForKind(editKind);
         newBytes = fmt::parseAsciiValue(text, expectedSize, &ok);
     } else {
-        newBytes = fmt::parseValue(editKind, text, &ok);
+        // Pass a temporary node carrying the effective kind + bigEndian so the
+        // parser applies the per-node endian swap (Vec/Mat components inherit
+        // the parent node's endianness by using its bigEndian flag).
+        Node editNode = node;
+        editNode.kind = editKind;
+        newBytes = fmt::parseValue(editNode, text, &ok);
     }
     if (!ok) return;
 
@@ -3304,6 +3313,25 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
             if (!hasConvert)
                 convertMenu->setEnabled(false);
+        }
+
+        // ── Big-endian toggle (scalar numeric kinds only) ──
+        {
+            bool isScalar = (node.kind >= NodeKind::Hex16 && node.kind <= NodeKind::Hex128)
+                         || (node.kind >= NodeKind::Int16 && node.kind <= NodeKind::UInt128)
+                         || node.kind == NodeKind::Float16 || node.kind == NodeKind::Float
+                         || node.kind == NodeKind::Double;
+            if (isScalar) {
+                bool cur = node.bigEndian;
+                QAction* act = menu.addAction("Big &endian", [this, nodeId, cur]() {
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni < 0) return;
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ToggleBigEndian{nodeId, cur, !cur}));
+                });
+                act->setCheckable(true);
+                act->setChecked(cur);
+            }
         }
 
         // ── Structure ► submenu (only when relevant) ──
@@ -5172,6 +5200,57 @@ void RcxController::handleMarginClick(RcxEditor* editor, int margin,
 void RcxController::setEditorFont(const QString& fontName) {
     for (auto* editor : m_editors)
         editor->setEditorFont(fontName);
+}
+
+bool RcxController::navigateToFormula(const QString& formula, QString* errOut) {
+    QString f = formula.trimmed();
+    if (f.isEmpty()) { if (errOut) *errOut = QStringLiteral("empty formula"); return false; }
+    AddressParserCallbacks cbs;
+    if (m_doc->provider) {
+        auto* prov = m_doc->provider.get();
+        cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
+            uint64_t base = prov->symbolToAddress(name);
+            *ok = (base != 0);
+            return base;
+        };
+        int ptrSz = m_doc->tree.pointerSize;
+        cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
+            uint64_t val = 0;
+            *ok = prov->read(addr, &val, ptrSz);
+            return val;
+        };
+        cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
+            return SymbolStore::instance().resolve(name, prov, ok);
+        };
+    }
+    auto result = AddressParser::evaluate(f, m_doc->tree.pointerSize, &cbs);
+    if (!result.ok) {
+        if (errOut) *errOut = result.error;
+        return false;
+    }
+    m_doc->tree.baseAddress = result.value;
+    m_doc->tree.baseAddressFormula = f;
+    emit m_doc->documentChanged();
+    refresh();
+    return true;
+}
+
+void RcxController::addBookmark(const QString& name, const QString& formula) {
+    Bookmark b;
+    b.name = name.trimmed();
+    b.addressFormula = formula.trimmed();
+    if (b.name.isEmpty() || b.addressFormula.isEmpty()) return;
+    m_doc->tree.bookmarks.append(b);
+    m_doc->modified = true;
+    emit m_doc->documentChanged();
+}
+
+void RcxController::removeBookmark(int idx) {
+    auto& bms = m_doc->tree.bookmarks;
+    if (idx < 0 || idx >= bms.size()) return;
+    bms.remove(idx);
+    m_doc->modified = true;
+    emit m_doc->documentChanged();
 }
 
 } // namespace rcx

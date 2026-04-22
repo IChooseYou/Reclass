@@ -25,6 +25,9 @@
         <file alias="chrome-minimize.svg">vsicons/chrome-minimize.svg</file>
         <file alias="chrome-maximize.svg">vsicons/chrome-maximize.svg</file>
         <file alias="chrome-restore.svg">vsicons/chrome-restore.svg</file>
+        <file alias="editor-layout.svg">vsicons/editor-layout.svg</file>
+        <file alias="layout-sidebar-left.svg">vsicons/layout-sidebar-left.svg</file>
+        <file alias="layout-sidebar-left-off.svg">vsicons/layout-sidebar-left-off.svg</file>
         <file alias="text-size.svg">vsicons/text-size.svg</file>
         <file alias="add.svg">vsicons/add.svg</file>
         <file alias="remove.svg">vsicons/remove.svg</file>

@@ -23,9 +23,9 @@ namespace rcx {
 
 enum class NodeKind : uint8_t {
     Hex8, Hex16, Hex32, Hex64, Hex128,
-    Int8, Int16, Int32, Int64,
-    UInt8, UInt16, UInt32, UInt64,
-    Float, Double, Bool,
+    Int8, Int16, Int32, Int64, Int128,
+    UInt8, UInt16, UInt32, UInt64, UInt128,
+    Float16, Float, Double, Bool,
     Pointer32, Pointer64,
     FuncPtr32, FuncPtr64,
     Vec2, Vec3, Vec4, Mat4x4,
@@ -72,10 +72,13 @@ inline constexpr KindMeta kKindMeta[] = {
     {NodeKind::Int16,     "Int16",     "int16_t",     2,  1,  2, KF_None},
     {NodeKind::Int32,     "Int32",     "int32_t",     4,  1,  4, KF_None},
     {NodeKind::Int64,     "Int64",     "int64_t",     8,  1,  8, KF_None},
+    {NodeKind::Int128,    "Int128",    "int128_t",   16,  1,  8, KF_None},
     {NodeKind::UInt8,     "UInt8",     "uint8_t",     1,  1,  1, KF_None},
     {NodeKind::UInt16,    "UInt16",    "uint16_t",    2,  1,  2, KF_None},
     {NodeKind::UInt32,    "UInt32",    "uint32_t",    4,  1,  4, KF_None},
     {NodeKind::UInt64,    "UInt64",    "uint64_t",    8,  1,  8, KF_None},
+    {NodeKind::UInt128,   "UInt128",   "uint128_t",  16,  1,  8, KF_None},
+    {NodeKind::Float16,   "Float16",   "float16",     2,  1,  2, KF_None},
     {NodeKind::Float,     "Float",     "float",       4,  1,  4, KF_None},
     {NodeKind::Double,    "Double",    "double",      8,  1,  8, KF_None},
     {NodeKind::Bool,      "Bool",      "bool",        1,  1,  1, KF_None},
@@ -189,6 +192,11 @@ enum Marker : int {
     M_FOCUS     = 10,  // Presentation mode: AI focus glow
 };
 
+// ── Array length clamp ──
+// Also bounded by the 20-bit kArrayElemMask encoding below; kept up here so
+// Node::fromJson (declared later) can reference it when clamping arrayLen.
+static constexpr int kMaxArrayLen = 1000000;
+
 // ── Bitfield member (name + bit position + width within a container) ──
 
 struct BitfieldMember {
@@ -220,6 +228,7 @@ struct Node {
     QVector<QPair<QString, int64_t>> enumMembers; // Enum: name→value pairs
     QVector<BitfieldMember> bitfieldMembers;       // Bitfield: per-bit member definitions
     QString  comment;          // User annotation (displayed as "// text" in comment column)
+    bool     bigEndian  = false;   // Scalar value is big-endian (swap on display/parse)
 
     // Note: Returns 0 for Array-of-Struct/Array. Use tree.structSpan() for accurate size.
     int byteSize() const {
@@ -288,6 +297,8 @@ struct Node {
         }
         if (!comment.isEmpty())
             o["comment"] = comment;
+        if (bigEndian)
+            o["bigEndian"] = true;
         return o;
     }
     static Node fromJson(const QJsonObject& o) {
@@ -302,7 +313,7 @@ struct Node {
         n.isStatic  = o["isStatic"].toBool(o["isHelper"].toBool(false));
         n.offsetExpr = o["offsetExpr"].toString();
         n.isRelative = o["isRelative"].toBool(false);
-        n.arrayLen  = qBound(1, o["arrayLen"].toInt(1), 1000000);
+        n.arrayLen  = qBound(1, o["arrayLen"].toInt(1), kMaxArrayLen);
         n.strLen    = qBound(1, o["strLen"].toInt(64), 1000000);
         n.collapsed = true;  // Always load collapsed; user expands as needed
         n.refId     = o["refId"].toString("0").toULongLong();
@@ -328,6 +339,7 @@ struct Node {
             }
         }
         n.comment = o["comment"].toString();
+        n.bigEndian = o["bigEndian"].toBool(false);
         return n;
     }
 
@@ -340,6 +352,25 @@ struct Node {
     bool isEnum() const { return resolvedClassKeyword() == QStringLiteral("enum"); }
 };
 
+// ── Bookmark (named address, persists with the project) ──
+
+struct Bookmark {
+    QString  name;
+    QString  addressFormula;  // e.g. "<game.exe>+0x12340" — survives rebases
+    QJsonObject toJson() const {
+        QJsonObject o;
+        o["name"] = name;
+        o["addressFormula"] = addressFormula;
+        return o;
+    }
+    static Bookmark fromJson(const QJsonObject& o) {
+        Bookmark b;
+        b.name = o["name"].toString();
+        b.addressFormula = o["addressFormula"].toString();
+        return b;
+    }
+};
+
 // ── NodeTree ──
 
 struct NodeTree {
@@ -347,6 +378,7 @@ struct NodeTree {
     uint64_t      baseAddress = 0x00400000;
     QString       baseAddressFormula;  // e.g. "<ReClass.exe> + 0x100"
     int           pointerSize = 8;    // 4 for 32-bit targets, 8 for 64-bit
+    QVector<Bookmark> bookmarks;       // user-named addresses
     uint64_t      m_nextId    = 1;
     mutable QHash<uint64_t, int> m_idCache;
     mutable QHash<uint64_t, QVector<int>> m_childCache;
@@ -498,6 +530,11 @@ struct NodeTree {
         QJsonArray arr;
         for (const auto& n : nodes) arr.append(n.toJson());
         o["nodes"] = arr;
+        if (!bookmarks.isEmpty()) {
+            QJsonArray ba;
+            for (const auto& b : bookmarks) ba.append(b.toJson());
+            o["bookmarks"] = ba;
+        }
         return o;
     }
 
@@ -514,6 +551,10 @@ struct NodeTree {
             t.nodes.append(n);
             if (n.id >= t.m_nextId) t.m_nextId = n.id + 1;
         }
+        QJsonArray ba = o["bookmarks"].toArray();
+        t.bookmarks.reserve(ba.size());
+        for (const auto& v : ba)
+            t.bookmarks.append(Bookmark::fromJson(v.toObject()));
         return t;
     }
 
@@ -594,6 +635,7 @@ static constexpr uint64_t kFooterIdBit    = 0x8000000000000000ULL;
 static constexpr uint64_t kArrayElemBit   = 0x4000000000000000ULL;  // marks array element selection
 static constexpr uint64_t kArrayElemShift = 42;                     // bits 42-61 hold element index
 static constexpr uint64_t kArrayElemMask  = 0x3FFFFC0000000000ULL;  // 20 bits → max 1048575 elements
+static_assert(kMaxArrayLen <= (1 << 20), "kMaxArrayLen must fit in kArrayElemMask (20 bits)");
 
 // Encode an array element selection ID: nodeId | kArrayElemBit | (elemIdx << 42)
 inline uint64_t makeArrayElemSelId(uint64_t nodeId, int elemIdx) {
@@ -703,6 +745,7 @@ namespace cmd {
     struct ChangeOffsetExpr { uint64_t nodeId; QString oldExpr, newExpr; };
     struct ToggleStatic     { uint64_t nodeId; bool oldVal, newVal; };
     struct ToggleRelative   { uint64_t nodeId; bool oldVal, newVal; };
+    struct ToggleBigEndian  { uint64_t nodeId; bool oldVal, newVal; };
     struct ChangeComment    { uint64_t nodeId; QString oldComment, newComment; };
 }
 
@@ -712,7 +755,7 @@ using Command = std::variant<
     cmd::ChangeArrayMeta, cmd::ChangePointerRef, cmd::ChangeStructTypeName,
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
     cmd::ChangeOffsetExpr, cmd::ToggleStatic, cmd::ToggleRelative,
-    cmd::ChangeComment
+    cmd::ToggleBigEndian, cmd::ChangeComment
 >;
 
 // ── Column spans (for inline editing) ──
@@ -1065,6 +1108,7 @@ namespace fmt {
     QString editableValue(const Node& node, const Provider& prov,
                           uint64_t addr, int subLine);
     QByteArray parseValue(NodeKind kind, const QString& text, bool* ok);
+    QByteArray parseValue(const Node& node, const QString& text, bool* ok);
     QByteArray parseAsciiValue(const QString& text, int expectedSize, bool* ok);
     QString validateValue(NodeKind kind, const QString& text);
     QString fmtEnumMember(const QString& name, int64_t value, int depth, int nameW);

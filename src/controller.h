@@ -129,6 +129,11 @@ public:
     uint64_t viewRootId() const { return m_viewRootId; }
     void scrollToNodeId(uint64_t nodeId);
 
+    // Bookmarks
+    bool navigateToFormula(const QString& formula, QString* errOut = nullptr);
+    void addBookmark(const QString& name, const QString& formula);
+    void removeBookmark(int idx);
+
     RcxDocument* document() const { return m_doc; }
     void setEditorFont(const QString& fontName);
     void setRefreshInterval(int ms);
