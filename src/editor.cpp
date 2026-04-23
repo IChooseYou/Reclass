@@ -1047,6 +1047,10 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             }
         }
     }
+
+    // Notify minimap / any passive mirror that text has been updated. Fired
+    // last so receivers see the final Scintilla state (post-indicator apply).
+    emit documentApplied(result.text);
 }
 
 void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta) {
@@ -2563,8 +2567,10 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         }
         return false;
     case Qt::Key_C:
-        if (ke->modifiers() == Qt::ControlModifier) {
-            // Ctrl+C: copy absolute address of selected node
+        // Ctrl+Shift+C → legacy "copy node address" shortcut. Kept for muscle
+        // memory after the clipboard rework.
+        if ((ke->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            == (Qt::ControlModifier | Qt::ShiftModifier)) {
             int line, col;
             m_sci->getCursorPosition(&line, &col);
             const LineMeta* lm = metaForLine(line);
@@ -2574,18 +2580,25 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             }
             return true;
         }
+        // Ctrl+C → copy selected nodes as a portable blob (rcx-clipboard/v1
+        // + plain-text fallback). Controller owns the serialization.
+        if (ke->modifiers() == Qt::ControlModifier) {
+            emit copyNodesRequested();
+            return true;
+        }
         return false;
     case Qt::Key_X:
-        if (ke->modifiers() & Qt::ControlModifier) {
-            // Ctrl+X: copy the full line text (margin + content)
-            int line, col;
-            m_sci->getCursorPosition(&line, &col);
-            if (line >= 0 && line < m_meta.size()) {
-                QString margin = m_meta[line].offsetText;
-                QString lineText = textWithMargins().split('\n').value(line);
-                if (!lineText.isEmpty())
-                    QApplication::clipboard()->setText(lineText);
-            }
+        if (ke->modifiers() == Qt::ControlModifier) {
+            // Ctrl+X → cut selection: copy then delete.
+            emit cutNodesRequested();
+            return true;
+        }
+        return false;
+    case Qt::Key_V:
+        if (ke->modifiers() == Qt::ControlModifier) {
+            // Ctrl+V → paste nodes; controller reads clipboard and inserts
+            // under the current parent at cursor offset.
+            emit pasteNodesRequested();
             return true;
         }
         return false;

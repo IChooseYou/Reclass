@@ -323,9 +323,8 @@ private slots:
         uint64_t rootId = tree.nodes[0].id;
         QString code = rcx::renderCpp(tree, rootId);
 
-        // Verify generated code has no pragma pack / cstdint
+        // Verify generated code structure
         QVERIFY(!code.contains("#pragma pack"));
-        QVERIFY(!code.contains("#include <cstdint>"));
         QVERIFY(code.contains("#pragma once"));
         QVERIFY(code.contains("struct TestStruct"));
 

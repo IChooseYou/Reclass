@@ -425,6 +425,17 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         p.drawText(goR, Qt::AlignCenter, QStringLiteral("Go"));
         m_hits.append({goR, HA_FillGo, true, NodeKind::Hex8});
     }
+
+    // Keyboard focus ring — m_hoveredBtn is set by arrow/Tab keys (see
+    // keyPressEvent). The main per-button highlight above is mouse-position
+    // driven, so without this overlay keyboard-focused buttons are invisible.
+    if (m_hoveredBtn >= 0 && m_hoveredBtn < m_hits.size()) {
+        const QRect& r = m_hits[m_hoveredBtn].rect;
+        QPen focusPen(t.indHoverSpan, 2);
+        p.setPen(focusPen);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(r.adjusted(0, 0, -1, -1));
+    }
 }
 
 void HexToolbarPopup::mouseMoveEvent(QMouseEvent* event) {
@@ -479,10 +490,50 @@ void HexToolbarPopup::leaveEvent(QEvent*) {
 }
 
 void HexToolbarPopup::keyPressEvent(QKeyEvent* event) {
-    if (event->key() == Qt::Key_Escape) {
-        if (m_pinned) togglePin();  // unpin first
+    // Tab / arrow keys cycle hoverable (enabled) hit rects, Enter/Space
+    // activates the focused one — mirrors the mouse UX for keyboard users.
+    // The popup draws its own buttons instead of using QPushButton children,
+    // so Qt's built-in focus traversal doesn't apply; we drive m_hoveredBtn
+    // explicitly.
+    auto advanceHover = [this](int dir) {
+        if (m_hits.isEmpty()) return;
+        int idx = m_hoveredBtn;
+        for (int i = 0; i < m_hits.size(); i++) {
+            idx = (idx + dir + m_hits.size()) % m_hits.size();
+            if (m_hits[idx].enabled) { m_hoveredBtn = idx; update(); return; }
+        }
+    };
+
+    switch (event->key()) {
+    case Qt::Key_Escape:
+        if (m_pinned) togglePin();
         else { hide(); emit dismissed(); }
         return;
+    case Qt::Key_Tab:
+    case Qt::Key_Right:
+    case Qt::Key_Down:
+        advanceHover(+1);
+        return;
+    case Qt::Key_Backtab:
+    case Qt::Key_Left:
+    case Qt::Key_Up:
+        advanceHover(-1);
+        return;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+    case Qt::Key_Space: {
+        if (m_hoveredBtn < 0 || m_hoveredBtn >= m_hits.size()) return;
+        const auto& h = m_hits[m_hoveredBtn];
+        if (!h.enabled) return;
+        // Fake a synthetic left-click at the center of the hit rect; reuses
+        // the existing mousePressEvent dispatch logic so behaviour is
+        // identical to a real click.
+        QMouseEvent me(QEvent::MouseButtonPress, h.rect.center(),
+                       mapToGlobal(h.rect.center()),
+                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        mousePressEvent(&me);
+        return;
+    }
     }
     QFrame::keyPressEvent(event);
 }

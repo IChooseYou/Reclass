@@ -1,4 +1,5 @@
 #pragma once
+#include "themes/theme.h"
 #include <QWidget>
 #include <QDockWidget>
 #include <QPainter>
@@ -38,6 +39,18 @@ public:
     }
 
     void setAccentColor(const QColor& c) { m_accent = c; }
+
+    // Wire theme colours so the overlay adapts to light/dark themes instead
+    // of using hard-coded RGB. Call this from MainWindow::applyTheme.
+    void setTheme(const Theme& t) {
+        m_theme = t;
+        // Accent defaults to the theme's focus border if not otherwise set.
+        if (!m_accentOverride) m_accent = t.borderFocused;
+    }
+    void setAccentColorOverride(const QColor& c) {
+        m_accent = c;
+        m_accentOverride = true;
+    }
 
     void beginDrag(QDockWidget* dock, const QString& title) {
         m_draggedDock = dock;
@@ -93,13 +106,19 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
 
-        // Soft scrim
-        p.fillRect(rect(), QColor(0, 0, 0, 20));
+        // Soft scrim — derived from theme background so it reads "dim this"
+        // on dark themes and "dim this" on light themes (pure-black scrim
+        // was invisible on dark themes).
+        QColor scrim = m_theme.background.isValid()
+            ? dim(m_theme.background.lightness() < 128 ? QColor(255,255,255)
+                                                       : QColor(0,0,0), 20)
+            : QColor(0, 0, 0, 20);
+        p.fillRect(rect(), scrim);
 
-        // Highlight the hovered dock widget area
+        // Highlight the hovered dock widget area with an accent tint.
         if (m_hoveredDock && m_hoveredDock != m_draggedDock) {
             QRect dr = m_hoveredDock->geometry();
-            p.fillRect(dr, QColor(m_accent.red(), m_accent.green(), m_accent.blue(), 15));
+            p.fillRect(dr, dim(m_accent, 15));
         }
 
         // Edge zone strips
@@ -129,6 +148,22 @@ private:
     QPoint       m_cursorPos;
     QString      m_dragTitle;
     QColor       m_accent{70, 130, 220};
+    bool         m_accentOverride = false;
+    Theme        m_theme;  // populated by setTheme; fields empty until wired
+
+    // Small alpha helpers — keep alphas readable; themes supply RGB.
+    QColor dim(const QColor& c, int alpha) const {
+        return QColor(c.red(), c.green(), c.blue(), alpha);
+    }
+    QColor textOrWhite(int alpha) const {
+        const QColor& c = m_theme.text.isValid() ? m_theme.text : QColor(255, 255, 255);
+        return dim(c, alpha);
+    }
+    QColor surfaceOrDark(int alpha) const {
+        const QColor& c = m_theme.backgroundAlt.isValid()
+            ? m_theme.backgroundAlt : QColor(20, 20, 20);
+        return dim(c, alpha);
+    }
 
     static constexpr int kEdgeW      = 36;
     static constexpr int kTargetSz   = 28;
@@ -232,16 +267,17 @@ private:
             bool active = (m_activeZone == t.zone);
 
             // Rounded rect background
-            QColor bg = active ? QColor(m_accent.red(), m_accent.green(), m_accent.blue(), 200)
-                               : QColor(20, 20, 20, 180);
-            QColor border = active ? m_accent : QColor(m_accent.red(), m_accent.green(), m_accent.blue(), 100);
+            QColor bg = active ? dim(m_accent, 200) : surfaceOrDark(180);
+            QColor border = active ? m_accent : dim(m_accent, 100);
             p.setPen(QPen(border, 1.5));
             p.setBrush(bg);
             p.drawRoundedRect(tr, 5, 5);
 
-            // Arrow icon via polygon
+            // Arrow icon via polygon — uses theme.text so it's visible on
+            // both light and dark themes (hard-coded white used to vanish
+            // on light backgrounds when the diamond was inactive).
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor(255, 255, 255, active ? 240 : 140));
+            p.setBrush(textOrWhite(active ? 240 : 140));
             int as = active ? 6 : 5;  // arrow size
             int cx = tp.x(), cy = tp.y();
 
@@ -259,16 +295,17 @@ private:
                 p.drawPolygon(QPolygon({QPoint(cx+as, cy), QPoint(cx-as/2, cy-as), QPoint(cx-as/2, cy+as)}));
                 break;
             case DropZone::Center:
-                // Tabify icon: overlapping squares
-                p.fillRect(cx-4, cy-4, 7, 7, QColor(255, 255, 255, active ? 220 : 120));
-                p.fillRect(cx-1, cy-1, 7, 7, QColor(255, 255, 255, active ? 180 : 80));
+                // Tabify icon: overlapping squares. Theme.text keeps contrast
+                // against the diamond's bg on both light + dark themes.
+                p.fillRect(cx-4, cy-4, 7, 7, textOrWhite(active ? 220 : 120));
+                p.fillRect(cx-1, cy-1, 7, 7, textOrWhite(active ? 180 :  80));
                 break;
             default: break;
             }
         }
 
         // Connect targets with faint lines (diamond shape)
-        p.setPen(QPen(QColor(m_accent.red(), m_accent.green(), m_accent.blue(), 40), 1));
+        p.setPen(QPen(dim(m_accent, 40), 1));
         p.setBrush(Qt::NoBrush);
         QPoint ct = center;
         p.drawLine(ct.x(), ct.y()-d, ct.x()+d, ct.y());
@@ -282,7 +319,7 @@ private:
         if (preview.isNull()) return;
 
         p.setPen(QPen(m_accent, 2));
-        p.setBrush(QColor(m_accent.red(), m_accent.green(), m_accent.blue(), 35));
+        p.setBrush(dim(m_accent, 35));
         p.drawRect(preview.adjusted(1, 1, -1, -1));
 
         // Zone label centered in preview
@@ -309,9 +346,11 @@ private:
             int th = fm.height() + 8;
             QRect lr(preview.center().x() - tw/2, preview.center().y() - th/2, tw, th);
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor(m_accent.red(), m_accent.green(), m_accent.blue(), 180));
+            p.setBrush(dim(m_accent, 180));
             p.drawRoundedRect(lr, 4, 4);
-            p.setPen(Qt::white);
+            // Label text uses theme.text so it's readable on both themes
+            // (hard-coded white was invisible when the accent was near-white).
+            p.setPen(m_theme.text.isValid() ? m_theme.text : QColor(Qt::white));
             p.drawText(lr, Qt::AlignCenter, label);
         }
     }
@@ -358,9 +397,9 @@ private:
 
         QRect lr(lx, ly, tw, th);
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(25, 25, 25, 220));
+        p.setBrush(surfaceOrDark(220));
         p.drawRoundedRect(lr, 4, 4);
-        p.setPen(QColor(200, 200, 200));
+        p.setPen(m_theme.textDim.isValid() ? m_theme.textDim : QColor(200, 200, 200));
         p.drawText(lr, Qt::AlignCenter, text);
     }
 };

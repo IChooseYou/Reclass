@@ -100,6 +100,23 @@ public:
     // Values match rcx::LayoutPreset enum in titlebar.h.
     void applyLayoutPreset(int preset);
 
+    // Find-references — scan all open documents for any Node.refId ==
+    // targetId (or Node.structTypeName matching the target name for unlinked
+    // types imported from another project), then present a modal list.
+    // Double-click an entry jumps to that tab + scrolls to the reference.
+    void showFindReferences(const QString& targetTypeName, uint64_t targetStructId);
+
+    // Data form for the same query, exposed for MCP tool reuse.
+    struct ReferenceHit {
+        QDockWidget*    ownerDock;   // which doc tab contains the hit
+        uint64_t        nodeId;      // node holding the reference
+        QString         ownerType;   // root struct containing nodeId
+        QString         fieldName;   // nodeId's name
+        int             fieldOffset; // for display
+    };
+    QVector<ReferenceHit> findReferences(const QString& targetTypeName,
+                                          uint64_t targetStructId) const;
+
 private:
     enum ViewMode { VM_Reclass, VM_Rendered, VM_Debug };
 
@@ -150,6 +167,11 @@ private:
         QToolButton*   fmtGear    = nullptr;
         ViewMode       viewMode  = VM_Reclass;
         uint64_t       lastRenderedRootId = 0;
+        // Minimap: narrow read-only Scintilla mirror to the right of the
+        // main editor. Synced via RcxEditor::documentApplied. Created but
+        // hidden; visibility toggled via the View menu "Minimap" action.
+        QsciScintilla* minimap         = nullptr;
+        QWidget*       editorContainer = nullptr;
     };
 
     struct TabState {

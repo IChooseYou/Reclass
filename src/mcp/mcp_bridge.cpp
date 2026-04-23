@@ -590,6 +590,24 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // refs.find — reverse lookup of struct references across all open docs.
+    tools.append(QJsonObject{
+        {"name", "refs.find"},
+        {"description", "Find every field across all open documents that references a given struct "
+                        "type. Matches by nodeId (precise) and/or structTypeName (cross-doc, for "
+                        "imported types not linked by id). Returns array of {tabIndex, nodeId, "
+                        "owner, field, offset} entries."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"nodeId", QJsonObject{{"type", "string"},
+                    {"description", "Target struct's node id. Optional if typeName is given."}}},
+                {"typeName", QJsonObject{{"type", "string"},
+                    {"description", "Target struct's structTypeName. Optional if nodeId is given."}}}
+            }}
+        }}
+    });
+
     // 6. status.set
     tools.append(QJsonObject{
         {"name", "status.set"},
@@ -1006,6 +1024,7 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "bookmarks.list")   result = toolBookmarksList(args);
     else if (toolName == "bookmarks.add")    result = toolBookmarksAdd(args);
     else if (toolName == "bookmarks.remove") result = toolBookmarksRemove(args);
+    else if (toolName == "refs.find")        result = toolRefsFind(args);
     else return errReply(id, -32601, "Unknown tool: " + toolName);
 
     // Presentation mode: brief focus glow for single-node tools (not tree.apply, which handles its own)
@@ -3121,6 +3140,48 @@ QJsonObject McpBridge::toolBookmarksRemove(const QJsonObject& args) {
     QString removed = bms[idx].name;
     tab->ctrl->removeBookmark(idx);
     return makeTextResult(QStringLiteral("Removed bookmark: %1").arg(removed));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// refs.find — reverse-lookup references to a struct across all open docs.
+// Accepts nodeId (precise) and/or typeName (cross-document name match for
+// unlinked imports). Returns JSON-text result with an array of hits.
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolRefsFind(const QJsonObject& args) {
+    QString nodeIdStr = args.value("nodeId").toString();
+    QString typeName  = args.value("typeName").toString();
+    uint64_t targetId = nodeIdStr.isEmpty() ? 0 : nodeIdStr.toULongLong();
+    if (targetId == 0 && typeName.isEmpty())
+        return makeTextResult("Need nodeId or typeName", true);
+
+    auto hits = m_mainWindow->findReferences(typeName, targetId);
+
+    // Map ownerDock → tabIndex so clients can cross-reference project.state.
+    QHash<QDockWidget*, int> tabIndexMap;
+    for (int i = 0; i < m_mainWindow->tabCount(); i++) {
+        auto* t = m_mainWindow->tabByIndex(i);
+        if (!t) continue;
+        for (auto it = m_mainWindow->m_tabs.constBegin();
+             it != m_mainWindow->m_tabs.constEnd(); ++it) {
+            if (&it.value() == t) { tabIndexMap.insert(it.key(), i); break; }
+        }
+    }
+
+    QJsonArray arr;
+    for (const auto& h : hits) {
+        QJsonObject o;
+        o["tabIndex"] = tabIndexMap.value(h.ownerDock, -1);
+        o["nodeId"]   = QString::number(h.nodeId);
+        o["owner"]    = h.ownerType;
+        o["field"]    = h.fieldName;
+        o["offset"]   = h.fieldOffset;
+        arr.append(o);
+    }
+    QJsonObject result;
+    result["count"] = hits.size();
+    result["hits"]  = arr;
+    return makeTextResult(QJsonDocument(result).toJson(QJsonDocument::Compact));
 }
 
 // ════════════════════════════════════════════════════════════════════

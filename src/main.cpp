@@ -222,6 +222,111 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
 }
 #endif
 
+// ── POSIX crash handler (Linux + macOS) ──
+// Mirrors the Windows path above: on fatal signal, print cause + a backtrace
+// to stderr and to $HOME/.reclass/crash_YYYYMMDD_HHMMSS.log, then re-raise
+// with the default handler so the OS can still dump a core file / CrashReporter.
+#if defined(__linux__) || defined(__APPLE__)
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+static volatile sig_atomic_t s_inPosixCrashHandler = 0;
+
+static const char* posixSigName(int sig) {
+    switch (sig) {
+    case SIGSEGV: return "SIGSEGV";
+    case SIGABRT: return "SIGABRT";
+    case SIGFPE:  return "SIGFPE";
+    case SIGBUS:  return "SIGBUS";
+    case SIGILL:  return "SIGILL";
+    default:      return "unknown";
+    }
+}
+
+static void posixCrashHandler(int sig, siginfo_t* info, void* /*uctx*/) {
+    if (s_inPosixCrashHandler) {
+        // Re-entrant crash in the handler itself — give up and default.
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+    s_inPosixCrashHandler = 1;
+
+    // Phase 1: always-safe output to stderr.
+    fprintf(stderr, "\n=== UNHANDLED SIGNAL ===\n");
+    fprintf(stderr, "Signal : %s (%d)\n", posixSigName(sig), sig);
+    fprintf(stderr, "Addr   : %p\n", info ? info->si_addr : nullptr);
+    fflush(stderr);
+
+    // Phase 2: open the crash log file under $HOME/.reclass/.
+    char logPath[1024] = {};
+    const char* home = getenv("HOME");
+    if (home && *home) {
+        char dirPath[1024];
+        snprintf(dirPath, sizeof(dirPath), "%s/.reclass", home);
+        mkdir(dirPath, 0700);  // ignore EEXIST
+        time_t now = time(nullptr);
+        struct tm tm{};
+#if defined(__APPLE__) || defined(__linux__)
+        localtime_r(&now, &tm);
+#else
+        tm = *localtime(&now);
+#endif
+        snprintf(logPath, sizeof(logPath),
+                 "%s/crash_%04d%02d%02d_%02d%02d%02d.log",
+                 dirPath,
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min, tm.tm_sec);
+    }
+    FILE* logF = logPath[0] ? fopen(logPath, "w") : nullptr;
+    if (logF) {
+        fprintf(stderr, "Log    : %s\n", logPath);
+        fprintf(logF, "=== Reclass crash ===\n");
+        fprintf(logF, "Signal : %s (%d)\n", posixSigName(sig), sig);
+        fprintf(logF, "Addr   : %p\n", info ? info->si_addr : nullptr);
+        fflush(logF);
+    }
+
+    // Phase 3: backtrace via libc. backtrace(3) is async-signal-unsafe
+    // strictly, but pragmatic for a best-effort crash log — we've already
+    // lost correctness by the time we get here.
+    void* frames[64];
+    int n = backtrace(frames, 64);
+    char** syms = backtrace_symbols(frames, n);
+    fprintf(stderr, "\nStack trace (%d frames):\n", n);
+    for (int i = 0; i < n; i++) {
+        const char* s = syms ? syms[i] : "<no symbols>";
+        fprintf(stderr, "  [%2d] %s\n", i, s);
+        if (logF) fprintf(logF, "  [%2d] %s\n", i, s);
+    }
+    // syms is malloc'd; leaking is fine, we're about to terminate.
+
+    fprintf(stderr, "=== END CRASH ===\n");
+    fflush(stderr);
+    if (logF) { fflush(logF); fclose(logF); }
+
+    // Re-raise with the default handler so the OS still produces a core
+    // dump / CrashReporter invocation.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void installPosixCrashHandler() {
+    struct sigaction sa{};
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sa.sa_sigaction = posixCrashHandler;
+    sigemptyset(&sa.sa_mask);
+    for (int sig : {SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL})
+        sigaction(sig, &sa, nullptr);
+}
+#endif
+
 class DarkApp : public QApplication {
 public:
     using QApplication::QApplication;
@@ -1120,6 +1225,27 @@ void MainWindow::createMenus() {
                 if (pane.editor) pane.editor->setHoverEffects(checked);
     });
 
+    // Minimap: narrow read-only Scintilla mirror on the right of each editor.
+    // Off by default — adds visual noise on short structs, but useful on
+    // 10k+ line composed views (kernel PTE dumps, generated SDKs).
+    auto* actMinimap = view->addAction("&Minimap");
+    actMinimap->setCheckable(true);
+    actMinimap->setChecked(settings.value("minimap", false).toBool());
+    connect(actMinimap, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("minimap", checked);
+        for (auto& tab : m_tabs) {
+            for (auto& pane : tab.panes) {
+                if (!pane.minimap || !pane.editor) continue;
+                pane.minimap->setVisible(checked);
+                if (checked) {
+                    // Force a full refresh so the just-revealed minimap
+                    // receives the current text via documentApplied.
+                    tab.ctrl->refresh();
+                }
+            }
+        }
+    });
+
     {
         auto* actRefresh = view->addAction("&Refresh");
         actRefresh->setShortcut(QKeySequence(Qt::Key_F5));
@@ -1692,7 +1818,45 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
                 if (p.editor && p.editor != sender())
                     p.editor->setRelativeOffsets(rel);
     });
-    pane.tabWidget->addTab(pane.editor, "Reclass");     // index 0
+
+    // Editor + minimap container. Main editor stretches; minimap is a narrow
+    // read-only Scintilla pinned on the right. Off by default — enabled via
+    // View menu Minimap toggle. Text sync is driven by the editor's
+    // documentApplied signal (see RcxEditor::applyDocument).
+    pane.editorContainer = new QWidget;
+    auto* ecLayout = new QHBoxLayout(pane.editorContainer);
+    ecLayout->setContentsMargins(0, 0, 0, 0);
+    ecLayout->setSpacing(0);
+    ecLayout->addWidget(pane.editor, /*stretch=*/1);
+
+    pane.minimap = new QsciScintilla;
+    pane.minimap->setReadOnly(true);
+    pane.minimap->setWrapMode(QsciScintilla::WrapNone);
+    pane.minimap->setCaretLineVisible(false);
+    pane.minimap->setMarginWidth(0, 0);
+    pane.minimap->setMarginWidth(1, 0);
+    pane.minimap->setMarginWidth(2, 0);
+    pane.minimap->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    pane.minimap->setFixedWidth(110);
+    {
+        // Very small font so a ~100-line struct fits vertically at a glance.
+        QFont mf("JetBrains Mono", 4);
+        mf.setFixedPitch(true);
+        pane.minimap->setFont(mf);
+    }
+    pane.minimap->setVisible(
+        QSettings("Reclass", "Reclass").value("minimap", false).toBool());
+    ecLayout->addWidget(pane.minimap);
+
+    connect(pane.editor, &RcxEditor::documentApplied, pane.minimap,
+            [mm = pane.minimap](const QString& text) {
+        if (!mm->isVisible()) return;
+        mm->setReadOnly(false);
+        mm->setText(text);
+        mm->setReadOnly(true);
+    });
+
+    pane.tabWidget->addTab(pane.editorContainer, "Reclass");  // index 0
 
     // Create per-pane rendered C++ view with find bar
     pane.renderedContainer = new QWidget;
@@ -3282,6 +3446,13 @@ void MainWindow::applyTheme(const Theme& theme) {
     // Update border overlay color
     updateBorderColor(isActiveWindow() ? theme.borderFocused : theme.border);
 
+    // Propagate theme to the drag-overlay so its drop-zone chrome isn't
+    // stuck with hard-coded dark-theme colours.
+    if (m_dockOverlay) {
+        m_dockOverlay->setTheme(theme);
+        m_dockOverlay->setAccentColor(theme.indHoverSpan);
+    }
+
     // Style doc dock tab bars and remove dock borders.
     // QWidget default colors are required because having ANY stylesheet on QMainWindow
     // switches children from palette-based to CSS-based rendering.
@@ -4807,6 +4978,107 @@ void MainWindow::closeAllDocDocks() {
         dock->close();
 }
 
+QVector<MainWindow::ReferenceHit>
+MainWindow::findReferences(const QString& targetTypeName,
+                            uint64_t targetStructId) const {
+    QVector<ReferenceHit> hits;
+    QSet<RcxDocument*> scannedDocs;
+    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it) {
+        RcxDocument* doc = it.value().doc;
+        // Dedup by document — multiple tabs can share a doc, and we only
+        // want to walk each unique tree once.
+        if (scannedDocs.contains(doc)) continue;
+        scannedDocs.insert(doc);
+
+        const auto& tree = doc->tree;
+        for (const Node& n : tree.nodes) {
+            const bool idMatch   = (targetStructId != 0 && n.refId == targetStructId);
+            const bool nameMatch = !targetTypeName.isEmpty()
+                                   && n.structTypeName == targetTypeName;
+            if (!idMatch && !nameMatch) continue;
+
+            // Walk up to the root-level struct for a human-readable owner.
+            QString ownerType;
+            uint64_t cur = n.parentId;
+            QSet<uint64_t> visited;
+            while (cur != 0 && !visited.contains(cur)) {
+                visited.insert(cur);
+                int pi = tree.indexOfId(cur);
+                if (pi < 0) break;
+                const Node& p = tree.nodes[pi];
+                if (p.parentId == 0) {
+                    ownerType = p.structTypeName.isEmpty() ? p.name : p.structTypeName;
+                    break;
+                }
+                cur = p.parentId;
+            }
+
+            ReferenceHit h;
+            h.ownerDock   = it.key();
+            h.nodeId      = n.id;
+            h.ownerType   = ownerType;
+            h.fieldName   = n.name;
+            h.fieldOffset = n.offset;
+            hits.append(h);
+        }
+    }
+    return hits;
+}
+
+void MainWindow::showFindReferences(const QString& targetTypeName,
+                                     uint64_t targetStructId) {
+    auto hits = findReferences(targetTypeName, targetStructId);
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("References to %1")
+                       .arg(targetTypeName.isEmpty()
+                            ? QStringLiteral("(unnamed)") : targetTypeName));
+    dlg.resize(560, 400);
+    auto* layout = new QVBoxLayout(&dlg);
+
+    auto* header = new QLabel(QStringLiteral("%1 reference%2")
+                               .arg(hits.size())
+                               .arg(hits.size() == 1 ? "" : "s"), &dlg);
+    layout->addWidget(header);
+
+    auto* list = new QListWidget(&dlg);
+    list->setAlternatingRowColors(true);
+    for (const auto& h : hits) {
+        QString text = QStringLiteral("%1 · %2.%3  (+0x%4)")
+            .arg(h.ownerDock ? h.ownerDock->windowTitle() : QStringLiteral("?"),
+                 h.ownerType.isEmpty() ? QStringLiteral("?") : h.ownerType,
+                 h.fieldName)
+            .arg(h.fieldOffset, 0, 16);
+        auto* item = new QListWidgetItem(text);
+        item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(
+            reinterpret_cast<quintptr>(h.ownerDock)));
+        item->setData(Qt::UserRole + 1, QString::number(h.nodeId));
+        list->addItem(item);
+    }
+    layout->addWidget(list);
+
+    // Double-click → raise that dock, scroll to the node.
+    connect(list, &QListWidget::itemActivated, this,
+            [this, &dlg](QListWidgetItem* item) {
+        if (!item) return;
+        auto* dock = reinterpret_cast<QDockWidget*>(
+            item->data(Qt::UserRole).value<quintptr>());
+        uint64_t nodeId = item->data(Qt::UserRole + 1).toString().toULongLong();
+        if (!dock || !m_tabs.contains(dock)) return;
+        dock->raise();
+        dock->show();
+        m_activeDocDock = dock;
+        m_tabs[dock].ctrl->scrollToNodeId(nodeId);
+        dlg.accept();
+    });
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    dlg.exec();
+}
+
 void MainWindow::applyLayoutPreset(int preset) {
     // Two-mode toggle: workspace on (Layout_Workspace) or off.
     // Other docks (symbols, scanner) keep whatever state the user set via
@@ -5095,6 +5367,16 @@ void MainWindow::createWorkspaceDock() {
                 actConvert = menu.addAction("Convert to Class");
         }
 
+        // Find References — single-selection only. Scans every open doc for
+        // Node.refId == target or Node.structTypeName == target.typeName and
+        // opens a results dialog. Inverse of the "rename struct → fields
+        // auto-update" flow; useful when untangling a cross-class refactor.
+        QAction* actFindRefs = nullptr;
+        if (items.size() == 1) {
+            actFindRefs = menu.addAction(QIcon(":/vsicons/search.svg"),
+                                          QStringLiteral("Find References"));
+        }
+
         // Pin/Unpin
         bool allPinned = true;
         for (const auto& item : items)
@@ -5300,6 +5582,9 @@ void MainWindow::createWorkspaceDock() {
                 if (it->doc == tab.doc)
                     it.key()->setWindowTitle(tabTitle(*it));
             rebuildWorkspaceModel();
+
+        } else if (chosen && chosen == actFindRefs && items.size() == 1) {
+            showFindReferences(items[0].typeName, items[0].structId);
 
         } else if (chosen && chosen == actPin) {
             for (const auto& item : items) {
@@ -6881,6 +7166,33 @@ void MainWindow::rebuildWorkspaceModelNow() {
     if (m_workspaceTree && m_workspaceTree->verticalScrollBar())
         savedScroll = m_workspaceTree->verticalScrollBar()->value();
 
+    // Capture expansion state + current selection keyed by node id. The
+    // subsequent model->clear() destroys all QModelIndex objects, so we must
+    // translate "which row is expanded / selected" into something stable
+    // (node id) and re-apply after the rebuild. Without this, any refresh
+    // collapses every expanded type and loses the user's selection — which
+    // is visibly jumpy on large projects.
+    QSet<uint64_t> expandedIds;
+    uint64_t selectedId = 0;
+    if (m_workspaceTree && m_workspaceProxy) {
+        for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
+            auto* item = m_workspaceModel->item(i);
+            if (!item) continue;
+            uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
+            if (id == 0) continue;
+            QModelIndex src = m_workspaceModel->indexFromItem(item);
+            QModelIndex proxy = m_workspaceProxy->mapFromSource(src);
+            if (m_workspaceTree->isExpanded(proxy))
+                expandedIds.insert(id);
+        }
+        QModelIndexList sel = m_workspaceTree->selectionModel()->selectedIndexes();
+        if (!sel.isEmpty()) {
+            QModelIndex src = m_workspaceProxy->mapToSource(sel.first());
+            auto* item = m_workspaceModel->itemFromIndex(src);
+            if (item) selectedId = item->data(Qt::UserRole + 1).toULongLong();
+        }
+    }
+
     QVector<rcx::TabInfo> tabs;
     QSet<RcxDocument*> seenDocs;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
@@ -6931,6 +7243,23 @@ void MainWindow::rebuildWorkspaceModelNow() {
                     .arg(enums).arg(enums != 1 ? "s" : "");
         }
         m_dockTitleLabel->setText(title);
+    }
+
+    // Restore expansion + selection state captured before model->clear().
+    if (m_workspaceTree && m_workspaceProxy) {
+        for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
+            auto* item = m_workspaceModel->item(i);
+            if (!item) continue;
+            uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
+            if (id == 0) continue;
+            QModelIndex src = m_workspaceModel->indexFromItem(item);
+            QModelIndex proxy = m_workspaceProxy->mapFromSource(src);
+            if (expandedIds.contains(id))
+                m_workspaceTree->setExpanded(proxy, true);
+            if (selectedId != 0 && id == selectedId)
+                m_workspaceTree->selectionModel()->setCurrentIndex(
+                    proxy, QItemSelectionModel::ClearAndSelect);
+        }
     }
 
     // Restore scroll position after rebuild
@@ -7651,6 +7980,9 @@ void MainWindow::dismissStartPage() {
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(crashHandler);
+#endif
+#if defined(__linux__) || defined(__APPLE__)
+    installPosixCrashHandler();
 #endif
 #ifdef Q_OS_MACOS
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);

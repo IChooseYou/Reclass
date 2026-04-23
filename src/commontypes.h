@@ -77,6 +77,25 @@ static const CommonField kFields_GUID[] = {
     {0x08, NodeKind::Hex64,  "Data4"},
 };
 
+// Win32 FILETIME — 100ns ticks since 1601-01-01 UTC. Split form matches the
+// MSDN ABI; a single UInt64 view is also common so we expose both.
+static const CommonField kFields_FILETIME[] = {
+    {0x00, NodeKind::UInt32, "dwLowDateTime"},
+    {0x04, NodeKind::UInt32, "dwHighDateTime"},
+};
+static const CommonField kFields_FILETIME64[] = {
+    {0x00, NodeKind::UInt64, "QuadPart"},
+};
+// Unix epoch timestamps. Plain integer under the hood; users pick the width
+// that matches their data. A later pass can wire a LineMeta::typeHint
+// formatter that renders local+UTC strings alongside the raw value.
+static const CommonField kFields_UnixTime32[] = {
+    {0x00, NodeKind::Int32, "seconds"},
+};
+static const CommonField kFields_UnixTime64[] = {
+    {0x00, NodeKind::Int64, "seconds"},
+};
+
 // ── C++ STL types (MSVC x64 layout) ──
 
 static const CommonField kFields_std_string[] = {
@@ -320,6 +339,10 @@ static const CommonType kCommonTypes[] = {
     CT("CLIENT_ID",          "Windows NT", "struct", 16, kFields_CLIENT_ID),
     CT("IO_STATUS_BLOCK",    "Windows NT", "struct", 16, kFields_IO_STATUS_BLOCK),
     CT("GUID",               "Windows NT", "struct", 16, kFields_GUID),
+    CT("FILETIME",           "Windows NT", "struct",  8, kFields_FILETIME),
+    CT("FILETIME_u64",       "Windows NT", "union",   8, kFields_FILETIME64),
+    CT("UnixTime32",         "Time",       "struct",  4, kFields_UnixTime32),
+    CT("UnixTime64",         "Time",       "struct",  8, kFields_UnixTime64),
     CT("RTL_BALANCED_NODE",  "Windows NT", "struct", 24, kFields_RTL_BALANCED_NODE),
     CT("SINGLE_LIST_ENTRY",  "Windows NT", "struct",  8, kFields_SINGLE_LIST_ENTRY),
     CT("STRING",             "Windows NT", "struct", 16, kFields_STRING),

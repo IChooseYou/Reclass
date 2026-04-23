@@ -5,6 +5,7 @@
 #include "sourcechooserpopup.h"
 #include "hextoolbarpopup.h"
 #include "commontypes.h"
+#include "clipboard.h"
 #include <cmath>
 #include <cstring>
 #include "providerregistry.h"
@@ -360,6 +361,85 @@ void RcxController::connectEditor(RcxEditor* editor) {
                        | kMemberBit | kMemberSubMask));
             if (idx >= 0) duplicateNode(idx);
         }
+    });
+
+    // Real clipboard (Ctrl+C / Ctrl+X / Ctrl+V).
+    // Serialize via ClipboardCodec to "application/x-reclass-nodes-v1" plus a
+    // plain-text dump for external pastes. Cut = copy + delete. Paste wires
+    // pasted nodes into the current view-root via a single undo macro.
+    auto selectedRootIds = [this]() -> QVector<uint64_t> {
+        QVector<uint64_t> out;
+        for (uint64_t id : m_selIds) {
+            uint64_t nodeId = id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                      | kMemberBit | kMemberSubMask);
+            if (nodeId != 0 && m_doc->tree.indexOfId(nodeId) >= 0)
+                out.append(nodeId);
+        }
+        return out;
+    };
+
+    connect(editor, &RcxEditor::copyNodesRequested, this, [this, selectedRootIds]() {
+        auto roots = selectedRootIds();
+        if (roots.isEmpty()) return;
+        auto* mime = ClipboardCodec::serialize(m_doc->tree, roots);
+        QApplication::clipboard()->setMimeData(mime);
+        emit statusHint(QStringLiteral("Copied %1 node(s)").arg(roots.size()));
+    });
+
+    connect(editor, &RcxEditor::cutNodesRequested, this, [this, selectedRootIds]() {
+        auto roots = selectedRootIds();
+        if (roots.isEmpty()) return;
+        auto* mime = ClipboardCodec::serialize(m_doc->tree, roots);
+        QApplication::clipboard()->setMimeData(mime);
+        // Delete after successful copy — matches standard cut behaviour.
+        QVector<int> indices;
+        for (uint64_t id : roots) {
+            int idx = m_doc->tree.indexOfId(id);
+            if (idx >= 0) indices.append(idx);
+        }
+        if (indices.size() > 1) batchRemoveNodes(indices);
+        else if (indices.size() == 1) removeNode(indices.first());
+        emit statusHint(QStringLiteral("Cut %1 node(s)").arg(roots.size()));
+    });
+
+    connect(editor, &RcxEditor::pasteNodesRequested, this, [this]() {
+        const QMimeData* mime = QApplication::clipboard()->mimeData();
+        if (!mime) return;
+        auto paste = ClipboardCodec::deserialize(m_doc->tree, mime);
+        if (paste.nodes.isEmpty()) {
+            emit statusHint(QStringLiteral("Nothing to paste — clipboard has no Reclass data"));
+            return;
+        }
+        // Target parent = current view root if set, else root.
+        uint64_t targetParent = m_viewRootId;
+        // Determine paste offset — append after existing siblings to avoid
+        // clobbering. Uses the same placement logic as insertNode(offset=-1).
+        // We rewrite root nodes' parentIds to targetParent, then push Inserts.
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Paste nodes"));
+        QSet<uint64_t> rootSet;
+        for (uint64_t r : paste.rootIds) rootSet.insert(r);
+        for (Node& n : paste.nodes) {
+            if (rootSet.contains(n.id)) {
+                n.parentId = targetParent;
+                // Auto-place after existing siblings (cf. insertNode -1 path)
+                int maxEnd = 0;
+                for (int si : m_doc->tree.childrenOf(targetParent)) {
+                    const Node& sn = m_doc->tree.nodes[si];
+                    int sz = (sn.kind == NodeKind::Struct || sn.kind == NodeKind::Array)
+                        ? m_doc->tree.structSpan(sn.id) : sn.byteSize();
+                    int end = sn.offset + sz;
+                    if (end > maxEnd) maxEnd = end;
+                }
+                int align = alignmentFor(n.kind);
+                n.offset = (maxEnd + align - 1) / align * align;
+            }
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, {}}));
+        }
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = false;
+        refresh();
+        emit statusHint(QStringLiteral("Pasted %1 node(s)").arg(paste.rootIds.size()));
     });
 
     // Quick type change (Space, 1-5, P, F, S, U keys)

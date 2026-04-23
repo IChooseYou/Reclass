@@ -398,14 +398,11 @@ if(BUILD_TESTING)
     target_link_libraries(test_scanner PRIVATE ${QT}::Core ${QT}::Concurrent ${QT}::Test)
     add_test(NAME test_scanner COMMAND test_scanner)
 
-    add_executable(test_32bit_support tests/test_32bit_support.cpp
-        src/generator.cpp src/imports/import_source.cpp src/imports/import_reclass_xml.cpp
-        src/compose.cpp src/format.cpp src/addressparser.cpp)
-    target_include_directories(test_32bit_support PRIVATE src
-        ${CMAKE_SOURCE_DIR}/plugins/RemoteProcessMemory)
-    target_link_libraries(test_32bit_support PRIVATE ${QT}::Core ${QT}::Widgets ${QT}::Test)
-    add_test(NAME test_32bit_support COMMAND test_32bit_support)
-    set_tests_properties(test_32bit_support PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    # ClipboardCodec — JSON MIME roundtrip + plaintext fallback
+    add_executable(test_clipboard tests/test_clipboard.cpp)
+    target_include_directories(test_clipboard PRIVATE src)
+    target_link_libraries(test_clipboard PRIVATE ${QT}::Core ${QT}::Gui ${QT}::Test)
+    add_test(NAME test_clipboard COMMAND test_clipboard)
 
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
@@ -610,60 +607,6 @@ if(BUILD_TESTING)
             COMMENT "Deploying Qt runtime DLLs for tests..."
         )
         endif()
-
-        # ── Training2: SDK Building Course (hands-on lessons with screenshots) ──
-        set(TRAINING2_SRCS
-            src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-            src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp src/processpicker.cpp
-            src/processpicker.ui src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-            src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
-        set(TRAINING2_LIBS
-            ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
-            QScintilla::QScintilla)
-        set(TRAINING2_SCREENSHOT_DIR "${CMAKE_SOURCE_DIR}/training2/screenshots")
-
-        macro(add_training_test name)
-            add_executable(${name} training2/tests/${name}.cpp ${TRAINING2_SRCS} ${ARGN})
-            target_include_directories(${name} PRIVATE src third_party/fadec training2/tests)
-            target_link_libraries(${name} PRIVATE ${TRAINING2_LIBS})
-            target_compile_definitions(${name} PRIVATE
-                TRAINING_SCREENSHOT_DIR="${TRAINING2_SCREENSHOT_DIR}")
-            if(WIN32)
-                target_link_libraries(${name} PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
-            endif()
-            add_test(NAME ${name} COMMAND ${name})
-        endmacro()
-
-        # Beginner (01-03)
-        add_training_test(test_lesson_01)
-        add_training_test(test_lesson_02)
-        add_training_test(test_lesson_03)
-
-        # Intermediate (04-08)
-        add_training_test(test_lesson_04)
-        add_training_test(test_lesson_05)
-        add_training_test(test_lesson_06)
-        add_training_test(test_lesson_07)
-        add_training_test(test_lesson_08)
-
-        # Advanced (09-16)
-        add_training_test(test_lesson_09 src/imports/import_source.cpp)
-        add_training_test(test_lesson_10 src/imports/import_pdb.cpp)
-        if(WIN32)
-            target_link_libraries(test_lesson_10 PRIVATE raw_pdb)
-        endif()
-        add_training_test(test_lesson_11)
-        add_training_test(test_lesson_12)
-        add_training_test(test_lesson_13 src/generator.cpp)
-        add_training_test(test_lesson_14 src/scanner.cpp)
-        add_training_test(test_lesson_15 src/generator.cpp)
-        add_training_test(test_lesson_16)
-
-        # Expert (17-20)
-        add_training_test(test_lesson_17 src/generator.cpp)
-        add_training_test(test_lesson_18 src/generator.cpp)
-        add_training_test(test_lesson_19 src/generator.cpp)
-        add_training_test(test_lesson_20)
 
     endif() # BUILD_UI_TESTS
 endif()

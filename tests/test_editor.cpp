@@ -494,11 +494,13 @@ private slots:
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();
 
-        // Source should be ALLOWED on CommandRow (SRC field)
+        // Source should be ALLOWED on CommandRow (SRC field).
+        // NOTE: Source now opens a SourceChooserPopup rather than going
+        // through inline edit state — beginInlineEdit returns true (the
+        // action was accepted) but isEditing() stays false because the
+        // popup owns the interaction. So we only verify the accept here.
         ok = m_editor->beginInlineEdit(EditTarget::Source, 0);
         QVERIFY2(ok, "Source edit should be allowed on CommandRow");
-        QVERIFY(m_editor->isEditing());
-        m_editor->cancelInlineEdit();
         QApplication::processEvents(); // flush deferred showSourcePicker timer
     }
 

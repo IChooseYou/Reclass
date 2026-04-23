@@ -103,6 +103,15 @@ signals:
     void appendEnumMembersRequested(uint64_t enumId, int count);
     void deleteSelectedRequested();
     void duplicateSelectedRequested();
+    // Real clipboard (rcx-clipboard/v1 MIME + plaintext fallback). Controller
+    // handles the actual serialization/paste + undo; editor just signals.
+    void copyNodesRequested();
+    void cutNodesRequested();
+    void pasteNodesRequested();
+    // Fires after applyDocument() has pushed new text into Scintilla. Carries
+    // the composed text so a minimap (or any passive mirror) can copy it
+    // without polling.
+    void documentApplied(const QString& text);
     void quickTypeChangeRequested(int nodeIdx, NodeKind targetKind);
     void cycleSameSizeTypeRequested(int nodeIdx, int direction);  // -1=prev, +1=next
     void moveNodeRequested(int nodeIdx, int direction);  // -1=up, +1=down
