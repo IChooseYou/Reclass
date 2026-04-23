@@ -410,36 +410,114 @@ void RcxController::connectEditor(RcxEditor* editor) {
             emit statusHint(QStringLiteral("Nothing to paste — clipboard has no Reclass data"));
             return;
         }
-        // Target parent = current view root if set, else root.
-        uint64_t targetParent = m_viewRootId;
-        // Determine paste offset — append after existing siblings to avoid
-        // clobbering. Uses the same placement logic as insertNode(offset=-1).
-        // We rewrite root nodes' parentIds to targetParent, then push Inserts.
-        m_suppressRefresh = true;
-        m_doc->undoStack.beginMacro(QStringLiteral("Paste nodes"));
+
         QSet<uint64_t> rootSet;
         for (uint64_t r : paste.rootIds) rootSet.insert(r);
+
+        // Paste-below-selection: find the anchor node with the greatest end
+        // offset among the current selection, and drop the pasted roots
+        // immediately after it (pushing later siblings down). This matches
+        // VS-style "add field below current row" behaviour; when nothing is
+        // selected we fall back to append-at-container-end.
+        uint64_t targetParent = m_viewRootId;
+        int anchorEnd = -1;
+        for (uint64_t sid : m_selIds) {
+            uint64_t nid = sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                                   | kMemberBit | kMemberSubMask);
+            int ai = m_doc->tree.indexOfId(nid);
+            if (ai < 0) continue;
+            const Node& a = m_doc->tree.nodes[ai];
+            int asz = (a.kind == NodeKind::Struct || a.kind == NodeKind::Array)
+                ? m_doc->tree.structSpan(a.id) : a.byteSize();
+            int end = a.offset + asz;
+            if (end > anchorEnd) {
+                anchorEnd    = end;
+                targetParent = a.parentId;
+            }
+        }
+
+        // Span of a to-be-pasted root, computed from paste.nodes (not yet in
+        // the tree). Struct/Array roots recurse over their captured children.
+        std::function<int(uint64_t)> pastedSpan = [&](uint64_t id) -> int {
+            int idx = -1;
+            for (int i = 0; i < paste.nodes.size(); i++)
+                if (paste.nodes[i].id == id) { idx = i; break; }
+            if (idx < 0) return 0;
+            const Node& n = paste.nodes[idx];
+            if (n.kind != NodeKind::Struct && n.kind != NodeKind::Array)
+                return n.byteSize();
+            int maxEnd = 0;
+            for (const Node& c : paste.nodes) {
+                if (c.parentId != id) continue;
+                int cend = c.offset + pastedSpan(c.id);
+                if (cend > maxEnd) maxEnd = cend;
+            }
+            return maxEnd;
+        };
+
+        // Total span the pasted roots will occupy, accounting for alignment
+        // between roots. Needed so we know how far to shift existing siblings.
+        int pasteTotal = 0;
+        for (uint64_t r : paste.rootIds) {
+            int idx = -1;
+            for (int i = 0; i < paste.nodes.size(); i++)
+                if (paste.nodes[i].id == r) { idx = i; break; }
+            if (idx < 0) continue;
+            int align = alignmentFor(paste.nodes[idx].kind);
+            pasteTotal = (pasteTotal + align - 1) / align * align + pastedSpan(r);
+        }
+
+        // Shift existing siblings at/after anchorEnd down by pasteTotal so
+        // the newly-inserted block can take the space. Attached to the first
+        // Insert command in the macro so one undo reverses the whole paste.
+        QVector<cmd::OffsetAdj> shift;
+        if (anchorEnd >= 0 && pasteTotal > 0) {
+            for (int si : m_doc->tree.childrenOf(targetParent)) {
+                const Node& s = m_doc->tree.nodes[si];
+                if (s.offset >= anchorEnd)
+                    shift.append(cmd::OffsetAdj{s.id, s.offset,
+                                                s.offset + pasteTotal});
+            }
+        }
+
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Paste nodes"));
+        int placedBase = anchorEnd;  // -1 ⇒ append-at-end fallback
+        bool firstRoot = true;
         for (Node& n : paste.nodes) {
             if (rootSet.contains(n.id)) {
                 n.parentId = targetParent;
-                // Auto-place after existing siblings (cf. insertNode -1 path)
-                int maxEnd = 0;
-                for (int si : m_doc->tree.childrenOf(targetParent)) {
-                    const Node& sn = m_doc->tree.nodes[si];
-                    int sz = (sn.kind == NodeKind::Struct || sn.kind == NodeKind::Array)
-                        ? m_doc->tree.structSpan(sn.id) : sn.byteSize();
-                    int end = sn.offset + sz;
-                    if (end > maxEnd) maxEnd = end;
-                }
                 int align = alignmentFor(n.kind);
-                n.offset = (maxEnd + align - 1) / align * align;
+                if (placedBase >= 0) {
+                    n.offset = (placedBase + align - 1) / align * align;
+                    placedBase = n.offset + pastedSpan(n.id);
+                } else {
+                    // Append path: after all current siblings (legacy).
+                    int maxEnd = 0;
+                    for (int si : m_doc->tree.childrenOf(targetParent)) {
+                        const Node& sn = m_doc->tree.nodes[si];
+                        int sz = (sn.kind == NodeKind::Struct || sn.kind == NodeKind::Array)
+                            ? m_doc->tree.structSpan(sn.id) : sn.byteSize();
+                        int end = sn.offset + sz;
+                        if (end > maxEnd) maxEnd = end;
+                    }
+                    n.offset = (maxEnd + align - 1) / align * align;
+                }
             }
-            m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, {}}));
+            if (firstRoot && rootSet.contains(n.id)) {
+                m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, shift}));
+                firstRoot = false;
+            } else {
+                m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, {}}));
+            }
         }
         m_doc->undoStack.endMacro();
         m_suppressRefresh = false;
         refresh();
-        emit statusHint(QStringLiteral("Pasted %1 node(s)").arg(paste.rootIds.size()));
+        emit statusHint(QStringLiteral("Pasted %1 node(s) %2")
+                        .arg(paste.rootIds.size())
+                        .arg(anchorEnd >= 0 ? QStringLiteral("below selection")
+                                            : QStringLiteral("at end")));
     });
 
     // Quick type change (Space, 1-5, P, F, S, U keys)
