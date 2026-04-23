@@ -113,7 +113,11 @@ public:
     void groupIntoUnion(const QSet<uint64_t>& nodeIds);
     void dissolveUnion(uint64_t unionId);
 
-    void applyCommand(const Command& cmd, bool isUndo);
+    // Applies a command variant. Returns false if the underlying operation
+    // rejected the change (e.g. provider write failed). Callers — primarily
+    // RcxCommand::undo/redo — use this to mark the command obsolete so the
+    // undo stack stays consistent with the actual data.
+    bool applyCommand(const Command& cmd, bool isUndo);
     void refresh();
     void applyTypePopupResult(TypePopupMode mode, int nodeIdx, const TypeEntry& entry, const QString& fullText);
     uint64_t findOrCreateStructByName(const QString& typeName, int depth = 0);

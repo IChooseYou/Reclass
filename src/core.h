@@ -230,7 +230,11 @@ struct Node {
     QString  comment;          // User annotation (displayed as "// text" in comment column)
     bool     bigEndian  = false;   // Scalar value is big-endian (swap on display/parse)
 
-    // Note: Returns 0 for Array-of-Struct/Array. Use tree.structSpan() for accurate size.
+    // Leaf-only byte size. Returns 0 for Struct (container, unless it's a
+    // bitfield which has a fixed container size) and Array-of-Struct/Array
+    // because those need tree context to span child nodes. For any node that
+    // might be a container, call totalByteSize(tree) instead — that dispatches
+    // to tree.structSpan() automatically and returns the real footprint.
     int byteSize() const {
         switch (kind) {
         case NodeKind::UTF8:    return strLen;
@@ -249,6 +253,12 @@ struct Node {
         default: return sizeForKind(kind);
         }
     }
+
+    // Container-aware byte size. Walks nested children for Struct/Array via
+    // NodeTree::structSpan, falls through to byteSize() for leaves. Defined
+    // out-of-line below NodeTree because it needs the full type to call
+    // structSpan().
+    int totalByteSize(const struct NodeTree& tree) const;
 
     QJsonObject toJson() const {
         QJsonObject o;
@@ -463,6 +473,13 @@ struct NodeTree {
         return d;
     }
 
+    // Returns the node's offset relative to the root (summed parent offsets).
+    // CAN RETURN NEGATIVE when a parent-chain walk produces a negative
+    // intermediate, e.g. a malformed tree with a node carrying a negative
+    // offset. Callers must check the sign before adding to baseAddress;
+    // casting to uint64_t on a negative result silently wraps into
+    // high addresses and reads arbitrary memory. Prefer absoluteAddress()
+    // when you just need "this node's address in the live process".
     int64_t computeOffset(int idx) const {
         int64_t total = 0;
         QSet<uint64_t> visited;
@@ -476,6 +493,20 @@ struct NodeTree {
             cur = indexOfId(nodes[cur].parentId);
         }
         return total;
+    }
+
+    // Convenience wrapper around computeOffset() that folds in baseAddress
+    // and handles the negative case safely: if computeOffset returns < 0,
+    // *ok is set to false and baseAddress alone is returned. Use this at
+    // callsites that only care about "what address does this node live at".
+    uint64_t absoluteAddress(int idx, bool* ok = nullptr) const {
+        int64_t off = computeOffset(idx);
+        if (off < 0) {
+            if (ok) *ok = false;
+            return baseAddress;
+        }
+        if (ok) *ok = true;
+        return baseAddress + static_cast<uint64_t>(off);
     }
 
     int structSpan(uint64_t structId,
@@ -559,6 +590,16 @@ struct NodeTree {
     }
 
 };
+
+// Out-of-line because it calls NodeTree::structSpan which needs the
+// complete type. Declared on Node above so callers can just write
+// node.totalByteSize(tree) regardless of kind — no more "is it a
+// container? oh right, use structSpan" branching at call sites.
+inline int Node::totalByteSize(const NodeTree& tree) const {
+    if (kind == NodeKind::Struct || kind == NodeKind::Array)
+        return tree.structSpan(id);
+    return byteSize();
+}
 
 // ── Value History (ring buffer for heatmap) ──
 

@@ -19,6 +19,7 @@ namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetecto
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMap>
+#include <QPointer>
 #include <QButtonGroup>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -183,7 +184,10 @@ private:
     };
     QMap<QDockWidget*, TabState> m_tabs;
     QVector<QDockWidget*> m_docDocks;       // ordered list for tabByIndex
-    QDockWidget* m_activeDocDock = nullptr;  // tracks active document dock
+    // QPointer so stale-pointer access after dock destruction fails safely
+    // (null-compare, null-deref fires Q_ASSERT) rather than silently running
+    // over freed memory. Automatically nulls when the dock is destroyed.
+    QPointer<QDockWidget> m_activeDocDock;  // tracks active document dock
     QVector<QDockWidget*> m_sentinelDocks;    // permanent sentinels for always-visible tab bars
     QVector<RcxDocument*> m_allDocs;  // all open docs, shared with controllers
     bool m_closingAll = false;        // guards spurious project_new during batch close
@@ -272,7 +276,10 @@ private:
     DockOverlay*       m_dockOverlay      = nullptr;
     DockDragDetector*  m_dockDragDetector = nullptr;
     Qt::DockWidgetArea m_dragOrigArea     = Qt::NoDockWidgetArea;
-    QDockWidget*       m_dragOrigPeer     = nullptr;
+    // QPointer because a peer dock can be closed or destroyed mid-drag
+    // (e.g. MCP-driven project close). Null-guard in the cancel handler
+    // below turns a potential UAF into a benign no-op.
+    QPointer<QDockWidget> m_dragOrigPeer;
     void setupDockOverlay();
     void onDockDragStarted(QDockWidget* dock, QPoint globalPos);
     void onDockDropRequested(QDockWidget* source, QDockWidget* target, int zone);

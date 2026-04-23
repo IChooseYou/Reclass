@@ -658,41 +658,22 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
         return {};
     }
 
+    // Hex kinds always parse as memory-order bytes (display order). Input
+    // must have exactly `byteCount` bytes' worth of hex digits — shorter
+    // inputs are rejected so callers must either type the full value or
+    // switch to an integer kind (UInt*/Int*) which accepts partial entry.
+    // This unifies spaced "DE AD BE EF" and unspaced "DEADBEEF" — both write
+    // the same memory, matching what the hex byte preview shows.
+    auto parseHexUnified = [&](QString cleaned, int byteCount) -> QByteArray {
+        cleaned.remove(' ');
+        return parseHexBytes(cleaned, byteCount, ok);
+    };
     switch (kind) {
-    case NodeKind::Hex8:    return parseHexBytes(stripHex(s), 1, ok);
-    case NodeKind::Hex16: {
-        QString cleaned = stripHex(s);
-        // Space-separated bytes → raw byte order (display order preserved)
-        if (cleaned.contains(' '))
-            return parseHexBytes(cleaned, 2, ok);
-        // Single value → native-endian
-        uint val = cleaned.toUInt(ok, 16);
-        if (*ok && val > 0xFFFF) *ok = false;
-        return *ok ? toBytes<uint16_t>(static_cast<uint16_t>(val)) : QByteArray{};
-    }
-    case NodeKind::Hex32: {
-        QString cleaned = stripHex(s);
-        // Space-separated bytes → raw byte order (display order preserved)
-        if (cleaned.contains(' '))
-            return parseHexBytes(cleaned, 4, ok);
-        // Single value → native-endian
-        uint val = cleaned.toUInt(ok, 16);
-        return *ok ? toBytes<uint32_t>(val) : QByteArray{};
-    }
-    case NodeKind::Hex64: {
-        QString cleaned = stripHex(s);
-        // Space-separated bytes → raw byte order (display order preserved)
-        if (cleaned.contains(' '))
-            return parseHexBytes(cleaned, 8, ok);
-        // Single value → native-endian
-        qulonglong val = cleaned.toULongLong(ok, 16);
-        return *ok ? toBytes<uint64_t>(val) : QByteArray{};
-    }
-    case NodeKind::Hex128: {
-        QString cleaned = stripHex(s);
-        // Space-separated bytes → raw byte order
-        return parseHexBytes(cleaned, 16, ok);
-    }
+    case NodeKind::Hex8:    return parseHexUnified(stripHex(s), 1);
+    case NodeKind::Hex16:   return parseHexUnified(stripHex(s), 2);
+    case NodeKind::Hex32:   return parseHexUnified(stripHex(s), 4);
+    case NodeKind::Hex64:   return parseHexUnified(stripHex(s), 8);
+    case NodeKind::Hex128:  return parseHexUnified(stripHex(s), 16);
     case NodeKind::Int8: {
         bool isHex = s.startsWith("0x", Qt::CaseInsensitive);
         if (isHex) {

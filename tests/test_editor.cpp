@@ -684,12 +684,14 @@ private slots:
         QCOMPARE((uint8_t)b[1], (uint8_t)0x5A);
         QCOMPARE((uint8_t)b[7], (uint8_t)0x00);
 
-        // Hex64 continuous - stores as native-endian (numeric value preserved)
+        // Hex64 continuous — memory-order bytes (same as spaced form).
         b = fmt::parseValue(NodeKind::Hex64, "4D5A900000000000", &ok);
         QVERIFY(ok);
-        uint64_t v64;
-        memcpy(&v64, b.data(), 8);
-        QCOMPARE(v64, (uint64_t)0x4D5A900000000000);
+        QCOMPARE(b.size(), 8);
+        QCOMPARE((uint8_t)b[0], (uint8_t)0x4D);
+        QCOMPARE((uint8_t)b[1], (uint8_t)0x5A);
+        QCOMPARE((uint8_t)b[2], (uint8_t)0x90);
+        QCOMPARE((uint8_t)b[7], (uint8_t)0x00);
 
         // Hex64 with 0x prefix and spaces
         b = fmt::parseValue(NodeKind::Hex64, "0x4D 5A 90 00 00 00 00 00", &ok);

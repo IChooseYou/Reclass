@@ -39,6 +39,25 @@ namespace rcx {
 
 static thread_local const RcxDocument* s_composeDoc = nullptr;
 
+// RAII guard so any path out of compose — normal return, early return, or
+// thrown exception — restores s_composeDoc to whatever it was before. The
+// previous pattern (manual s_composeDoc = m_doc / s_composeDoc = nullptr)
+// would leave the thread-local pointing at a destroyed document if compose
+// threw, and subsequent type-name lookups would dereference freed memory.
+// Stacks cleanly across nested composes: saves the prior value and restores
+// it rather than blindly clearing to nullptr.
+namespace {
+struct ComposeDocGuard {
+    const RcxDocument* prev;
+    explicit ComposeDocGuard(const RcxDocument* doc) : prev(s_composeDoc) {
+        s_composeDoc = doc;
+    }
+    ~ComposeDocGuard() { s_composeDoc = prev; }
+    ComposeDocGuard(const ComposeDocGuard&) = delete;
+    ComposeDocGuard& operator=(const ComposeDocGuard&) = delete;
+};
+}
+
 static QString docTypeNameProvider(NodeKind k) {
     if (s_composeDoc) return s_composeDoc->resolveTypeName(k);
     auto* m = kindMeta(k);
@@ -230,8 +249,18 @@ void RcxDocument::loadData(const QByteArray& data) {
 RcxCommand::RcxCommand(RcxController* ctrl, Command cmd)
     : m_ctrl(ctrl), m_cmd(cmd) {}
 
-void RcxCommand::undo() { m_ctrl->applyCommand(m_cmd, true); }
-void RcxCommand::redo() { m_ctrl->applyCommand(m_cmd, false); }
+// If applyCommand reports the underlying op was rejected (e.g. the provider
+// refused a WriteBytes), mark this command obsolete so QUndoStack drops it
+// on its next walk. This prevents a later undo from pushing stale
+// "oldBytes" over memory that never actually took the "newBytes" write.
+void RcxCommand::undo() {
+    if (!m_ctrl->applyCommand(m_cmd, true))
+        setObsolete(true);
+}
+void RcxCommand::redo() {
+    if (!m_ctrl->applyCommand(m_cmd, false))
+        setObsolete(true);
+}
 
 // ── RcxController ──
 
@@ -1213,8 +1242,10 @@ void RcxController::resetChangeTracking() {
 }
 
 void RcxController::refresh() {
-    // Bracket compose with thread-local doc pointer for type name resolution
-    s_composeDoc = m_doc;
+    // Bracket compose with thread-local doc pointer for type name resolution.
+    // RAII guard restores the previous value on scope exit — safe against any
+    // exception compose might throw.
+    ComposeDocGuard composeGuard(m_doc);
 
     // Build symbol lookup callback if PDB symbols are loaded
     SymbolLookupFn symLookup;
@@ -1230,8 +1261,6 @@ void RcxController::refresh() {
         m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
     else
         m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
-
-    s_composeDoc = nullptr;
 
     // Mark lines whose node data changed since last refresh
     if (!m_changedOffsets.isEmpty()) {
@@ -1814,8 +1843,9 @@ void RcxController::materializeRefChildren(int nodeIdx) {
     if (!m_suppressRefresh) refresh();
 }
 
-void RcxController::applyCommand(const Command& command, bool isUndo) {
+bool RcxController::applyCommand(const Command& command, bool isUndo) {
     auto& tree = m_doc->tree;
+    bool success = true;
 
     // Clear value history for nodes whose effective offset changed.
     // When offsets shift (insert/delete/resize), old recorded values came from
@@ -1955,8 +1985,15 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
             bool ok = m_snapshotProv
                 ? m_snapshotProv->write(c.addr, bytes.constData(), bytes.size())
                 : m_doc->provider->writeBytes(c.addr, bytes);
-            if (!ok)
+            if (!ok) {
                 qWarning() << "WriteBytes failed at address" << QString::number(c.addr, 16);
+                // Signal failure so RcxCommand::redo/undo can call setObsolete(true)
+                // and drop this entry from the undo stack. Otherwise a later undo
+                // would write c.oldBytes over the current (still-original) memory.
+                emit statusHint(QStringLiteral("Write rejected at 0x%1 — removing from history")
+                                 .arg(c.addr, 0, 16));
+                success = false;
+            }
         } else if constexpr (std::is_same_v<T, cmd::ChangeArrayMeta>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0) {
@@ -2012,8 +2049,13 @@ void RcxController::applyCommand(const Command& command, bool isUndo) {
         }
     }, command);
 
-    if (!m_suppressRefresh)
+    // Only refresh when the op actually took effect. On WriteBytes failure
+    // we skip the refresh so the UI keeps whatever the most recent
+    // successful state was — a refresh here would just recompose the same
+    // unchanged memory.
+    if (success && !m_suppressRefresh)
         refresh();
+    return success;
 }
 
 void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
@@ -2346,8 +2388,11 @@ void RcxController::showHexToolbar(RcxEditor* editor, int nodeIdx) {
     ctx.nodeId = node.id;
     ctx.currentKind = node.kind;
     int curSz = sizeForKind(node.kind);
-    uint64_t addr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(nodeIdx);
-    ctx.data = m_doc->provider ? m_doc->provider->readBytes(addr, curSz) : QByteArray(curSz, '\0');
+    bool addrOk = true;
+    uint64_t addr = m_doc->tree.absoluteAddress(nodeIdx, &addrOk);
+    ctx.data = (addrOk && m_doc->provider)
+        ? m_doc->provider->readBytes(addr, curSz)
+        : QByteArray(curSz, '\0');
 
     // Collect adjacent same-parent hex nodes
     uint64_t parentId = node.parentId;
@@ -2361,8 +2406,11 @@ void RcxController::showHexToolbar(RcxEditor* editor, int nodeIdx) {
         adj.exists = true;
         adj.kind = sib.kind;
         int sibSz = sizeForKind(sib.kind);
-        uint64_t sibAddr = m_doc->tree.baseAddress + m_doc->tree.computeOffset(i);
-        adj.data = m_doc->provider ? m_doc->provider->readBytes(sibAddr, sibSz) : QByteArray(sibSz, '\0');
+        bool sibOk = true;
+        uint64_t sibAddr = m_doc->tree.absoluteAddress(i, &sibOk);
+        adj.data = (sibOk && m_doc->provider)
+            ? m_doc->provider->readBytes(sibAddr, sibSz)
+            : QByteArray(sibSz, '\0');
         ctx.nexts.append(adj);
         nextOff += sibSz;
     }

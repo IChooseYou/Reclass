@@ -150,14 +150,16 @@ private slots:
 
     void testParseValueHex32() {
         bool ok;
-        // Hex parsing produces native-endian bytes (matches display which reads native-endian)
+        // Hex kinds parse as memory-order bytes (matches hex-preview display).
+        // "DEADBEEF" stores bytes [DE, AD, BE, EF] in memory, which round-trips
+        // with the hex preview that shows "DE AD BE EF".
         QByteArray b = fmt::parseValue(NodeKind::Hex32, "DEADBEEF", &ok);
         QVERIFY(ok);
         QCOMPARE(b.size(), 4);
-        // Value 0xDEADBEEF stored as native-endian (little-endian on x86)
-        uint32_t v;
-        memcpy(&v, b.data(), 4);
-        QCOMPARE(v, (uint32_t)0xDEADBEEF);
+        QCOMPARE((uint8_t)b[0], (uint8_t)0xDE);
+        QCOMPARE((uint8_t)b[1], (uint8_t)0xAD);
+        QCOMPARE((uint8_t)b[2], (uint8_t)0xBE);
+        QCOMPARE((uint8_t)b[3], (uint8_t)0xEF);
     }
 
     void testParseValueBool() {
@@ -178,14 +180,14 @@ private slots:
 
     void testParseValueHex0xPrefix() {
         bool ok;
-        // Hex32 with 0x prefix should work (native-endian, matches display)
+        // Hex32 with 0x prefix: prefix is stripped, rest parsed as memory bytes
         QByteArray b = fmt::parseValue(NodeKind::Hex32, "0xDEADBEEF", &ok);
         QVERIFY(ok);
-        uint32_t v32;
-        memcpy(&v32, b.data(), 4);
-        QCOMPARE(v32, (uint32_t)0xDEADBEEF);
+        QCOMPARE(b.size(), 4);
+        QCOMPARE((uint8_t)b[0], (uint8_t)0xDE);
+        QCOMPARE((uint8_t)b[3], (uint8_t)0xEF);
 
-        // Pointer64 with 0x prefix
+        // Pointer64 with 0x prefix — pointer kinds still parse as integer
         b = fmt::parseValue(NodeKind::Pointer64, "0x0000000000400000", &ok);
         QVERIFY(ok);
         uint64_t v64;

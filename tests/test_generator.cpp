@@ -506,6 +506,44 @@ private slots:
         QVERIFY(result.contains("static_assert(sizeof(StructB) == 0x8"));
     }
 
+    // ── Duplicate struct type names must not be silently dropped ──
+    // Two root structs sharing the same structTypeName used to make the
+    // second one disappear from generated output (emittedTypeNames dedup).
+    // They're now disambiguated via `_v2`, `_v3`, … suffixes so both survive.
+
+    void testDuplicateTypeNameDisambiguation() {
+        rcx::NodeTree tree;
+
+        auto makeRoot = [&](const QString& typeName, int offset, rcx::NodeKind fieldKind) {
+            rcx::Node r;
+            r.kind = rcx::NodeKind::Struct;
+            r.structTypeName = typeName;
+            r.parentId = 0;
+            r.offset = offset;
+            int ri = tree.addNode(r);
+            uint64_t rid = tree.nodes[ri].id;
+            rcx::Node f;
+            f.kind = fieldKind;
+            f.name = "val";
+            f.parentId = rid;
+            f.offset = 0;
+            tree.addNode(f);
+            return rid;
+        };
+        makeRoot("Shared", 0x000, rcx::NodeKind::UInt32);
+        makeRoot("Shared", 0x100, rcx::NodeKind::UInt64);
+
+        QString result = rcx::renderCppAll(tree, nullptr, false);
+
+        // Both structs must appear in the output. The first keeps its name;
+        // the second gets a disambiguator suffix.
+        QVERIFY(result.contains("struct Shared\n{"));
+        QVERIFY(result.contains("struct Shared_v2\n{"));
+        // And their field types survive distinctly.
+        QVERIFY(result.contains("uint32_t val;"));
+        QVERIFY(result.contains("uint64_t val;"));
+    }
+
     // ── Null generator ──
 
     void testNullGenerator() {

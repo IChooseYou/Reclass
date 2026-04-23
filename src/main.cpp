@@ -4007,7 +4007,7 @@ void MainWindow::updateWindowTitle() {
     setWindowTitle(QStringLiteral("Reclass"));
 #else
     QString title;
-    auto* activeDock = m_activeDocDock;
+    QDockWidget* activeDock = m_activeDocDock;
     if (activeDock && m_tabs.contains(activeDock)) {
         auto& tab = m_tabs[activeDock];
         QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());

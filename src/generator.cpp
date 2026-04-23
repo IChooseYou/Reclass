@@ -73,6 +73,13 @@ struct GenContext {
     int             padCounter = 0;
     const QHash<NodeKind, QString>* typeAliases = nullptr;
     bool            emitAsserts = false;
+    // Pre-computed unique name per struct id. Populated by assignUniqueNames()
+    // before any emission. Use nameFor(node) at emission/reference sites so
+    // two root structs sharing the same structTypeName both get output —
+    // instead of the second being silently dropped by the dedup check.
+    // Kept at the end so existing aggregate initialisers still bind positions
+    // 1..10 correctly; nameById defaults to an empty hash.
+    QHash<uint64_t, QString> nameById;
 
     void prepare() { output.reserve(tree.nodes.size() * 80); }
 
@@ -108,6 +115,42 @@ struct GenContext {
         if (!n.structTypeName.isEmpty()) return sanitizeIdent(n.structTypeName);
         if (!n.name.isEmpty())           return sanitizeIdent(n.name);
         return QStringLiteral("anon_%1").arg(n.id, 0, 16);
+    }
+
+    // Post-disambiguation name lookup. Falls back to structName() for nodes
+    // not yet in nameById (e.g. anonymous inline structs, which collide by
+    // id rather than by name).
+    QString nameFor(const Node& n) const {
+        auto it = nameById.find(n.id);
+        if (it != nameById.end()) return it.value();
+        return structName(n);
+    }
+
+    // Pre-pass: walk every struct that could be referenced by a generated
+    // identifier (root structs first for stable naming, then named nested
+    // structs) and assign a unique C identifier. Duplicates get a `_v2`,
+    // `_v3`, … suffix so both survive in the generated output. Anonymous
+    // inline structs aren't processed here because they don't need a name —
+    // they're emitted inline via the kind keyword ("struct { … }").
+    void assignUniqueNames() {
+        QSet<QString> used;
+        auto assign = [&](uint64_t id, const QString& base) {
+            QString name = base;
+            int suffix = 2;
+            while (used.contains(name))
+                name = QStringLiteral("%1_v%2").arg(base).arg(suffix++);
+            used.insert(name);
+            nameById[id] = name;
+        };
+        for (const Node& n : tree.nodes) {
+            if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+            assign(n.id, structName(n));
+        }
+        for (const Node& n : tree.nodes) {
+            if (n.parentId == 0 || n.kind != NodeKind::Struct) continue;
+            if (n.structTypeName.isEmpty()) continue;
+            assign(n.id, structName(n));
+        }
     }
 };
 
@@ -156,7 +199,7 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
-                QString target = ctx.structName(tree.nodes[refIdx]);
+                QString target = ctx.nameFor(tree.nodes[refIdx]);
                 return ind + QStringLiteral("struct %1* %2;").arg(target, name) + oc;
             }
         }
@@ -281,7 +324,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
                 QString kw = child.resolvedClassKeyword();
                 if (kw == QStringLiteral("enum") && child.enumMembers.isEmpty())
                     kw = QStringLiteral("struct");
-                QString typeName = sanitizeIdent(child.structTypeName);
+                QString typeName = ctx.nameFor(child);
                 QString fieldName = sanitizeIdent(child.name);
                 ctx.output += ind + kw + QStringLiteral(" ") + typeName
                     + QStringLiteral(" ") + fieldName + QStringLiteral(";")
@@ -296,7 +339,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
             for (int ak : arrayKids) {
                 if (tree.nodes[ak].kind == NodeKind::Struct) {
                     hasStructChild = true;
-                    elemTypeName = ctx.structName(tree.nodes[ak]);
+                    elemTypeName = ctx.nameFor(tree.nodes[ak]);
                     break;
                 }
             }
@@ -355,7 +398,7 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
     }
 
     // Deduplicate by struct type name
-    QString typeName = ctx.structName(node);
+    QString typeName = ctx.nameFor(node);
     if (ctx.emittedTypeNames.contains(typeName)) {
         ctx.emittedIds.insert(structId);
         ctx.visiting.remove(structId);
@@ -372,7 +415,7 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
             int ri = ctx.tree.indexOfId(child.refId);
             if (ri >= 0 && !ctx.emittedIds.contains(child.refId)
                 && !ctx.forwardDeclared.contains(child.refId)) {
-                ctx.output += QStringLiteral("struct %1;\n").arg(ctx.structName(ctx.tree.nodes[ri]));
+                ctx.output += QStringLiteral("struct %1;\n").arg(ctx.nameFor(ctx.tree.nodes[ri]));
                 ctx.forwardDeclared.insert(child.refId);
             }
         }
@@ -534,7 +577,7 @@ static QString emitRustField(GenContext& ctx, const Node& node, int depth, int b
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
-                QString target = ctx.structName(tree.nodes[refIdx]);
+                QString target = ctx.nameFor(tree.nodes[refIdx]);
                 return ind + QStringLiteral("pub %1: *mut %2,").arg(name, target) + oc;
             }
         }
@@ -637,7 +680,7 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
                     QString kw = child.resolvedClassKeyword();
                     if (kw == QStringLiteral("enum") && child.enumMembers.isEmpty())
                         kw = QStringLiteral("struct");
-                    QString typeName = sanitizeIdent(child.structTypeName);
+                    QString typeName = ctx.nameFor(child);
                     QString fieldName = sanitizeIdent(child.name);
                     ctx.output += ind + QStringLiteral("pub %1: %2,")
                         .arg(fieldName, typeName)
@@ -651,7 +694,7 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
             for (int ak : arrayKids) {
                 if (tree.nodes[ak].kind == NodeKind::Struct) {
                     hasStructChild = true;
-                    elemTypeName = ctx.structName(tree.nodes[ak]);
+                    elemTypeName = ctx.nameFor(tree.nodes[ak]);
                     break;
                 }
             }
@@ -696,7 +739,7 @@ static void emitRustStruct(GenContext& ctx, uint64_t structId) {
     const Node& node = ctx.tree.nodes[idx];
     if (node.kind != NodeKind::Struct) { ctx.visiting.remove(structId); return; }
 
-    QString typeName = ctx.structName(node);
+    QString typeName = ctx.nameFor(node);
     if (ctx.emittedTypeNames.contains(typeName)) {
         ctx.emittedIds.insert(structId);
         ctx.visiting.remove(structId);
@@ -753,7 +796,7 @@ static void emitDefinesForStruct(GenContext& ctx, uint64_t structId,
     if (idx < 0) return;
 
     const Node& node = ctx.tree.nodes[idx];
-    QString typeName = prefix.isEmpty() ? ctx.structName(node) : prefix;
+    QString typeName = prefix.isEmpty() ? ctx.nameFor(node) : prefix;
     QString kw = node.resolvedClassKeyword();
 
     // Enum with members: emit #define EnumName_MemberName value
@@ -894,7 +937,7 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
                     .arg(QString::number(span, 16).toUpper())
                     + oc + QStringLiteral("\n");
             } else {
-                QString typeName = sanitizeIdent(child.structTypeName);
+                QString typeName = ctx.nameFor(child);
                 ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
                     .arg(QString::number(absOffset, 16).toUpper(), typeName, name)
                     + oc + QStringLiteral("\n");
@@ -906,7 +949,7 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
             for (int ak : arrayKids) {
                 if (tree.nodes[ak].kind == NodeKind::Struct) {
                     hasStructChild = true;
-                    elemTypeName = ctx.structName(tree.nodes[ak]);
+                    elemTypeName = ctx.nameFor(tree.nodes[ak]);
                     break;
                 }
             }
@@ -1000,7 +1043,7 @@ static void emitCSharpStruct(GenContext& ctx, uint64_t structId) {
     const Node& node = ctx.tree.nodes[idx];
     if (node.kind != NodeKind::Struct) { ctx.visiting.remove(structId); return; }
 
-    QString typeName = ctx.structName(node);
+    QString typeName = ctx.nameFor(node);
     if (ctx.emittedTypeNames.contains(typeName)) {
         ctx.emittedIds.insert(structId);
         ctx.visiting.remove(structId);
@@ -1162,7 +1205,7 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
                     .arg(QString::number(span, 16).toUpper())
                     + oc + QStringLiteral("\n");
             } else {
-                QString typeName = sanitizeIdent(child.structTypeName);
+                QString typeName = ctx.nameFor(child);
                 ctx.output += ind + QStringLiteral("(\"%1\", %2),")
                     .arg(name, typeName)
                     + oc + QStringLiteral("\n");
@@ -1174,7 +1217,7 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
             for (int ak : arrayKids) {
                 if (tree.nodes[ak].kind == NodeKind::Struct) {
                     hasStructChild = true;
-                    elemTypeName = ctx.structName(tree.nodes[ak]);
+                    elemTypeName = ctx.nameFor(tree.nodes[ak]);
                     break;
                 }
             }
@@ -1220,7 +1263,7 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
                 if (child.refId != 0) {
                     int refIdx = tree.indexOfId(child.refId);
                     if (refIdx >= 0) {
-                        QString target = ctx.structName(tree.nodes[refIdx]);
+                        QString target = ctx.nameFor(tree.nodes[refIdx]);
                         ctx.output += ind + QStringLiteral("(\"%1\", ctypes.POINTER(%2)),").arg(name, target)
                             + oc + QStringLiteral("\n");
                         break;
@@ -1267,7 +1310,7 @@ static void emitPythonStruct(GenContext& ctx, uint64_t structId) {
     const Node& node = ctx.tree.nodes[idx];
     if (node.kind != NodeKind::Struct) { ctx.visiting.remove(structId); return; }
 
-    QString typeName = ctx.structName(node);
+    QString typeName = ctx.nameFor(node);
     if (ctx.emittedTypeNames.contains(typeName)) {
         ctx.emittedIds.insert(structId);
         ctx.visiting.remove(structId);
@@ -1404,6 +1447,7 @@ QString renderCpp(const NodeTree& tree, uint64_t rootStructId,
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
 
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
@@ -1422,6 +1466,7 @@ QString renderCppTree(const NodeTree& tree, uint64_t rootStructId,
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
@@ -1435,6 +1480,7 @@ QString renderCppAll(const NodeTree& tree,
                      bool emitAsserts) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
 
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
@@ -1462,6 +1508,7 @@ QString renderRust(const NodeTree& tree, uint64_t rootStructId,
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("// Generated by Reclass 2027\n\n");
     emitRustStruct(ctx, rootStructId);
     return alignComments(ctx.output);
@@ -1477,6 +1524,7 @@ QString renderRustTree(const NodeTree& tree, uint64_t rootStructId,
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("// Generated by Reclass 2027\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
@@ -1490,6 +1538,7 @@ QString renderRustAll(const NodeTree& tree,
                       bool emitAsserts) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("// Generated by Reclass 2027\n\n");
 
     QVector<int> roots = ctx.childMap.value(0);
@@ -1512,6 +1561,7 @@ QString renderDefines(const NodeTree& tree, uint64_t rootStructId) {
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
     emitDefinesForStruct(ctx, rootStructId, QString(), 0);
     return ctx.output;
@@ -1525,6 +1575,7 @@ QString renderDefinesTree(const NodeTree& tree, uint64_t rootStructId) {
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, nullptr, false};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
@@ -1536,6 +1587,7 @@ QString renderDefinesTree(const NodeTree& tree, uint64_t rootStructId) {
 QString renderDefinesAll(const NodeTree& tree) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
 
     QVector<int> roots = ctx.childMap.value(0);
@@ -1560,6 +1612,7 @@ QString renderCSharp(const NodeTree& tree, uint64_t rootStructId,
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
     emitCSharpStruct(ctx, rootStructId);
     return alignComments(ctx.output);
@@ -1575,6 +1628,7 @@ QString renderCSharpTree(const NodeTree& tree, uint64_t rootStructId,
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
@@ -1588,6 +1642,7 @@ QString renderCSharpAll(const NodeTree& tree,
                         bool emitAsserts) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
 
     QVector<int> roots = ctx.childMap.value(0);
@@ -1610,6 +1665,7 @@ QString renderPython(const NodeTree& tree, uint64_t rootStructId) {
 
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("import ctypes\n\n");
     emitPythonStruct(ctx, rootStructId);
     return alignComments(ctx.output);
@@ -1623,6 +1679,7 @@ QString renderPythonTree(const NodeTree& tree, uint64_t rootStructId) {
     auto childMap = buildChildMap(tree);
     GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, nullptr, false};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("import ctypes\n\n");
 
     for (uint64_t sid : collectReachableStructs(tree, childMap, rootStructId))
@@ -1634,6 +1691,7 @@ QString renderPythonTree(const NodeTree& tree, uint64_t rootStructId) {
 QString renderPythonAll(const NodeTree& tree) {
     GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
     ctx.prepare();
+    ctx.assignUniqueNames();
     ctx.output += QStringLiteral("import ctypes\n\n");
 
     QVector<int> roots = ctx.childMap.value(0);
