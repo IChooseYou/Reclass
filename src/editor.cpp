@@ -2369,6 +2369,27 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool alreadySelected = m_currentSelIds.contains(h.nodeId);
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
+                // Ctrl+Click on Type/Name of a navigable node — open the
+                // referenced struct in a new tab. Narrow scope (Type/Name
+                // span only, refId/structTypeName must be set) so multi-
+                // select toggle on plain hex fields still works.
+                if ((me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+                    == Qt::ControlModifier) {
+                    int tLine, tCol; EditTarget t;
+                    if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)
+                        && (t == EditTarget::Type || t == EditTarget::Name
+                            || t == EditTarget::PointerTarget)) {
+                        // Resolve which node holds the navigation target.
+                        const LineMeta* lm = (tLine >= 0 && tLine < m_meta.size())
+                            ? &m_meta[tLine] : nullptr;
+                        if (lm && lm->nodeIdx >= 0) {
+                            m_pendingClickNodeId = 0;
+                            emit openTypeInNewTabRequested(lm->nodeIdx);
+                            return true;
+                        }
+                    }
+                }
+
                 // Click on already-selected node → edit the clicked token
                 // (type column opens picker, name opens rename, value opens value edit)
                 int tLine, tCol; EditTarget t;
@@ -4465,6 +4486,60 @@ void RcxEditor::applyHoverCursor() {
                         QPoint((xA + xB) / 2, py + lh));
                     tip->showAt(anchor);
                     showTip = true;
+                }
+            }
+        }
+        // Ctrl-held hover on a navigable Type/Name span — show "Open in new
+        // tab" hint. Mirrors VS Code's Ctrl+hover affordance. Only triggered
+        // outside CommandRow (handled above) and only on nodes with a real
+        // navigation target (refId/structTypeName set).
+        if (!showTip && tokenHit
+            && (QApplication::keyboardModifiers() & Qt::ControlModifier)
+            && (t == EditTarget::Type || t == EditTarget::Name
+                || t == EditTarget::PointerTarget)
+            && line > 0 && line < m_meta.size()) {
+            const LineMeta& lm = m_meta[line];
+            if (lm.nodeIdx >= 0) {
+                // Validate target — only show for struct/pointer/array nodes
+                // that actually point somewhere. Plumbing here mirrors the
+                // controller's resolution in goToDefinitionRequested.
+                NormalizedSpan span;
+                QString lineText;
+                if (resolvedSpanFor(line, t, span, &lineText)
+                    && h.col >= span.start && h.col < span.end) {
+                    if (!m_arrowTooltip) {
+                        m_arrowTooltip = new RcxTooltip(this);
+                        static_cast<RcxTooltip*>(m_arrowTooltip)->onMouseMove =
+                            [this](QMouseEvent* e) {
+                            QPoint gp = e->globalPosition().toPoint();
+                            QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
+                            m_lastHoverPos = vp;
+                            m_hoverInside = m_sci->viewport()->rect().contains(vp);
+                            applyHoverCursor();
+                        };
+                    }
+                    auto* tip = static_cast<RcxTooltip*>(m_arrowTooltip);
+                    const auto& theme = ThemeManager::instance().current();
+                    tip->setTheme(theme.backgroundAlt, theme.border,
+                                  theme.text, theme.textDim, theme.border);
+                    tip->populate(QStringLiteral("Open in new tab"),
+                                  QStringLiteral("Ctrl+Click — open this type\nin a new editor tab"),
+                                  editorFont());
+                    long posA = posFromCol(m_sci, line, span.start);
+                    long posB = posFromCol(m_sci, line, span.end);
+                    int xA = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posA);
+                    int xB = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, posB);
+                    int py = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, posA);
+                    int lh = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+                    QPoint anchor = m_sci->viewport()->mapToGlobal(
+                        QPoint((xA + xB) / 2, py + lh));
+                    tip->showAt(anchor);
+                    showTip = true;
+                    desired = Qt::PointingHandCursor;
                 }
             }
         }

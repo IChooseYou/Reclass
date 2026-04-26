@@ -730,6 +730,25 @@ void RcxController::connectEditor(RcxEditor* editor) {
         m_suppressRefresh = false;
         refresh();
     });
+    // Ctrl+Click on type/name span: open the referenced struct in a new
+    // tab. Resolves the same target as F12 but routes through MainWindow
+    // via requestOpenStructInNewTab so a fresh tab gets created sharing
+    // this document.
+    connect(editor, &RcxEditor::openTypeInNewTabRequested, this, [this](int nodeIdx) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        const Node& n = m_doc->tree.nodes[nodeIdx];
+        uint64_t target = 0;
+        if (n.refId != 0) target = n.refId;
+        else if (n.kind == NodeKind::Array && n.elementKind == NodeKind::Struct
+                 && n.refId != 0) target = n.refId;
+        else if (n.kind == NodeKind::Struct && n.parentId != 0) target = n.id;
+        if (target == 0) {
+            emit statusHint(QStringLiteral("No type to open"));
+            return;
+        }
+        emit requestOpenStructInNewTab(target);
+    });
+
     // F12: go to definition — navigate to the type referenced by the
     // current node. Pointer.refId, Struct.refId, or Array element struct.
     connect(editor, &RcxEditor::goToDefinitionRequested, this, [this](int nodeIdx) {

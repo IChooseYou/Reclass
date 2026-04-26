@@ -121,6 +121,10 @@ signals:
     // (Pointer.refId, Struct.refId, or Array element struct). Controller
     // resolves and opens / focuses the target.
     void goToDefinitionRequested(int nodeIdx);
+    // Ctrl+Click on a navigable type span: open the referenced struct in
+    // a NEW tab (sharing the same document). Controller resolves and asks
+    // MainWindow to spawn the tab.
+    void openTypeInNewTabRequested(int nodeIdx);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;

@@ -2615,6 +2615,32 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         });
     });
 
+    // Ctrl+Click navigation: open a struct in a new tab sharing the same
+    // document. Mirrors the workspace-tree "Open in New Tab" action.
+    connect(ctrl, &RcxController::requestOpenStructInNewTab,
+            this, [this, ctrl](uint64_t structId) {
+        RcxDocument* doc = ctrl->document();
+        int ni = doc->tree.indexOfId(structId);
+        if (ni < 0) return;
+        // Reuse an existing tab if one already views this struct
+        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+            if (it->doc == doc && it->ctrl->viewRootId() == structId) {
+                it.key()->raise();
+                it.key()->show();
+                m_activeDocDock = it.key();
+                return;
+            }
+        }
+        doc->tree.nodes[ni].collapsed = false;
+        auto* newDock = createTab(doc);
+        m_tabs[newDock].ctrl->setViewRootId(structId);
+        m_tabs[newDock].ctrl->refresh();
+        const Node& n = doc->tree.nodes[ni];
+        QString name = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+        if (!name.isEmpty()) newDock->setWindowTitle(name);
+        rebuildWorkspaceModel();
+    });
+
     // Open a new tab with a plugin-provided provider (e.g. kernel physical memory)
     connect(ctrl, &RcxController::requestOpenProviderTab,
             this, [this](const QString& pluginId, const QString& target,

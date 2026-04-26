@@ -180,6 +180,10 @@ signals:
     void contextMenuAboutToShow(QMenu* menu, int line);
     void requestOpenProviderTab(const QString& pluginId, const QString& target,
                                 const QString& title);
+    // Ctrl+Click on a typed pointer or struct field — open the target struct
+    // in a new tab sharing this document. MainWindow calls createTab(doc)
+    // and setViewRootId(structId) on the new tab.
+    void requestOpenStructInNewTab(uint64_t structId);
 
 private:
     RcxDocument*       m_doc;
