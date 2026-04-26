@@ -2369,20 +2369,21 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 bool alreadySelected = m_currentSelIds.contains(h.nodeId);
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
-                // Ctrl+Click on Type/Name of a navigable node — open the
-                // referenced struct in a new tab. Narrow scope (Type/Name
-                // span only, refId/structTypeName must be set) so multi-
-                // select toggle on plain hex fields still works.
+                // Ctrl+Click on Type/Name of a navigable parent — open the
+                // referenced struct in a new tab. Restricted to Header lines
+                // (struct/array/pointer with children, collapsed or expanded)
+                // so child member rows under an expanded parent don't fire.
+                // Multi-select toggle on plain rows is preserved.
                 if ((me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
                     == Qt::ControlModifier) {
                     int tLine, tCol; EditTarget t;
                     if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)
                         && (t == EditTarget::Type || t == EditTarget::Name
                             || t == EditTarget::PointerTarget)) {
-                        // Resolve which node holds the navigation target.
                         const LineMeta* lm = (tLine >= 0 && tLine < m_meta.size())
                             ? &m_meta[tLine] : nullptr;
-                        if (lm && lm->nodeIdx >= 0) {
+                        if (lm && lm->nodeIdx >= 0
+                            && lm->lineKind == LineKind::Header) {
                             m_pendingClickNodeId = 0;
                             emit openTypeInNewTabRequested(lm->nodeIdx);
                             return true;
@@ -4489,17 +4490,17 @@ void RcxEditor::applyHoverCursor() {
                 }
             }
         }
-        // Ctrl-held hover on a navigable Type/Name span — show "Open in new
-        // tab" hint. Mirrors VS Code's Ctrl+hover affordance. Only triggered
-        // outside CommandRow (handled above) and only on nodes with a real
-        // navigation target (refId/structTypeName set).
+        // Ctrl-held hover on a navigable Header line — show "Open in new
+        // tab" hint. Restricted to Header (the parent row that has
+        // children) so child member rows under an expanded parent don't
+        // light up while Ctrl is held.
         if (!showTip && tokenHit
             && (QApplication::keyboardModifiers() & Qt::ControlModifier)
             && (t == EditTarget::Type || t == EditTarget::Name
                 || t == EditTarget::PointerTarget)
             && line > 0 && line < m_meta.size()) {
             const LineMeta& lm = m_meta[line];
-            if (lm.nodeIdx >= 0) {
+            if (lm.nodeIdx >= 0 && lm.lineKind == LineKind::Header) {
                 // Validate target — only show for struct/pointer/array nodes
                 // that actually point somewhere. Plumbing here mirrors the
                 // controller's resolution in goToDefinitionRequested.
