@@ -135,14 +135,17 @@ struct ComposeState {
             text += lineText;
         }
 
-        // Auto-detect trailing '{' for braceCol (avoids per-char IPC scan in editor)
+        // Auto-detect trailing '{' for braceCol (avoids per-char IPC scan in editor).
+        // Stored in Scintilla column space, so add the fold-prefix width for any
+        // line that gets one (Header). CommandRow is flush-left so prefix is 0.
         if (lm.braceCol < 0 && (lm.lineKind == LineKind::Header
                                  || lm.lineKind == LineKind::CommandRow)) {
+            int prefixLen = (lm.lineKind == LineKind::CommandRow) ? 0 : kFoldCol;
             int len = lineText.size();
             for (int p = len - 1; p >= 0; --p) {
                 QChar ch = lineText[p];
                 if (ch == ' ' || ch == '\t') continue;
-                if (ch == '{') lm.braceCol = p;
+                if (ch == '{') lm.braceCol = p + prefixLen;
                 break;
             }
         }
