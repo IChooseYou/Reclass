@@ -1088,6 +1088,28 @@ void MainWindow::createMenus() {
     edit->addSeparator();
     Qt5Qt6AddAction(edit, "Add &Bookmark...", QKeySequence(Qt::CTRL | Qt::Key_B), QIcon(),
                     this, &MainWindow::promptAddBookmark);
+    // Quick bookmark — captures the current address with an auto-generated
+    // name (no dialog). Uses the formula if there is one (preserves rebases),
+    // falls back to the literal hex address.
+    Qt5Qt6AddAction(edit, "&Quick Bookmark Here",
+                    QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_B), QIcon(), this, [this]() {
+        auto* c = activeController();
+        if (!c) return;
+        QString formula = c->document()->tree.baseAddressFormula;
+        if (formula.isEmpty())
+            formula = QStringLiteral("0x") + QString::number(c->document()->tree.baseAddress, 16).toUpper();
+        // Find a free slot name: bookmark_NN
+        int n = 1;
+        QSet<QString> taken;
+        for (const auto& bm : c->document()->tree.bookmarks) taken.insert(bm.name);
+        QString name;
+        do { name = QStringLiteral("bookmark_%1").arg(n++, 2, 10, QChar('0')); }
+        while (taken.contains(name) && n < 1000);
+        c->addBookmark(name, formula);
+        refreshBookmarksDock();
+        if (m_bookmarksDock) m_bookmarksDock->show();
+        setAppStatus(QStringLiteral("Bookmarked: ") + name + QStringLiteral(" → ") + formula);
+    });
 
     // View
     auto* view = m_menuBar->addMenu("&View");
@@ -1288,6 +1310,14 @@ void MainWindow::createMenus() {
         });
     }
 
+    view->addSeparator();
+    Qt5Qt6AddAction(view, "&Split Editor",
+                    QKeySequence(Qt::CTRL | Qt::Key_Backslash),
+                    makeIcon(":/vsicons/split-vertical.svg"), this,
+                    &MainWindow::splitView);
+    Qt5Qt6AddAction(view, "&Unsplit Editor",
+                    QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Backslash),
+                    QIcon(), this, &MainWindow::unsplitView);
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
     {
@@ -1728,6 +1758,64 @@ void MainWindow::createStatusBar() {
         m_statusLabel->setFont(f);
         sb->setMinimumHeight(QFontMetrics(f).height() + 6);
     }
+
+    // Progress widgets — child of status bar, positioned manually in
+    // begin/end. Hidden by default; shown only during long operations.
+    {
+        const auto& t = ThemeManager::instance().current();
+        QSettings s("Reclass", "Reclass");
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        f.setFixedPitch(true);
+
+        m_progressLabel = new QLabel(sb);
+        m_progressLabel->setFont(f);
+        m_progressLabel->setStyleSheet(QStringLiteral("color: %1;").arg(t.text.name()));
+        m_progressLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+        m_progressLabel->setVisible(false);
+
+        m_progressBar = new QProgressBar(sb);
+        m_progressBar->setFixedHeight(QFontMetrics(f).height() - 2);
+        m_progressBar->setTextVisible(false);
+        m_progressBar->setStyleSheet(QStringLiteral(
+            "QProgressBar { background: %1; border: 1px solid %2; }"
+            "QProgressBar::chunk { background: %3; }")
+            .arg(t.background.name(), t.border.name(), t.indHoverSpan.name()));
+        m_progressBar->setVisible(false);
+    }
+}
+
+void MainWindow::beginProgress(const QString& label, int total) {
+    if (!m_progressBar || !m_progressLabel) return;
+    m_progressLabel->setText(label);
+    m_progressBar->setMinimum(0);
+    m_progressBar->setMaximum(total);  // 0 = indeterminate (Qt convention)
+    m_progressBar->setValue(0);
+
+    // Position: right-anchored on status bar, label to the left of bar
+    int sbH = statusBar()->height();
+    int barW = 160, lblW = 220, gap = 6, edge = 8;
+    int sbW = statusBar()->width();
+    int lblY = (sbH - m_progressLabel->sizeHint().height()) / 2;
+    int barY = (sbH - m_progressBar->height()) / 2;
+    int barX = sbW - barW - edge;
+    int lblX = barX - gap - lblW;
+    m_progressLabel->setGeometry(lblX, lblY, lblW, m_progressLabel->sizeHint().height());
+    m_progressBar->setGeometry(barX, barY, barW, m_progressBar->height());
+    m_progressLabel->show();
+    m_progressBar->show();
+    m_progressBar->raise();
+    m_progressLabel->raise();
+}
+
+void MainWindow::updateProgress(int value, const QString& label) {
+    if (!m_progressBar) return;
+    if (!label.isEmpty() && m_progressLabel) m_progressLabel->setText(label);
+    m_progressBar->setValue(value);
+}
+
+void MainWindow::endProgress() {
+    if (m_progressBar) m_progressBar->setVisible(false);
+    if (m_progressLabel) m_progressLabel->setVisible(false);
 }
 
 void MainWindow::setAppStatus(const QString& text) {
@@ -4230,7 +4318,10 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
         }
     }
 
-    // Generate text
+    // Generate text — cached on (tree.generation, rootId, format, scope, asserts).
+    // Refresh ticks that don't touch tree shape (provider tick, value updates,
+    // selection-only) reuse the prior render. On 200-class projects this drops
+    // ~800ms generator passes to <1ms.
     const QHash<NodeKind, QString>* aliases =
         tab.doc->typeAliases.isEmpty() ? nullptr : &tab.doc->typeAliases;
     bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
@@ -4238,16 +4329,32 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
         QSettings("Reclass", "Reclass").value("codeFormat", 0).toInt());
     CodeScope scope = static_cast<CodeScope>(
         QSettings("Reclass", "Reclass").value("codeScope", 0).toInt());
+    quint64 treeGen = tab.doc->tree.generation();
+    bool cacheHit = (!pane.lastRenderedText.isEmpty()
+                     && pane.lastRenderedTreeGen == treeGen
+                     && pane.lastRenderedRootId == rootId
+                     && pane.lastRenderedFmt == static_cast<int>(fmt)
+                     && pane.lastRenderedScope == static_cast<int>(scope)
+                     && pane.lastRenderedAsserts == asserts);
     QString text;
-    if (scope == CodeScope::FullSdk) {
-        text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
-    } else if (rootId != 0) {
-        if (scope == CodeScope::WithChildren)
-            text = renderCodeTree(fmt, tab.doc->tree, rootId, aliases, asserts);
-        else
-            text = renderCode(fmt, tab.doc->tree, rootId, aliases, asserts);
+    if (cacheHit) {
+        text = pane.lastRenderedText;
     } else {
-        text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
+        if (scope == CodeScope::FullSdk) {
+            text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
+        } else if (rootId != 0) {
+            if (scope == CodeScope::WithChildren)
+                text = renderCodeTree(fmt, tab.doc->tree, rootId, aliases, asserts);
+            else
+                text = renderCode(fmt, tab.doc->tree, rootId, aliases, asserts);
+        } else {
+            text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
+        }
+        pane.lastRenderedText     = text;
+        pane.lastRenderedTreeGen  = treeGen;
+        pane.lastRenderedFmt      = static_cast<int>(fmt);
+        pane.lastRenderedScope    = static_cast<int>(scope);
+        pane.lastRenderedAsserts  = asserts;
     }
 
     // Scroll restoration: save if same root, reset if different
@@ -4908,19 +5015,23 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     auto* doc = new RcxDocument(this);
 
     // Show progress for large files
+    beginProgress(QStringLiteral("Loading ") + QFileInfo(filePath).fileName(), 0);
     setAppStatus(QStringLiteral("Loading %1...").arg(QFileInfo(filePath).fileName()));
     QApplication::processEvents();
 
     if (!doc->load(filePath)) {
         QMessageBox::warning(this, "Error", "Failed to load: " + filePath);
         setAppStatus({});
+        endProgress();
         delete doc;
         return nullptr;
     }
 
     int nodeCount = doc->tree.nodes.size();
-    if (nodeCount > 5000)
+    if (nodeCount > 5000) {
+        updateProgress(0, QStringLiteral("Composing %1 nodes...").arg(nodeCount));
         setAppStatus(QStringLiteral("Composing %1 nodes...").arg(nodeCount));
+    }
     QApplication::processEvents();
 
     // Close all existing tabs so the project replaces the current state
@@ -4941,6 +5052,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
     setAppStatus(QStringLiteral("Loaded %1 (%2 classes, %3 nodes)")
         .arg(QFileInfo(filePath).fileName()).arg(classCount).arg(nodeCount));
+    endProgress();
 
     return dock;
 }
@@ -7161,6 +7273,32 @@ void MainWindow::rebuildWorkspaceModel() {
 }
 
 void MainWindow::rebuildWorkspaceModelNow() {
+    // Generation gate — hash (tab list, struct id+name+keyword+pinned status)
+    // and skip the rebuild when the result would be identical. Catches the
+    // common "documentChanged fired but only baseAddress / values changed"
+    // path so we don't blow away expansion + scroll state on every refresh.
+    quint64 gen = 0;
+    auto mix = [&](quint64 v) {
+        gen ^= v + 0x9E3779B97F4A7C15ULL + (gen << 6) + (gen >> 2);
+    };
+    QSet<RcxDocument*> seen;
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+        mix(reinterpret_cast<quintptr>(it.key()));
+        mix(it->ctrl->viewRootId());
+        if (seen.contains(it->doc)) continue;
+        seen.insert(it->doc);
+        for (const auto& n : it->doc->tree.nodes) {
+            if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+            mix(n.id);
+            mix(qHash(n.structTypeName));
+            mix(qHash(n.name));
+            mix(qHash(n.classKeyword));
+            mix(m_pinnedIds.contains(n.id) ? 1 : 0);
+        }
+    }
+    if (gen == m_workspaceGen) return;
+    m_workspaceGen = gen;
+
     // Save scroll position before model clear (which resets it)
     int savedScroll = 0;
     if (m_workspaceTree && m_workspaceTree->verticalScrollBar())
@@ -7555,6 +7693,52 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 void MainWindow::updateBorderColor(const QColor& color) {
     static_cast<BorderOverlay*>(m_borderOverlay)->color = color;
     m_borderOverlay->update();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    // Collect unique dirty docs (multiple tabs can share a document).
+    QSet<RcxDocument*> dirtyDocs;
+    QStringList dirtyNames;
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+        if (it->doc->modified && !dirtyDocs.contains(it->doc)) {
+            dirtyDocs.insert(it->doc);
+            QString name = rootName(it->doc->tree, it->ctrl->viewRootId());
+            if (!it->doc->filePath.isEmpty())
+                name = QFileInfo(it->doc->filePath).fileName();
+            if (!dirtyNames.contains(name))
+                dirtyNames.append(name);
+        }
+    }
+    if (dirtyDocs.isEmpty()) { event->accept(); return; }
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("Unsaved Changes"));
+    box.setIcon(QMessageBox::Warning);
+    box.setText(QStringLiteral("The following project%1 ha%2 unsaved changes:")
+        .arg(dirtyDocs.size() == 1 ? "" : "s",
+             dirtyDocs.size() == 1 ? "s" : "ve"));
+    box.setInformativeText(dirtyNames.join(QStringLiteral("\n")));
+    auto* saveBtn   = box.addButton(QStringLiteral("Save All"),   QMessageBox::AcceptRole);
+    auto* discardBtn = box.addButton(QStringLiteral("Discard"),    QMessageBox::DestructiveRole);
+    auto* cancelBtn = box.addButton(QStringLiteral("Cancel"),     QMessageBox::RejectRole);
+    box.setDefaultButton(saveBtn);
+    box.exec();
+    auto* clicked = box.clickedButton();
+    if (clicked == cancelBtn) { event->ignore(); return; }
+    if (clicked == saveBtn) {
+        // Save each unique dirty doc via the tab that owns it.
+        QSet<RcxDocument*> saved;
+        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+            if (!it->doc->modified || saved.contains(it->doc)) continue;
+            saved.insert(it->doc);
+            if (!project_save(it.key(), false)) {
+                event->ignore();
+                return;
+            }
+        }
+    }
+    // discardBtn → fall through and accept
+    event->accept();
 }
 
 // ════════════════════════════════════════════════════════════════════

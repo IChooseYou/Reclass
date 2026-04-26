@@ -28,6 +28,7 @@ namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetecto
 #include <QTimer>
 #include <QToolButton>
 #include <Qsci/qsciscintilla.h>
+#include <QProgressBar>
 
 namespace rcx {
 
@@ -88,6 +89,14 @@ public:
     void setMcpStatus(const QString& text);
     void clearMcpStatus();
 
+    // Status-bar progress indicator. Begin with a label + total (or 0 for
+    // indeterminate); update with current value; end clears it. Hidden when
+    // idle so the ShimmerLabel reverts to normal status text. Use for PDB
+    // load, large compose, Code-tab render — anything that takes >100ms.
+    void beginProgress(const QString& label, int total = 0);
+    void updateProgress(int value, const QString& label = QString());
+    void endProgress();
+
     bool presentationMode() const { return m_presentationMode; }
 
     // Project Lifecycle API
@@ -123,6 +132,8 @@ private:
 
     QWidget*        m_centralPlaceholder;
     ShimmerLabel*   m_statusLabel;
+    QProgressBar*   m_progressBar = nullptr;
+    QLabel*         m_progressLabel = nullptr;
     QString         m_appStatus;
     QString         m_appStatusDim;
     bool            m_mcpBusy   = false;
@@ -168,6 +179,15 @@ private:
         QToolButton*   fmtGear    = nullptr;
         ViewMode       viewMode  = VM_Reclass;
         uint64_t       lastRenderedRootId = 0;
+        // Cached output of the last renderCode* call — keyed on
+        // (tree.generation, rootId, format, scope, asserts). Skip
+        // regeneration when nothing changed; on multi-class projects this
+        // turns 800ms into <1ms for refresh ticks that don't touch types.
+        QString        lastRenderedText;
+        quint64        lastRenderedTreeGen = 0;
+        int            lastRenderedFmt    = -1;
+        int            lastRenderedScope  = -1;
+        bool           lastRenderedAsserts = false;
         // Minimap: narrow read-only Scintilla mirror to the right of the
         // main editor. Synced via RcxEditor::documentApplied. Created but
         // hidden; visibility toggled via the View menu "Minimap" action.
@@ -270,6 +290,10 @@ private:
     int  computeWorkspaceDockWidth() const;  // fit to longest type name
     QTimer*               m_workspaceRebuildTimer = nullptr;
     QTimer*               m_workspaceSearchTimer  = nullptr;
+    // Generation hash of (tab dock list, root struct names per doc). When
+    // unchanged across a documentChanged signal we skip the (O(N) over all
+    // docs) rebuild. Computed in rebuildWorkspaceModelNow.
+    quint64               m_workspaceGen          = 0;
     void updateBorderColor(const QColor& color);
 
     // Dock overlay drag system
@@ -348,6 +372,7 @@ private:
 protected:
     void changeEvent(QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
 };
 

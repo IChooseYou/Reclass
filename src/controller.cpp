@@ -209,6 +209,13 @@ bool RcxDocument::load(const QString& path) {
     QJsonObject root = jdoc.object();
     tree = NodeTree::fromJson(root);
 
+    // Validate + repair on load: orphans re-rooted, cycles broken, duplicate
+    // ids re-numbered. Silent on clean trees; non-fatal on dirty so the user
+    // still gets a usable view of even partially-corrupted files.
+    auto vr = tree.validate(/*repair=*/true);
+    if (!vr.clean())
+        qWarning() << "[load] tree validation:" << path << vr.summary();
+
     // Load type aliases
     typeAliases.clear();
     QJsonObject aliasObj = root["typeAliases"].toObject();
@@ -253,12 +260,20 @@ RcxCommand::RcxCommand(RcxController* ctrl, Command cmd)
 // refused a WriteBytes), mark this command obsolete so QUndoStack drops it
 // on its next walk. This prevents a later undo from pushing stale
 // "oldBytes" over memory that never actually took the "newBytes" write.
+// Failed WriteBytes are usually transient (target process gone, page
+// protection changed, snapshot writethrough refused). Leaving them alive
+// lets a later redo on a re-attached writable provider succeed. Tree-state
+// commands genuinely can't recover, so they get marked obsolete on failure.
+static bool isTransientCommand(const Command& cmd) {
+    return std::holds_alternative<cmd::WriteBytes>(cmd);
+}
+
 void RcxCommand::undo() {
-    if (!m_ctrl->applyCommand(m_cmd, true))
+    if (!m_ctrl->applyCommand(m_cmd, true) && !isTransientCommand(m_cmd))
         setObsolete(true);
 }
 void RcxCommand::redo() {
-    if (!m_ctrl->applyCommand(m_cmd, false))
+    if (!m_ctrl->applyCommand(m_cmd, false) && !isTransientCommand(m_cmd))
         setObsolete(true);
 }
 
@@ -715,6 +730,29 @@ void RcxController::connectEditor(RcxEditor* editor) {
         m_suppressRefresh = false;
         refresh();
     });
+    // F12: go to definition — navigate to the type referenced by the
+    // current node. Pointer.refId, Struct.refId, or Array element struct.
+    connect(editor, &RcxEditor::goToDefinitionRequested, this, [this](int nodeIdx) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        const Node& n = m_doc->tree.nodes[nodeIdx];
+        uint64_t target = 0;
+        // Direct refId on pointer or embedded struct
+        if (n.refId != 0) target = n.refId;
+        // Array of structs — chase refId on the array
+        else if (n.kind == NodeKind::Array && n.elementKind == NodeKind::Struct
+                 && n.refId != 0) target = n.refId;
+        // Plain struct field — view its own subtree
+        else if (n.kind == NodeKind::Struct && n.parentId != 0) target = n.id;
+        if (target == 0) {
+            emit statusHint(QStringLiteral("No definition to navigate to"));
+            return;
+        }
+        // Reuse existing tab if one already views this struct, else focus
+        // here. Don't open a new tab — F12 is meant to be quick nav.
+        setViewRootId(target);
+        emit statusHint(QStringLiteral("Jumped to definition"));
+    });
+
     connect(editor, &RcxEditor::expandAllRequested, this, [this]() {
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Expand all"));
@@ -1846,6 +1884,12 @@ void RcxController::materializeRefChildren(int nodeIdx) {
 bool RcxController::applyCommand(const Command& command, bool isUndo) {
     auto& tree = m_doc->tree;
     bool success = true;
+    // Every command that reaches here mutates tree state in some way (the
+    // exceptions — WriteBytes / ChangeBase — bump generation too because a
+    // value cache keyed off (tree gen, base) needs invalidation when base
+    // changes). Bump once at entry; downstream caches read it via
+    // tree.generation() to decide whether to re-render.
+    tree.touch();
 
     // Clear value history for nodes whose effective offset changed.
     // When offsets shift (insert/delete/resize), old recorded values came from
@@ -4261,6 +4305,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         popup->setModifier(preModId, preArrayCount);
     popup->setCurrentNodeSize(nodeSize);
     popup->setPointerSize(m_doc->tree.pointerSize);
+    popup->setRecentTypes(m_recentTypeNames);
 
     connect(popup, &TypeSelectorPopup::typeSelected,
             this, [this, mode, nodeIdx](const TypeEntry& entry, const QString& fullText) {
@@ -4565,6 +4610,13 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
     });
 }
 
+void RcxController::pushRecentType(const QString& displayName) {
+    if (displayName.isEmpty()) return;
+    m_recentTypeNames.removeAll(displayName);
+    m_recentTypeNames.prepend(displayName);
+    while (m_recentTypeNames.size() > 8) m_recentTypeNames.removeLast();
+}
+
 void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                                          const TypeEntry& entry, const QString& fullText) {
     // Resolve external types: structId==0 means from another document, import first
@@ -4573,6 +4625,10 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
         && !resolved.displayName.isEmpty()) {
         resolved.structId = findOrCreateStructByName(resolved.displayName);
     }
+
+    // Track for the popup's "Recent" section. Done early so any return path
+    // below still records the user's selection.
+    pushRecentType(resolved.displayName);
 
     if (mode == TypePopupMode::Root) {
         if (resolved.entryKind == TypeEntry::Composite)
@@ -5205,9 +5261,11 @@ void RcxController::collectPointerRanges(
         uint64_t structId, uint64_t memBase,
         int depth, int maxDepth,
         QSet<QPair<uint64_t,uint64_t>>& visited,
-        QVector<QPair<uint64_t,int>>& ranges) const
+        QVector<QPair<uint64_t,int>>& ranges,
+        int64_t& budget) const
 {
     if (depth >= maxDepth) return;
+    if (budget <= 0) return;  // exhausted byte budget — bail
     QPair<uint64_t,uint64_t> key{structId, memBase};
     if (visited.contains(key)) return;
     visited.insert(key);
@@ -5215,12 +5273,15 @@ void RcxController::collectPointerRanges(
     int span = m_doc->tree.structSpan(structId);
     if (span <= 0) return;
     ranges.emplaceBack(memBase, span);
+    budget -= span;
+    if (budget <= 0) return;
 
     if (!m_snapshotProv) return;
 
     // Walk children looking for non-collapsed pointers
     QVector<int> children = m_doc->tree.childrenOf(structId);
     for (int ci : children) {
+        if (budget <= 0) break;
         const Node& child = m_doc->tree.nodes[ci];
         if (child.kind != NodeKind::Pointer32 && child.kind != NodeKind::Pointer64)
             continue;
@@ -5237,7 +5298,7 @@ void RcxController::collectPointerRanges(
 
         uint64_t pBase = ptrVal;
         collectPointerRanges(child.refId, pBase, depth + 1, maxDepth,
-                             visited, ranges);
+                             visited, ranges, budget);
     }
 
     // Embedded struct references (struct node with refId but no own children)
@@ -5246,7 +5307,7 @@ void RcxController::collectPointerRanges(
         const Node& sn = m_doc->tree.nodes[idx];
         if (sn.kind == NodeKind::Struct && sn.refId != 0 && children.isEmpty())
             collectPointerRanges(sn.refId, memBase, depth, maxDepth,
-                                 visited, ranges);
+                                 visited, ranges, budget);
     }
 }
 
@@ -5269,7 +5330,12 @@ void RcxController::onRefreshTick() {
         uint64_t rootId = m_viewRootId;
         if (rootId == 0 && !m_doc->tree.nodes.isEmpty())
             rootId = m_doc->tree.nodes[0].id;
-        collectPointerRanges(rootId, m_doc->tree.baseAddress, 0, 99, visited, ranges);
+        // Cap total bytes to prevent balloon snapshots on cyclic pointer graphs
+        // or pathological tree shapes. 64MB is plenty for any reasonable struct
+        // hierarchy; beyond that we silently clip the deepest branches.
+        int64_t budget = kPointerSnapshotByteBudget - extent;
+        collectPointerRanges(rootId, m_doc->tree.baseAddress, 0, 99,
+                             visited, ranges, budget);
     }
 
     m_readInFlight = true;

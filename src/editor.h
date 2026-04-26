@@ -117,6 +117,10 @@ signals:
     void moveNodeRequested(int nodeIdx, int direction);  // -1=up, +1=down
     void collapseAllRequested();
     void expandAllRequested();
+    // F12: navigate to the type definition referenced by the current node
+    // (Pointer.refId, Struct.refId, or Array element struct). Controller
+    // resolves and opens / focuses the target.
+    void goToDefinitionRequested(int nodeIdx);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;

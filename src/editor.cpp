@@ -361,7 +361,10 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     m_sci->viewport()->installEventFilter(this);
     m_sci->viewport()->setMouseTracking(true);
 
-    // Find bar: indicator-based search (selection is disabled in our Scintilla)
+    // Find bar: indicator-based search (selection is disabled in our Scintilla).
+    // doFind paints the indicator at *every* match in the document so the user
+    // sees all hits at once, then advances the cursor to the next/prev match
+    // from m_findPos.
     auto doFind = [this](bool forward) {
         long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_FIND);
@@ -371,12 +374,27 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (text.isEmpty()) return;
         QByteArray needle = text.toUtf8();
 
+        // Pass 1: paint every match so the highlight is global.
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEARCHFLAGS, (long)0);
+        {
+            long scan = 0;
+            while (scan < docLen) {
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, scan);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, docLen);
+                long hit = m_sci->SendScintilla(QsciScintillaBase::SCI_SEARCHINTARGET,
+                                                  (uintptr_t)needle.size(), needle.constData());
+                if (hit < 0) break;
+                m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, hit,
+                                      (long)needle.size());
+                scan = hit + qMax<long>(needle.size(), 1);
+            }
+        }
+
+        // Pass 2: advance cursor to the next match from m_findPos.
         long startPos = forward ? m_findPos : (m_findPos > 0 ? m_findPos - 1 : docLen);
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, startPos);
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND,
                              forward ? docLen : (long)0);
-        m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEARCHFLAGS, (long)0);
-
         long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_SEARCHINTARGET,
                                          (uintptr_t)needle.size(), needle.constData());
         if (pos == -1) {  // wrap
@@ -388,8 +406,6 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
                                          (uintptr_t)needle.size(), needle.constData());
         }
         if (pos >= 0) {
-            m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_FIND);
-            m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, (long)needle.size());
             int line = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_LINEFROMPOSITION, pos);
             m_sci->ensureLineVisible(line);
             m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, pos);
@@ -2549,6 +2565,13 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     switch (ke->key()) {
     case Qt::Key_F2:
         return beginInlineEdit(EditTarget::Name);
+    case Qt::Key_F12: {
+        // Go to definition — emit for the current node; controller decides
+        // whether to navigate (typed pointer, struct ref, etc.) or no-op.
+        int ni = currentNodeIndex();
+        if (ni >= 0) emit goToDefinitionRequested(ni);
+        return true;
+    }
     case Qt::Key_T:
         if (ke->modifiers() == Qt::NoModifier)
             return beginInlineEdit(EditTarget::Type);

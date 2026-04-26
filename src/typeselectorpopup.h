@@ -80,6 +80,9 @@ public:
     void setPointerSize(int bytes);
     void setModifier(int modId, int arrayCount = 0);
     void setTypes(const QVector<TypeEntry>& types, const TypeEntry* current = nullptr);
+    // Most-recent-first list of type display names. Surfaces a "Recent"
+    // pseudo-section at the top of group view when non-empty.
+    void setRecentTypes(const QStringList& names) { m_recentNames = names; }
     void popup(const QPoint& globalPos);
 
     /// Show popup instantly with skeleton placeholders; call setTypes() to fill content.
@@ -137,6 +140,7 @@ private:
 
     QVector<TypeEntry> m_allTypes;
     QVector<TypeEntry> m_filteredTypes;
+    QStringList        m_recentNames;  // most-recent-first; emitted as top section
     QVector<QVector<int>> m_matchPositions;
     TypeEntry          m_currentEntry;
     bool               m_hasCurrent = false;

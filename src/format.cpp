@@ -378,11 +378,15 @@ static QString readValueImpl(const Node& node, const Provider& prov,
         QByteArray b = prov.readBytes(addr, 16);
         if (b.size() < 16) b.resize(16);
         if (!display) {
-            // Editable: space-separated hex bytes
+            // Editable: space-separated hex bytes. For bigEndian we flip to
+            // display order BEFORE rendering so the round-trip through
+            // parseValue (which reverses for BE) writes the same memory back.
+            QByteArray show = b;
+            if (be) std::reverse(show.begin(), show.end());
             QString hex;
             for (int i = 0; i < 16; i++) {
                 if (i > 0) hex += ' ';
-                hex += rawHex((uint8_t)b[i], 2);
+                hex += rawHex((uint8_t)show[i], 2);
             }
             return hex;
         }
@@ -658,14 +662,19 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
         return {};
     }
 
-    // Hex kinds always parse as memory-order bytes (display order). Input
-    // must have exactly `byteCount` bytes' worth of hex digits — shorter
-    // inputs are rejected so callers must either type the full value or
-    // switch to an integer kind (UInt*/Int*) which accepts partial entry.
-    // This unifies spaced "DE AD BE EF" and unspaced "DEADBEEF" — both write
+    // Hex kinds parse as memory-order bytes (display order). Spaced form
+    // "DE AD BE EF" requires exact byteCount groups; unspaced form accepts
+    // any width up to byteCount*2 hex chars and zero-pads on the left so
+    // `0x42` into a Hex32 writes 0x00000042. Spaced and unspaced both write
     // the same memory, matching what the hex byte preview shows.
     auto parseHexUnified = [&](QString cleaned, int byteCount) -> QByteArray {
-        cleaned.remove(' ');
+        if (cleaned.contains(' ')) {
+            // Spaced form: parseHexBytes enforces exact byteCount groups
+            return parseHexBytes(cleaned, byteCount, ok);
+        }
+        if (cleaned.size() > byteCount * 2) return {};   // too many digits
+        if (cleaned.size() < byteCount * 2)
+            cleaned = QString(byteCount * 2 - cleaned.size(), '0') + cleaned;
         return parseHexBytes(cleaned, byteCount, ok);
     };
     switch (kind) {

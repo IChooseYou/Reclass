@@ -1708,6 +1708,22 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         };
 
         if (m_sortMode == SortGroup) {
+            // Recent section — entries whose displayName matches a recent
+            // pick. Listed first so common selections are one chord away.
+            // Items still appear in their normal kindGroup section below.
+            if (!m_recentNames.isEmpty()) {
+                QVector<TypeEntry> recents;
+                QHash<QString, TypeEntry> byName;
+                for (const auto& items : buckets)
+                    for (const auto& p : items) byName.insert(p.displayName, p);
+                for (const QString& nm : m_recentNames) {
+                    auto it = byName.constFind(nm);
+                    if (it != byName.constEnd() && it->enabled)
+                        recents.append(*it);
+                }
+                if (!recents.isEmpty())
+                    appendSection(QStringLiteral("Recent"), recents);
+            }
             // Group view: per-kindGroup sections
             for (int gi = 0; gi < 8; gi++) {
                 QString g = QString::fromLatin1(kGroupOrder[gi]);

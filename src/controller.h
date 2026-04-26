@@ -202,6 +202,11 @@ private:
     // ── Cached type selector popup (avoids ~350ms cold-start on first show) ──
     QPointer<TypeSelectorPopup> m_cachedPopup;
     int m_typePopupGen = 0;  // generation counter for deferred content loading
+    // Recently-used type display names (most recent first, capped at 8).
+    // Pushed in applyTypePopupResult so primitive + composite selections are
+    // both tracked. Surfaced as a "Recent" pseudo-section in the popup.
+    QStringList m_recentTypeNames;
+    void pushRecentType(const QString& displayName);
 
     // ── Cached source chooser popup ──
     QPointer<SourceChooserPopup> m_cachedSourcePopup;
@@ -256,7 +261,9 @@ private:
     void collectPointerRanges(uint64_t structId, uint64_t memBase,
                               int depth, int maxDepth,
                               QSet<QPair<uint64_t,uint64_t>>& visited,
-                              QVector<QPair<uint64_t,int>>& ranges) const;
+                              QVector<QPair<uint64_t,int>>& ranges,
+                              int64_t& budget) const;
+    static constexpr int64_t kPointerSnapshotByteBudget = 64 * 1024 * 1024; // 64 MB
 };
 
 } // namespace rcx

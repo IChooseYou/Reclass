@@ -392,6 +392,12 @@ struct NodeTree {
     uint64_t      m_nextId    = 1;
     mutable QHash<uint64_t, int> m_idCache;
     mutable QHash<uint64_t, QVector<int>> m_childCache;
+    // Bumped on every structural mutation (add/remove/parent change). Caches
+    // keyed on this counter (generator output, type popup entries, etc.) can
+    // skip rebuilds when the tree hasn't changed shape between refreshes.
+    quint64       m_generation = 1;
+    quint64 generation() const { return m_generation; }
+    void   bumpGeneration() { ++m_generation; }
 
     int addNode(const Node& n) {
         Node copy = n;
@@ -403,6 +409,7 @@ struct NodeTree {
             m_idCache[copy.id] = idx;
         if (!m_childCache.isEmpty())
             m_childCache[copy.parentId].append(idx);
+        ++m_generation;
         return idx;
     }
 
@@ -410,6 +417,74 @@ struct NodeTree {
     uint64_t reserveId() { return m_nextId++; }
 
     void invalidateIdCache() const { m_idCache.clear(); m_childCache.clear(); }
+    // For mutators that change tree shape (parentId, offsets, kind, structTypeName,
+    // refId — anything the generator/popup-cache fingerprints). Caller is responsible
+    // for invoking this; controller's applyCommand path bumps where needed.
+    void touch() { ++m_generation; }
+
+    // Validate tree structure. Returns true if clean. If repair=true, fixes
+    // detected issues in place (orphaned subtrees re-rooted at parentId=0,
+    // cycles broken by re-rooting the deepest node in the cycle, duplicate
+    // ids re-numbered). Reports counts via *out fields when provided.
+    struct ValidateReport {
+        int orphans   = 0;  // nodes whose parentId doesn't exist
+        int cycles    = 0;  // cycles broken
+        int duplicates = 0; // duplicate ids re-numbered
+        QString summary() const {
+            return QStringLiteral("orphans=%1 cycles=%2 duplicates=%3")
+                .arg(orphans).arg(cycles).arg(duplicates);
+        }
+        bool clean() const { return orphans == 0 && cycles == 0 && duplicates == 0; }
+    };
+    ValidateReport validate(bool repair = true) {
+        ValidateReport r;
+        if (nodes.isEmpty()) return r;
+
+        // Pass 1: dedupe ids
+        {
+            QHash<uint64_t, int> seen;
+            for (int i = 0; i < nodes.size(); i++) {
+                Node& n = nodes[i];
+                if (n.id == 0 || seen.contains(n.id)) {
+                    r.duplicates++;
+                    if (repair) n.id = m_nextId++;
+                }
+                seen.insert(n.id, i);
+                if (n.id >= m_nextId) m_nextId = n.id + 1;
+            }
+        }
+        invalidateIdCache();
+
+        // Pass 2: orphan detection — parentId points to nonexistent node
+        for (int i = 0; i < nodes.size(); i++) {
+            Node& n = nodes[i];
+            if (n.parentId != 0 && indexOfId(n.parentId) < 0) {
+                r.orphans++;
+                if (repair) n.parentId = 0;
+            }
+        }
+        invalidateIdCache();
+
+        // Pass 3: cycle detection — walk parent chain from each node
+        for (int i = 0; i < nodes.size(); i++) {
+            QSet<uint64_t> visited;
+            int cur = i;
+            while (cur >= 0 && cur < nodes.size()) {
+                uint64_t nid = nodes[cur].id;
+                if (visited.contains(nid)) {
+                    // Cycle. Break by re-rooting the offending node.
+                    r.cycles++;
+                    if (repair) nodes[cur].parentId = 0;
+                    break;
+                }
+                visited.insert(nid);
+                if (nodes[cur].parentId == 0) break;
+                cur = indexOfId(nodes[cur].parentId);
+            }
+        }
+        invalidateIdCache();
+        return r;
+    }
 
     int indexOfId(uint64_t id) const {
         if (m_idCache.isEmpty() && !nodes.isEmpty()) {
@@ -826,6 +901,39 @@ inline constexpr int kMinNameW    = 10;  // Minimum name column width (fits "fie
 inline constexpr int kMaxNameW    = 128; // Maximum name column width
 inline constexpr int kCompactTypeW    = 20; // Type column cap for compact column mode
 inline constexpr int kDefaultRefreshMs = 660; // Auto-refresh interval (ms)
+
+// LineGeometry — single source of truth for column math on a composed line.
+// Bundles the prefix (fold indicator), per-depth indent, and a content
+// origin so callers can ask "what is the document column of content position
+// N on this line?" without repeating `kFoldCol + depth*kTreeIndent` everywhere.
+// Use case: hit-testing, indicator placement, span computation.
+struct LineGeometry {
+    int prefixWidth   = kFoldCol;        // 0 for CommandRow / root footer (flush-left)
+    int indentWidth   = 0;               // depth * kTreeIndent
+    int typeColumnWidth = kColType;
+    int nameColumnWidth = kColName;
+
+    // Document column for the start of the type column.
+    int typeStart() const { return prefixWidth + indentWidth; }
+    // Document column for the start of the name column.
+    int nameStart() const { return typeStart() + typeColumnWidth + kSepWidth; }
+    // Document column for the start of the value column.
+    int valueStart() const { return nameStart() + nameColumnWidth + kSepWidth; }
+    // Translate a content-space column (lineText index, ignoring prefix) to
+    // the corresponding document column in the Scintilla buffer.
+    int documentColumn(int contentCol) const { return prefixWidth + contentCol; }
+
+    static LineGeometry forLine(const LineMeta& lm) {
+        LineGeometry g;
+        bool flushLeft = (lm.lineKind == LineKind::CommandRow)
+                     || (lm.lineKind == LineKind::Footer && lm.isRootHeader);
+        g.prefixWidth = flushLeft ? 0 : kFoldCol;
+        g.indentWidth = lm.depth * kTreeIndent;
+        g.typeColumnWidth = lm.effectiveTypeW > 0 ? lm.effectiveTypeW : kColType;
+        g.nameColumnWidth = lm.effectiveNameW > 0 ? lm.effectiveNameW : kColName;
+        return g;
+    }
+};
 
 inline ColumnSpan typeSpanFor(const LineMeta& lm, int typeW = kColType) {
     if (lm.lineKind != LineKind::Field || lm.isContinuation || lm.isMemberLine) return {};

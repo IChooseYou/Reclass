@@ -136,16 +136,17 @@ struct ComposeState {
         }
 
         // Auto-detect trailing '{' for braceCol (avoids per-char IPC scan in editor).
-        // Stored in Scintilla column space, so add the fold-prefix width for any
-        // line that gets one (Header). CommandRow is flush-left so prefix is 0.
+        // Stored in Scintilla document-column space — LineGeometry handles the
+        // prefix offset so flush-left lines (CommandRow, root footer) get 0
+        // and Header lines get kFoldCol added automatically.
         if (lm.braceCol < 0 && (lm.lineKind == LineKind::Header
                                  || lm.lineKind == LineKind::CommandRow)) {
-            int prefixLen = (lm.lineKind == LineKind::CommandRow) ? 0 : kFoldCol;
+            LineGeometry geom = LineGeometry::forLine(lm);
             int len = lineText.size();
             for (int p = len - 1; p >= 0; --p) {
                 QChar ch = lineText[p];
                 if (ch == ' ' || ch == '\t') continue;
-                if (ch == '{') lm.braceCol = p + prefixLen;
+                if (ch == '{') lm.braceCol = geom.documentColumn(p);
                 break;
             }
         }
@@ -305,7 +306,10 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             if (!commentText.isEmpty()) {
                 // Trim trailing spaces (from value column padding) so comment sits close to value
                 while (lineText.endsWith(' ')) lineText.chop(1);
-                lm.commentStart = kFoldCol + lineText.size() + 2; // after fold prefix + "  " gap
+                // commentStart is in document-column space: LineGeometry adds
+                // the fold prefix (kFoldCol for Field lines), then the comment
+                // sits 2 chars after the trimmed lineText.
+                lm.commentStart = LineGeometry::forLine(lm).documentColumn(lineText.size() + 2);
                 lineText += QStringLiteral("  // ") + commentText;
             }
         }
@@ -318,7 +322,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             auto suggestions = inferTypes(
                 reinterpret_cast<const uint8_t*>(b.constData()), sz);
             if (!suggestions.isEmpty() && suggestions[0].strength >= 3) {
-                lm.typeHintStart = kFoldCol + lineText.size() + 2; // after fold prefix + "  " gap
+                lm.typeHintStart = LineGeometry::forLine(lm).documentColumn(lineText.size() + 2);
                 lm.typeHintKinds = suggestions[0].kinds;
                 QString typeName = formatHint(suggestions[0]);
                 QString preview = formatPreview(
@@ -1208,24 +1212,50 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     state.meta.reserve(tree.nodes.size() * 3);
     state.text.reserve(tree.nodes.size() * 80);
 
-    // Precompute absolute offsets via BFS (O(N) — avoids per-node parent-chain walk)
+    // Precompute absolute offsets via BFS (O(N) — avoids per-node parent-chain walk).
+    // Treats any node with a missing parentId as a root so orphans don't silently
+    // land at offset 0 (which would compose them on top of real root structs).
     state.absOffsets.resize(tree.nodes.size());
     state.absOffsets.fill(0);
+    QVector<bool> visited(tree.nodes.size(), false);
     for (int i = 0; i < tree.nodes.size(); i++)
         if (tree.nodes[i].parentId == 0)
             state.absOffsets[i] = tree.nodes[i].offset;
     {
         QVector<int> bfsQueue;
-        for (int i : state.childMap.value(0))
+        for (int i : state.childMap.value(0)) {
             bfsQueue.append(i);
+            visited[i] = true;
+        }
         int front = 0;
         while (front < bfsQueue.size()) {
             int idx = bfsQueue[front++];
             int pi = tree.indexOfId(tree.nodes[idx].parentId);
             state.absOffsets[idx] = (pi >= 0 ? state.absOffsets[pi] : 0)
                                   + tree.nodes[idx].offset;
-            for (int ci : state.childMap.value(tree.nodes[idx].id))
-                bfsQueue.append(ci);
+            for (int ci : state.childMap.value(tree.nodes[idx].id)) {
+                if (!visited[ci]) { visited[ci] = true; bfsQueue.append(ci); }
+            }
+        }
+        // Any node still unvisited is either an orphan (parentId points to
+        // nothing) or part of a parent-chain that doesn't reach root.
+        // Treat as a top-level root so its offset isn't garbage 0.
+        for (int i = 0; i < tree.nodes.size(); i++) {
+            if (!visited[i]) {
+                state.absOffsets[i] = tree.nodes[i].offset;
+                visited[i] = true;
+                // Walk descendants to fix their offsets too
+                QVector<int> q; q.append(i);
+                while (!q.isEmpty()) {
+                    int p = q.takeLast();
+                    for (int ci : state.childMap.value(tree.nodes[p].id)) {
+                        if (visited[ci]) continue;
+                        visited[ci] = true;
+                        state.absOffsets[ci] = state.absOffsets[p] + tree.nodes[ci].offset;
+                        q.append(ci);
+                    }
+                }
+            }
         }
     }
     for (auto& v : state.absOffsets)
