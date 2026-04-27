@@ -261,9 +261,9 @@ QString fmtStructHeader(const Node& node, int depth, bool collapsed, int colType
 QString fmtStructFooter(const Node& node, int depth, int totalSize) {
     QString footer = indent(depth) + QStringLiteral("};");
     if (node.isEnum())
-        footer += QStringLiteral("  +10 Top");
+        footer += QStringLiteral("  +1 +10 Top");
     else
-        footer += QStringLiteral("  +10h +100h +1000h Trim Top");
+        footer += QStringLiteral("  +1 +10h +100h +1000h Trim Top");
     if (totalSize > 0)
         footer += QStringLiteral("  // 0x%1 (%2)")
             .arg(QString::number(totalSize, 16).toUpper())

@@ -974,6 +974,14 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     for (int i = 0; i < result.meta.size(); i++) {
         if (result.meta[i].lineKind != LineKind::Footer) continue;
         const QString& ft = lineTexts[i];
+        // Single-field add chip — search ` +1 ` (padded so the token can't
+        // collide with +10/+10h/+100h/+1000h, which all have a digit after
+        // +1). Paint only the visible `+1` (cols pPlusOne+1..pPlusOne+3)
+        // so the pill doesn't visually butt up against the +10h chip
+        // beside it; click hit-test below stays generous (4 cols).
+        int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
+        if (pPlusOne >= 0)
+            fillIndicatorCols(IND_CMD_PILL, i, pPlusOne + 1, pPlusOne + 3);
         // Struct footer: +10h +100h +1000h Trim (search longest first)
         int p1000 = ft.indexOf(QStringLiteral("+1000h"));
         if (p1000 >= 0)
@@ -984,7 +992,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         int p10 = ft.indexOf(QStringLiteral("+10h"));
         if (p10 >= 0 && p10 != p100 && p10 != p1000)
             fillIndicatorCols(IND_CMD_PILL, i, p10, p10 + 4);
-        // Enum footer: +10 (no 'h')
+        // Enum footer: +10 (no 'h'). Skip when the +10 we found is actually
+        // the start of "+1000h" / "+100h" / "+10h" we already painted, OR
+        // sits inside "+Field" (it doesn't, but be defensive).
         int add10Start = ft.indexOf(QStringLiteral("+10"));
         if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000)
             fillIndicatorCols(IND_CMD_PILL, i, add10Start, add10Start + 3);
@@ -1492,10 +1502,13 @@ int RcxEditor::currentNodeIndex() const {
 }
 
 void RcxEditor::showFindBar() {
+    // Leave m_findPos alone so reopening the bar continues from where the
+    // user last was. Esc-then-reopen is the normal "I lost my place" flow,
+    // resetting here would defeat that. textChanged in the find input
+    // resets to 0 when the user starts a new query.
     m_findBarContainer->setVisible(true);
     m_findBar->setFocus();
     m_findBar->selectAll();
-    m_findPos = 0;
 }
 
 void RcxEditor::dismissHistoryPopup() {
@@ -1511,11 +1524,11 @@ void RcxEditor::dismissAllPopups() {
 }
 
 void RcxEditor::hideFindBar() {
+    // Keep IND_FIND highlights and m_findPos intact so the user can see
+    // where they were and resume from there. Reopening the find bar
+    // continues from the last position; typing a fresh query clears the
+    // old highlights via the textChanged hook in doFind's first pass.
     m_findBarContainer->setVisible(false);
-    long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_FIND);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
-    m_findPos = 0;
     m_sci->setFocus();
 }
 
@@ -2313,11 +2326,18 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 emit marginClicked(0, h.line, me->modifiers());
                 return true;
             }
-            // Footer buttons: +10h/+100h/+1000h, +10 (enum), Trim
+            // Footer buttons: +1, +10h/+100h/+1000h, +10 (enum), Trim, Top
             if (h.line >= 0 && h.line < m_meta.size()
                 && m_meta[h.line].lineKind == LineKind::Footer) {
                 QString ft = getLineText(m_sci, h.line);
                 uint64_t nid = m_meta[h.line].nodeId;
+                // Single-field add — " +1 " padded so it can't collide with
+                // +10/+10h/+100h/+1000h (digit after +1 in those, not space).
+                int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
+                if (pPlusOne >= 0 && h.col >= pPlusOne && h.col < pPlusOne + 4) {
+                    emit appendSingleFieldRequested(nid);
+                    return true;
+                }
                 // Struct: +1000h (0x1000 = 4096 bytes)
                 int p1000 = ft.indexOf(QStringLiteral("+1000h"));
                 if (p1000 >= 0 && h.col >= p1000 && h.col < p1000 + 6) {
@@ -2681,6 +2701,19 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             m_sci->ensureLineVisible(i);
             emit nodeClicked(i, lm.nodeId, ke->modifiers());
             return true;
+        }
+        // Forward walk fell off the end — auto-append a new field to the
+        // enclosing struct of the last visible data node. Mirrors the
+        // "+1" footer pill behavior for keyboard users. Up-at-top is a
+        // silent no-op (no field inserted above).
+        if (dir == 1) {
+            for (int i = m_meta.size() - 1; i >= 0; --i) {
+                const auto& lm = m_meta[i];
+                if (lm.nodeId == 0 || lm.nodeId == kCommandRowId) continue;
+                if (lm.isContinuation) continue;
+                emit appendSingleFieldRequested(lm.nodeId);
+                break;
+            }
         }
         return true;
     }
@@ -4084,7 +4117,7 @@ void RcxEditor::applyHoverCursor() {
         m_hoverSpanLines.append(h.line);
     }
 
-    // Apply hover span on footer pills (+10h/+100h/+1000h, +10, Trim)
+    // Apply hover span on footer pills (+Field, +10h/+100h/+1000h, +10, Trim)
     if (h.line >= 0 && h.line < m_meta.size()
         && m_meta[h.line].lineKind == LineKind::Footer) {
         QString ft = getLineText(m_sci, h.line);
@@ -4094,6 +4127,11 @@ void RcxEditor::applyHoverCursor() {
                 m_hoverSpanLines.append(h.line);
             }
         };
+        // Search padded token, but hover-paint only the `+1` chars so the
+        // glyph doesn't bleed into the gap before +10h.
+        int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
+        if (pPlusOne >= 0)
+            tryPill(QStringLiteral("+1"), pPlusOne + 1);
         int p1000 = ft.indexOf(QStringLiteral("+1000h"));
         tryPill(QStringLiteral("+1000h"), p1000);
         int p100 = ft.indexOf(QStringLiteral("+100h"));
@@ -4376,6 +4414,9 @@ void RcxEditor::applyHoverCursor() {
     } else if (h.line >= 0 && h.line < m_meta.size()
                && m_meta[h.line].lineKind == LineKind::Footer) {
         QString ft = getLineText(m_sci, h.line);
+        int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
+        if (pPlusOne >= 0 && h.col >= pPlusOne && h.col < pPlusOne + 4)
+            desired = Qt::PointingHandCursor;
         int p1000 = ft.indexOf(QStringLiteral("+1000h"));
         if (p1000 >= 0 && h.col >= p1000 && h.col < p1000 + 6)
             desired = Qt::PointingHandCursor;

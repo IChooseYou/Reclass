@@ -101,6 +101,9 @@ signals:
     void appendBytesRequested(uint64_t structId, int byteCount);
     void trimHexRequested(uint64_t structId);
     void appendEnumMembersRequested(uint64_t enumId, int count);
+    // Single-field append from footer "+Field" pill. Adds one Hex64 field
+    // (or one enum member, when the parent is an enum) at the end.
+    void appendSingleFieldRequested(uint64_t structId);
     void deleteSelectedRequested();
     void duplicateSelectedRequested();
     // Real clipboard (rcx-clipboard/v1 MIME + plaintext fallback). Controller

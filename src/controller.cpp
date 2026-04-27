@@ -856,6 +856,53 @@ void RcxController::connectEditor(RcxEditor* editor) {
     });
 
     // Footer "+1024" button
+    // Footer "+1" pill / Down-at-end shortcut — append one Hex64 field
+    // (struct/array) or one enum member (auto-numbered) at the end.
+    // Caller may pass either a struct/array/enum id (footer pill click)
+    // or a leaf field id (Down-at-end emits the last visible node id);
+    // we walk up the parent chain in the leaf case so the field lands in
+    // the enclosing container, not gets rejected.
+    connect(editor, &RcxEditor::appendSingleFieldRequested,
+            this, [this](uint64_t nodeId) {
+        int si = m_doc->tree.indexOfId(nodeId);
+        if (si < 0) return;
+        // Walk up to the enclosing struct/array/enum if a leaf was passed.
+        while (si >= 0) {
+            const Node& n = m_doc->tree.nodes[si];
+            if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array
+                || n.isEnum()) break;
+            if (n.parentId == 0) return;
+            si = m_doc->tree.indexOfId(n.parentId);
+        }
+        if (si < 0) return;
+        uint64_t structId = m_doc->tree.nodes[si].id;
+        const Node& parent = m_doc->tree.nodes[si];
+        if (parent.isEnum()) {
+            auto members = parent.enumMembers;
+            int64_t nextVal = members.isEmpty() ? 0 : members.last().second + 1;
+            auto oldMembers = members;
+            members.emplaceBack(QStringLiteral("Member%1").arg(nextVal), nextVal);
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::ChangeEnumMembers{structId, oldMembers, members}));
+            return;
+        }
+        // Embedded struct with refId: append to the referenced root class
+        uint64_t targetId = structId;
+        if (m_doc->tree.childrenOf(structId).isEmpty() && parent.refId != 0)
+            targetId = parent.refId;
+        // Auto-name based on the next slot offset for consistency with the
+        // multi-byte append path.
+        int slotOffset = 0;
+        for (int ci : m_doc->tree.childrenOf(targetId)) {
+            const Node& sib = m_doc->tree.nodes[ci];
+            int sz = (sib.kind == NodeKind::Struct || sib.kind == NodeKind::Array)
+                ? m_doc->tree.structSpan(sib.id) : sib.byteSize();
+            slotOffset = qMax(slotOffset, sib.offset + sz);
+        }
+        insertNode(targetId, -1, NodeKind::Hex64,
+                   QStringLiteral("field_%1").arg(slotOffset, 4, 16, QChar('0')));
+    });
+
     connect(editor, &RcxEditor::appendBytesRequested,
             this, [this](uint64_t structId, int byteCount) {
         // If this is an embedded struct with refId (virtual children),

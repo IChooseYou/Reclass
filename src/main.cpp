@@ -1368,6 +1368,10 @@ void MainWindow::createMenus() {
 
     // Help
     auto* help = m_menuBar->addMenu("&Help");
+    Qt5Qt6AddAction(help, "&Keyboard Shortcuts...", QKeySequence(Qt::Key_F1),
+                    makeIcon(":/vsicons/question.svg"), this,
+                    &MainWindow::showShortcutsDialog);
+    help->addSeparator();
     Qt5Qt6AddAction(help, "&About Reclass", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
 }
 
@@ -3529,6 +3533,131 @@ void MainWindow::about() {
         dlg.setPalette(dlgPal);
         dlg.setAutoFillBackground(true);
     }
+    dlg.exec();
+}
+
+void MainWindow::showShortcutsDialog() {
+    // Discoverable home for the editor's keyboard shortcuts. Static content
+    // grouped by category. Two-column layout (Key, Description) with
+    // section header rows that span both columns.
+    const auto& t = ThemeManager::instance().current();
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Keyboard Shortcuts"));
+    dlg.resize(560, 520);
+
+    {
+        QPalette pal = dlg.palette();
+        pal.setColor(QPalette::Window, t.background);
+        pal.setColor(QPalette::WindowText, t.text);
+        dlg.setPalette(pal);
+        dlg.setAutoFillBackground(true);
+    }
+
+    QSettings settings("Reclass", "Reclass");
+    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
+    monoFont.setFixedPitch(true);
+
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(12, 12, 12, 12);
+    lay->setSpacing(8);
+
+    auto* table = new QTableWidget(&dlg);
+    table->setColumnCount(2);
+    table->horizontalHeader()->setVisible(false);
+    table->verticalHeader()->setVisible(false);
+    table->setShowGrid(false);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setFocusPolicy(Qt::NoFocus);
+    table->setAlternatingRowColors(false);
+    table->setFont(monoFont);
+    table->setStyleSheet(QStringLiteral(
+        "QTableWidget { background: %1; color: %2; border: 1px solid %3; }"
+        "QTableWidget::item { padding: 4px 8px; }")
+        .arg(t.background.name(), t.text.name(), t.border.name()));
+
+    struct Row { QString key; QString desc; bool header = false; };
+    const QVector<Row> rows = {
+        {QStringLiteral("Navigation"),         {}, true},
+        {QStringLiteral("↑ / ↓"),     QStringLiteral("Previous / next field (↓ at end adds a new field)")},
+        {QStringLiteral("PgUp / PgDn"),         QStringLiteral("Jump by visible lines")},
+        {QStringLiteral("Home / End"),          QStringLiteral("Line start / line end")},
+        {QStringLiteral("Ctrl+F"),              QStringLiteral("Find")},
+        {QStringLiteral("F12"),                 QStringLiteral("Go to definition")},
+        {QStringLiteral("Ctrl+Click"),          QStringLiteral("Open type in new tab")},
+
+        {QStringLiteral("Editing"),            {}, true},
+        {QStringLiteral("Enter"),               QStringLiteral("Edit value at caret")},
+        {QStringLiteral("Tab"),                 QStringLiteral("Cycle edit targets (name → value → comment → type)")},
+        {QStringLiteral("F2"),                  QStringLiteral("Rename")},
+        {QStringLiteral("Space"),               QStringLiteral("Cycle hex size")},
+        {QStringLiteral(";"),                   QStringLiteral("Edit comment")},
+        {QStringLiteral("Ctrl+Shift+↑/↓"), QStringLiteral("Reorder field")},
+        {QStringLiteral("Ctrl+D"),              QStringLiteral("Duplicate node")},
+        {QStringLiteral("Delete"),              QStringLiteral("Delete selected node(s)")},
+        {QStringLiteral("Insert / Shift+Ins"),  QStringLiteral("Insert hex64 / hex32 above")},
+
+        {QStringLiteral("Type changes"),       {}, true},
+        {QStringLiteral("1 – 5"),          QStringLiteral("Hex8 / Hex16 / Hex32 / Hex64 / Hex128")},
+        {QStringLiteral("P"),                   QStringLiteral("Pointer")},
+        {QStringLiteral("F"),                   QStringLiteral("Float / Double (size-aware)")},
+        {QStringLiteral("S"),                   QStringLiteral("Signed int (size-aware)")},
+        {QStringLiteral("U"),                   QStringLiteral("Unsigned int (size-aware)")},
+        {QStringLiteral("← / →"),     QStringLiteral("Cycle through same-size type variants")},
+        {QStringLiteral("T"),                   QStringLiteral("Open type picker")},
+
+        {QStringLiteral("Bookmarks & Window"), {}, true},
+        {QStringLiteral("Ctrl+B"),              QStringLiteral("Add bookmark...")},
+        {QStringLiteral("Ctrl+Alt+B"),          QStringLiteral("Quick bookmark here")},
+        {QStringLiteral("Ctrl+\\"),             QStringLiteral("Split editor")},
+        {QStringLiteral("Ctrl+Shift+\\"),       QStringLiteral("Unsplit editor")},
+        {QStringLiteral("Ctrl+Shift+[ / ]"),    QStringLiteral("Collapse all / expand all")},
+        {QStringLiteral("F5"),                  QStringLiteral("Refresh")},
+        {QStringLiteral("Ctrl+G"),              QStringLiteral("Go to offset...")},
+        {QStringLiteral("Ctrl+Shift+P"),        QStringLiteral("Presentation mode")},
+        {QStringLiteral("Esc"),                 QStringLiteral("Clear selection")},
+    };
+
+    table->setRowCount(rows.size());
+    for (int i = 0; i < rows.size(); i++) {
+        const auto& r = rows[i];
+        if (r.header) {
+            auto* item = new QTableWidgetItem(r.key);
+            QFont hf = monoFont;
+            hf.setBold(true);
+            item->setFont(hf);
+            item->setForeground(QBrush(t.indHoverSpan));
+            item->setBackground(QBrush(t.backgroundAlt));
+            table->setItem(i, 0, item);
+            table->setSpan(i, 0, 1, 2);
+            table->setRowHeight(i, 28);
+        } else {
+            auto* keyItem = new QTableWidgetItem(r.key);
+            keyItem->setForeground(QBrush(t.text));
+            keyItem->setFont(monoFont);
+            auto* descItem = new QTableWidgetItem(r.desc);
+            descItem->setForeground(QBrush(t.textDim));
+            table->setItem(i, 0, keyItem);
+            table->setItem(i, 1, descItem);
+            table->setRowHeight(i, 22);
+        }
+    }
+    table->setColumnWidth(0, 200);
+    table->horizontalHeader()->setStretchLastSection(true);
+    lay->addWidget(table);
+
+    auto* closeBtn = new QPushButton(QStringLiteral("Close"));
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    closeBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: %1; color: %2; border: 1px solid %3;"
+        "  border-radius: 4px; padding: 5px 16px; }"
+        "QPushButton:hover { background: %4; border-color: %5; }")
+        .arg(t.indCmdPill.name(), t.text.name(), t.border.name(),
+             t.button.name(), t.textFaint.name()));
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    lay->addWidget(closeBtn, 0, Qt::AlignRight);
+
     dlg.exec();
 }
 

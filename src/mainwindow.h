@@ -65,6 +65,7 @@ private slots:
     void undo();
     void redo();
     void about();
+    void showShortcutsDialog();
     void toggleMcp();
     void setEditorFont(const QString& fontName);
     void exportToFile(CodeFormat fmt);
