@@ -139,6 +139,10 @@ add_executable(Reclass
     src/scanner.cpp
     src/scannerpanel.h
     src/scannerpanel.cpp
+    src/profiler.h
+    src/profiler.cpp
+    src/profilerdialog.h
+    src/profilerdialog.cpp
     src/mainwindow.h
     src/startpage.h
     src/dock_tab_buttons.h
@@ -322,7 +326,7 @@ if(BUILD_TESTING)
 
     # ── Headless tests (Qt::Core only — safe for CI without a display) ──
 
-    add_executable(test_core tests/test_core.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)
+    add_executable(test_core tests/test_core.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp)
     target_include_directories(test_core PRIVATE src)
     target_link_libraries(test_core PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_core COMMAND test_core)
@@ -337,7 +341,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_format PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_format COMMAND test_format)
 
-    add_executable(test_compose tests/test_compose.cpp src/compose.cpp src/format.cpp src/addressparser.cpp)
+    add_executable(test_compose tests/test_compose.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp)
     target_include_directories(test_compose PRIVATE src)
     target_link_libraries(test_compose PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_compose COMMAND test_compose)
@@ -353,31 +357,31 @@ if(BUILD_TESTING)
     add_test(NAME test_command_row COMMAND test_command_row)
 
     add_executable(test_generator tests/test_generator.cpp
-        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp)
+        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp)
     target_include_directories(test_generator PRIVATE src)
     target_link_libraries(test_generator PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_generator COMMAND test_generator)
 
     add_executable(test_import_xml tests/test_import_xml.cpp
-        src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)
+        src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp)
     target_include_directories(test_import_xml PRIVATE src)
     target_link_libraries(test_import_xml PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_import_xml COMMAND test_import_xml)
 
     add_executable(test_import_source tests/test_import_source.cpp
-        src/imports/import_source.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)
+        src/imports/import_source.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp)
     target_include_directories(test_import_source PRIVATE src)
     target_link_libraries(test_import_source PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_import_source COMMAND test_import_source)
 
     add_executable(test_export_xml tests/test_export_xml.cpp
-        src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)
+        src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp)
     target_include_directories(test_export_xml PRIVATE src)
     target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_export_xml COMMAND test_export_xml)
 
     add_executable(test_disasm tests/test_disasm.cpp
-        src/disasm.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+        src/disasm.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
         third_party/fadec/decode.c third_party/fadec/format.c)
     target_include_directories(test_disasm PRIVATE src third_party/fadec)
     target_link_libraries(test_disasm PRIVATE ${QT}::Core ${QT}::Test)
@@ -388,7 +392,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_addressparser PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_addressparser COMMAND test_addressparser)
 
-    add_executable(test_static_fields tests/test_static_fields.cpp src/compose.cpp src/format.cpp src/addressparser.cpp)
+    add_executable(test_static_fields tests/test_static_fields.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp)
     target_include_directories(test_static_fields PRIVATE src)
     target_link_libraries(test_static_fields PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_static_fields COMMAND test_static_fields)
@@ -406,14 +410,14 @@ if(BUILD_TESTING)
 
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
-            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)
+            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp)
         target_include_directories(test_import_pdb PRIVATE src)
         target_link_libraries(test_import_pdb PRIVATE
             ${QT}::Core ${QT}::Test raw_pdb)
         add_test(NAME test_import_pdb COMMAND test_import_pdb)
 
         add_executable(bench_import_pdb tests/bench_import_pdb.cpp
-            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp)
+            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp)
         target_include_directories(bench_import_pdb PRIVATE src)
         target_link_libraries(bench_import_pdb PRIVATE
             ${QT}::Core ${QT}::Test raw_pdb)
@@ -425,7 +429,7 @@ if(BUILD_TESTING)
     if(BUILD_UI_TESTS)
 
         add_executable(test_controller tests/test_controller.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -439,7 +443,7 @@ if(BUILD_TESTING)
         add_test(NAME test_controller COMMAND test_controller)
 
         add_executable(test_context_menu tests/test_context_menu.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -453,7 +457,7 @@ if(BUILD_TESTING)
         add_test(NAME test_context_menu COMMAND test_context_menu)
 
         add_executable(test_source_management tests/test_source_management.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -467,7 +471,7 @@ if(BUILD_TESTING)
         add_test(NAME test_source_management COMMAND test_source_management)
 
         add_executable(test_editor tests/test_editor.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
         src/providerregistry.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         target_include_directories(test_editor PRIVATE src third_party/fadec)
@@ -477,7 +481,7 @@ if(BUILD_TESTING)
         add_test(NAME test_editor COMMAND test_editor)
 
         add_executable(test_rendered_view tests/test_rendered_view.cpp
-        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp)
+        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp)
         target_include_directories(test_rendered_view PRIVATE src)
         target_link_libraries(test_rendered_view PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test
@@ -485,7 +489,7 @@ if(BUILD_TESTING)
         add_test(NAME test_rendered_view COMMAND test_rendered_view)
 
         add_executable(test_type_selector tests/test_type_selector.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -499,7 +503,7 @@ if(BUILD_TESTING)
         add_test(NAME test_type_selector COMMAND test_type_selector)
 
         add_executable(test_type_visibility tests/test_type_visibility.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
@@ -526,7 +530,7 @@ if(BUILD_TESTING)
         add_test(NAME test_titlebar_border COMMAND test_titlebar_border)
 
         add_executable(test_source_provider tests/test_source_provider.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
@@ -575,7 +579,7 @@ if(BUILD_TESTING)
         endif()
 
         add_executable(bench_large_class tests/bench_large_class.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
         src/providerregistry.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
         target_include_directories(bench_large_class PRIVATE src third_party/fadec)
@@ -594,6 +598,30 @@ if(BUILD_TESTING)
             target_link_libraries(bench_project PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
         endif()
         add_test(NAME bench_project COMMAND bench_project)
+
+        # Spam-append + type-cycle benchmark — exercises the meta-diff
+        # narrowing path with the runtime profiler enabled and dumps
+        # aggregated bucket stats so we can verify (a) refresh stays
+        # cheap during rapid edits, (b) per-line pass call counts match
+        # type-change events (regression guard for the sameLine bug),
+        # (c) IND_HEX_DIM stays applied to ALL hex64 lines after each
+        # press — including the controller-driven path that goes
+        # editor -> appendSingleFieldRequested -> insertNode ->
+        # applyCommand -> refresh.
+        add_executable(bench_spam_append tests/bench_spam_append.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
+        src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        target_include_directories(bench_spam_append PRIVATE src third_party/fadec)
+        target_link_libraries(bench_spam_append PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        QScintilla::QScintilla)
+        if(WIN32)
+            target_link_libraries(bench_spam_append PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME bench_spam_append COMMAND bench_spam_append)
 
         # Deploy Qt runtime DLLs for tests (run windeployqt on a representative test exe
         # that links the broadest set of Qt modules; all test exes share the same output dir)

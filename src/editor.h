@@ -137,6 +137,19 @@ private:
     QsciLexerCPP*     m_lexer  = nullptr;
     QVector<LineMeta> m_meta;
     LayoutInfo        m_layout;  // cached from ComposeResult
+    // Previous-frame text used by applyDocument's diff-and-patch path so
+    // we can avoid the full Scintilla setText() (~659 µs) on the common
+    // append/edit case.
+    QString           m_prevText;
+    QVector<LineMeta> m_prevMeta;
+    // Tracks whether the last applyDocument took the patch path (cheap, no
+    // marker loss outside the patched range) or the full-replace path
+    // (which wipes all markers). applySelectionOverlay uses this together
+    // with set-equality to decide whether it can skip its rebuild on a
+    // refresh tick that didn't actually change anything visible.
+    bool              m_lastApplyWasPatch = false;
+    // Skip-on-no-change caches for the refresh-tail path.
+    QString           m_lastCommandRowText;
 
     // ── Toggle: absolute vs relative offset margin
     bool m_relativeOffsets = true;
@@ -244,11 +257,17 @@ private:
     void setupMarkers();
     void allocateMarginStyles();
 
-    void applyLineAttributes(const QVector<LineMeta>& meta);
-    void reformatMargins();
-    void applyHexDimming(const QVector<LineMeta>& meta);
-    void applyHeatmapHighlight(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts);
-    void applySymbolColoring(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts);
+    // Optional [first, last] line range. When set (>=0), the per-line pass
+    // operates only on those lines; markers/indicators on lines outside
+    // are assumed to have survived the most recent SCI_REPLACETARGET.
+    // When unset (-1), full-doc pass — used by the fullReplace path.
+    void applyLineAttributes(const QVector<LineMeta>& meta, int firstLine = -1, int lastLine = -1);
+    void reformatMargins(int firstLine = -1, int lastLine = -1);
+    void applyHexDimming(const QVector<LineMeta>& meta, int firstLine = -1, int lastLine = -1);
+    void applyHeatmapHighlight(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,
+                                int firstLine = -1, int lastLine = -1);
+    void applySymbolColoring(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,
+                              int firstLine = -1, int lastLine = -1);
     void applyBaseAddressColoring(const QVector<LineMeta>& meta);
     void applyCommandRowPills();
 

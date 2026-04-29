@@ -2,6 +2,7 @@
 #include "disasm.h"
 #include "providerregistry.h"
 #include "rcxtooltip.h"
+#include "profiler.h"
 #include <QDebug>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
@@ -861,6 +862,7 @@ void RcxEditor::applyTheme(const Theme& theme) {
 }
 
 void RcxEditor::applyDocument(const ComposeResult& result) {
+    PROFILE_SCOPE("applyDocument");
     // Silently deactivate inline edit (no signal — refresh is already happening)
     if (m_editState.active)
         endInlineEdit();
@@ -894,28 +896,118 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         m_sci->setMarginWidth(0, marginSizer);
     }
 
-    m_sci->setReadOnly(false);
-    m_sci->setText(result.text);
-    m_sci->setReadOnly(true);
-
-    // Set horizontal scroll width to match the longest line (ignoring trailing spaces).
-    // Single-pass scan avoids QString::split() allocation of entire QStringList.
+    bool didPatch = false;
+    long patchByteStart = 0;
+    long patchByteLen = 0;
     {
-        int maxLen = 0, curLen = 0, lastNonSpace = 0;
-        for (int i = 0; i < result.text.size(); i++) {
-            QChar ch = result.text[i];
-            if (ch == '\n') {
-                maxLen = qMax(maxLen, lastNonSpace);
-                curLen = 0;
-                lastNonSpace = 0;
-            } else {
-                ++curLen;
-                if (ch != ' ') lastNonSpace = curLen;
+        PROFILE_SCOPE("applyDocument.setText");
+        // Diff-and-patch: when the previous-frame text exists and the new
+        // text shares a common head/tail, replace only the differing
+        // middle. Common case during rapid editing (append at end, value
+        // tick, single-field mutation) is one or two changed lines.
+        // Falls back to full setText only when the diff covers >50% of
+        // the document or the previous text was empty.
+        const QString& newText = result.text;
+        if (!m_prevText.isEmpty()
+            && m_prevText.size() > 0 && newText.size() > 0) {
+            PROFILE_SCOPE("applyDocument.diff");
+            const int oldN = m_prevText.size();
+            const int newN = newText.size();
+
+            // Find longest common prefix (in chars) — but stop at a line
+            // boundary so the head/tail boundaries are clean.
+            int prefix = 0;
+            int maxScan = qMin(oldN, newN);
+            while (prefix < maxScan && m_prevText[prefix] == newText[prefix])
+                prefix++;
+            // Walk back to the previous '\n' (or 0) so we patch whole lines.
+            while (prefix > 0 && m_prevText[prefix - 1] != '\n') prefix--;
+
+            // Find longest common suffix the same way.
+            int oldEnd = oldN, newEnd = newN;
+            while (oldEnd > prefix && newEnd > prefix
+                   && m_prevText[oldEnd - 1] == newText[newEnd - 1]) {
+                oldEnd--; newEnd--;
+            }
+            // Walk forward past the next '\n' to align the diff end on a
+            // line boundary — but ONLY when we're currently mid-line. If
+            // the suffix walk already left us at the start of a line
+            // (prev_text[oldEnd-1] == '\n', i.e. the prior char is a line
+            // break), do NOT extend forward; otherwise we'd swallow the
+            // entire next line into the diff even though it's unchanged
+            // (the bug we hit at the bottom of large structs where the
+            // footer line ate everything before it).
+            bool atLineStart = (oldEnd == 0) || (oldEnd >= oldN)
+                               || (m_prevText[oldEnd - 1] == '\n');
+            if (!atLineStart) {
+                while (oldEnd < oldN && newEnd < newN
+                       && m_prevText[oldEnd] != '\n') {
+                    if (m_prevText[oldEnd] != newText[newEnd]) break;
+                    oldEnd++; newEnd++;
+                }
+                if (oldEnd < oldN && newEnd < newN
+                    && m_prevText[oldEnd] == newText[newEnd]) {
+                    oldEnd++; newEnd++;  // include the \n itself
+                }
+            }
+
+            int oldDiffLen = oldEnd - prefix;
+            int newDiffLen = newEnd - prefix;
+            // Only patch when the change is small enough to be worth it.
+            // Threshold: change covers <= 50% of document size.
+            int worstCase = qMax(oldDiffLen, newDiffLen);
+            if (worstCase >= 0 && worstCase <= newN / 2) {
+                PROFILE_SCOPE("applyDocument.patch");
+                m_sci->setReadOnly(false);
+                // Convert char offsets to byte offsets — Scintilla works
+                // in bytes (UTF-8). Avoid `m_prevText.left(N).toUtf8().size()`:
+                // that allocates an O(N) substring + an O(N) UTF-8 buffer just
+                // to count bytes. On a 10K-char doc, two of those per refresh
+                // dominated the patch path (~600 µs). Count UTF-8 bytes inline.
+                auto utf8ByteCount = [](const QChar* d, int n) -> long {
+                    long bytes = 0;
+                    for (int i = 0; i < n; ++i) {
+                        ushort u = d[i].unicode();
+                        if (u < 0x80) bytes += 1;
+                        else if (u < 0x800) bytes += 2;
+                        else if (u >= 0xD800 && u < 0xDC00) {
+                            bytes += 4; ++i;  // high surrogate consumes low
+                        } else bytes += 3;
+                    }
+                    return bytes;
+                };
+                const QChar* prevData = m_prevText.constData();
+                long bytePrefix = utf8ByteCount(prevData, prefix);
+                long byteOldEnd = bytePrefix
+                    + utf8ByteCount(prevData + prefix, oldEnd - prefix);
+                QByteArray replacement = newText.mid(prefix, newDiffLen).toUtf8();
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, bytePrefix);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, byteOldEnd);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
+                                     (uintptr_t)replacement.size(),
+                                     replacement.constData());
+                m_sci->setReadOnly(true);
+                didPatch = true;
+                patchByteStart = bytePrefix;
+                patchByteLen = replacement.size();
             }
         }
-        maxLen = qMax(maxLen, lastNonSpace);
+        if (!didPatch) {
+            PROFILE_SCOPE("applyDocument.fullReplace");
+            m_sci->setReadOnly(false);
+            m_sci->setText(newText);
+            m_sci->setReadOnly(true);
+        }
+        m_prevText = newText;
+        m_lastApplyWasPatch = didPatch;
+    }
+
+    // Set horizontal scroll width to match the longest line. compose()
+    // already tracked the longest non-trailing-space line length while
+    // building text — reuse it instead of re-scanning the entire buffer.
+    {
         QFontMetrics fm(editorFont());
-        int pixelWidth = fm.horizontalAdvance(QString(maxLen, QChar('0')));
+        int pixelWidth = fm.horizontalAdvance(QString(result.maxLineLen, QChar('0')));
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
                              (unsigned long)qMax(1, pixelWidth));
 
@@ -924,13 +1016,87 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETXOFFSET, (unsigned long)0);
     }
 
-    // Force full re-lex to fix stale syntax coloring after edits
-    m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, (uintptr_t)0, (long)-1);
-
-    // Clear all TEXTFORE indicators to prevent stale color bleed from previous frame
-    // (setText + COLOURISE should reset them, but under rapid batch operations a
-    //  green IND_TYPE_HINT can survive and color entire converted lines)
+    // Force re-lex of the patched range only (or the full doc on
+    // fullReplace). Colouring full-doc on every refresh was 3 ms / call
+    // — accounting for ~20% of refresh time on big structs.
     {
+        PROFILE_SCOPE("applyDocument.colourise");
+        if (didPatch) {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE,
+                                 (uintptr_t)patchByteStart,
+                                 (long)(patchByteStart + patchByteLen));
+        } else {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, (uintptr_t)0, (long)-1);
+        }
+    }
+
+    // Compute changed line range by comparing new meta against m_prevMeta.
+    // When small, per-line passes (line attributes, hex dim, heatmap,
+    // indicators) operate only on that range — markers/indicators on
+    // surrounding lines are preserved across SCI_REPLACETARGET, so
+    // there's no need to clear-and-rebuild the entire document.
+    int firstChanged = -1, lastChanged = -1;
+    if (m_lastApplyWasPatch && !m_prevMeta.isEmpty()) {
+        PROFILE_SCOPE("applyDocument.metaDiff");
+        const int newN = result.meta.size();
+        const int oldN = m_prevMeta.size();
+        // Equivalence: same visual state on this line. ANY field consumed
+        // by the per-line passes (applyLineAttributes, applyHexDimming,
+        // applyHeatmapHighlight, applySymbolColoring, indicator/marker
+        // re-paint loops) must be compared here — otherwise a kind change
+        // (e.g. Hex8 → Int8 via the U/S/F/P shortcuts) would slip through
+        // unchanged, leaving stale IND_HEX_DIM coloring on the new type.
+        auto sameLine = [](const LineMeta& a, const LineMeta& b) {
+            return a.nodeId == b.nodeId
+                && a.subLine == b.subLine
+                && a.lineKind == b.lineKind
+                && a.nodeKind == b.nodeKind
+                && a.elementKind == b.elementKind
+                && a.foldLevel == b.foldLevel
+                && a.markerMask == b.markerMask
+                && a.depth == b.depth
+                && a.foldHead == b.foldHead
+                && a.foldCollapsed == b.foldCollapsed
+                && a.braceCol == b.braceCol
+                && a.isContinuation == b.isContinuation
+                && a.isRootHeader == b.isRootHeader
+                && a.isArrayHeader == b.isArrayHeader
+                && a.isArrayElement == b.isArrayElement
+                && a.isMemberLine == b.isMemberLine
+                && a.isStaticLine == b.isStaticLine
+                && a.heatLevel == b.heatLevel
+                && a.commentStart == b.commentStart
+                && a.typeHintStart == b.typeHintStart
+                && a.lineByteCount == b.lineByteCount
+                && a.effectiveTypeW == b.effectiveTypeW
+                && a.effectiveNameW == b.effectiveNameW
+                && a.pointerTargetName == b.pointerTargetName;
+        };
+        int first = 0;
+        while (first < newN && first < oldN
+               && sameLine(m_prevMeta[first], result.meta[first]))
+            ++first;
+        if (first < newN || newN != oldN) {
+            int last = newN - 1, oldLast = oldN - 1;
+            while (last >= first && oldLast >= first
+                   && sameLine(m_prevMeta[oldLast], result.meta[last])) {
+                --last; --oldLast;
+            }
+            firstChanged = first;
+            lastChanged = qMax(last, first);  // at least one entry
+        }
+    }
+
+    // Clear TEXTFORE indicators across the whole doc. Narrowing this to
+    // [firstChanged, lastChanged] caused old hex64 lines to lose their
+    // IND_HEX_DIM in production (Scintilla edge case: indicators don't
+    // always survive REPLACETARGET as cleanly as the docs imply when
+    // the patch lands at a line boundary on a styled buffer). The
+    // narrow-marker path below still saves the expensive markerAdd
+    // loop; indicators are cheap (microseconds even on 1000-line
+    // structs) so always-full is the correct default here.
+    {
+        PROFILE_SCOPE("applyDocument.clearIndicators");
         long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
         for (int ind : {IND_HEX_DIM, IND_BASE_ADDR, IND_HOVER_SPAN, IND_HEAT_COLD,
                         IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
@@ -940,40 +1106,44 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         }
     }
 
-    applyLineAttributes(result.meta);
-    applyHexDimming(result.meta);
+    // Marker/margin work stays narrowed — that's where the real cost
+    // was (~2.6 ms/refresh in production for applyLineAttributes on a
+    // 1000-line struct). Indicator work below is forced full-pass.
+    applyLineAttributes(result.meta, firstChanged, lastChanged);
+    applyHexDimming(result.meta, /*firstLine=*/-1, /*lastLine=*/-1);
 
-    // Build line-text cache from compose text directly (avoids per-line Scintilla IPC).
-    // The compose text includes fold-indicator prefixes (3 chars) added by emitLine(),
-    // but indicator column positions already account for this via kFoldCol offset.
+    // Build line-text cache using the lineStarts array compose() already
+    // computed. O(N) slice of the buffer rather than O(N) char scan +
+    // O(N) QString allocations from a manual split.
     QVector<QString> lineTexts(result.meta.size());
     {
-        int lineIdx = 0;
-        int start = 0;
-        for (int i = 0; i <= result.text.size() && lineIdx < result.meta.size(); i++) {
-            if (i == result.text.size() || result.text[i] == '\n') {
-                lineTexts[lineIdx] = result.text.mid(start, i - start);
-                lineIdx++;
-                start = i + 1;
-            }
+        const int n = qMin(result.meta.size(), result.lineStarts.size());
+        for (int i = 0; i < n; ++i) {
+            int start = result.lineStarts[i];
+            int end = (i + 1 < n) ? result.lineStarts[i + 1] - 1
+                                  : result.text.size();
+            lineTexts[i] = result.text.mid(start, end - start);
         }
     }
-    applyHeatmapHighlight(result.meta, lineTexts);
-    applySymbolColoring(result.meta, lineTexts);
+    // Indicator passes are forced full-doc (see clearIndicators rationale
+    // above). Cheap — tens of microseconds even on 1000-line structs.
+    applyHeatmapHighlight(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
+    applySymbolColoring(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
 
-    // Apply green coloring to user comments (same indicator as symbol annotations)
-    for (int i = 0; i < result.meta.size(); i++) {
+    // Apply green coloring to user comments (same indicator as symbol annotations).
+    for (int i = 0; i < result.meta.size(); ++i) {
         const auto& lm = result.meta[i];
-        if (lm.commentStart >= 0 && !lineTexts[i].isEmpty())
+        if (lm.commentStart >= 0 && i < lineTexts.size() && !lineTexts[i].isEmpty())
             fillIndicatorCols(IND_HINT_GREEN, i, lm.commentStart, lineTexts[i].size());
     }
 
     applyCommandRowPills();
 
-    // Footer buttons — pill styling
-    for (int i = 0; i < result.meta.size(); i++) {
-        if (result.meta[i].lineKind != LineKind::Footer) continue;
-        const QString& ft = lineTexts[i];
+    // Footer pill styling — full-doc (indicators forced full-pass).
+    {
+        for (int i = 0; i < result.meta.size(); i++) {
+            if (result.meta[i].lineKind != LineKind::Footer) continue;
+            const QString& ft = lineTexts[i];
         // Single-field add chip — search ` +1 ` (padded so the token can't
         // collide with +10/+10h/+100h/+1000h, which all have a digit after
         // +1). Paint only the visible `+1` (cols pPlusOne+1..pPlusOne+3)
@@ -1004,9 +1174,10 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         int topStart = ft.indexOf(QStringLiteral("Top"));
         if (topStart >= 0)
             fillIndicatorCols(IND_CMD_PILL, i, topStart, topStart + 3);
+        }
     }
 
-    // Apply type inference hint coloring (green, same as comment annotations)
+    // Apply type inference hint coloring — full-doc (indicators forced).
     for (int i = 0; i < result.meta.size(); i++) {
         const auto& lm = result.meta[i];
         if (lm.typeHintStart < 0) continue;
@@ -1074,30 +1245,50 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         }
     }
 
+    // Stash meta for the next frame's diff. Done last so any earlier code
+    // that needs the previous-frame state has already consumed it.
+    m_prevMeta = result.meta;
+
     // Notify minimap / any passive mirror that text has been updated. Fired
     // last so receivers see the final Scintilla state (post-indicator apply).
     emit documentApplied(result.text);
 }
 
-void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta) {
-    // Margin text
+void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta, int firstLine, int lastLine) {
+    PROFILE_SCOPE("applyLineAttributes");
+    bool full = (firstLine < 0);
+    int begin = full ? 0 : firstLine;
+    int end = full ? meta.size() : qMin(lastLine + 1, meta.size());
+
+    // Margin text is FORCED full-pass even on a narrow update. Reason:
+    // SCI_REPLACETARGET that inserts a '\n' renumbers Scintilla's lines,
+    // but margin-text storage doesn't reliably follow — older fields end
+    // up with blank margins after a spam-append. Margin work is cheap
+    // (~10 µs full-pass), so always re-apply across the document.
     if (m_relativeOffsets) {
-        reformatMargins();
+        reformatMargins(/*firstLine=*/-1, /*lastLine=*/-1);
     } else {
         m_sci->clearMarginText(-1);
     }
 
-    // Clear markers
-    for (int m = M_CONT; m <= M_STRUCT_BG; m++)
-        m_sci->markerDeleteAll(m);
-    m_sci->markerDeleteAll(M_CMD_ROW);
+    // Clear markers — full clear when full pass; per-line when narrowed.
+    if (full) {
+        for (int m = M_CONT; m <= M_STRUCT_BG; m++)
+            m_sci->markerDeleteAll(m);
+        m_sci->markerDeleteAll(M_CMD_ROW);
+    } else {
+        for (int i = begin; i < end; ++i) {
+            for (int m = M_CONT; m <= M_STRUCT_BG; m++)
+                m_sci->markerDelete(i, m);
+            m_sci->markerDelete(i, M_CMD_ROW);
+        }
+    }
 
-    // Single pass: margin text (absolute mode), markers, fold levels
-    for (int i = 0; i < meta.size(); i++) {
-        const auto& lm = meta[i];
-
-        // Margin text (only in absolute offset mode; reformatMargins handles relative)
-        if (!m_relativeOffsets && !lm.offsetText.isEmpty()) {
+    // Margin text — full-pass (see rationale above).
+    if (!m_relativeOffsets) {
+        for (int i = 0; i < meta.size(); i++) {
+            const auto& lm = meta[i];
+            if (lm.offsetText.isEmpty()) continue;
             QByteArray text = lm.offsetText.toUtf8();
             m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETTEXT,
                                  (uintptr_t)i, text.constData());
@@ -1105,8 +1296,12 @@ void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLES,
                                  (uintptr_t)i, styles.constData());
         }
+    }
 
-        // Markers
+    // Markers + fold levels — narrow when requested (this is the expensive part).
+    for (int i = begin; i < end; i++) {
+        const auto& lm = meta[i];
+
         if (lm.lineKind == LineKind::CommandRow) {
             m_sci->markerAdd(i, M_CMD_ROW);
         } else {
@@ -1117,15 +1312,18 @@ void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta) {
             }
         }
 
-        // Fold level
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETFOLDLEVEL,
                              (unsigned long)i, (long)lm.foldLevel);
     }
 }
 
-void RcxEditor::reformatMargins() {
+void RcxEditor::reformatMargins(int firstLine, int lastLine) {
+    PROFILE_SCOPE("reformatMargins");
     uint64_t base = m_layout.baseAddress;
     int hexDigits = m_layout.offsetHexDigits;
+    bool full = (firstLine < 0);
+    int begin = full ? 0 : firstLine;
+    int end = full ? m_meta.size() : qMin(lastLine + 1, (int)m_meta.size());
 
     // Resize margin: RVA offsets are much shorter than full addresses
     int marginDigits = m_relativeOffsets ? qMax(hexDigits / 2, 4) : hexDigits;
@@ -1133,8 +1331,14 @@ void RcxEditor::reformatMargins() {
     m_sci->setMarginWidth(0, marginSizer);
 
     // ── Pass 1: margin text (global offset only) ──
-    m_sci->clearMarginText(-1);
-    for (int i = 0; i < m_meta.size(); i++) {
+    if (full) {
+        m_sci->clearMarginText(-1);
+    } else {
+        for (int i = begin; i < end; ++i)
+            m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETTEXT,
+                                 (uintptr_t)i, "");
+    }
+    for (int i = begin; i < end; i++) {
         auto& lm = m_meta[i];
 
         if (lm.isContinuation || lm.isMemberLine) {
@@ -1173,7 +1377,7 @@ void RcxEditor::reformatMargins() {
     if (m_layout.treeLines)
         return;
     m_sci->setReadOnly(false);
-    for (int i = 0; i < m_meta.size(); i++) {
+    for (int i = begin; i < end; i++) {
         const auto& lm = m_meta[i];
         if (lm.depth <= 1 || lm.isContinuation) continue;
         if (lm.lineKind != LineKind::Field && lm.lineKind != LineKind::Header)
@@ -1278,9 +1482,13 @@ void RcxEditor::fillIndicatorCols(int indic, int line, int colA, int colB) {
     }
 }
 
-void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta) {
+void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta, int firstLine, int lastLine) {
+    PROFILE_SCOPE("applyHexDimming");
+    bool full = (firstLine < 0);
+    int begin = full ? 0 : firstLine;
+    int end = full ? meta.size() : qMin(lastLine + 1, (int)meta.size());
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HEX_DIM);
-    for (int i = 0; i < meta.size(); i++) {
+    for (int i = begin; i < end; i++) {
         // Dim fold arrows (▸/▾) on fold head lines
         if (meta[i].foldHead && meta[i].lineKind != LineKind::CommandRow)
             fillIndicatorCols(IND_HEX_DIM, i, 0, kFoldCol);
@@ -1304,6 +1512,13 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta) {
 }
 
 void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
+    PROFILE_SCOPE("applySelectionOverlay");
+    // Skip when nothing changed since the last call AND the previous
+    // applyDocument took the patch path (so markers outside the patched
+    // range are still intact). Saves ~22 µs/refresh during rapid editing
+    // when selection holds steady. Full-replace path always invalidates.
+    if (selIds == m_currentSelIds && m_lastApplyWasPatch)
+        return;
     m_currentSelIds = selIds;
     m_sci->markerDeleteAll(M_SELECTED);
     m_sci->markerDeleteAll(M_ACCENT);
@@ -1722,10 +1937,15 @@ static QString getLineText(QsciScintilla* sci, int line) {
 }
 
 void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta,
-                                       const QVector<QString>& lineTexts) {
+                                       const QVector<QString>& lineTexts,
+                                       int firstLine, int lastLine) {
+    PROFILE_SCOPE("applyHeatmapHighlight");
     static constexpr int heatIndicators[] = { IND_HEAT_COLD, IND_HEAT_WARM, IND_HEAT_HOT };
+    bool full = (firstLine < 0);
+    int begin = full ? 0 : firstLine;
+    int end = full ? meta.size() : qMin(lastLine + 1, (int)meta.size());
 
-    for (int i = 0; i < meta.size(); i++) {
+    for (int i = begin; i < end; i++) {
         const LineMeta& lm = meta[i];
         if (isSyntheticLine(lm)) continue;
 
@@ -1760,8 +1980,13 @@ void RcxEditor::applyHeatmapHighlight(const QVector<LineMeta>& meta,
 }
 
 void RcxEditor::applySymbolColoring(const QVector<LineMeta>& meta,
-                                     const QVector<QString>& lineTexts) {
-    for (int i = 0; i < meta.size(); i++) {
+                                     const QVector<QString>& lineTexts,
+                                     int firstLine, int lastLine) {
+    PROFILE_SCOPE("applySymbolColoring");
+    bool full = (firstLine < 0);
+    int begin = full ? 0 : firstLine;
+    int end = full ? meta.size() : qMin(lastLine + 1, (int)meta.size());
+    for (int i = begin; i < end; i++) {
         const LineMeta& lm = meta[i];
         if (!isFuncPtr(lm.nodeKind)
             && lm.nodeKind != NodeKind::Pointer32
@@ -1794,6 +2019,7 @@ void RcxEditor::applyBaseAddressColoring(const QVector<LineMeta>& meta) {
 }
 
 void RcxEditor::applyCommandRowPills() {
+    PROFILE_SCOPE("applyCommandRowPills");
     if (m_meta.isEmpty() || m_meta[0].lineKind != LineKind::CommandRow) return;
 
     constexpr int line = 0;
@@ -4727,6 +4953,11 @@ void RcxEditor::setCommandRowText(const QString& line) {
     QString s = line;
     s.replace('\n', ' ');
     s.replace('\r', ' ');
+    // Skip the SCI_REPLACETARGET + COLOURISE + applyCommandRowPills work
+    // when nothing changed. Common during rapid editing when only field
+    // text on later lines is mutating but the command row stays put.
+    if (s == m_lastCommandRowText) return;
+    m_lastCommandRowText = s;
 
     bool wasReadOnly = m_sci->isReadOnly();
     bool wasModified = m_sci->SendScintilla(QsciScintillaBase::SCI_GETMODIFY);

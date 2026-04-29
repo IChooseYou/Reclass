@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include "profiler.h"
+#include "profilerdialog.h"
 #include "typeselectorpopup.h"
 #include "providerregistry.h"
 #include <QInputDialog>
@@ -1355,6 +1357,9 @@ void MainWindow::createMenus() {
     // Tools
     auto* tools = m_menuBar->addMenu("&Tools");
     Qt5Qt6AddAction(tools, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
+    Qt5Qt6AddAction(tools, "&Performance Profiler...",
+                    QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F),
+                    QIcon(), this, &MainWindow::showProfilerDialog);
     tools->addSeparator();
     const auto mcpName = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
     m_mcpAction = Qt5Qt6AddAction(tools, mcpName, QKeySequence::UnknownKey, QIcon(), this, &MainWindow::toggleMcp);
@@ -4086,6 +4091,17 @@ void MainWindow::editTheme() {
 }
 
 void MainWindow::showOptionsDialog() { showOptionsDialog(-1); }
+
+void MainWindow::showProfilerDialog() {
+    // Lightweight RAII timer aggregator. Dialog auto-enables profiling
+    // on first open so the user gets samples immediately.
+    static QPointer<rcx::ProfilerDialog> s_dlg;
+    if (!s_dlg) s_dlg = new rcx::ProfilerDialog(this);
+    rcx::Profiler::instance().setEnabled(true);
+    s_dlg->show();
+    s_dlg->raise();
+    s_dlg->activateWindow();
+}
 
 void MainWindow::showOptionsDialog(int initialPage) {
     auto& tm = ThemeManager::instance();

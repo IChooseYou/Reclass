@@ -1,6 +1,7 @@
 #include "controller.h"
 #include "addressparser.h"
 #include "symbolstore.h"
+#include "profiler.h"
 #include "typeselectorpopup.h"
 #include "sourcechooserpopup.h"
 #include "hextoolbarpopup.h"
@@ -890,8 +891,12 @@ void RcxController::connectEditor(RcxEditor* editor) {
         uint64_t targetId = structId;
         if (m_doc->tree.childrenOf(structId).isEmpty() && parent.refId != 0)
             targetId = parent.refId;
-        // Auto-name based on the next slot offset for consistency with the
-        // multi-byte append path.
+        // Auto-name + auto-place at the end of the parent's children. Build
+        // the Node inline (rather than calling insertNode) so we can capture
+        // the reserved id and move selection to the freshly-appended field
+        // afterward — without that, repeated Down kept the *original* field
+        // selected and visually each new line inherited a "selected"
+        // appearance from leftover markers.
         int slotOffset = 0;
         for (int ci : m_doc->tree.childrenOf(targetId)) {
             const Node& sib = m_doc->tree.nodes[ci];
@@ -899,8 +904,23 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 ? m_doc->tree.structSpan(sib.id) : sib.byteSize();
             slotOffset = qMax(slotOffset, sib.offset + sz);
         }
-        insertNode(targetId, -1, NodeKind::Hex64,
-                   QStringLiteral("field_%1").arg(slotOffset, 4, 16, QChar('0')));
+        int align = alignmentFor(NodeKind::Hex64);
+        Node n;
+        n.kind     = NodeKind::Hex64;
+        n.parentId = targetId;
+        n.offset   = (slotOffset + align - 1) / align * align;
+        n.name     = QStringLiteral("field_%1").arg(n.offset, 4, 16, QChar('0'));
+        n.id       = m_doc->tree.reserveId();
+        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
+
+        // Move selection to the new node so a subsequent Down appends after
+        // it (and so the user can immediately retype the kind via U/S/F/P).
+        m_selIds.clear();
+        m_selIds.insert(n.id);
+        m_anchorLine = -1;
+        updateCommandRow();
+        applySelectionOverlays();
+        emit selectionChanged(m_selIds.size());
     });
 
     connect(editor, &RcxEditor::appendBytesRequested,
@@ -1169,15 +1189,18 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 }
             }
             auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
-            if (result.ok && result.value != m_doc->tree.baseAddress) {
+            if (result.ok) {
+                // Preserve user-typed expression unless it's a bare hex/decimal literal
+                // that round-trips identically through the canonical "0xHEX" display.
+                static const QRegularExpression literalRx(
+                    QStringLiteral("^\\s*(?:0[xX][0-9A-Fa-f]+|\\d+)\\s*$"));
+                QString newFormula = literalRx.match(s).hasMatch() ? QString() : s;
                 uint64_t oldBase = m_doc->tree.baseAddress;
                 QString oldFormula = m_doc->tree.baseAddressFormula;
-                // Store formula if input uses module/deref/kernel-function/symbol syntax
-                static const QRegularExpression formulaRx(
-                    QStringLiteral("[<\\[]|\\b(?:vtop|cr3|phys)\\s*\\(|\\w+!\\w+"));
-                QString newFormula = formulaRx.match(s).hasMatch() ? s : QString();
-                m_doc->undoStack.push(new RcxCommand(this,
-                    cmd::ChangeBase{oldBase, result.value, oldFormula, newFormula}));
+                if (result.value != oldBase || newFormula != oldFormula) {
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangeBase{oldBase, result.value, oldFormula, newFormula}));
+                }
             }
             break;
         }
@@ -1346,6 +1369,7 @@ void RcxController::resetChangeTracking() {
 }
 
 void RcxController::refresh() {
+    PROFILE_SCOPE("refresh");
     // Bracket compose with thread-local doc pointer for type name resolution.
     // RAII guard restores the previous value on scope exit — safe against any
     // exception compose might throw.
@@ -1476,19 +1500,25 @@ void RcxController::refresh() {
         : (m_doc->provider ? m_doc->provider.get() : nullptr);
     const Provider* realProv = m_doc->provider ? m_doc->provider.get() : nullptr;
 
-    for (auto* editor : m_editors) {
-        editor->setCustomTypeNames(customTypes);
-        editor->setValueHistoryRef(&m_valueHistory);
-        editor->setProviderRef(snapProv, realProv, &m_doc->tree);
-        ViewState vs = editor->saveViewState();
-        editor->applyDocument(m_lastResult);
-        editor->restoreViewState(vs);
+    {
+        PROFILE_SCOPE("refresh.applyToEditors");
+        for (auto* editor : m_editors) {
+            editor->setCustomTypeNames(customTypes);
+            editor->setValueHistoryRef(&m_valueHistory);
+            editor->setProviderRef(snapProv, realProv, &m_doc->tree);
+            ViewState vs = editor->saveViewState();
+            editor->applyDocument(m_lastResult);
+            editor->restoreViewState(vs);
+        }
     }
     // Text-modifying passes first (command row replaces line 0 text),
     // then overlays last so hover indicators survive the refresh.
-    pushSavedSourcesToEditors();
-    updateCommandRow();
-    applySelectionOverlays();
+    {
+        PROFILE_SCOPE("refresh.tail");
+        pushSavedSourcesToEditors();
+        updateCommandRow();
+        applySelectionOverlays();
+    }
 }
 
 void RcxController::convertRootKeyword(const QString& newKeyword) {

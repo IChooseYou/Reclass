@@ -833,6 +833,14 @@ struct ComposeResult {
     QString            text;
     QVector<LineMeta>  meta;
     LayoutInfo         layout;
+    // Pre-computed by compose so applyDocument doesn't need to re-scan.
+    // - maxLineLen: longest line length in chars, ignoring trailing spaces
+    //   (drives SCI_SETSCROLLWIDTH).
+    // - lineStarts: char offset of the start of each line in `text`.
+    //   Size matches meta.size(); applyDocument uses it to slice line
+    //   texts in O(1) instead of re-splitting on '\n'.
+    int                maxLineLen = 0;
+    QVector<int>       lineStarts;
 };
 
 // ── Command ──

@@ -1,6 +1,7 @@
 #include "core.h"
 #include "typeinfer.h"
 #include "addressparser.h"
+#include "profiler.h"
 #include <algorithm>
 #include <numeric>
 
@@ -59,6 +60,8 @@ constexpr uint64_t kGoldenRatio      = 0x9E3779B97F4A7C15ULL;
 struct ComposeState {
     QString            text;
     QVector<LineMeta>  meta;
+    QVector<int>       lineStarts;    // char offset of each line in `text`
+    int                maxLineLen = 0;// longest line in chars, trailing spaces excluded
     QSet<uint64_t>     visiting;      // cycle detection for struct recursion
     QSet<qulonglong>   ptrVisiting;   // cycle guard for pointer expansions
     QSet<uint64_t>     virtualPtrRefs; // refIds currently being virtually expanded via pointer deref
@@ -102,7 +105,10 @@ struct ComposeState {
     }
 
     void emitLine(const QString& lineText, LineMeta&& lm) {
+        // Record this line's char offset in text + the global '\n' if any.
         if (currentLine > 0) text += '\n';
+        lineStarts.append(text.size());
+        int lineStartChars = text.size();
         // 3-char fold indicator column: " - " expanded, " + " collapsed, "   " other
         // CommandRow has no fold prefix (flush left)
         if (lm.lineKind == LineKind::CommandRow
@@ -153,6 +159,16 @@ struct ComposeState {
 
         meta.append(std::move(lm));
         currentLine++;
+
+        // Track the longest line length (excluding trailing spaces) so
+        // applyDocument can set SCI_SETSCROLLWIDTH without re-scanning.
+        int lineEnd = text.size();
+        int len = lineEnd - lineStartChars;
+        // Trim trailing spaces in-place by counting backwards.
+        int lastNonSpace = len;
+        while (lastNonSpace > 0 && text[lineStartChars + lastNonSpace - 1] == ' ')
+            --lastNonSpace;
+        if (lastNonSpace > maxLineLen) maxLineLen = lastNonSpace;
     }
 };
 
@@ -1194,6 +1210,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
                       bool compactColumns, bool treeLines, bool braceWrap,
                       bool typeHints, bool showComments,
                       SymbolLookupFn symbolLookup) {
+    PROFILE_SCOPE("compose");
     ComposeState state;
     state.compactColumns = compactColumns;
     state.treeLines = treeLines;
@@ -1215,51 +1232,54 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     // Precompute absolute offsets via BFS (O(N) — avoids per-node parent-chain walk).
     // Treats any node with a missing parentId as a root so orphans don't silently
     // land at offset 0 (which would compose them on top of real root structs).
-    state.absOffsets.resize(tree.nodes.size());
-    state.absOffsets.fill(0);
-    QVector<bool> visited(tree.nodes.size(), false);
-    for (int i = 0; i < tree.nodes.size(); i++)
-        if (tree.nodes[i].parentId == 0)
-            state.absOffsets[i] = tree.nodes[i].offset;
     {
-        QVector<int> bfsQueue;
-        for (int i : state.childMap.value(0)) {
-            bfsQueue.append(i);
-            visited[i] = true;
-        }
-        int front = 0;
-        while (front < bfsQueue.size()) {
-            int idx = bfsQueue[front++];
-            int pi = tree.indexOfId(tree.nodes[idx].parentId);
-            state.absOffsets[idx] = (pi >= 0 ? state.absOffsets[pi] : 0)
-                                  + tree.nodes[idx].offset;
-            for (int ci : state.childMap.value(tree.nodes[idx].id)) {
-                if (!visited[ci]) { visited[ci] = true; bfsQueue.append(ci); }
-            }
-        }
-        // Any node still unvisited is either an orphan (parentId points to
-        // nothing) or part of a parent-chain that doesn't reach root.
-        // Treat as a top-level root so its offset isn't garbage 0.
-        for (int i = 0; i < tree.nodes.size(); i++) {
-            if (!visited[i]) {
+        PROFILE_SCOPE("compose.absOffsets-BFS");
+        state.absOffsets.resize(tree.nodes.size());
+        state.absOffsets.fill(0);
+        QVector<bool> visited(tree.nodes.size(), false);
+        for (int i = 0; i < tree.nodes.size(); i++)
+            if (tree.nodes[i].parentId == 0)
                 state.absOffsets[i] = tree.nodes[i].offset;
+        {
+            QVector<int> bfsQueue;
+            for (int i : state.childMap.value(0)) {
+                bfsQueue.append(i);
                 visited[i] = true;
-                // Walk descendants to fix their offsets too
-                QVector<int> q; q.append(i);
-                while (!q.isEmpty()) {
-                    int p = q.takeLast();
-                    for (int ci : state.childMap.value(tree.nodes[p].id)) {
-                        if (visited[ci]) continue;
-                        visited[ci] = true;
-                        state.absOffsets[ci] = state.absOffsets[p] + tree.nodes[ci].offset;
-                        q.append(ci);
+            }
+            int front = 0;
+            while (front < bfsQueue.size()) {
+                int idx = bfsQueue[front++];
+                int pi = tree.indexOfId(tree.nodes[idx].parentId);
+                state.absOffsets[idx] = (pi >= 0 ? state.absOffsets[pi] : 0)
+                                      + tree.nodes[idx].offset;
+                for (int ci : state.childMap.value(tree.nodes[idx].id)) {
+                    if (!visited[ci]) { visited[ci] = true; bfsQueue.append(ci); }
+                }
+            }
+            // Any node still unvisited is either an orphan (parentId points to
+            // nothing) or part of a parent-chain that doesn't reach root.
+            // Treat as a top-level root so its offset isn't garbage 0.
+            for (int i = 0; i < tree.nodes.size(); i++) {
+                if (!visited[i]) {
+                    state.absOffsets[i] = tree.nodes[i].offset;
+                    visited[i] = true;
+                    // Walk descendants to fix their offsets too
+                    QVector<int> q; q.append(i);
+                    while (!q.isEmpty()) {
+                        int p = q.takeLast();
+                        for (int ci : state.childMap.value(tree.nodes[p].id)) {
+                            if (visited[ci]) continue;
+                            visited[ci] = true;
+                            state.absOffsets[ci] = state.absOffsets[p] + tree.nodes[ci].offset;
+                            q.append(ci);
+                        }
                     }
                 }
             }
         }
+        for (auto& v : state.absOffsets)
+            v += tree.baseAddress;
     }
-    for (auto& v : state.absOffsets)
-        v += tree.baseAddress;
 
     // Compute hex digit tier from max absolute address
     {
@@ -1290,6 +1310,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
 
     // Pre-compute type name lengths (avoids re-creating temp QStrings in width loops)
     QVector<int> typeNameLens(tree.nodes.size());
+    {
+    PROFILE_SCOPE("compose.widths");
     for (int i = 0; i < tree.nodes.size(); i++)
         typeNameLens[i] = nodeTypeName(tree.nodes[i]).size();
 
@@ -1359,6 +1381,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
         state.scopeTypeW[0] = qBound(kMinTypeW, rootMaxType, typeCap);
         state.scopeNameW[0] = qBound(kMinNameW, rootMaxName, kMaxNameW);
     }
+    }  // end PROFILE_SCOPE("compose.widths")
 
     // Emit CommandRow as line 0 (combined: source + address + root class type + name)
     const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE  0x0  struct NoName {");
@@ -1395,14 +1418,23 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
 
     const QVector<int>& roots = childIndices(state, 0);
 
-    for (int idx : roots) {
-        // If viewRootId is set, skip roots that don't match
-        if (viewRootId != 0 && tree.nodes[idx].id != viewRootId)
-            continue;
-        composeNode(state, tree, prov, idx, 0);
+    {
+        PROFILE_SCOPE("compose.walk-nodes");
+        for (int idx : roots) {
+            // If viewRootId is set, skip roots that don't match
+            if (viewRootId != 0 && tree.nodes[idx].id != viewRootId)
+                continue;
+            composeNode(state, tree, prov, idx, 0);
+        }
     }
 
-    return { state.text, state.meta, LayoutInfo{state.typeW, state.nameW, state.offsetHexDigits, tree.baseAddress, treeLines} };
+    ComposeResult cr;
+    cr.text       = std::move(state.text);
+    cr.meta       = std::move(state.meta);
+    cr.layout     = LayoutInfo{state.typeW, state.nameW, state.offsetHexDigits, tree.baseAddress, treeLines};
+    cr.maxLineLen = state.maxLineLen;
+    cr.lineStarts = std::move(state.lineStarts);
+    return cr;
 }
 
 QSet<uint64_t> NodeTree::normalizePreferAncestors(const QSet<uint64_t>& ids) const {

@@ -82,6 +82,7 @@ private slots:
     void editTheme();
     void showOptionsDialog();
     void showOptionsDialog(int initialPage);
+    void showProfilerDialog();
 
 public:
     // Status bar helpers — separate app / MCP channels
