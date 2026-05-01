@@ -388,6 +388,13 @@ struct NodeTree {
     uint64_t      baseAddress = 0x00400000;
     QString       baseAddressFormula;  // e.g. "<ReClass.exe> + 0x100"
     int           pointerSize = 8;    // 4 for 32-bit targets, 8 for 64-bit
+    // Save-file "auto-open" tag — names the class (by structTypeName, or
+    // by Node.name as fallback) that should be the active view when the
+    // project is loaded. Non-binding: if the class isn't found we fall
+    // back to the first root struct. The tutorial / selfTest sets this
+    // to "RcxEditor" plus a live baseAddress so Continue lands on the
+    // demo immediately.
+    QString       initialClass;
     QVector<Bookmark> bookmarks;       // user-named addresses
     uint64_t      m_nextId    = 1;
     mutable QHash<uint64_t, int> m_idCache;
@@ -630,6 +637,8 @@ struct NodeTree {
         o["baseAddress"] = QString::number(baseAddress, 16);
         if (!baseAddressFormula.isEmpty())
             o["baseAddressFormula"] = baseAddressFormula;
+        if (!initialClass.isEmpty())
+            o["initialClass"] = initialClass;
         if (pointerSize != 8)
             o["pointerSize"] = pointerSize;
         o["nextId"]      = QString::number(m_nextId);
@@ -648,6 +657,7 @@ struct NodeTree {
         NodeTree t;
         t.baseAddress = o["baseAddress"].toString("400000").toULongLong(nullptr, 16);
         t.baseAddressFormula = o["baseAddressFormula"].toString();
+        t.initialClass       = o["initialClass"].toString();
         t.pointerSize = o["pointerSize"].toInt(8);
         t.m_nextId    = o["nextId"].toString("1").toULongLong();
         QJsonArray arr = o["nodes"].toArray();
@@ -808,6 +818,9 @@ struct LineMeta {
     QString  typeHint;                 // Type inference hint text (e.g. "Float×2") — only set for hex nodes when hints enabled
     int      typeHintStart  = -1;      // Character offset where hint text starts in line text (-1 = none)
     QVector<NodeKind> typeHintKinds;   // Suggested kinds from inference (empty = no hint)
+    QString  rttiHint;                 // RTTI vtable hint text ("{RTTI: Foo}") — set when value points at MSVC vtable
+    int      rttiHintStart  = -1;      // Character offset where rttiHint begins (-1 = none)
+    uint64_t rttiVtableAddr = 0;       // The pointer value walked (for future click-through to RTTI browser)
     int      commentStart   = -1;      // Character offset where "// comment" starts in line text (-1 = none)
     int      braceCol       = -1;      // Column of trailing '{' on header lines (-1 = none); avoids per-char IPC scan
     uint64_t parentAddr     = 0;       // Absolute address of enclosing container (for relative offset display)

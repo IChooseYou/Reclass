@@ -306,6 +306,7 @@ static constexpr int IND_HEAT_WARM    = 17; // Heatmap level 2 (moderate changes
 static constexpr int IND_HEAT_HOT     = 18; // Heatmap level 3 (frequent changes)
 static constexpr int IND_FIND         = 19; // Search match highlight
 static constexpr int IND_TYPE_HINT    = 20; // Dimmed type inference hint text on hex nodes
+static constexpr int IND_RTTI_HINT    = 21; // Auto-detected RTTI vtable name hint (warm amber)
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -644,6 +645,12 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_TYPE_HINT, 17 /*INDIC_TEXTFORE*/);
 
+    // RTTI hint — warm amber text appended after typeHint when a vtable
+    // is auto-detected. Distinct color so it stands out as "this is real
+    // RTTI, not a generic guess."
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_RTTI_HINT, 17 /*INDIC_TEXTFORE*/);
+
     // Find match highlight — thick underline (avoids box rendering artifacts)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_FIND, 14 /*INDIC_COMPOSITIONTHICK*/);
@@ -794,6 +801,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_LOCAL_OFF, theme.textFaint);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_TYPE_HINT, theme.indHintGreen);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_RTTI_HINT, theme.indRttiHint);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_FIND, theme.borderFocused);
     // Lexer colors
@@ -997,6 +1006,15 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             m_sci->setReadOnly(false);
             m_sci->setText(newText);
             m_sci->setReadOnly(true);
+            // Full-replace just rewrote line 0 to compose's literal
+            // "[▸] source▾  0x0  struct NoName {" placeholder. Invalidate
+            // the setCommandRowText skip-cache so the controller's
+            // updateCommandRow() that runs next is forced to re-paint
+            // line 0 with the proper text. Without this clear, the cache
+            // says "we already wrote that" and line 0 stays stuck on the
+            // placeholder. (Patch path doesn't touch line 0 unless the
+            // diff covers it, so the cache stays valid there.)
+            m_lastCommandRowText.clear();
         }
         m_prevText = newText;
         m_lastApplyWasPatch = didPatch;
@@ -1067,6 +1085,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                 && a.heatLevel == b.heatLevel
                 && a.commentStart == b.commentStart
                 && a.typeHintStart == b.typeHintStart
+                && a.rttiHintStart == b.rttiHintStart
                 && a.lineByteCount == b.lineByteCount
                 && a.effectiveTypeW == b.effectiveTypeW
                 && a.effectiveNameW == b.effectiveNameW
@@ -1100,7 +1119,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
         for (int ind : {IND_HEX_DIM, IND_BASE_ADDR, IND_HOVER_SPAN, IND_HEAT_COLD,
                         IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
-                        IND_HEAT_HOT, IND_TYPE_HINT}) {
+                        IND_HEAT_HOT, IND_TYPE_HINT, IND_RTTI_HINT}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
             m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
         }
@@ -1184,6 +1203,16 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         const QString& ft = lineTexts[i];
         if (lm.typeHintStart < ft.size())
             fillIndicatorCols(IND_TYPE_HINT, i, lm.typeHintStart, ft.size());
+    }
+
+    // Apply RTTI hint coloring (warm amber). Painted as a separate pass so
+    // it overlays cleanly even when typeHint is disabled.
+    for (int i = 0; i < result.meta.size(); i++) {
+        const auto& lm = result.meta[i];
+        if (lm.rttiHintStart < 0) continue;
+        const QString& ft = lineTexts[i];
+        if (lm.rttiHintStart < ft.size())
+            fillIndicatorCols(IND_RTTI_HINT, i, lm.rttiHintStart, ft.size());
     }
 
     // Reset hint line - applySelectionOverlay will repaint indicators

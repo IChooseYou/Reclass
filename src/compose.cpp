@@ -2,6 +2,8 @@
 #include "typeinfer.h"
 #include "addressparser.h"
 #include "profiler.h"
+#include "rtti.h"
+#include "providers/provider.h"
 #include <algorithm>
 #include <numeric>
 
@@ -78,6 +80,14 @@ struct ComposeState {
     SymbolLookupFn     symbolLookup;             // optional PDB symbol lookup callback
     QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
+
+    // ── RTTI auto-detect cache (per compose pass) ──
+    // Module list is fetched lazily on first vtable candidate. walkRtti()
+    // results are memoized — both successes (avoid re-walk) and failures
+    // (avoid re-trying every refresh on the same arbitrary 8-byte word).
+    bool                              rttiModulesCached = false;
+    QVector<Provider::ModuleEntry>    rttiModules;
+    QHash<uint64_t, RttiInfo>         rttiCache;
 
     // Precomputed for O(1) lookups
     QHash<uint64_t, QVector<int>> childMap;
@@ -236,6 +246,44 @@ static const QVector<int>& childIndices(ComposeState& state, uint64_t parentId) 
     return it.value();
 }
 
+// Resolve RTTI for a candidate vtable address, cached per compose pass.
+// Module enumeration runs at most once per pass; values that don't land
+// inside any known module short-circuit before walkRtti is even called.
+// Negative results (ok=false) are cached too — prevents the parser from
+// being re-run on the same arbitrary qword every refresh tick.
+//
+// maxVtableSlots=0 is honored by walkRtti's `for (slot = 0; slot < cap; ++slot)`
+// loop (rtti.cpp:236) — it yields the demangled class name without
+// enumerating method addresses, which is all the inline hint needs.
+static const RttiInfo& rttiForVtable(ComposeState& state, const Provider& prov,
+                                     uint64_t candidateAddr) {
+    auto it = state.rttiCache.find(candidateAddr);
+    if (it != state.rttiCache.end()) return it.value();
+
+    if (!state.rttiModulesCached) {
+        state.rttiModules = prov.enumerateModules();
+        state.rttiModulesCached = true;
+    }
+
+    RttiInfo info;  // ok=false default — caches negative results
+    bool inModule = false;
+    for (const auto& m : state.rttiModules) {
+        if (candidateAddr >= m.base && candidateAddr < m.base + m.size) {
+            inModule = true; break;
+        }
+    }
+    if (inModule) {
+        // Try MSVC RTTI first (signature-validated, lower false-positive
+        // risk). Fall back to Itanium ABI for GCC/Clang/MinGW binaries —
+        // most C++ class instances on Linux/macOS, and any Reclass.exe
+        // self-attach (Reclass is MinGW-built) hit this path.
+        info = walkRtti(prov, candidateAddr, /*ptrSize=*/8, /*maxVtableSlots=*/0);
+        if (!info.ok)
+            info = walkRttiItanium(prov, candidateAddr, /*ptrSize=*/8, /*maxVtableSlots=*/0);
+    }
+    return state.rttiCache.insert(candidateAddr, info).value();
+}
+
 void composeLeaf(ComposeState& state, const NodeTree& tree,
                  const Provider& prov, int nodeIdx,
                  int depth, uint64_t absAddr, uint64_t scopeId) {
@@ -349,6 +397,30 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 else
                     lm.typeHint = QStringLiteral("[") + typeName + QStringLiteral("]");
                 lineText += QStringLiteral("  ") + lm.typeHint;
+            }
+        }
+
+        // RTTI auto-detect: hex64/Pointer64 whose value lands inside a known
+        // module is a vtable candidate. The module-range scan rejects ~99% of
+        // values cheaply; surviving candidates run walkRtti once and the
+        // result is cached for the rest of this compose pass. Independent of
+        // state.typeHints — RTTI is "real signal" worth showing on its own.
+        // Also independent of state.showComments.
+        if (sub == 0
+            && (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64)
+            && prov.isReadable(absAddr, 8)) {
+            uint64_t candidate = prov.readU64(absAddr);
+            if (candidate != 0 && candidate != UINT64_MAX) {
+                const RttiInfo& info = rttiForVtable(state, prov, candidate);
+                if (info.ok && !info.demangledName.isEmpty()) {
+                    QString hint = QStringLiteral(" {RTTI: ") + info.demangledName
+                                 + QStringLiteral("}");
+                    lm.rttiHintStart  = LineGeometry::forLine(lm)
+                                           .documentColumn(lineText.size() + 1);
+                    lm.rttiVtableAddr = candidate;
+                    lm.rttiHint       = hint;
+                    lineText += hint;
+                }
             }
         }
 
@@ -1083,6 +1155,31 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 QString ptrText = fmt::fmtPointerHeader(node, depth, effectiveCollapsed,
                                                          prov, absAddr, ptrTypeOverride,
                                                          typeW, nameW, state.compactColumns);
+                // RTTI hint on typed pointer headers: the pointer's value
+                // is *the vtable address itself*, not a struct/data pointer.
+                // composeLeaf's RTTI block doesn't see this case (typed
+                // pointers route through composeNode), so we duplicate the
+                // detect-and-attach here. Same per-pass cache, same amber
+                // indicator, same `{RTTI: …}` text.
+                if (prov.isReadable(absAddr, 8)) {
+                    uint64_t candidate = prov.readU64(absAddr);
+                    if (candidate != 0 && candidate != UINT64_MAX) {
+                        const RttiInfo& info = rttiForVtable(state, prov, candidate);
+                        if (info.ok && !info.demangledName.isEmpty()) {
+                            // Trim trailing spaces so the hint sits close
+                            // to the visible end of the pointer line.
+                            while (ptrText.endsWith(' ')) ptrText.chop(1);
+                            QString hint = QStringLiteral(" {RTTI: ")
+                                         + info.demangledName
+                                         + QStringLiteral("}");
+                            lm.rttiHintStart  = LineGeometry::forLine(lm)
+                                                   .documentColumn(ptrText.size() + 1);
+                            lm.rttiVtableAddr = candidate;
+                            lm.rttiHint       = hint;
+                            ptrText += hint;
+                        }
+                    }
+                }
                 if (state.braceWrap && !effectiveCollapsed && ptrText.endsWith(QChar('{'))) {
                     ptrText.chop(1);
                     while (ptrText.endsWith(' ')) ptrText.chop(1);

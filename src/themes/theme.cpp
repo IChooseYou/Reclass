@@ -33,6 +33,7 @@ const ThemeFieldMeta kThemeFields[] = {
     {"indHeatWarm",   "Heat Warm",      "Indicators",  &Theme::indHeatWarm},
     {"indHeatHot",    "Heat Hot",       "Indicators",  &Theme::indHeatHot},
     {"indHintGreen",  "Hint Green",     "Indicators",  &Theme::indHintGreen},
+    {"indRttiHint",   "RTTI Hint",      "Indicators",  &Theme::indRttiHint},
     {"markerPtr",     "Pointer",        "Markers",     &Theme::markerPtr},
     {"markerCycle",   "Cycle",          "Markers",     &Theme::markerCycle},
     {"markerError",   "Error",          "Markers",     &Theme::markerError},
@@ -74,6 +75,12 @@ Theme Theme::fromJson(const QJsonObject& o) {
 
     if (!t.focusGlow.isValid())
         t.focusGlow = t.borderFocused.isValid() ? t.borderFocused : QColor("#4fc3f7");
+
+    // RTTI hint defaults to a warm amber so it visibly contrasts the green
+    // type-inference hint when both fire on the same line. Themes can override
+    // via the JSON key; this only fires for themes that don't ship the field.
+    if (!t.indRttiHint.isValid())
+        t.indRttiHint = QColor("#d19a66");
 
     // Ensure hover is visually distinct from background
     if (t.hover.isValid() && t.background.isValid()) {

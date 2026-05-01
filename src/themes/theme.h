@@ -43,6 +43,7 @@ struct Theme {
     QColor indHeatWarm;     // heatmap level 2 (moderate changes)
     QColor indHeatHot;      // heatmap level 3 (frequent changes)
     QColor indHintGreen;    // comment/hint text
+    QColor indRttiHint;     // RTTI vtable name hint (distinct from indHintGreen)
 
     // ── Markers ──
     QColor markerPtr;       // null pointer

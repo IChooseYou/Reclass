@@ -14,6 +14,10 @@
 #include "symbol_downloader.h"
 #include "imports/pe_debug_info.h"
 #include "mcp/mcp_bridge.h"
+#include "gotoaddressdialog.h"
+#include "commandpalette.h"
+#include "rtti.h"
+#include "rttibrowser.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QMenuBar>
@@ -1279,37 +1283,15 @@ void MainWindow::createMenus() {
         });
     }
     {
-        auto* actGoTo = view->addAction("&Go to Offset...");
+        auto* actGoTo = view->addAction("&Go to Address...");
         actGoTo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
-        connect(actGoTo, &QAction::triggered, this, [this]() {
-            auto* ctrl = activeController();
-            if (!ctrl) return;
-            bool ok;
-            QString input = QInputDialog::getText(this,
-                QStringLiteral("Go to Offset"),
-                QStringLiteral("Hex offset within struct (e.g. 0x40):"),
-                QLineEdit::Normal, QString(), &ok);
-            if (!ok || input.trimmed().isEmpty()) return;
-            QString s = input.trimmed();
-            if (s.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) s = s.mid(2);
-            uint64_t offset = s.toULongLong(&ok, 16);
-            if (!ok) return;
-            const auto& result = ctrl->lastResult();
-            uint64_t base = ctrl->document()->tree.baseAddress;
-            int bestLine = -1;
-            int64_t bestDist = INT64_MAX;
-            for (int i = 0; i < result.meta.size(); i++) {
-                const auto& lm = result.meta[i];
-                if (lm.nodeIdx < 0 || lm.isContinuation) continue;
-                int64_t dist = qAbs((int64_t)(lm.offsetAddr - base) - (int64_t)offset);
-                if (dist < bestDist) { bestDist = dist; bestLine = i; }
-            }
-            if (bestLine >= 0 && activePaneEditor()) {
-                activePaneEditor()->scrollToNodeId(result.meta[bestLine].nodeId);
-                ctrl->handleNodeClick(activePaneEditor(), bestLine,
-                    result.meta[bestLine].nodeId, Qt::NoModifier);
-            }
-        });
+        connect(actGoTo, &QAction::triggered, this, &MainWindow::showGotoAddressDialog);
+    }
+    {
+        auto* actCmdPalette = view->addAction("Command &Palette...");
+        actCmdPalette->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_K));
+        connect(actCmdPalette, &QAction::triggered, this,
+                &MainWindow::showCommandPalette);
     }
 
     view->addSeparator();
@@ -1356,6 +1338,46 @@ void MainWindow::createMenus() {
 
     // Tools
     auto* tools = m_menuBar->addMenu("&Tools");
+    Qt5Qt6AddAction(tools, "&RTTI Browser",
+                    QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R), QIcon(), this, [this]() {
+        // Drill-down for the user-selected hex/pointer field. The compose
+        // pipeline already auto-detects RTTI inline as a hint; this opens
+        // the full hierarchy + vtable browser for the selected vtable.
+        // No prompt — discoverability comes from the inline hints.
+        auto* ctrl = activeController();
+        if (!ctrl || !ctrl->document()->provider) {
+            setAppStatus(QStringLiteral("No active provider"));
+            return;
+        }
+        const auto& sel = ctrl->selectedIds();
+        if (sel.size() != 1) {
+            setAppStatus(QStringLiteral("Select a hex/pointer field first"));
+            return;
+        }
+        uint64_t nid = (*sel.begin())
+            & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                | kMemberBit | kMemberSubMask);
+        int idx = ctrl->document()->tree.indexOfId(nid);
+        if (idx < 0) return;
+        const auto& n = ctrl->document()->tree.nodes[idx];
+        const bool is64 = (n.kind == NodeKind::Hex64 || n.kind == NodeKind::Pointer64);
+        const bool is32 = (n.kind == NodeKind::Hex32 || n.kind == NodeKind::Pointer32);
+        if (!is64 && !is32) {
+            setAppStatus(QStringLiteral("Selected field isn't a 4/8-byte word"));
+            return;
+        }
+        int64_t off = ctrl->document()->tree.computeOffset(idx);
+        if (off < 0) return;
+        uint64_t addr = ctrl->document()->tree.baseAddress + (uint64_t)off;
+        uint64_t val = is64
+            ? ctrl->document()->provider->readU64(addr)
+            : (uint64_t)ctrl->document()->provider->readU32(addr);
+        if (!val) {
+            setAppStatus(QStringLiteral("Field is null"));
+            return;
+        }
+        showRttiBrowser(val);
+    });
     Qt5Qt6AddAction(tools, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
     Qt5Qt6AddAction(tools, "&Performance Profiler...",
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F),
@@ -2728,12 +2750,34 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             });
     });
 
-    // Auto-focus on first root struct (don't show all roots)
-    for (const auto& n : doc->tree.nodes) {
-        if (n.parentId == 0 && n.kind == NodeKind::Struct) {
-            ctrl->setViewRootId(n.id);
-            break;
+    // Auto-focus rule: prefer the save-file's `initialClass` tag (a class
+    // name to auto-open on load); fall back to the first root struct when
+    // the tag is missing or names something we can't find. Match against
+    // both structTypeName (canonical) and Node::name so legacy projects
+    // that only set the instance name still work.
+    {
+        const QString& wanted = doc->tree.initialClass;
+        uint64_t targetId = 0;
+        if (!wanted.isEmpty()) {
+            for (const auto& n : doc->tree.nodes) {
+                if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+                if (n.structTypeName == wanted || n.name == wanted) {
+                    targetId = n.id;
+                    break;
+                }
+            }
         }
+        if (targetId == 0) {
+            // Fallback: first root struct
+            for (const auto& n : doc->tree.nodes) {
+                if (n.parentId == 0 && n.kind == NodeKind::Struct) {
+                    targetId = n.id;
+                    break;
+                }
+            }
+        }
+        if (targetId != 0)
+            ctrl->setViewRootId(targetId);
     }
 
     ctrl->refresh();
@@ -3288,7 +3332,8 @@ void MainWindow::newEnum() {
     project_new(QStringLiteral("enum"));
 }
 
-static void buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
+// Returns the RcxEditor root struct id so the caller can pin viewRootId.
+static uint64_t buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
     tree.nodes.clear();
     tree.invalidateIdCache();
     tree.m_nextId = 1;
@@ -3300,6 +3345,7 @@ static void buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
     root.name = QStringLiteral("editor");
     root.structTypeName = QStringLiteral("RcxEditor");
     root.classKeyword = QStringLiteral("class");
+    root.collapsed = false;
     int ri = tree.addNode(root);
     uint64_t rootId = tree.nodes[ri].id;
 
@@ -3328,68 +3374,120 @@ static void buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
     }
 
     // ── RcxEditor fields ──
-    // offset 0: vtable pointer → QWidgetVTable
-    {
+    // QObject layout (Qt 6 / Itanium ABI on MinGW):
+    //   +0  vtable pointer → QObject's vtable (effectively QWidget's via inheritance)
+    //   +8  QObjectData* d_ptr — Qt's pimpl, holds parent/children/objectName
+    // QWidget extends QObject and adds its own d_ptr-style internals; the
+    // exact size of QWidget's instance data depends on the Qt build, so we
+    // mark the QWidget body as raw bytes and let the user explore.
+    // Past the QWidget base, RcxEditor's own members start. The exact offsets
+    // depend on Qt build flags + compiler padding, so we don't hardcode them
+    // beyond +0 / +8 — the user sees them as hex64 and can rename / retype
+    // them live (which is the whole point of a Reclass tutorial).
+    auto addPtr = [&](uint64_t parent, int off, const QString& name,
+                      uint64_t refId = 0) {
         Node n;
         n.kind = NodeKind::Pointer64;
-        n.name = QStringLiteral("__vptr");
-        n.parentId = rootId;
-        n.offset = 0;
-        n.refId = vtId;
+        n.name = name;
+        n.parentId = parent;
+        n.offset = off;
+        n.refId = refId;
         tree.addNode(n);
-    }
-    // offset 8: QObjectData* d_ptr (QObject internals)
-    {
-        Node n;
-        n.kind = NodeKind::Pointer64;
-        n.name = QStringLiteral("d_ptr");
-        n.parentId = rootId;
-        n.offset = 8;
-        tree.addNode(n);
-    }
-    // The rest of the object: raw memory visible as Hex64 fields
-    // QWidget base is large (~200+ bytes), then RcxEditor members follow.
-    // Lay out enough to cover the interesting editor state.
-    for (int off = 16; off < 512; off += 8) {
+    };
+    auto addHex = [&](uint64_t parent, int off, const QString& name) {
         Node n;
         n.kind = NodeKind::Hex64;
-        n.name = QStringLiteral("field_%1").arg(off, 3, 16, QLatin1Char('0'));
-        n.parentId = rootId;
+        n.name = name;
+        n.parentId = parent;
         n.offset = off;
         tree.addNode(n);
-    }
+    };
 
+    addPtr(rootId, 0, QStringLiteral("__vptr"), vtId);
+    addPtr(rootId, 8, QStringLiteral("d_ptr"));
+    // The rest of the object: raw memory visible as Hex64 fields with
+    // section labels grouping QWidget's body vs RcxEditor's own members.
+    // The user lays a vtable cursor over them and the auto-RTTI hint lights
+    // them up live (or will once Itanium walking lands).
+    for (int off = 0x10; off < 0x40; off += 8)
+        addHex(rootId, off, QStringLiteral("qwidget_internal_%1").arg(off, 2, 16, QLatin1Char('0')));
+    for (int off = 0x40; off < 0x100; off += 8)
+        addHex(rootId, off, QStringLiteral("rcxeditor_member_%1").arg(off, 3, 16, QLatin1Char('0')));
+    for (int off = 0x100; off < 0x200; off += 8)
+        addHex(rootId, off, QStringLiteral("field_%1").arg(off, 3, 16, QLatin1Char('0')));
+    return rootId;
 }
 
 void MainWindow::selfTest() {
 #ifdef Q_OS_WIN
-    // Tab 2: Editor demo with live process memory (created first)
+    // Tutorial flow: open *the editor demo* as the active tab so the user
+    // lands on a meaningful RcxEditor* layout instead of a blank class.
+    // The demo points at the real RcxEditor object in this process — the
+    // user is literally inspecting the editor that's drawing the inspection.
     project_new();
+    auto* editorCtrl = activeController();
+    if (!editorCtrl || editorCtrl->editors().isEmpty()) return;
+    auto* editor = editorCtrl->editors().first();
+    auto* editorDoc = editorCtrl->document();
 
-    auto* ctrl = activeController();
-    if (!ctrl || ctrl->editors().isEmpty()) return;
+    // Lay out the RcxEditor struct skeleton at the live object address.
+    // Capture the root id so we can pin viewRootId — the controller's
+    // pre-existing viewRootId points at the now-deleted UnnamedClass that
+    // project_new() built before we wiped the tree.
+    uint64_t rcxEditorId = buildEditorDemo(editorDoc->tree,
+        reinterpret_cast<uintptr_t>(editor));
 
-    auto* editor = ctrl->editors().first();
-    auto* doc = ctrl->document();
+    // Tag the document with the auto-open class. On project load this is
+    // what `createTab` looks up to set viewRootId — so even if the user
+    // saves the demo as a .rcx and reopens it later, RcxEditor auto-opens.
+    // The demo additionally pins baseAddress (below) so the user lands on
+    // the live editor object instead of an arbitrary VA.
+    editorDoc->tree.initialClass = QStringLiteral("RcxEditor");
 
-    // Build a tree describing RcxEditor, based at the real object address
-    buildEditorDemo(doc->tree, reinterpret_cast<uintptr_t>(editor));
-
-    // Attach process memory to self — provider base will be set to the editor address
+    // Attach to self via processmemory plugin — provider supplies live bytes
+    // so the vtable + d_ptr fields show real values.
     DWORD pid = GetCurrentProcessId();
     QString target = QString("%1:Reclass.exe").arg(pid);
+    editorCtrl->attachViaPlugin(QStringLiteral("processmemory"), target);
 
-    ctrl->attachViaPlugin(QStringLiteral("processmemory"), target);
+    // The plugin attach can rewrite baseAddress to its own default — pin
+    // it back at the actual editor object so the demo lands where intended.
+    editorDoc->tree.baseAddress = reinterpret_cast<uint64_t>(editor);
+    editorDoc->tree.baseAddressFormula.clear();
+    // Point the controller's view at the freshly-built RcxEditor root,
+    // not the stale UnnamedClass id from before buildEditorDemo wiped
+    // the tree. Without this the command row reads "struct NoName" and
+    // compose may render the wrong root.
+    editorCtrl->setViewRootId(rcxEditorId);
 
-    // Tab 1: Empty class for user work (created second, becomes active)
+    // Find the editor demo's dock (the most recently added doc dock that
+    // owns this controller) and rename its window title to something
+    // self-explanatory in the dock tab bar.
+    QDockWidget* editorDock = nullptr;
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+        if (it->ctrl == editorCtrl) { editorDock = it.key(); break; }
+    }
+    if (editorDock)
+        editorDock->setWindowTitle(QStringLiteral("RcxEditor* (live)"));
+
+    // Optional: a second tab with an empty class for the user to noodle on.
+    // Created BEFORE we raise the editor tab so the editor demo wins focus.
     auto* userTab = project_new(QStringLiteral("class"));
-    userTab->raise();
-    userTab->show();
+    if (userTab)
+        userTab->setWindowTitle(QStringLiteral("Scratch"));
+
+    // Raise the editor demo last so it becomes the active tab on Continue.
+    if (editorDock) {
+        editorDock->raise();
+        editorDock->show();
+        m_activeDocDock = editorDock;
+        editorCtrl->refresh();
+    }
 #else
-    project_new();
+    // Non-Windows: no live process self-attach available. Just open a
+    // scratch class so the user has something to play with.
     auto* userTab = project_new(QStringLiteral("class"));
-    userTab->raise();
-    userTab->show();
+    if (userTab) userTab->raise();
 #endif
 }
 
@@ -3497,6 +3595,92 @@ void MainWindow::undo() {
 void MainWindow::redo() {
     auto* tab = activeTab();
     if (tab) tab->doc->undoStack.redo();
+}
+
+void MainWindow::showGotoAddressDialog() {
+    auto* ctrl = activeController();
+    if (!ctrl) {
+        setAppStatus(QStringLiteral("Open a project first"));
+        return;
+    }
+
+    // Build the same callback set the controller uses for navigateToFormula —
+    // module resolution, pointer reads, identifier lookup, and kernel paging
+    // when the provider supports it.
+    AddressParserCallbacks cbs;
+    auto* doc = ctrl->document();
+    if (doc->provider) {
+        auto* prov = doc->provider.get();
+        cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
+            uint64_t base = prov->symbolToAddress(name);
+            *ok = (base != 0);
+            return base;
+        };
+        int ptrSz = doc->tree.pointerSize;
+        cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
+            uint64_t val = 0;
+            *ok = prov->read(addr, &val, ptrSz);
+            return val;
+        };
+        cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
+            return SymbolStore::instance().resolve(name, prov, ok);
+        };
+        if (prov->hasKernelPaging()) {
+            cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
+                Q_UNUSED(pid);
+                auto r = prov->translateAddress(va);
+                *ok = r.valid;
+                return r.physical;
+            };
+            cbs.cr3 = [prov](uint32_t pid, bool* ok) -> uint64_t {
+                Q_UNUSED(pid);
+                uint64_t cr3 = prov->getCr3();
+                *ok = (cr3 != 0);
+                return cr3;
+            };
+            cbs.physRead = [prov](uint64_t physAddr, bool* ok) -> uint64_t {
+                auto entries = prov->readPageTable(physAddr, 0, 1);
+                *ok = !entries.isEmpty();
+                return entries.isEmpty() ? 0 : entries[0];
+            };
+        }
+    }
+
+    GotoAddressDialog dlg(cbs, doc->tree.pointerSize, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QString err;
+    if (!ctrl->navigateToFormula(dlg.formula(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("Go to Address"),
+            QStringLiteral("Failed to evaluate '%1': %2")
+                .arg(dlg.formula(), err.isEmpty() ? QStringLiteral("invalid expression") : err));
+        return;
+    }
+    setAppStatus(QStringLiteral("Jumped to 0x%1")
+        .arg(dlg.resolvedAddress(), 0, 16));
+}
+
+void MainWindow::showCommandPalette() {
+    CommandPalette dlg(m_menuBar, this);
+    dlg.exec();
+}
+
+void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
+    auto* ctrl = activeController();
+    if (!ctrl || !ctrl->document()->provider) {
+        setAppStatus(QStringLiteral("No active provider for RTTI"));
+        return;
+    }
+    auto info = walkRtti(*ctrl->document()->provider, vtableAddr);
+    if (!info.ok) {
+        QMessageBox::information(this, QStringLiteral("RTTI Browser"),
+            info.error.isEmpty()
+                ? QStringLiteral("No RTTI found at 0x%1").arg(vtableAddr, 0, 16)
+                : info.error);
+        return;
+    }
+    RttiBrowserDialog dlg(info, ctrl->document()->provider.get(), this);
+    dlg.exec();
 }
 
 void MainWindow::about() {

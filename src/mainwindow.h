@@ -371,6 +371,20 @@ private:
     Q_INVOKABLE void showStartPage();
     void dismissStartPage();
 
+public:
+    // Open the modal Go to Address dialog. Public so MCP / tests can drive it.
+    // Wires AddressParser callbacks against the active controller's provider
+    // (module resolution, pointer reads, kernel paging when available).
+    void showGotoAddressDialog();
+    // Open the Command Palette popup. Walks every QAction reachable from the
+    // menu bar and lets the user fuzzy-search by joined "menu > submenu > item"
+    // path. Triggering an entry calls action->trigger() — no behavior duplication.
+    void showCommandPalette();
+    // Open the RTTI browser modal for a given vtable address. Walks MSVC RTTI
+    // (COL → CHD → BCD → TD), surfaces class name + virtual methods. Resolves
+    // method symbols via SymbolStore when PDBs are loaded for the owning module.
+    void showRttiBrowser(uint64_t vtableAddr);
+
 protected:
     void changeEvent(QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;

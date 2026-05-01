@@ -23,6 +23,7 @@
     "indCmdPill": "#2d2d30",
     "indDataChanged": "#8fbc7a",
     "indHintGreen": "#5a8248",
+    "indRttiHint": "#D7BA7D",
     "markerPtr": "#f44747",
     "markerCycle": "#e5a00d",
     "markerError": "#7a2e2e"
