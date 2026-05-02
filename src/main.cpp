@@ -703,7 +703,7 @@ public:
                                 int bottomInset = 1;
                                 int caTop = tab->rect.top() + topInset;
                                 int caH   = tab->rect.height() - topInset - bottomInset;
-                                int iy    = caTop + (caH - kIconSz) / 2 + 2;  // visual nudge
+                                int iy    = caTop + (caH - kIconSz) / 2 + 1;  // visual nudge
                                 QRect iconRect(tab->rect.left() + kIconPad, iy,
                                                kIconSz, kIconSz);
                                 // Selected/unselected contrast: tab palette
