@@ -4,16 +4,17 @@
 #include <QMutex>
 #include <QElapsedTimer>
 #include <QtGlobal>
+#include <limits>
 
 namespace rcx {
 
 // Per-bucket aggregated timing stats.
 struct ProfileStats {
-    qint64 totalNs = 0;     // sum of all sample durations
-    qint64 minNs   = LLONG_MAX;
+    qint64 totalNs = 0;                                    // sum of all sample durations
+    qint64 minNs   = std::numeric_limits<qint64>::max();
     qint64 maxNs   = 0;
-    qint64 lastNs  = 0;     // most recent sample (useful for live overlay)
-    int    count  = 0;      // number of samples
+    qint64 lastNs  = 0;                                    // most recent sample (useful for live overlay)
+    qint64 count   = 0;                                    // number of samples (qint64: a per-paint scope can rack up >2B over a long session)
 };
 
 // Lightweight aggregating profiler. Records (name, duration) samples from
@@ -48,6 +49,11 @@ private:
 // RAII scoped timer. Constructs a QElapsedTimer, starts it, records
 // `nsecsElapsed()` against `name` on destruction. The `name` MUST be a
 // string literal (we capture by pointer; no copy). One sample per scope.
+//
+// Enabled state is captured at construction so a scope is "all or nothing":
+// flipping the global flag mid-scope does not retroactively start a sample
+// (we'd have no start timestamp) and does not abort one in flight. The
+// destructor's record() is a cheap no-op when m_active is false.
 class ProfileScope {
 public:
     explicit ProfileScope(const char* name)

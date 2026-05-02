@@ -351,6 +351,22 @@ if(BUILD_TESTING)
     target_link_libraries(test_compose PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_compose COMMAND test_compose)
 
+    add_executable(test_default_class_footer tests/test_default_class_footer.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
+        src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
+        src/resources.qrc)
+    target_include_directories(test_default_class_footer PRIVATE src third_party/fadec)
+    target_link_libraries(test_default_class_footer PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+    if(WIN32)
+        target_link_libraries(test_default_class_footer PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+    endif()
+    add_test(NAME test_default_class_footer COMMAND test_default_class_footer)
+
     add_executable(test_provider tests/test_provider.cpp)
     target_include_directories(test_provider PRIVATE src)
     target_link_libraries(test_provider PRIVATE ${QT}::Core ${QT}::Test)
@@ -588,6 +604,16 @@ if(BUILD_TESTING)
         target_include_directories(test_dock_size_tip PRIVATE src)
         target_link_libraries(test_dock_size_tip PRIVATE ${QT}::Widgets ${QT}::Test)
         add_test(NAME test_dock_size_tip COMMAND test_dock_size_tip)
+
+        add_executable(test_doc_tab_chrome tests/test_doc_tab_chrome.cpp src/resources.qrc)
+        target_include_directories(test_doc_tab_chrome PRIVATE src)
+        target_link_libraries(test_doc_tab_chrome PRIVATE ${QT}::Widgets ${QT}::Test)
+        add_test(NAME test_doc_tab_chrome COMMAND test_doc_tab_chrome)
+
+        add_executable(test_tab_source_icon tests/test_tab_source_icon.cpp src/resources.qrc)
+        target_include_directories(test_tab_source_icon PRIVATE src)
+        target_link_libraries(test_tab_source_icon PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
+        add_test(NAME test_tab_source_icon COMMAND test_tab_source_icon)
 
         add_executable(test_source_provider tests/test_source_provider.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp

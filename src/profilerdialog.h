@@ -20,6 +20,10 @@ class ProfilerDialog : public QDialog {
 public:
     explicit ProfilerDialog(QWidget* parent = nullptr);
 
+protected:
+    void showEvent(QShowEvent* e) override;
+    void hideEvent(QHideEvent* e) override;
+
 private slots:
     void refreshData();
     void onEnabledToggled(bool on);
@@ -32,6 +36,7 @@ private:
     QCheckBox*      m_enableBox  = nullptr;
     QLabel*         m_summary    = nullptr;
     QTimer*         m_timer      = nullptr;
+    int             m_lastRowCount = 0;  // resize cols only when row count changes
     void rebuildChart(const QVector<QPair<QString, ProfileStats>>& sorted);
     void rebuildTable(const QVector<QPair<QString, ProfileStats>>& sorted);
     void rebuildSummary(const QVector<QPair<QString, ProfileStats>>& sorted);

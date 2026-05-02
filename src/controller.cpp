@@ -4295,12 +4295,14 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
         }
     }
 
-    // Clear All action (only if saved sources exist)
-    if (!m_savedSources.isEmpty()) {
+    // Clear All action — always present so the user has a visible
+    // "reset" affordance even before any sources are saved.
+    {
         SourceEntry e;
         e.entryKind = SourceEntry::ClearAction;
         e.displayName = QStringLiteral("Clear All");
         e.iconPath = QStringLiteral(":/vsicons/clear-all.svg");
+        e.enabled = !m_savedSources.isEmpty();
         entries.append(e);
     }
 
@@ -5132,6 +5134,9 @@ void RcxController::switchToSavedSource(int idx) {
         if (entry.baseAddressFormula.isEmpty())
             m_doc->tree.baseAddress = entry.baseAddress;
     }
+    // Notify listeners that the active source changed — used by the
+    // doc tab's source-icon to swap to the new provider's icon.
+    emit m_doc->documentChanged();
 }
 
 void RcxController::selectSource(const QString& text) {
@@ -5169,6 +5174,9 @@ void RcxController::selectSource(const QString& text) {
                 m_savedSources.append(entry);
                 m_activeSourceIdx = m_savedSources.size() - 1;
             }
+            // Notify after m_activeSourceIdx is set so listeners
+            // (doc tab source-icon, etc) see the new state.
+            emit m_doc->documentChanged();
             refresh();
         }
     } else {
@@ -5273,6 +5281,10 @@ void RcxController::selectSource(const QString& text) {
                         m_savedSources.append(entry);
                         m_activeSourceIdx = m_savedSources.size() - 1;
                     }
+                    // Re-emit AFTER m_activeSourceIdx is set so the
+                    // doc tab's source-icon reads the new index, not
+                    // the stale one from the earlier emit at 5258.
+                    emit m_doc->documentChanged();
                     refresh();
                 } else if (!errorMsg.isEmpty()) {
                     QMessageBox::warning(qobject_cast<QWidget*>(parent()), "Provider Error", errorMsg);
@@ -5413,6 +5425,15 @@ void RcxController::collectPointerRanges(
 }
 
 void RcxController::onRefreshTick() {
+    // Liveness-flip detection runs BEFORE the early-returns below: when
+    // a process exits its provider transitions to !isValid(), and we
+    // also want to report that case to the UI so the tab icon dims.
+    bool nowLive = (m_doc->provider && m_doc->provider->isValid());
+    if (nowLive != m_lastLive) {
+        m_lastLive = nowLive;
+        emit sourceLivenessChanged(nowLive);
+    }
+
     if (m_readInFlight) return;
     if (!m_doc->provider || !m_doc->provider->isLive()) return;
     if (m_suppressRefresh) return;

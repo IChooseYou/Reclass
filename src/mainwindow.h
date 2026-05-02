@@ -313,6 +313,10 @@ private:
     // consistent with the rest of the chrome. Positioned at the dock's
     // right edge as the user resizes; hidden when the mouse releases.
     DockSizeReadout* m_dockSizeTip = nullptr;
+    // Re-evaluate the left-side source icon shown on a doc dock's tab.
+    // Reads the doc's controller for the active source kind + liveness
+    // and updates the DockTabSourceIcon in place.
+    void refreshDocTabSourceIcon(QDockWidget* docDock);
     void showDockSizeTip(QDockWidget* dock, const QSize& sz);
     // Like showDockSizeTip but with explicit axis: caller knows which
     // dimension actually changed (e.g. from QResizeEvent::oldSize vs

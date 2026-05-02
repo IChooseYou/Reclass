@@ -9,7 +9,7 @@ Profiler& Profiler::instance() {
 }
 
 void Profiler::record(const char* name, qint64 nanos) {
-    if (!isEnabled()) return;  // double-check, in case toggled mid-scope
+    if (!isEnabled()) return;  // dropped if disabled between scope start and end
     QMutexLocker lock(&m_mutex);
     auto& s = m_stats[QString::fromLatin1(name)];
     s.totalNs += nanos;

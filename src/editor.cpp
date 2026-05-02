@@ -5003,6 +5003,18 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, end);
     m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET, (uintptr_t)utf8.size(), utf8.constData());
 
+    // Sync m_prevText with the rewritten line 0. Without this the
+    // applyDocument diff/patch path on the NEXT refresh computes
+    // byte offsets against a stale prefix (compose's placeholder
+    // command-row text) while Scintilla actually holds the real
+    // command-row text — and SCI_REPLACETARGET ends up overwriting
+    // the WRONG range, producing a truncated-bytes-line + merged-
+    // footer corruption further down the document. Bug repros
+    // when opening multiple "New Class" tabs (tabs 2, 3 hit it).
+    int nl = m_prevText.indexOf('\n');
+    int oldLine0End = nl >= 0 ? nl : m_prevText.size();
+    m_prevText.replace(0, oldLine0End, s);
+
     // Adjust saved cursor/anchor for length change in line 0
     long delta = (long)utf8.size() - oldLen;
     if (savedPos > end)    savedPos    += delta;

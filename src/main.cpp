@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include <cstdio>
+#include <QSvgRenderer>
 #include "docksizereadout.h"
+#include "tab_source_icon.h"
 #include "profiler.h"
 #include "profilerdialog.h"
 #include "typeselectorpopup.h"
@@ -403,7 +405,10 @@ public:
                     if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt))
                         if (tab->text == QStringLiteral("\u200B"))
                             return QSize(32, 37);
-                    s.setWidth(s.width() + 24);  // room for DockTabButtons (16px icon + padding)
+                    // Reserve room for:
+                    //   right: DockTabButtons (close x) ≈ 24px
+                    //   left:  inline source icon painted in CE_TabBarTabLabel ≈ 20px
+                    s.setWidth(s.width() + 24 + 20);
                 }
             }
         }
@@ -644,34 +649,93 @@ public:
                         return;
                     }
 
-                    // Leave space for pin+close buttons on right
-                    int btnWidth = 0;
+                    int rightBtnW = 0;
                     if (tabIdx >= 0) {
-                        auto* btn = tabBar->tabButton(tabIdx, QTabBar::RightSide);
-                        if (btn) btnWidth = btn->sizeHint().width() + 4;
+                        if (auto* rb = tabBar->tabButton(tabIdx, QTabBar::RightSide))
+                            rightBtnW = rb->sizeHint().width() + 4;
                     }
-                    QRect textRect = tab->rect.adjusted(8, 0, -(8 + btnWidth), 0);
 
-                    // Use editor font from settings
+                    // Source-status icon — read directly from the dock's
+                    // own properties (set in MainWindow::refreshDocTabSourceIcon).
+                    // Properties are bound to the QDockWidget object, so
+                    // they survive tab reorder, tabify/untabify, and any
+                    // tabData wipes Qt does internally during dock moves.
+                    bool selected = tab->state & State_Selected;
+                    QColor fg = selected ? tab->palette.color(QPalette::Text)
+                                         : tab->palette.color(QPalette::WindowText);
+
+                    // Use editor font from settings — needed before icon
+                    // sizing to match the dropdown's fm.height()+4 sizing
+                    // and to center vertically the same way Qt::AlignVCenter
+                    // centers the text below.
                     QSettings s("Reclass", "Reclass");
                     QFont f(s.value("font", "JetBrains Mono").toString(), 10);
                     f.setFixedPitch(true);
                     p->setFont(f);
-
                     QFontMetrics fm(f);
-                    // Get original (un-elided) text from the tab bar
+
+                    // Icon size = fm.height() so its vertical extent matches
+                    // the text-block Qt::AlignVCenter centers. Matching the
+                    // dropdown's ONE-line icon size (sourcechooserpopup.cpp:172
+                    // — `iconSz = fm.height()` for single-line entries). The
+                    // earlier +4 made the icon's top sit above the text's
+                    // top — visually too high. With them at the same height
+                    // and same vertical center, the box edges line up.
+                    const int kIconSz  = fm.height();
+                    const int kIconPad = 8;
+                    const int kIconGap = 6;
+                    int leftInset = kIconPad;
+                    if (tabIdx >= 0) {
+                        QString tabText2 = tabBar->tabText(tabIdx);
+                        if (auto* mw = qobject_cast<QMainWindow*>(tabBar->parent())) {
+                            for (auto* dw : mw->findChildren<QDockWidget*>()) {
+                                if (dw->windowTitle() != tabText2) continue;
+                                QString iconPath = dw->property("rcxSourceIcon").toString();
+                                if (iconPath.isEmpty()) break;
+                                bool live = dw->property("rcxSourceLive").toBool();
+                                // Visible content area depends on selection
+                                // state (CE_TabBarTabShape at line 615-621):
+                                //   - 1px bottom is ALWAYS the base-line border
+                                //   - 2px top is the accent strip but ONLY
+                                //     when selected
+                                // Center icon vertically in this area.
+                                int topInset    = selected ? 2 : 0;
+                                int bottomInset = 1;
+                                int caTop = tab->rect.top() + topInset;
+                                int caH   = tab->rect.height() - topInset - bottomInset;
+                                int iy    = caTop + (caH - kIconSz) / 2 + 2;  // visual nudge
+                                QRect iconRect(tab->rect.left() + kIconPad, iy,
+                                               kIconSz, kIconSz);
+                                // Selected/unselected contrast: tab palette
+                                // already gives `fg` two distinct colors, but
+                                // the SVG-tinted-via-SourceIn loses some of
+                                // that contrast. Drop unselected icons to 70%
+                                // opacity so the active tab's icon stands
+                                // out clearly. Disconnected goes further to
+                                // 35% (the !live case).
+                                qreal stateOpacity = selected ? 1.0 : 0.70;
+                                qreal prev = p->opacity();
+                                p->setOpacity(prev * stateOpacity);
+                                rcx::drawTabSourceIcon(p, iconRect, iconPath, live, fg);
+                                p->setOpacity(prev);
+                                leftInset = kIconPad + kIconSz + kIconGap;
+                                break;
+                            }
+                        }
+                    }
+                    // Match icon's content-area: insets depend on selection
+                    // state, exactly as the bg fill in CE_TabBarTabShape does.
+                    int textTopInset    = selected ? 2 : 0;
+                    int textBottomInset = 1;
+                    QRect textRect = tab->rect.adjusted(leftInset, textTopInset,
+                                                        -(8 + rightBtnW), -textBottomInset);
+
                     QString text = tabText;
                     int maxW = textRect.width();
-
-                    // Elide if text overflows available width.
-                    // Middle-elide for long names (>2x), right-elide for short overflow.
                     if (fm.horizontalAdvance(text) > maxW) {
                         text = fm.elidedText(text, Qt::ElideRight, maxW);
                     }
 
-                    bool selected = tab->state & State_Selected;
-                    QColor fg = selected ? tab->palette.color(QPalette::Text)
-                                         : tab->palette.color(QPalette::WindowText);
                     p->setPen(fg);
                     p->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, text);
                     return;
@@ -683,6 +747,7 @@ public:
 };
 
 #include "dock_tab_buttons.h"
+#include "sourcechooserpopup.h"
 #include "dockoverlay.h"
 
 static void applyGlobalTheme(const rcx::Theme& theme) {
@@ -2278,15 +2343,10 @@ static QString rootName(const NodeTree& tree, uint64_t viewRootId = 0) {
 }
 
 QString MainWindow::tabTitle(const TabState& tab) const {
-    QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
-    int srcIdx = tab.ctrl->activeSourceIndex();
-    const auto& sources = tab.ctrl->savedSources();
-    if (srcIdx >= 0 && srcIdx < sources.size()) {
-        const auto& src = sources[srcIdx];
-        if (!src.displayName.isEmpty())
-            name += QStringLiteral(" \u2014 ") + src.displayName;
-    }
-    return name;
+    // Source identity is carried by the left-side DockTabSourceIcon \u2014
+    // no need to append the source's filename/process to the text,
+    // which used to balloon to "UnnamedClass0 \u2014 long_filename.png".
+    return rootName(tab.doc->tree, tab.ctrl->viewRootId());
 }
 
 // Create a sentinel dock — invisible tab that keeps Qt's tab bar on-screen
@@ -2481,6 +2541,13 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     // Refresh bookmarks on document changes (e.g. add/remove)
     connect(doc, &RcxDocument::documentChanged, this, [this, dock]() {
         if (m_activeDocDock == dock) refreshBookmarksDock();
+        refreshDocTabSourceIcon(dock);
+    });
+    // Live-update the tab's source icon when the provider's isValid()
+    // flips (process exit / reattach / file vanish). Fires from the
+    // controller's existing 660ms refresh tick — no new timers.
+    connect(ctrl, &RcxController::sourceLivenessChanged, this, [this, dock](bool) {
+        refreshDocTabSourceIcon(dock);
     });
 
     // Cleanup on close
@@ -2951,6 +3018,47 @@ void MainWindow::onDockDropRequested(QDockWidget* source, QDockWidget* target, i
     });
 }
 
+void MainWindow::refreshDocTabSourceIcon(QDockWidget* docDock) {
+    if (!docDock) return;
+    auto it = m_tabs.find(docDock);
+    if (it == m_tabs.end()) return;
+    auto* doc = it->doc;
+    auto* ctrl = it->ctrl;
+    if (!doc || !ctrl) return;
+
+    QString iconPath;
+    QString tip;
+    bool live = false;
+    int idx = ctrl->activeSourceIndex();
+    const auto& saved = ctrl->savedSources();
+    if (idx >= 0 && idx < saved.size()) {
+        const auto& ss = saved[idx];
+        iconPath = iconForProvider(ss.kind);
+        live = (doc->provider && doc->provider->isValid());
+        tip = QStringLiteral("Source: %1 (%2)")
+                .arg(ss.displayName.isEmpty() ? ss.kind : ss.displayName)
+                .arg(live ? QStringLiteral("connected") : QStringLiteral("disconnected"));
+    } else {
+        iconPath = QStringLiteral(":/vsicons/plug.svg");
+        live = false;
+        tip = QStringLiteral("No source — click to connect");
+    }
+
+    // Store on the dock object itself — survives any tab-reorder /
+    // tabify event because QObject properties are bound to the dock,
+    // not to a tab index. CE_TabBarTabLabel looks these up by tabText.
+    docDock->setProperty("rcxSourceIcon", iconPath);
+    docDock->setProperty("rcxSourceLive", live);
+    for (auto* tabBar : findChildren<QTabBar*>()) {
+        if (tabBar->parent() != this) continue;
+        for (int i = 0; i < tabBar->count(); ++i) {
+            if (tabBar->tabText(i) == docDock->windowTitle())
+                tabBar->setTabToolTip(i, tip);
+        }
+        tabBar->update();
+    }
+}
+
 // Installs pin/close buttons, context menu, font, and style on all
 // dock tab bars owned by this QMainWindow. Safe to call repeatedly —
 // skips tabs that already have buttons and tab bars that already have
@@ -3023,18 +3131,28 @@ void MainWindow::setupDockTabBars() {
                 continue;
             auto* existing = qobject_cast<DockTabButtons*>(
                 tabBar->tabButton(i, QTabBar::RightSide));
-            if (existing) continue;
-
-            auto* btns = new DockTabButtons(tabBar);
-            btns->applyTheme(theme.hover);
-
-            // Find dock by matching tab title (doc tabs + sidebar docks)
             QDockWidget* target = findDockByTitle(tabBar->tabText(i));
-            if (target) {
-                connect(btns->closeBtn, &QToolButton::clicked,
-                        target, &QDockWidget::close);
+            if (!existing) {
+                auto* btns = new DockTabButtons(tabBar);
+                btns->applyTheme(theme.hover);
+                if (target) {
+                    connect(btns->closeBtn, &QToolButton::clicked,
+                            target, &QDockWidget::close);
+                }
+                tabBar->setTabButton(i, QTabBar::RightSide, btns);
             }
-            tabBar->setTabButton(i, QTabBar::RightSide, btns);
+
+            // Drop any stale LeftSide widget from earlier implementations —
+            // the icon is now painted inline in CE_TabBarTabLabel, no
+            // widget needed. A leftover widget would visually fight
+            // with our inline draw.
+            if (tabBar->tabButton(i, QTabBar::LeftSide))
+                tabBar->setTabButton(i, QTabBar::LeftSide, nullptr);
+
+            // Doc-dock tab: ensure source-icon properties are populated
+            // on the dock. CE_TabBarTabLabel reads them on every paint.
+            if (target && m_docDocks.contains(target))
+                refreshDocTabSourceIcon(target);
         }
 
         // Middle-click close + context menu + drag detection (install only once)

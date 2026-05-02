@@ -184,6 +184,11 @@ signals:
     // in a new tab sharing this document. MainWindow calls createTab(doc)
     // and setViewRootId(structId) on the new tab.
     void requestOpenStructInNewTab(uint64_t structId);
+    // Active provider's isValid() flipped — used by the dock tab's
+    // source-status icon to dim/restore in real time when a process
+    // exits, a file vanishes, etc. Fires on transition only, not every
+    // refresh tick.
+    void sourceLivenessChanged(bool live);
 
 private:
     RcxDocument*       m_doc;
@@ -202,6 +207,7 @@ private:
     // ── Saved sources for quick-switch ──
     QVector<SavedSourceEntry> m_savedSources;
     int m_activeSourceIdx = -1;
+    bool m_lastLive = false;  // last-seen provider->isValid(); diff for sourceLivenessChanged emit
 
     // ── Cached type selector popup (avoids ~350ms cold-start on first show) ──
     QPointer<TypeSelectorPopup> m_cachedPopup;

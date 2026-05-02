@@ -16,6 +16,8 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QSettings>
+#include <QShowEvent>
+#include <QHideEvent>
 #include <algorithm>
 
 namespace rcx {
@@ -195,12 +197,23 @@ ProfilerDialog::ProfilerDialog(QWidget* parent) : QDialog(parent) {
         .arg(t.background.name(), t.text.name(), t.border.name(), t.backgroundAlt.name()));
     lay->addWidget(m_table, /*stretch=*/3);
 
-    // Auto-refresh
+    // Auto-refresh — started/stopped in showEvent/hideEvent so a hidden
+    // dialog doesn't keep paying the snapshot+repaint cost.
     m_timer = new QTimer(this);
     m_timer->setInterval(500);
     connect(m_timer, &QTimer::timeout, this, &ProfilerDialog::refreshData);
-    m_timer->start();
     refreshData();
+}
+
+void ProfilerDialog::showEvent(QShowEvent* e) {
+    QDialog::showEvent(e);
+    if (m_timer && !m_timer->isActive()) m_timer->start();
+    refreshData();
+}
+
+void ProfilerDialog::hideEvent(QHideEvent* e) {
+    if (m_timer) m_timer->stop();
+    QDialog::hideEvent(e);
 }
 
 void ProfilerDialog::onEnabledToggled(bool on) {
@@ -233,25 +246,35 @@ void ProfilerDialog::rebuildChart(const QVector<QPair<QString, ProfileStats>>& s
 }
 
 void ProfilerDialog::rebuildTable(const QVector<QPair<QString, ProfileStats>>& sorted) {
-    m_table->setRowCount(sorted.size());
+    const bool rowCountChanged = (sorted.size() != m_lastRowCount);
+    if (rowCountChanged) {
+        m_table->setRowCount(sorted.size());
+        // Allocate items for any newly-added rows; existing rows keep their items.
+        for (int i = m_lastRowCount; i < sorted.size(); ++i) {
+            for (int col = 0; col < 7; ++col) {
+                auto* item = new QTableWidgetItem;
+                Qt::Alignment align = (col == 0) ? Qt::AlignLeft : Qt::AlignRight;
+                item->setTextAlignment(align | Qt::AlignVCenter);
+                m_table->setItem(i, col, item);
+            }
+        }
+        m_lastRowCount = sorted.size();
+    }
     for (int i = 0; i < sorted.size(); ++i) {
         const auto& [name, s] = sorted[i];
         double mean = s.count ? double(s.totalNs) / s.count : 0;
-        auto setCell = [this, i](int col, const QString& text, Qt::Alignment align) {
-            auto* item = new QTableWidgetItem(text);
-            item->setTextAlignment(align | Qt::AlignVCenter);
-            m_table->setItem(i, col, item);
-        };
-        setCell(0, name, Qt::AlignLeft);
-        setCell(1, QString::number(s.count), Qt::AlignRight);
-        setCell(2, QString::number(s.totalNs / 1.0e6, 'f', 3), Qt::AlignRight);
-        setCell(3, QString::number(mean / 1.0e3, 'f', 2), Qt::AlignRight);
-        setCell(4, QString::number(s.minNs / 1.0e3, 'f', 2), Qt::AlignRight);
-        setCell(5, QString::number(s.maxNs / 1.0e3, 'f', 2), Qt::AlignRight);
-        setCell(6, QString::number(s.lastNs / 1.0e3, 'f', 2), Qt::AlignRight);
+        m_table->item(i, 0)->setText(name);
+        m_table->item(i, 1)->setText(QString::number(s.count));
+        m_table->item(i, 2)->setText(QString::number(s.totalNs / 1.0e6, 'f', 3));
+        m_table->item(i, 3)->setText(QString::number(mean / 1.0e3, 'f', 2));
+        m_table->item(i, 4)->setText(QString::number(s.minNs / 1.0e3, 'f', 2));
+        m_table->item(i, 5)->setText(QString::number(s.maxNs / 1.0e3, 'f', 2));
+        m_table->item(i, 6)->setText(QString::number(s.lastNs / 1.0e3, 'f', 2));
     }
-    m_table->resizeColumnsToContents();
-    m_table->horizontalHeader()->setStretchLastSection(true);
+    if (rowCountChanged) {
+        m_table->resizeColumnsToContents();
+        m_table->horizontalHeader()->setStretchLastSection(true);
+    }
 }
 
 void ProfilerDialog::rebuildSummary(const QVector<QPair<QString, ProfileStats>>& sorted) {
