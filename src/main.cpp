@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include <cstdio>
+#include "docksizereadout.h"
 #include "profiler.h"
 #include "profilerdialog.h"
 #include "typeselectorpopup.h"
@@ -18,6 +20,7 @@
 #include "commandpalette.h"
 #include "rtti.h"
 #include "rttibrowser.h"
+#include "rcxtooltip.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QMenuBar>
@@ -804,6 +807,8 @@ static QString sciGetLineText(QsciScintilla* sci, int line) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("Reclass");
+    // Initial size +30% over the legacy 1080×720 to give docks + editor
+    // more breathing room on first launch.
     resize(1080, 720);
 
 #ifndef __APPLE__
@@ -3247,7 +3252,114 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
             }
         }
     }
+    // Dock-resize live size readout. Empirically (test_dock_size_tip),
+    // Qt 6.5 on Windows MinGW does NOT set overrideCursor() or
+    // QMainWindow::cursor() to SizeHor/SizeVer during a separator
+    // drag — the cursor change is done at the native Win32 level,
+    // invisible to QApplication. But QEvent::Resize DOES fire on the
+    // dock for every pixel of the drag (test reports 10 resizes for
+    // 10 mouse moves: 305→310→315...→350). So we hook resize events
+    // on the dock directly. The LMB gate excludes programmatic
+    // resizes (window-init, layout-preset switches) — those happen
+    // without the user holding the mouse.
+    //
+    // The tooltip itself is WA_TransparentForMouseEvents (set in
+    // showDockSizeTip) so showing it doesn't break Qt's internal
+    // mouse grab on QMainWindowLayout for the drag.
+    if (event->type() == QEvent::Resize
+        && (QApplication::mouseButtons() & Qt::LeftButton)) {
+        for (QDockWidget* d : {m_workspaceDock, m_bookmarksDock,
+                                m_symbolsDock, m_scannerDock}) {
+            if (!d || obj != d) continue;
+            if (!d->isVisible() || d->isFloating()) continue;
+            auto* re = static_cast<QResizeEvent*>(event);
+            // Skip "ghost" resizes where the dimension didn't actually
+            // change. When the user drags one sidebar, Qt may re-layout
+            // sibling sidebars and emit Resize on them with the same
+            // size — those would clobber the live tooltip with a
+            // constant value.
+            if (re->oldSize() == re->size()) break;
+            // Pass the changed dimension explicitly via a flag in
+            // size: if width changed, treat as horizontal; else
+            // vertical. showDockSizeTip uses this to pick the right
+            // axis to display.
+            bool widthChanged = (re->oldSize().width() != re->size().width());
+            showDockSizeTipForAxis(d, re->size(), widthChanged);
+            break;
+        }
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+        if (m_dockSizeTip) m_dockSizeTip->dismiss();
+    }
     return QMainWindow::eventFilter(obj, event);
+}
+
+void MainWindow::showDockSizeTipForAxis(QDockWidget* dock, const QSize& sz, bool horizontalDrag) {
+    if (!dock) return;
+    if (!m_dockSizeTip) {
+        m_dockSizeTip = new DockSizeReadout(this);
+    }
+    const auto& t = ThemeManager::instance().current();
+    m_dockSizeTip->setTheme(t.backgroundAlt, t.border,
+                             t.text, t.textDim, t.border);
+
+    QSettings s("Reclass", "Reclass");
+    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+    f.setFixedPitch(true);
+
+    // Find the OTHER widget across the divider — the doc dock area
+    // (m_docDocks.first()) for sidebar drags, fall back to central
+    // widget. When both dock-resizes arrive in the same event-loop
+    // tick, the "other" widget hasn't been resized yet at the time
+    // OUR resize handler fires. Defer the readout via a 0-timer so
+    // Qt's layout has actually applied the geometry on both sides
+    // before we read.
+    int selfSz = horizontalDrag ? sz.width() : sz.height();
+    QPointer<QDockWidget> dockPtr(dock);
+    QTimer::singleShot(0, this, [this, dockPtr, selfSz, horizontalDrag, f]() {
+        if (!dockPtr || !m_dockSizeTip) return;
+        // Probe the doc-area width directly — that's the "other side".
+        QWidget* other = nullptr;
+        if (!m_docDocks.isEmpty()) other = m_docDocks.first();
+        if (!other) other = centralWidget();
+        int otherSz = 0;
+        if (other) {
+            otherSz = horizontalDrag ? other->width() : other->height();
+        } else {
+            otherSz = (horizontalDrag ? width() : height()) - selfSz;
+        }
+        QString body = QStringLiteral("%1 px | %2 px")
+            .arg(selfSz).arg(otherSz);
+        QString title;
+        if (dockPtr == m_workspaceDock)        title = QStringLiteral("Workspace size");
+        else if (dockPtr == m_bookmarksDock)   title = QStringLiteral("Bookmarks size");
+        else if (dockPtr == m_symbolsDock)     title = QStringLiteral("Symbols size");
+        else if (dockPtr == m_scannerDock)     title = QStringLiteral("Scanner size");
+        else                                   title = QStringLiteral("Dock size");
+        m_dockSizeTip->updateText(title, body, f);
+        m_dockSizeTip->showAt(mapFromGlobal(QCursor::pos()));
+    });
+}
+
+void MainWindow::showDockSizeTip(QDockWidget* dock, const QSize& sz) {
+    if (!dock) return;
+    // Legacy entry — fall back to dockWidgetArea-based axis detection
+    // for callers that don't know which dimension actually changed.
+    // dockWidgetArea() returns NoDockWidgetArea for tabified docks, so
+    // the area-based "is this a horizontal drag" check is unreliable.
+    // Fall back to size-delta detection in that case.
+    // Left number: this dock's size on the axis it's being dragged on.
+    // Right number: the central widget's size on the same axis. When
+    // the dock shrinks, the central area grows — so the right number
+    // rises as the left drops.
+    Qt::DockWidgetArea area = dockWidgetArea(dock);
+    bool horizontalDrag;
+    if (area == Qt::LeftDockWidgetArea || area == Qt::RightDockWidgetArea) {
+        horizontalDrag = true;
+    } else {
+        horizontalDrag = false;
+    }
+    showDockSizeTipForAxis(dock, sz, horizontalDrag);
 }
 
 // Build a minimal empty struct for new documents
@@ -6084,9 +6196,13 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceDock->setWidget(dockContainer);
     // Floor on dock width — prevents Qt's splitter from crushing workspace
     // when another dock shares the area.
-    m_workspaceDock->setMinimumWidth(180);
+    // Min width +30% — keeps long type names + counts readable without
+    // Qt's splitter crushing the dock when the user opens neighbours.
+    m_workspaceDock->setMinimumWidth(235);
     addDockWidget(Qt::TopDockWidgetArea, m_workspaceDock);
     m_workspaceDock->hide();
+    // Watch resize events to drive the live divider-size tooltip.
+    m_workspaceDock->installEventFilter(this);
 
     connect(m_workspaceTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& index) {
         if (!index.data(rcx::RoleSectionHeader).toString().isEmpty()) return;
@@ -6271,6 +6387,7 @@ void MainWindow::createScannerDock() {
     m_scannerDock->setMinimumHeight(140);
     addDockWidget(Qt::BottomDockWidgetArea, m_scannerDock);
     m_scannerDock->hide();
+    m_scannerDock->installEventFilter(this);
 
     // Border overlay and resize grip for floating state
     {
@@ -7048,6 +7165,7 @@ void MainWindow::createSymbolsDock() {
     m_symbolsDock->setMinimumWidth(220);
     addDockWidget(Qt::RightDockWidgetArea, m_symbolsDock);
     m_symbolsDock->hide();
+    m_symbolsDock->installEventFilter(this);
 
     // Border overlay and resize grip for floating state
     {
@@ -7143,6 +7261,7 @@ void MainWindow::createBookmarksDock() {
     m_bookmarksDock->setMinimumWidth(180);
     addDockWidget(Qt::LeftDockWidgetArea, m_bookmarksDock);
     m_bookmarksDock->hide();  // hidden by default; toggle via View menu
+    m_bookmarksDock->installEventFilter(this);
 
     // When the dock becomes visible via any path (View menu toggle, drag
     // re-dock, MCP, etc.) tabify with the workspace if it's already open in
@@ -7805,32 +7924,65 @@ void MainWindow::placeSidebarDock(QDockWidget* dock, Qt::DockWidgetArea area,
         break;
     }
 
+    const bool horizontal = (area == Qt::LeftDockWidgetArea
+                              || area == Qt::RightDockWidgetArea);
     if (peer) {
-        // Tabify with the existing neighbour. No resize — inherits peer's size.
         tabifyDockWidget(peer, dock);
     } else {
-        // No peer yet. Position next to the first doc dock for horizontal
-        // areas (keeps docs centred and sidebar flush to the edge) or drop
-        // into the area directly for vertical ones.
-        const bool horizontal = (area == Qt::LeftDockWidgetArea
-                                  || area == Qt::RightDockWidgetArea);
         if (horizontal && !m_docDocks.isEmpty()) {
             splitDockWidget(dock, m_docDocks.first(), Qt::Horizontal);
         } else {
             addDockWidget(area, dock);
         }
-        // Restore remembered size, falling back to preferredSize (or the
-        // dynamic computeWorkspaceDockWidth for the workspace dock).
-        int def = preferredSize;
-        if (def < 0 && dock == m_workspaceDock) def = computeWorkspaceDockWidth();
-        if (def > 0) {
-            int sz = loadDockSize(dock, def);
-            resizeDocks({dock}, {sz},
-                        horizontal ? Qt::Horizontal : Qt::Vertical);
+        // Other sidebars still honour the saved size; workspace is
+        // forced to its minimumWidth below (defer-after-show).
+        if (dock != m_workspaceDock) {
+            int def = preferredSize;
+            if (def > 0) {
+                int sz = loadDockSize(dock, def);
+                resizeDocks({dock}, {sz},
+                            horizontal ? Qt::Horizontal : Qt::Vertical);
+            }
         }
     }
     dock->show();
     dock->raise();
+    // Workspace dock: ALWAYS open at exactly 235 px, regardless of
+    // tabify-vs-split path or persisted size. Defer via 0-timer so
+    // it runs after Qt's layout has settled — calling resizeDocks
+    // before show()/layout-settle is silently overridden by Qt's
+    // size-hint resolution. We pass a literal 235 (not minimumWidth)
+    // because QDockWidget::minimumWidth() can be raised by child-
+    // widget content minimums (the workspace tree reports ~293).
+    // Also lower the dock's own minimum so 235 isn't clamped up.
+    if (dock == m_workspaceDock) {
+        // Strategy: temporarily cap the dock at 235 px max — the
+        // layout solver MUST honor a max constraint, so the content's
+        // own minimum-width hints are overridden. After Qt's first
+        // event-loop tick (deferred timer), drop the max so the user
+        // can drag the dock wider. Combined with recursive
+        // setMinimumWidth(0) in case content otherwise refuses to lay
+        // out at <=235.
+        std::function<void(QWidget*)> zeroMins = [&zeroMins](QWidget* w) {
+            if (!w) return;
+            w->setMinimumWidth(0);
+            for (QObject* c : w->children()) {
+                if (auto* cw = qobject_cast<QWidget*>(c)) zeroMins(cw);
+            }
+        };
+        zeroMins(m_workspaceDock);
+        if (auto* tb = m_workspaceDock->titleBarWidget()) zeroMins(tb);
+        m_workspaceDock->setMaximumWidth(235);
+        QTimer::singleShot(0, this, [this, horizontal]() {
+            if (!m_workspaceDock) return;
+            resizeDocks({m_workspaceDock}, {235},
+                        horizontal ? Qt::Horizontal : Qt::Vertical);
+            QTimer::singleShot(100, this, [this]() {
+                if (m_workspaceDock)
+                    m_workspaceDock->setMaximumWidth(QWIDGETSIZE_MAX);
+            });
+        });
+    }
     // Tab bar styling needs to pick up the new tab (tabifyDockWidget path) or
     // the new dock layout (split path).
     QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });

@@ -584,6 +584,11 @@ if(BUILD_TESTING)
         target_link_libraries(test_titlebar_border PRIVATE ${QT}::Widgets ${QT}::Test ${QT}::Svg)
         add_test(NAME test_titlebar_border COMMAND test_titlebar_border)
 
+        add_executable(test_dock_size_tip tests/test_dock_size_tip.cpp)
+        target_include_directories(test_dock_size_tip PRIVATE src)
+        target_link_libraries(test_dock_size_tip PRIVATE ${QT}::Widgets ${QT}::Test)
+        add_test(NAME test_dock_size_tip COMMAND test_dock_size_tip)
+
         add_executable(test_source_provider tests/test_source_provider.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp

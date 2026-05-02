@@ -7,7 +7,7 @@
 #include "startpage.h"
 #include "generator.h"
 #include "workspace_model.h"
-namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; }
+namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class DockSizeReadout; }
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -307,6 +307,20 @@ private:
     // below turns a potential UAF into a benign no-op.
     QPointer<QDockWidget> m_dragOrigPeer;
     void setupDockOverlay();
+
+    // Live size readout shown while the user drags a dock divider.
+    // Reuses RcxTooltip (the cmd-bar arrow tooltip) so the visual is
+    // consistent with the rest of the chrome. Positioned at the dock's
+    // right edge as the user resizes; hidden when the mouse releases.
+    DockSizeReadout* m_dockSizeTip = nullptr;
+    void showDockSizeTip(QDockWidget* dock, const QSize& sz);
+    // Like showDockSizeTip but with explicit axis: caller knows which
+    // dimension actually changed (e.g. from QResizeEvent::oldSize vs
+    // size). Avoids relying on dockWidgetArea(), which lies for
+    // tabified docks and for height-resizes of sidebars in horizontal
+    // areas.
+    void showDockSizeTipForAxis(QDockWidget* dock, const QSize& sz,
+                                bool horizontalDrag);
     void onDockDragStarted(QDockWidget* dock, QPoint globalPos);
     void onDockDropRequested(QDockWidget* source, QDockWidget* target, int zone);
 

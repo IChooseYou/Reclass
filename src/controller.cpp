@@ -4266,12 +4266,17 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
         hdr.enabled = false;
         entries.append(hdr);
 
-        // File provider (always available)
+        // File provider (always available — built into the binary, no
+        // plugin DLL). Set kindLabel + a "built-in" subtext so the row
+        // has the same two-line shape as plugin-loaded providers
+        // (Process / Kernel / etc) below it.
         {
             SourceEntry e;
             e.entryKind = SourceEntry::ProviderAction;
             e.displayName = QStringLiteral("Open File");
             e.providerIdentifier = QStringLiteral("File");
+            e.kindLabel = kindLabelFor(QStringLiteral("File"));
+            e.dllFileName = QStringLiteral("built-in");
             e.iconPath = iconForProvider(QStringLiteral("File"));
             entries.append(e);
         }

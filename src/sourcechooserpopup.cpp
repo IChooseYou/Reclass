@@ -216,11 +216,8 @@ public:
             p->setFont(baseFont);
         }
 
-        // Provider chevron (right side, row 1)
-        if (e.entryKind == SourceEntry::ProviderAction) {
-            p->setPen(theme.textFaint);
-            p->drawText(r.right() - 18, row1Y, QStringLiteral("\u203A"));
-        }
+        // (Provider chevron removed \u2014 implies a submenu that doesn't exist;
+        // selecting a provider opens its own dialog/modal directly.)
 
         if (!twoLine) return;
 
@@ -526,9 +523,17 @@ void SourceChooserPopup::applyFilter(const QString& text) {
             QStringLiteral("%1 of %2 sources").arg(m_filteredEntries.size()).arg(total));
     }
 
-    int first = nextSelectableRow(0, 1);
-    if (first >= 0)
-        m_listView->setCurrentIndex(m_model->index(first));
+    // Only pre-select when filtering — otherwise the first row (Open File)
+    // appears permanently highlighted before the user has hovered or
+    // navigated to it. Filter focus is in m_filterEdit; pressing Down
+    // shifts focus to the list and selects the first row at that point.
+    if (!text.isEmpty()) {
+        int first = nextSelectableRow(0, 1);
+        if (first >= 0)
+            m_listView->setCurrentIndex(m_model->index(first));
+    } else {
+        m_listView->setCurrentIndex(QModelIndex());
+    }
 }
 
 void SourceChooserPopup::popup(const QPoint& globalPos) {
