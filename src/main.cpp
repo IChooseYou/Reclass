@@ -6513,7 +6513,10 @@ void MainWindow::createWorkspaceDock() {
 void MainWindow::createScannerDock() {
     m_scannerDock = new QDockWidget("Memory Scanner", this);
     m_scannerDock->setObjectName("ScannerDock");
-    m_scannerDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+    // Restrict to bottom (split under the editor) and left (alongside the
+    // workspace dock). Top/right docking made no UX sense — the scanner
+    // either lives under the code or to the side of the project tree.
+    m_scannerDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::LeftDockWidgetArea);
     m_scannerDock->setFeatures(
         QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
         QDockWidget::DockWidgetFloatable);
