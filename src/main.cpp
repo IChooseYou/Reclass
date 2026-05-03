@@ -1374,11 +1374,12 @@ void MainWindow::createMenus() {
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
     {
-        // Memory Scanner opens undocked in its own floating window — keeps
-        // the editor's vertical real estate intact (the dock used to eat
-        // 360 px off the bottom every time it was opened) and lets the
-        // user park it on a second monitor. The toggle action still hides
-        // and shows it; we just override the open-side to detach first.
+        // Memory Scanner opens floating only on its FIRST show — after the
+        // user explicitly redocks it (drag, double-click, context menu),
+        // re-opens via Ctrl+Shift+S must respect that choice. The previous
+        // version called setFloating(true) inside the toggle handler, so
+        // any redock got immediately undone the next time visibilityChanged
+        // round-tripped through the action's checked state.
         auto* scanAct = new QAction(m_scannerDock->toggleViewAction()->icon(),
                                     QStringLiteral("Memory Scanner"), this);
         scanAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S));
@@ -1388,8 +1389,6 @@ void MainWindow::createMenus() {
                 &QAction::setChecked);
         connect(scanAct, &QAction::toggled, this, [this](bool on) {
             if (on) {
-                if (!m_scannerDock->isFloating())
-                    m_scannerDock->setFloating(true);
                 m_scannerDock->show();
                 m_scannerDock->raise();
                 m_scannerDock->activateWindow();
