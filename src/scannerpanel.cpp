@@ -25,6 +25,7 @@
 #include <QTimer>
 #include <QLocale>
 #include <QStyle>
+#include <QFrame>
 
 namespace rcx {
 
@@ -1889,18 +1890,51 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     m_valueEdit->setStyleSheet(lineEditStyle);
 
     // Combo boxes
+    //
+    // Lessons from TypeSelectorPopup (the type chooser): Fusion's default
+    // frame around a popup view is invisible-on-dark or a fat 2px sunken
+    // bevel — neither reads as a clean border. The fix is to give the
+    // dropdown view a flat 1px border in theme.border AND pad the items
+    // so they don't sit flush against the border (which makes the border
+    // look glued to the first row's text). Also outline:none kills Qt's
+    // dotted focus rectangle inside the popup.
     QString comboStyle = QStringLiteral(
         "QComboBox { background: %1; color: %2; border: 1px solid %3; padding: 2px 4px 2px 4px; }"
         "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;"
         "  width: 16px; border-left: 1px solid %3; }"
         "QComboBox::down-arrow { image: url(:/vsicons/chevron-down.svg); width: 10px; height: 10px; }"
-        "QComboBox QAbstractItemView { background: %1; color: %2; selection-background-color: %4; }")
+        "QComboBox QAbstractItemView {"
+        "  background: %1; color: %2;"
+        "  selection-background-color: %4;"
+        "  border: 1px solid %3;"
+        "  padding: 2px 0;"
+        "  outline: none;"
+        "}"
+        "QComboBox QAbstractItemView::item { padding: 4px 10px; }"
+        "QComboBox QAbstractItemView::item:hover { background: %4; }")
         .arg(theme.background.name(), theme.text.name(),
              theme.border.name(), theme.hover.name());
     m_modeCombo->setStyleSheet(comboStyle);
     m_typeCombo->setStyleSheet(comboStyle);
     m_fastScanCombo->setStyleSheet(comboStyle);
     m_condCombo->setStyleSheet(comboStyle);
+
+    // Defensive: the QFrame container Qt wraps the popup view in adds its
+    // own frame shape/line that fights the QSS border. Force NoFrame on
+    // each combo's popup container so only the QSS border shows. Same
+    // trick TypeSelectorPopup uses (`setFrameShape(QFrame::NoFrame)`).
+    for (QComboBox* c : { m_modeCombo, m_typeCombo, m_fastScanCombo, m_condCombo }) {
+        if (auto* view = c->view()) {
+            if (auto* container = qobject_cast<QFrame*>(view->parentWidget())) {
+                container->setFrameShape(QFrame::NoFrame);
+                container->setLineWidth(0);
+            }
+            if (auto* viewFrame = qobject_cast<QFrame*>(view)) {
+                viewFrame->setFrameShape(QFrame::NoFrame);
+                viewFrame->setLineWidth(0);
+            }
+        }
+    }
 
     // Labels
     QPalette lp;
