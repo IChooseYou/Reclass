@@ -456,7 +456,25 @@ if(BUILD_TESTING)
     add_executable(test_scanner tests/test_scanner.cpp src/scanner.cpp)
     target_include_directories(test_scanner PRIVATE src)
     target_link_libraries(test_scanner PRIVATE ${QT}::Core ${QT}::Concurrent ${QT}::Test)
+    if(WIN32)
+        # psapi for the self-attach end-to-end test (EnumProcessModulesEx).
+        target_link_libraries(test_scanner PRIVATE psapi)
+    endif()
     add_test(NAME test_scanner COMMAND test_scanner)
+
+    # Non-UI combinatorial sweep — exercises every (mode, condition,
+    # value type, alignment, region filter) tuple that the panel can
+    # produce, against a synthetic provider, asserting the engine
+    # returns the expected result count for each. No QtWidgets, no
+    # popups, no flashing windows. Catches regressions when scan
+    # request fields drift apart from the engine's interpretation.
+    add_executable(test_scanner_combinations
+        tests/test_scanner_combinations.cpp
+        src/scanner.cpp)
+    target_include_directories(test_scanner_combinations PRIVATE src)
+    target_link_libraries(test_scanner_combinations
+        PRIVATE ${QT}::Core ${QT}::Concurrent ${QT}::Test)
+    add_test(NAME test_scanner_combinations COMMAND test_scanner_combinations)
 
     # ClipboardCodec — JSON MIME roundtrip + plaintext fallback
     add_executable(test_clipboard tests/test_clipboard.cpp)

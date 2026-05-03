@@ -101,6 +101,11 @@ public:
 
     bool presentationMode() const { return m_presentationMode; }
 
+    // Test/screenshot helpers — let the headless --screenshot path reach
+    // into the scanner dock so we can capture the panel for visual review.
+    QDockWidget*  scannerDock()  const { return m_scannerDock; }
+    ScannerPanel* scannerPanel() const { return m_scannerPanel; }
+
     // Project Lifecycle API
     QDockWidget* project_new(const QString& classKeyword = QString());
     QDockWidget* project_open(const QString& path = {});
@@ -254,6 +259,12 @@ private:
     QString tabTitle(const TabState& tab) const;
     void setupDockTabBars();
     void updateWindowTitle();
+    // Refresh the floating Memory Scanner dock's title bar so it shows the
+    // active editor tab's source name + kind in parentheses, e.g.
+    // "Memory Scanner — notepad.exe (Process)". Called whenever the active
+    // tab or its provider changes so the user can never confuse which tab
+    // their next scan will run against.
+    void updateScannerTitle();
     void closeAllDocDocks();
 
     void setViewMode(ViewMode mode);

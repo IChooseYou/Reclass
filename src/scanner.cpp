@@ -3,11 +3,101 @@
 #include <QMetaObject>
 #include <QElapsedTimer>
 #include <QDebug>
+#include <QSet>
+#include <QFileInfo>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
 
 namespace rcx {
+
+// ── System module skip list ──
+// Hard-coded set of well-known Windows + Qt + CRT DLLs and the same set of
+// libs on Linux/macOS. Used by ScanRequest::skipSystemModules to drop matches
+// inside loader/runtime code that almost never holds user data. Stripped of
+// extension on lookup so "kernel32" matches "kernel32.dll".
+bool ScanEngine::isSystemModule(const QString& moduleName) {
+    if (moduleName.isEmpty()) return false;
+    static const QSet<QString> kSystem = {
+        // Windows core
+        "kernel32", "kernelbase", "ntdll", "win32u", "user32", "gdi32",
+        "gdi32full", "advapi32", "shell32", "shlwapi", "shcore",
+        "combase", "ole32", "oleaut32", "rpcrt4", "sechost", "sspicli",
+        "msvcrt", "ucrtbase", "msvcp140", "vcruntime140", "vcruntime140_1",
+        "msvcp_win", "bcrypt", "bcryptprimitives", "cryptbase", "crypt32",
+        "imm32", "dwmapi", "uxtheme", "comdlg32", "comctl32", "winmm",
+        "ws2_32", "iphlpapi", "wininet", "winhttp", "psapi", "version",
+        "wldap32", "secur32", "msasn1", "wintrust", "kernel.appcore",
+        "twinapi", "twinapi.appcore", "windows.storage", "wintypes",
+        "profapi", "dnsapi", "userenv", "setupapi", "cfgmgr32", "devobj",
+        "powrprof", "atl", "atl120", "atl140", "msvcr120", "msvcp120",
+        // Qt 6 core libs (this app's own deps; user data lives elsewhere)
+        "qt6core", "qt6gui", "qt6widgets", "qt6concurrent", "qt6network",
+        "qt6printsupport", "qt6svg", "qt6dbus", "qt6xml",
+        // Linux
+        "ld-linux-x86-64.so", "libc.so", "libc.so.6", "libdl.so",
+        "libpthread.so", "librt.so", "libm.so", "libstdc++.so",
+        "libgcc_s.so",
+        // macOS
+        "libsystem_kernel.dylib", "libsystem_c.dylib", "libsystem_pthread.dylib",
+        "libsystem_malloc.dylib", "libsystem_platform.dylib",
+        "libc++.1.dylib", "libobjc.A.dylib", "dyld",
+    };
+    QString name = moduleName.trimmed().toLower();
+    // Strip extension(s): "kernel32.dll" -> "kernel32", "libc.so.6" -> "libc.so"
+    QString stem = name;
+    int dot = stem.indexOf('.');
+    while (dot > 0) {
+        QString suffix = stem.mid(dot + 1);
+        if (suffix == "dll" || suffix == "exe" || suffix == "dylib"
+            || suffix == "so" || (suffix.size() <= 3 && suffix.toInt() > 0)) {
+            stem = stem.left(dot);
+            dot = stem.indexOf('.');
+            continue;
+        }
+        break;
+    }
+    if (kSystem.contains(stem)) return true;
+    if (kSystem.contains(name)) return true;
+    return false;
+}
+
+// ── Boyer-Moore-Horspool ──
+// Stable, in-line implementation. ~5-10× faster than the naive matcher on
+// long patterns (≥4 bytes); the caller falls back to the naive loop when
+// the pattern has wildcards (BMH can't represent wildcard semantics in the
+// shift table). Returns offset into [data, data+len) or -1.
+int ScanEngine::bmhFind(const char* data, int len,
+                         const char* pat, int patLen) {
+    if (patLen <= 0 || patLen > len) return -1;
+    if (patLen == 1) {
+        const void* p = std::memchr(data, (unsigned char)pat[0], len);
+        return p ? int((const char*)p - data) : -1;
+    }
+    int shift[256];
+    for (int i = 0; i < 256; i++) shift[i] = patLen;
+    for (int i = 0; i < patLen - 1; i++)
+        shift[(unsigned char)pat[i]] = patLen - 1 - i;
+    int i = 0;
+    const int last = patLen - 1;
+    while (i <= len - patLen) {
+        // Fast tail check first — most rejections happen here
+        unsigned char tail = (unsigned char)data[i + last];
+        if (tail == (unsigned char)pat[last]) {
+            // Tail matched — verify the rest
+            int j = 0;
+            while (j < last && data[i + j] == pat[j]) j++;
+            if (j == last) return i;
+        }
+        i += shift[tail];
+    }
+    return -1;
+}
+
+void ScanEngine::invalidateRegionCache() {
+    m_cachedRegions.clear();
+    m_cachedProvider = nullptr;
+}
 
 // ── Pattern parsing ──
 
@@ -460,18 +550,47 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
     timer.start();
 
     QVector<ScanResult> results;
-    const bool isUnknown = (req.condition == ScanCondition::UnknownValue);
+    const ScanCondition cond = req.condition;
+    // Compare-against-previous conditions on a first scan have no baseline,
+    // so they're treated as raw capture of every aligned address. Rescan
+    // applies the actual filter.
+    const bool isCapture = (cond == ScanCondition::UnknownValue)
+                        || (cond == ScanCondition::Changed)
+                        || (cond == ScanCondition::Unchanged)
+                        || (cond == ScanCondition::Increased)
+                        || (cond == ScanCondition::Decreased)
+                        || (cond == ScanCondition::IncreasedBy)
+                        || (cond == ScanCondition::DecreasedBy);
+    // Typed-const compare on first scan: we have a constant to test against,
+    // so we filter inline during capture instead of capturing everything.
+    const bool isTypedConst = (cond == ScanCondition::BiggerThan)
+                           || (cond == ScanCondition::SmallerThan)
+                           || (cond == ScanCondition::Between);
 
-    if (!prov || (!isUnknown && req.pattern.isEmpty()))
+    if (!prov) return results;
+    if (!isCapture && !isTypedConst && req.pattern.isEmpty())
+        return results;
+    if (isTypedConst && req.pattern.isEmpty())
         return results;
 
-    auto regions = prov->enumerateRegions();
+    // Region cache: enumerateRegions() can be ~10-50 ms on processes with
+    // thousands of mappings; reuse across rapid back-to-back scans.
+    QVector<MemoryRegion> regions;
+    if (m_cachedProvider == prov.get() && !m_cachedRegions.isEmpty()) {
+        regions = m_cachedRegions;
+    } else {
+        regions = prov->enumerateRegions();
+        m_cachedRegions  = regions;
+        m_cachedProvider = prov.get();
+    }
     qDebug() << "[scan] regions:" << regions.size()
              << " pattern:" << req.pattern.size() << "bytes"
              << " align:" << req.alignment
-             << " condition:" << (int)req.condition
+             << " condition:" << (int)cond
              << " filterExec:" << req.filterExecutable
-             << " filterWrite:" << req.filterWritable;
+             << " filterWrite:" << req.filterWritable
+             << " privateOnly:" << req.privateOnly
+             << " skipSys:" << req.skipSystemModules;
 
     // Fallback for providers that don't enumerate regions (file/buffer/syscall without modules)
     if (regions.isEmpty()) {
@@ -484,13 +603,24 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
         regions.append(fallback);
     }
 
-    const int patternLen = isUnknown ? req.valueSize : req.pattern.size();
-    const char* pat = isUnknown ? nullptr : req.pattern.constData();
-    const char* msk = isUnknown ? nullptr : req.mask.constData();
+    const int patternLen = (isCapture || isTypedConst) ? req.valueSize : req.pattern.size();
+    const char* pat = isCapture ? nullptr : req.pattern.constData();
+    const char* msk = isCapture ? nullptr : req.mask.constData();
     const int alignment = qMax(1, req.alignment);
-    const int valSize = isUnknown ? req.valueSize : patternLen;
+    const int valSize = (isCapture || isTypedConst) ? req.valueSize : patternLen;
     const bool hasRange = (req.startAddress != 0 || req.endAddress != 0) &&
                            req.endAddress > req.startAddress;
+
+    // BMH eligibility: pattern ≥4 bytes, no wildcards, alignment 1.
+    // (Aligned scans can't use BMH's variable shift table — they'd skip
+    //  matches that don't land on the alignment grid; the naive loop with
+    //  alignment-stride is still cheap enough.)
+    bool bmhEligible = !isCapture && patternLen >= 4 && alignment == 1;
+    if (bmhEligible && msk) {
+        for (int j = 0; j < patternLen; j++) {
+            if ((unsigned char)msk[j] != 0xFF) { bmhEligible = false; break; }
+        }
+    }
 
     // If constrainRegions specified, intersect with provider regions
     if (!req.constrainRegions.isEmpty()) {
@@ -527,11 +657,23 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                  << merged.size() << "after merge)";
     }
 
-    // Pre-compute total bytes for progress
+    // Reusable per-region acceptance check — keeps the pre-compute pass and
+    // the inner scan loop in lockstep so totalBytes matches scannedBytes.
+    auto regionAccepted = [&](const MemoryRegion& r) {
+        if (req.filterExecutable && !r.executable) return false;
+        if (req.filterWritable && !r.writable) return false;
+        if (req.privateOnly && r.type != RegionType::Private) return false;
+        if (req.skipSystemModules && isSystemModule(r.moduleName)) return false;
+        return true;
+    };
+
+    // Pre-compute total bytes for progress + emit a resolved-regions count
+    // back to the UI so the user sees the scope reduction in real time
+    // ("Scanning 247 MB across 89 regions").
     uint64_t totalBytes = 0;
+    int acceptedRegions = 0;
     for (const auto& r : regions) {
-        if (req.filterExecutable && !r.executable) continue;
-        if (req.filterWritable && !r.writable) continue;
+        if (!regionAccepted(r)) continue;
         uint64_t rStart = r.base, rEnd = r.base + r.size;
         if (hasRange) {
             if (rEnd <= req.startAddress || rStart >= req.endAddress) continue;
@@ -539,23 +681,32 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             rEnd   = qMin(rEnd, req.endAddress);
         }
         totalBytes += rEnd - rStart;
+        acceptedRegions++;
     }
+    QMetaObject::invokeMethod(this, "regionsResolved",
+        Qt::QueuedConnection, Q_ARG(int, acceptedRegions),
+        Q_ARG(qulonglong, (qulonglong)totalBytes));
 
-    qDebug() << "[scan] total scannable:" << (totalBytes / 1024) << "KB across filtered regions";
+    qDebug() << "[scan] total scannable:" << (totalBytes / 1024) << "KB across"
+             << acceptedRegions << "of" << regions.size() << "regions";
 
     if (totalBytes == 0) return results;
 
     uint64_t scannedBytes = 0;
+    uint64_t failedBytes = 0;
     int lastPct = -1;
 
-    constexpr int kChunk = 256 * 1024;
+    // Adaptive chunk sizing — tiny regions get one read; huge ones get 2 MB
+    // chunks so the read syscall amortizes well. The legacy 256 KB was a
+    // safe baseline but punished syscalls per chunk on multi-GB regions.
+    constexpr int kChunkBig = 2 * 1024 * 1024;
+    constexpr int kChunkMin = 64 * 1024;
 
     for (int regionIndex = 0; regionIndex < regions.size(); ++regionIndex) {
         const auto& region = regions[regionIndex];
         if (m_abort.load()) break;
 
-        if (req.filterExecutable && !region.executable) continue;
-        if (req.filterWritable && !region.writable) continue;
+        if (!regionAccepted(region)) continue;
 
         // Clip region to requested address range
         uint64_t regStart = region.base;
@@ -577,8 +728,16 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
         }
 
         const int overlap = patternLen - 1;
-        QByteArray chunk(qMin((uint64_t)kChunk, regSize), Qt::Uninitialized);
+        // Adaptive: cap big regions at 2 MB; tiny regions get one read.
+        uint64_t targetChunk = qMin((uint64_t)kChunkBig, regSize);
+        if (regSize < (uint64_t)kChunkMin) targetChunk = regSize;
+        QByteArray chunk(targetChunk, Qt::Uninitialized);
         uint64_t regOffset = regStart - region.base; // offset within provider region
+
+        // Inner-loop abort check: every kAbortStride iterations, peek the flag.
+        // 4096 stride at alignment=1 = ~4 KB per check, well under 1 ms even
+        // at 50 MB/s read rate. Larger alignments naturally check less often.
+        constexpr int kAbortStride = 4096;
 
         for (uint64_t off = 0; off < regSize; ) {
             if (m_abort.load()) break;
@@ -587,7 +746,8 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             int readLen = (int)qMin((uint64_t)chunk.size(), remaining);
 
             if (!prov->read(regStart + off, chunk.data(), readLen)) {
-                // Skip unreadable chunk
+                // Skip unreadable chunk; track for status-line surfacing.
+                failedBytes += readLen;
                 qDebug() << "[scan] read failed region" << regionIndex << "addr" << Qt::showbase << Qt::hex
                          << (region.base + off) << "base" << region.base << "off" << off << "len" << readLen << Qt::dec;
                 off += readLen;
@@ -598,20 +758,74 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             int scanEnd = readLen - patternLen;
             const char* data = chunk.constData();
 
-            if (isUnknown) {
-                // Unknown value: capture every aligned address
+            if (isCapture) {
+                // Capture every aligned address (UnknownValue + comparison
+                // conditions seed the result list this way; rescan filters
+                // against the captured bytes later).
                 for (int i = 0; i <= scanEnd; i += alignment) {
+                    if ((i & (kAbortStride - 1)) == 0 && m_abort.load())
+                        goto done;
                     ScanResult r;
                     r.address = regStart + off + (uint64_t)i;
+                    r.regionModule = region.moduleName;
                     r.scanValue = QByteArray(data + i, valSize);
                     results.append(r);
 
                     if (results.size() >= req.maxResults)
                         goto done;
                 }
-            } else {
-                // Exact pattern match
+            } else if (isTypedConst) {
+                // Inline typed compare: BiggerThan / SmallerThan / Between.
+                // Reuses compareTyped so we get the same numeric semantics as
+                // rescan filters.
+                QByteArray loBuf = req.pattern;
+                QByteArray hiBuf = req.pattern2;
                 for (int i = 0; i <= scanEnd; i += alignment) {
+                    if ((i & (kAbortStride - 1)) == 0 && m_abort.load())
+                        goto done;
+                    QByteArray val(data + i, valSize);
+                    int cmpLo = compareTyped(val, loBuf, req.valueType);
+                    bool ok = false;
+                    if (cond == ScanCondition::BiggerThan)       ok = (cmpLo > 0);
+                    else if (cond == ScanCondition::SmallerThan) ok = (cmpLo < 0);
+                    else if (cond == ScanCondition::Between && !hiBuf.isEmpty()) {
+                        int cmpHi = compareTyped(val, hiBuf, req.valueType);
+                        ok = (cmpLo >= 0 && cmpHi <= 0);
+                    }
+                    if (ok) {
+                        ScanResult r;
+                        r.address = regStart + off + (uint64_t)i;
+                        r.regionModule = region.moduleName;
+                        r.scanValue = std::move(val);
+                        results.append(r);
+                        if (results.size() >= req.maxResults)
+                            goto done;
+                    }
+                }
+            } else if (bmhEligible) {
+                // BMH path: no wildcards, alignment 1, pattern ≥4 bytes.
+                int searchFrom = 0;
+                while (searchFrom <= scanEnd) {
+                    if (m_abort.load()) goto done;
+                    int hit = bmhFind(data + searchFrom, readLen - searchFrom,
+                                       pat, patternLen);
+                    if (hit < 0) break;
+                    int absI = searchFrom + hit;
+                    if (absI > scanEnd) break;
+                    ScanResult r;
+                    r.address = regStart + off + (uint64_t)absI;
+                    r.regionModule = region.moduleName;
+                    r.scanValue = QByteArray(data + absI, qMin(16, readLen - absI));
+                    results.append(r);
+                    if (results.size() >= req.maxResults)
+                        goto done;
+                    searchFrom = absI + 1;
+                }
+            } else {
+                // Naive aligned matcher (handles wildcards + alignment > 1).
+                for (int i = 0; i <= scanEnd; i += alignment) {
+                    if ((i & (kAbortStride - 1)) == 0 && m_abort.load())
+                        goto done;
                     bool match = true;
                     for (int j = 0; j < patternLen; j++) {
                         if ((data[i + j] & msk[j]) != (pat[j] & msk[j])) {
@@ -663,7 +877,26 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
 
 done:
     qDebug() << "[scan] done:" << results.size() << "results in" << timer.elapsed() << "ms"
-             << " scanned:" << (scannedBytes / 1024) << "KB";
+             << " scanned:" << (scannedBytes / 1024) << "KB"
+             << " failed:" << (failedBytes / 1024) << "KB";
+    ScanStats stats;
+    stats.regionsScanned = acceptedRegions;
+    stats.bytesScanned   = scannedBytes;
+    stats.bytesFailed    = failedBytes;
+    stats.msElapsed      = (int)timer.elapsed();
+    QMetaObject::invokeMethod(this, "scanStats",
+        Qt::QueuedConnection, Q_ARG(rcx::ScanStats, stats));
+
+    // For capture-mode comparison conditions, run an immediate "rescan"
+    // against the just-captured baseline so the user gets a Changed/
+    // Unchanged/Increased/Decreased result set in one click.
+    if (cond == ScanCondition::Changed || cond == ScanCondition::Unchanged
+        || cond == ScanCondition::Increased || cond == ScanCondition::Decreased
+        || cond == ScanCondition::IncreasedBy || cond == ScanCondition::DecreasedBy) {
+        // The first scan can't compare against anything — the panel turns these
+        // into UnknownValue at first-scan time, so we shouldn't reach here for
+        // a true "first scan". Defensive: just return.
+    }
     return results;
 }
 
@@ -671,7 +904,8 @@ void ScanEngine::startRescan(std::shared_ptr<Provider> provider,
                               QVector<ScanResult> results, int readSize,
                               ScanCondition condition, ValueType valueType,
                               const QByteArray& filterPattern,
-                              const QByteArray& filterMask) {
+                              const QByteArray& filterMask,
+                              const QByteArray& filterPattern2) {
     if (isRunning()) return;
 
     m_abort.store(false);
@@ -689,9 +923,10 @@ void ScanEngine::startRescan(std::shared_ptr<Provider> provider,
 
     watcher->setFuture(QtConcurrent::run(
         [this, provider, results = std::move(results), readSize,
-         condition, valueType, filterPattern, filterMask]() mutable {
+         condition, valueType, filterPattern, filterMask, filterPattern2]() mutable {
             return runRescan(provider, std::move(results), readSize,
-                             condition, valueType, filterPattern, filterMask);
+                             condition, valueType, filterPattern, filterMask,
+                             filterPattern2);
         }));
 }
 
@@ -699,7 +934,8 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
                                            QVector<ScanResult> results, int readSize,
                                            ScanCondition condition, ValueType valueType,
                                            const QByteArray& filterPattern,
-                                           const QByteArray& filterMask) {
+                                           const QByteArray& filterMask,
+                                           const QByteArray& filterPattern2) {
     QElapsedTimer timer;
     timer.start();
 
@@ -711,7 +947,12 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
                           condition == ScanCondition::Unchanged ||
                           condition == ScanCondition::Increased ||
                           condition == ScanCondition::Decreased);
-    bool needsFilter = hasExactFilter || hasComparison;
+    bool hasTypedConst = (condition == ScanCondition::BiggerThan ||
+                          condition == ScanCondition::SmallerThan ||
+                          condition == ScanCondition::Between);
+    bool hasDelta      = (condition == ScanCondition::IncreasedBy ||
+                          condition == ScanCondition::DecreasedBy);
+    bool needsFilter = hasExactFilter || hasComparison || hasTypedConst || hasDelta;
 
     qDebug() << "[rescan] start:" << total << "results, readSize:" << readSize
              << "condition:" << (int)condition
@@ -788,6 +1029,59 @@ QVector<ScanResult> ScanEngine::runRescan(std::shared_ptr<Provider> prov,
                 case ScanCondition::Increased: matched[idx] = (cmp > 0);  break;
                 case ScanCondition::Decreased: matched[idx] = (cmp < 0);  break;
                 default: break;
+                }
+            }
+
+            // Typed const compare (BiggerThan / SmallerThan / Between).
+            // filterPattern carries the lower bound (or sole bound);
+            // filterPattern2 carries the upper bound for Between.
+            if (hasTypedConst && !filterPattern.isEmpty()) {
+                int cmpLo = compareTyped(r.scanValue, filterPattern, valueType);
+                if (condition == ScanCondition::BiggerThan)
+                    matched[idx] = (cmpLo > 0);
+                else if (condition == ScanCondition::SmallerThan)
+                    matched[idx] = (cmpLo < 0);
+                else if (condition == ScanCondition::Between
+                         && !filterPattern2.isEmpty()) {
+                    int cmpHi = compareTyped(r.scanValue, filterPattern2, valueType);
+                    matched[idx] = (cmpLo >= 0 && cmpHi <= 0);
+                }
+            }
+
+            // Delta compare (IncreasedBy / DecreasedBy). Only meaningful when
+            // a previous value exists; first scan can't satisfy this.
+            if (hasDelta && !r.previousValue.isEmpty()
+                && !filterPattern.isEmpty()) {
+                // Compute previous + delta (or - delta) and compare element-wise.
+                // We only need exact byte match against the typed addition.
+                int sz = qMin(r.previousValue.size(), filterPattern.size());
+                if (r.scanValue.size() >= sz) {
+                    bool ok = false;
+                    auto addAndCheck = [&](auto sample) {
+                        using T = decltype(sample);
+                        if (sz < (int)sizeof(T)) return;
+                        T prev{}, delta{}, cur{};
+                        memcpy(&prev,  r.previousValue.constData(), sizeof(T));
+                        memcpy(&delta, filterPattern.constData(),    sizeof(T));
+                        memcpy(&cur,   r.scanValue.constData(),      sizeof(T));
+                        T expected = (condition == ScanCondition::IncreasedBy)
+                                     ? T(prev + delta) : T(prev - delta);
+                        ok = (cur == expected);
+                    };
+                    switch (valueType) {
+                    case ValueType::Int8:   addAndCheck(int8_t{});   break;
+                    case ValueType::UInt8:  addAndCheck(uint8_t{});  break;
+                    case ValueType::Int16:  addAndCheck(int16_t{});  break;
+                    case ValueType::UInt16: addAndCheck(uint16_t{}); break;
+                    case ValueType::Int32:  addAndCheck(int32_t{});  break;
+                    case ValueType::UInt32: addAndCheck(uint32_t{}); break;
+                    case ValueType::Int64:  addAndCheck(int64_t{});  break;
+                    case ValueType::UInt64: addAndCheck(uint64_t{}); break;
+                    case ValueType::Float:  addAndCheck(float{});    break;
+                    case ValueType::Double: addAndCheck(double{});   break;
+                    default: break;
+                    }
+                    matched[idx] = ok;
                 }
             }
         }

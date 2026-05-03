@@ -243,6 +243,13 @@ QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const
                                 (mbi.Protect & PAGE_EXECUTE_READWRITE) ||
                                 (mbi.Protect & PAGE_EXECUTE_WRITECOPY);
 
+            // Classify by mbi.Type — the scanner's "Private only" filter
+            // depends on this (game state lives in MEM_PRIVATE, not in
+            // MEM_IMAGE .rdata or MEM_MAPPED file-backed pages).
+            if      (mbi.Type == MEM_IMAGE)   region.type = rcx::RegionType::Image;
+            else if (mbi.Type == MEM_MAPPED)  region.type = rcx::RegionType::Mapped;
+            else                              region.type = rcx::RegionType::Private;
+
             // Match module name from cached module list
             for (const auto& mod : m_modules) {
                 if (region.base >= mod.base && region.base < mod.base + mod.size) {
@@ -466,17 +473,26 @@ QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const
         region.readable   = readable;
         region.writable   = writable;
         region.executable = executable;
+        region.type       = rcx::RegionType::Private;  // anonymous default
 
         // Extract module name from pathname
         size_t start = pathname.find_first_not_of(" \t");
+        bool fileBackedAnon = false;  // [heap], [stack], [vdso], etc. — anonymous despite path
         if (start != std::string::npos) {
             QString qpath = QString::fromStdString(pathname.substr(start));
-            if (qpath.startsWith('/') && !qpath.startsWith("/dev/") &&
-                !qpath.startsWith("/memfd:")) {
+            if (qpath.startsWith('[')) {
+                fileBackedAnon = true;  // pseudo-paths are private
+            } else if (qpath.startsWith('/') && !qpath.startsWith("/dev/") &&
+                       !qpath.startsWith("/memfd:")) {
                 QFileInfo fi(qpath);
                 region.moduleName = fi.fileName();
+                // Heuristic: executable file-backed = Image (DLL/SO),
+                // non-executable file-backed = Mapped (asset/font/cache).
+                region.type = executable ? rcx::RegionType::Image
+                                         : rcx::RegionType::Mapped;
             }
         }
+        if (fileBackedAnon) region.type = rcx::RegionType::Private;
 
         regions.append(region);
     }
@@ -690,6 +706,12 @@ QVector<rcx::MemoryRegion> ProcessMemoryProvider::enumerateRegions() const
             if (pathLen > 0) {
                 QFileInfo fi(QString::fromUtf8(pathBuf));
                 region.moduleName = fi.fileName();
+                // Same heuristic as Linux: executable file-backed = Image,
+                // non-executable file-backed = Mapped.
+                region.type = region.executable ? rcx::RegionType::Image
+                                                : rcx::RegionType::Mapped;
+            } else {
+                region.type = rcx::RegionType::Private;
             }
 
             regions.append(region);

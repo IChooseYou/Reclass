@@ -130,6 +130,13 @@ jobs:
         run: cmake --build build
 
       - name: Test
+        # Headless CI has no X server / Wayland — Qt's xcb plugin can't
+        # initialize a display, so test_default_class_footer (and any other
+        # test using QApplication) aborts on QGuiApplication construction.
+        # The "offscreen" platform plugin paints to a memory bitmap and
+        # works with QApplication on display-less hosts.
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
 
       - name: Create AppImage

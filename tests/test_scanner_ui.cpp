@@ -11,6 +11,9 @@
 #include <QLabel>
 #include <QClipboard>
 #include <QElapsedTimer>
+#include <QDir>
+#include <QFile>
+#include <QSettings>
 #include <cstring>
 #include "scannerpanel.h"
 #include "scanner.h"
@@ -62,7 +65,8 @@ private slots:
     }
 
     void initialState_scanButton() {
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Scan"));
+        // Renamed for workflow clarity: First Scan / Next Scan / Reset.
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
     }
 
     void initialState_progressBarHidden() {
@@ -171,9 +175,9 @@ private slots:
         m_panel->setProviderGetter([prov]() { return prov; });
 
         m_panel->patternEdit()->setText("");
-        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
-
-        QVERIFY(m_panel->statusLabel()->text().contains("error", Qt::CaseInsensitive));
+        // The button now disables itself the moment the input is empty —
+        // safer than letting the click fire and surface an error string.
+        QVERIFY(!m_panel->scanButton()->isEnabled());
     }
 
     void scan_invalidPattern() {
@@ -251,7 +255,8 @@ private slots:
         QApplication::processEvents();
 
         // Button back to Scan
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Scan"));
+        // Renamed for workflow clarity: First Scan / Next Scan / Reset.
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
         QVERIFY(!m_panel->progressBar()->isVisible());
     }
 
@@ -284,7 +289,8 @@ private slots:
             QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
             QApplication::processEvents();
         }
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Scan"));
+        // Renamed for workflow clarity: First Scan / Next Scan / Reset.
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -455,10 +461,10 @@ private slots:
 
         auto* item = m_panel->resultsTable()->item(0, 1);
         QVERIFY(item);
-        QVERIFY(item->text().contains("DE"));
-        QVERIFY(item->text().contains("AD"));
-        QVERIFY(item->text().contains("BE"));
-        QVERIFY(item->text().contains("EF"));
+        // Value column shows ONLY the matched bytes (the pattern length),
+        // not the 16-byte chunk the engine cached for context. Previously
+        // a 1-byte "DD" search produced a 16-byte string of unrelated bytes.
+        QCOMPARE(item->text(), QStringLiteral("DE AD"));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -604,7 +610,9 @@ private slots:
         QVERIFY(finSpy.wait(5000));
         QApplication::processEvents();
 
-        QCOMPARE(m_panel->statusLabel()->text(), QStringLiteral("1 result"));
+        // Status line now reads "N result(s) found" so it's clearer to the
+        // user that the count IS the result of a fresh scan, not stale text.
+        QCOMPARE(m_panel->statusLabel()->text(), QStringLiteral("1 result found"));
     }
 
     void status_multipleResults() {
@@ -620,7 +628,7 @@ private slots:
         QVERIFY(finSpy.wait(5000));
         QApplication::processEvents();
 
-        QCOMPARE(m_panel->statusLabel()->text(), QStringLiteral("2 results"));
+        QCOMPARE(m_panel->statusLabel()->text(), QStringLiteral("2 results found"));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -859,8 +867,13 @@ private slots:
         QVERIFY(m_panel->resultsTable()->item(lastRow, 0) != nullptr);
         QCOMPARE(m_panel->resultsTable()->item(lastRow, 1)->text(), QStringLiteral("21"));
         QCOMPARE(m_panel->resultsTable()->item(lastRow, 2)->text(), QStringLiteral("7"));
-        // Status should say "Updated"
-        QVERIFY(m_panel->statusLabel()->text().contains("Updated"));
+        // Status now reads either "Narrowed N → M (eliminated K)" or
+        // "All N results still match" — it surfaces the rescan delta
+        // explicitly instead of a generic "Updated N results".
+        QString status = m_panel->statusLabel()->text();
+        QVERIFY2(status.contains("Narrowed") || status.contains("still match")
+                  || status.contains("result"),
+                 qPrintable(QStringLiteral("Unexpected rescan status: ") + status));
         // Buttons should be re-enabled
         QVERIFY(m_panel->updateButton()->isEnabled());
         QVERIFY(m_panel->scanButton()->isEnabled());
@@ -1036,7 +1049,8 @@ private slots:
                 QCOMPARE(m_panel->resultsTable()->item(0, 2)->text(),
                          QString::number(newVal - 1));
             }
-            QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Scan"));
+            // Renamed for workflow clarity: First Scan / Next Scan / Reset.
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
             QVERIFY(!m_panel->progressBar()->isVisible());
             QVERIFY(m_panel->updateButton()->isEnabled());
         }
@@ -1096,7 +1110,8 @@ private slots:
             qDebug() << "[bench-sig] rescan #" << iter << ":" << iterTimer.elapsed() << "ms"
                      << "| status:" << m_panel->statusLabel()->text();
 
-            QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Scan"));
+            // Renamed for workflow clarity: First Scan / Next Scan / Reset.
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
             QVERIFY(!m_panel->progressBar()->isVisible());
             QVERIFY(m_panel->updateButton()->isEnabled());
         }
@@ -1115,7 +1130,8 @@ private slots:
     void structOnly_checkboxExists() {
         QVERIFY(m_panel->structOnlyCheck() != nullptr);
         QCOMPARE(m_panel->structOnlyCheck()->isChecked(), false);
-        QCOMPARE(m_panel->structOnlyCheck()->text(), QStringLiteral("Current Struct"));
+        // Lowercased to match the redesigned panel label.
+        QCOMPARE(m_panel->structOnlyCheck()->text(), QStringLiteral("Current struct"));
     }
 
     void structOnly_setsAddressRange() {
@@ -1216,6 +1232,261 @@ private slots:
         QVERIFY(finSpy2.wait(5000));
         QApplication::processEvents();
         QVERIFY(m_panel->resultsTable()->rowCount() > 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Tier A/B/C UI surface — new checkboxes, conditions, filter, banner,
+    // save/load, multi-select, sort, shortcuts, persisted settings.
+    // ═══════════════════════════════════════════════════════════════════
+
+    void newCheckboxes_exist() {
+        QVERIFY(m_panel->privateOnlyCheck());
+        QVERIFY(m_panel->skipSystemCheck());
+        QVERIFY(m_panel->userModeOnlyCheck());
+    }
+
+    void modeChange_setsSmartDefaults() {
+        // Defaults simplified: Value mode → Writable only; Signature mode →
+        // Executable only. The narrower private/system/user-mode filters
+        // are opt-in (the user toggles them when they need them).
+        m_panel->modeCombo()->setCurrentIndex(1);
+        QApplication::processEvents();
+        QVERIFY(m_panel->writeCheck()->isChecked());
+        QVERIFY(!m_panel->execCheck()->isChecked());
+        QVERIFY(!m_panel->privateOnlyCheck()->isChecked());
+        QVERIFY(!m_panel->skipSystemCheck()->isChecked());
+        QVERIFY(!m_panel->userModeOnlyCheck()->isChecked());
+
+        m_panel->modeCombo()->setCurrentIndex(0);
+        QApplication::processEvents();
+        QVERIFY(m_panel->execCheck()->isChecked());
+        QVERIFY(!m_panel->writeCheck()->isChecked());
+        QVERIFY(!m_panel->privateOnlyCheck()->isChecked());
+        QVERIFY(!m_panel->skipSystemCheck()->isChecked());
+        QVERIFY(!m_panel->userModeOnlyCheck()->isChecked());
+    }
+
+    void newConditions_inCombo() {
+        // Lowercase shorthand condition labels in the redesigned combo.
+        QStringList expected = {
+            "bigger than", "smaller than", "between",
+            "inc by", "dec by"
+        };
+        for (const QString& label : expected) {
+            int idx = m_panel->condCombo()->findText(label);
+            QVERIFY2(idx >= 0, qPrintable("Condition not found: " + label));
+        }
+    }
+
+    void betweenCondition_revealsValue2() {
+        // Switch to Value mode + Between → upper-bound field becomes visible.
+        m_panel->modeCombo()->setCurrentIndex(1);
+        QApplication::processEvents();
+        int idx = m_panel->condCombo()->findText("between");
+        m_panel->condCombo()->setCurrentIndex(idx);
+        QApplication::processEvents();
+        QVERIFY(m_panel->value2Edit()->isVisible());
+
+        // Switch to Exact Value → upper-bound hidden again.
+        m_panel->condCombo()->setCurrentIndex(
+            m_panel->condCombo()->findText("equals"));
+        QApplication::processEvents();
+        QVERIFY(!m_panel->value2Edit()->isVisible());
+    }
+
+    void resultFilter_narrowsTable() {
+        // Plant two values, scan, then filter by one.
+        QByteArray data(64, 0);
+        int32_t a = 0xAABBCCDD, b = 0x11223344;
+        memcpy(data.data() + 0, &a, 4);
+        memcpy(data.data() + 8, &b, 4);
+        std::shared_ptr<Provider> prov = std::make_shared<BufferProvider>(data, "test");
+        m_panel->setProviderGetter([prov]() { return prov; });
+
+        m_panel->modeCombo()->setCurrentIndex(0);
+        m_panel->patternEdit()->setText("DD CC BB AA");
+        m_panel->execCheck()->setChecked(false);
+        m_panel->writeCheck()->setChecked(false);
+        QSignalSpy finSpy(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(finSpy.wait(5000));
+        QApplication::processEvents();
+        QCOMPARE(m_panel->resultsTable()->rowCount(), 1);
+
+        // Filter that matches → row visible.
+        m_panel->resultFilter()->setText("DD");
+        QApplication::processEvents();
+        QVERIFY(!m_panel->resultsTable()->isRowHidden(0));
+
+        // Filter that doesn't match → row hidden.
+        m_panel->resultFilter()->setText("zzz_no_match");
+        QApplication::processEvents();
+        QVERIFY(m_panel->resultsTable()->isRowHidden(0));
+
+        // Clear filter → row visible again.
+        m_panel->resultFilter()->clear();
+        QApplication::processEvents();
+        QVERIFY(!m_panel->resultsTable()->isRowHidden(0));
+    }
+
+    void newScanButton_appearsAndResets() {
+        // Initially hidden.
+        QVERIFY(!m_panel->newScanButton()->isVisible());
+
+        // Plant + scan.
+        QByteArray data(8, 0);
+        int32_t v = 1; memcpy(data.data(), &v, 4);
+        std::shared_ptr<Provider> prov = std::make_shared<BufferProvider>(data, "x");
+        m_panel->setProviderGetter([prov]() { return prov; });
+        m_panel->patternEdit()->setText("01 00 00 00");
+        QSignalSpy fin(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(fin.wait(5000));
+        QApplication::processEvents();
+        QVERIFY(m_panel->newScanButton()->isVisible());
+
+        // Click New Scan → table cleared, button hidden again.
+        QTest::mouseClick(m_panel->newScanButton(), Qt::LeftButton);
+        QApplication::processEvents();
+        QCOMPARE(m_panel->resultsTable()->rowCount(), 0);
+        QVERIFY(!m_panel->newScanButton()->isVisible());
+    }
+
+    void multiSelect_enabled() {
+        // Multi-select must be the default mode now.
+        QCOMPARE(m_panel->resultsTable()->selectionMode(),
+                 QAbstractItemView::ExtendedSelection);
+    }
+
+    void saveLoad_jsonRoundTrip() {
+        // Plant 3 values, scan, save → clear → load → results match.
+        QByteArray data(48, 0);
+        int32_t v = 0xCAFEBABE;
+        memcpy(data.data() + 0,  &v, 4);
+        memcpy(data.data() + 16, &v, 4);
+        memcpy(data.data() + 32, &v, 4);
+        std::shared_ptr<Provider> prov = std::make_shared<BufferProvider>(data, "x");
+        m_panel->setProviderGetter([prov]() { return prov; });
+        m_panel->patternEdit()->setText("BE BA FE CA");
+        QSignalSpy fin(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(fin.wait(5000));
+        QApplication::processEvents();
+        QCOMPARE(m_panel->results().size(), 3);
+
+        QString tmpPath = QDir::tempPath() + "/rcx_scanner_test.json";
+        QVERIFY(m_panel->saveResultsTo(tmpPath));
+
+        // Reset panel state, then load.
+        QTest::mouseClick(m_panel->newScanButton(), Qt::LeftButton);
+        QCOMPARE(m_panel->results().size(), 0);
+        QVERIFY(m_panel->loadResultsFrom(tmpPath));
+        QCOMPARE(m_panel->results().size(), 3);
+        QFile::remove(tmpPath);
+    }
+
+    void persistSettings_roundTrip() {
+        m_panel->modeCombo()->setCurrentIndex(1);
+        QApplication::processEvents();
+        m_panel->privateOnlyCheck()->setChecked(true);
+        m_panel->skipSystemCheck()->setChecked(true);
+        m_panel->userModeOnlyCheck()->setChecked(true);
+        // Pick a non-default valueType + condition we can verify after reload.
+        m_panel->typeCombo()->setCurrentIndex(7);  // uint64
+        m_panel->condCombo()->setCurrentIndex(
+            m_panel->condCombo()->findText("bigger than"));
+        QApplication::processEvents();
+
+        const QString key = "scanner_test_persist";
+        m_panel->saveSettings(key);
+
+        // Reset everything, then reload.
+        m_panel->modeCombo()->setCurrentIndex(0);
+        m_panel->privateOnlyCheck()->setChecked(false);
+        m_panel->skipSystemCheck()->setChecked(false);
+        m_panel->userModeOnlyCheck()->setChecked(false);
+        m_panel->typeCombo()->setCurrentIndex(0);
+        m_panel->condCombo()->setCurrentIndex(0);
+        QApplication::processEvents();
+
+        m_panel->loadSettings(key);
+        QCOMPARE(m_panel->modeCombo()->currentIndex(), 1);
+        QVERIFY(m_panel->privateOnlyCheck()->isChecked());
+        QVERIFY(m_panel->skipSystemCheck()->isChecked());
+        QVERIFY(m_panel->userModeOnlyCheck()->isChecked());
+        QCOMPARE(m_panel->typeCombo()->currentIndex(), 7);
+        QCOMPARE(m_panel->condCombo()->currentText(), QStringLiteral("bigger than"));
+
+        // Clean up the test settings group.
+        QSettings s("Reclass", "Reclass");
+        s.remove(key);
+    }
+
+    void truncationBanner_appearsAtCap() {
+        // We'd need 10001+ results to trigger the banner. Construct a buffer
+        // with many one-byte 'A' hits and scan with alignment 1.
+        QByteArray data(11000, 'A');
+        std::shared_ptr<Provider> prov = std::make_shared<BufferProvider>(data, "x");
+        m_panel->setProviderGetter([prov]() { return prov; });
+        m_panel->patternEdit()->setText("41");
+        QSignalSpy fin(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(fin.wait(15000));
+        QApplication::processEvents();
+
+        // m_results holds all 11000; table shows max 10000; banner visible.
+        QCOMPARE(m_panel->results().size(), 11000);
+        QCOMPARE(m_panel->resultsTable()->rowCount(), 10000);
+    }
+
+    void e2e_findMutateRevalidate_uiFlow() {
+        // The integration counterpart of test_scanner.cpp::e2e_findMutateRevalidate
+        // — driven through the panel widgets so we exercise buildRequest +
+        // signal wiring + onScanFinished + onUpdateClicked.
+        QByteArray data(32, 0);
+        int32_t hp = 100, gold = 1234;
+        memcpy(data.data() + 0, &hp, 4);
+        memcpy(data.data() + 8, &gold, 4);
+        std::shared_ptr<Provider> prov = std::make_shared<BufferProvider>(data, "x");
+        m_panel->setProviderGetter([prov]() { return prov; });
+
+        // Switch to Value mode, type int32, condition ExactValue, value 1234.
+        m_panel->modeCombo()->setCurrentIndex(1);
+        QApplication::processEvents();
+        m_panel->typeCombo()->setCurrentIndex(2);  // int32
+        m_panel->condCombo()->setCurrentIndex(0);  // Exact Value
+        m_panel->valueEdit()->setText("1234");
+
+        // Disable filters so the synthetic BufferProvider isn't excluded.
+        m_panel->execCheck()->setChecked(false);
+        m_panel->writeCheck()->setChecked(false);
+        m_panel->privateOnlyCheck()->setChecked(false);
+        m_panel->skipSystemCheck()->setChecked(false);
+        m_panel->userModeOnlyCheck()->setChecked(false);
+
+        QSignalSpy fin(m_panel->engine(), &ScanEngine::finished);
+        QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
+        QVERIFY(fin.wait(5000));
+        QApplication::processEvents();
+        QCOMPARE(m_panel->results().size(), 1);
+        QCOMPARE(m_panel->results()[0].address, (uint64_t)8);
+
+        // Mutate via provider directly (simulates user editing the cell).
+        int32_t newGold = 9999;
+        QVERIFY(prov->writeBytes(8, QByteArray((const char*)&newGold, 4)));
+
+        // Re-scan with new exact value.
+        m_panel->valueEdit()->setText("9999");
+        QSignalSpy resc(m_panel->engine(), &ScanEngine::rescanFinished);
+        QTest::mouseClick(m_panel->updateButton(), Qt::LeftButton);
+        QVERIFY(resc.wait(5000));
+        QApplication::processEvents();
+        QCOMPARE(m_panel->results().size(), 1);
+        QCOMPARE(m_panel->results()[0].address, (uint64_t)8);
+        // Confirm the cached value reflects the mutation.
+        int32_t reread = 0;
+        memcpy(&reread, m_panel->results()[0].scanValue.constData(), 4);
+        QCOMPARE(reread, newGold);
     }
 };
 

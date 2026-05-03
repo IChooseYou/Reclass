@@ -1199,8 +1199,7 @@ void MainWindow::createMenus() {
         }
         if (m_workspaceDock && m_workspaceDock->isFloating())
             m_workspaceDock->setFloating(false);
-        if (m_scannerDock && m_scannerDock->isFloating())
-            m_scannerDock->setFloating(false);
+        // Memory Scanner stays floating — that's its intended home now.
         if (m_symbolsDock && m_symbolsDock->isFloating())
             m_symbolsDock->setFloating(false);
 
@@ -1375,8 +1374,30 @@ void MainWindow::createMenus() {
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
     {
-        auto* scanAct = m_scannerDock->toggleViewAction();
+        // Memory Scanner opens undocked in its own floating window — keeps
+        // the editor's vertical real estate intact (the dock used to eat
+        // 360 px off the bottom every time it was opened) and lets the
+        // user park it on a second monitor. The toggle action still hides
+        // and shows it; we just override the open-side to detach first.
+        auto* scanAct = new QAction(m_scannerDock->toggleViewAction()->icon(),
+                                    QStringLiteral("Memory Scanner"), this);
         scanAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S));
+        scanAct->setCheckable(true);
+        scanAct->setChecked(m_scannerDock->isVisible());
+        connect(m_scannerDock, &QDockWidget::visibilityChanged, scanAct,
+                &QAction::setChecked);
+        connect(scanAct, &QAction::toggled, this, [this](bool on) {
+            if (on) {
+                if (!m_scannerDock->isFloating())
+                    m_scannerDock->setFloating(true);
+                m_scannerDock->show();
+                m_scannerDock->raise();
+                m_scannerDock->activateWindow();
+                if (m_scannerPanel) m_scannerPanel->setFocus(Qt::OtherFocusReason);
+            } else {
+                m_scannerDock->hide();
+            }
+        });
         view->addAction(scanAct);
     }
     {
@@ -2548,6 +2569,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     // controller's existing 660ms refresh tick — no new timers.
     connect(ctrl, &RcxController::sourceLivenessChanged, this, [this, dock](bool) {
         refreshDocTabSourceIcon(dock);
+        if (m_activeDocDock == dock) updateScannerTitle();
     });
 
     // Cleanup on close
@@ -4691,6 +4713,53 @@ void MainWindow::updateWindowTitle() {
     }
     setWindowTitle(title);
 #endif
+    // Keep the scanner's title bar in sync with the editor's active tab so
+    // the user can see which source the next scan will run against.
+    updateScannerTitle();
+}
+
+void MainWindow::updateScannerTitle() {
+    if (!m_scanDockTitle) return;
+
+    QString sourceName, sourceKind;
+    if (m_activeDocDock && m_tabs.contains(m_activeDocDock)) {
+        auto& tab = m_tabs[m_activeDocDock];
+        if (tab.doc && tab.doc->provider) {
+            sourceName = tab.doc->provider->name();
+            sourceKind = tab.doc->provider->kind();
+        }
+    }
+
+    QString text;
+    if (sourceName.isEmpty()) {
+        // No provider attached on the active tab — be explicit about it
+        // rather than leaving a stale "Memory Scanner (notepad.exe)" lying
+        // around from a previously-active tab.
+        text = QStringLiteral("Memory Scanner — no source on active tab");
+    } else if (sourceKind.isEmpty()) {
+        text = QStringLiteral("Memory Scanner — %1").arg(sourceName);
+    } else {
+        text = QStringLiteral("Memory Scanner — %1 (%2)")
+            .arg(sourceName, sourceKind);
+    }
+    m_scanDockTitle->setText(text);
+
+    // Window title (the OS chrome around the floating dock) gets the same
+    // text so taskbar / Alt-Tab also identify the source.
+    if (m_scannerDock) m_scannerDock->setWindowTitle(text);
+
+    // Tooltip on the title label (and the dock itself) explains the
+    // following-the-active-tab behaviour so the source name in the title
+    // is never read as a static binding to a particular file/process.
+    QString tip = QStringLiteral(
+        "The Memory Scanner runs against the source of whichever editor "
+        "tab is currently active.\n"
+        "Switch tabs (or open a new one) and the scanner re-targets to "
+        "that tab's source automatically.\n\n"
+        "Active source: %1")
+        .arg(sourceName.isEmpty() ? QStringLiteral("(none)") : sourceName);
+    m_scanDockTitle->setToolTip(tip);
+    if (m_scannerDock) m_scannerDock->setToolTip(tip);
 }
 
 // ── Rendered view setup ──
@@ -6443,49 +6512,58 @@ void MainWindow::createWorkspaceDock() {
 // ── Scanner Dock ──
 
 void MainWindow::createScannerDock() {
-    m_scannerDock = new QDockWidget("Scanner", this);
+    m_scannerDock = new QDockWidget("Memory Scanner", this);
     m_scannerDock->setObjectName("ScannerDock");
     m_scannerDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     m_scannerDock->setFeatures(
         QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
         QDockWidget::DockWidgetFloatable);
 
-    // Custom titlebar: label + close button (matches workspace dock)
+    // Custom titlebar \u2014 same pattern as the Project dock (which has working
+    // drag-to-redock). Key insight: Qt's native drag/dock handler runs on
+    // the QDockWidget when mouse events on the title bar bubble up
+    // unconsumed. As long as we don't install an event filter that swallows
+    // press/move events, Qt's drag-to-redock works natively. The workspace
+    // dock proves this \u2014 its DockTitleBar is just a paint-only QWidget.
     {
         const auto& t = ThemeManager::instance().current();
-
-        auto* titleBar = new QWidget(m_scannerDock);
-        titleBar->setFixedHeight(24);
-        titleBar->setAutoFillBackground(true);
-        {
-            QPalette tbPal = titleBar->palette();
-            tbPal.setColor(QPalette::Window, t.backgroundAlt);
-            titleBar->setPalette(tbPal);
-        }
+        auto* titleBar = new DockTitleBar(24, t.backgroundAlt, m_scannerDock);
+        titleBar->setObjectName(QStringLiteral("scannerHeader"));
         auto* layout = new QHBoxLayout(titleBar);
-        layout->setContentsMargins(4, 2, 2, 2);
+        layout->setContentsMargins(6, 0, 4, 0);
         layout->setSpacing(4);
 
         m_scanDockGrip = new DockGripWidget(titleBar);
         layout->addWidget(m_scanDockGrip);
 
-        m_scanDockTitle = new QLabel("Scanner", titleBar);
-        m_scanDockTitle->setStyleSheet(
-            QStringLiteral("color: %1;").arg(t.textDim.name()));
-        layout->addWidget(m_scanDockTitle);
-
-        layout->addStretch();
+        m_scanDockTitle = new QLabel("Memory Scanner", titleBar);
+        m_scanDockTitle->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+        {
+            m_scanDockTitle->setStyleSheet(
+                QStringLiteral("color: %1;").arg(t.textDim.name()));
+            QSettings s("Reclass", "Reclass");
+            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+            f.setFixedPitch(true);
+            m_scanDockTitle->setFont(f);
+        }
+        // Elide-on-overflow so a long process name doesn't push the close
+        // button off the right edge. Full source name lives in the tooltip.
+        m_scanDockTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        m_scanDockTitle->setMinimumWidth(0);
+        layout->addWidget(m_scanDockTitle, /*stretch*/ 1);
 
         m_scanDockCloseBtn = new QToolButton(titleBar);
-        m_scanDockCloseBtn->setText(QStringLiteral("\u2715"));
+        m_scanDockCloseBtn->setIcon(QIcon(QStringLiteral(":/vsicons/close.svg")));
+        m_scanDockCloseBtn->setIconSize(QSize(14, 14));
+        m_scanDockCloseBtn->setFixedSize(22, 22);
         m_scanDockCloseBtn->setAutoRaise(true);
         m_scanDockCloseBtn->setCursor(Qt::PointingHandCursor);
         m_scanDockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
-            "QToolButton:hover { color: %2; }")
-            .arg(t.textDim.name(), t.indHoverSpan.name()));
+            "QToolButton { border: none; padding: 0px; }"
+            "QToolButton:hover { background: %1; }")
+            .arg(t.hover.name()));
         connect(m_scanDockCloseBtn, &QToolButton::clicked, m_scannerDock, &QDockWidget::close);
-        layout->addWidget(m_scanDockCloseBtn);
+        layout->addWidget(m_scanDockCloseBtn, 0, Qt::AlignVCenter);
 
         m_scannerDock->setTitleBarWidget(titleBar);
     }
@@ -6501,9 +6579,15 @@ void MainWindow::createScannerDock() {
         m_scanDockTitle->setFont(f);
     }
     m_scannerDock->setWidget(m_scannerPanel);
-    // Floor on dock height — scanner has enough controls it needs real room.
-    m_scannerDock->setMinimumHeight(140);
+    // Floor on dock height — scanner now has 3 input rows (mode/value, filters,
+    // workflow buttons), the breadcrumb, the result filter, the truncation
+    // banner, and a results table. 140 px crushed everything; 320 px gives
+    // the table real room and the chrome stops competing with results.
+    m_scannerDock->setMinimumHeight(320);
     addDockWidget(Qt::BottomDockWidgetArea, m_scannerDock);
+    // Default size: 360 px tall on initial show. Qt resolves this against
+    // the layout so it acts as a request, not a hard floor.
+    resizeDocks({m_scannerDock}, {360}, Qt::Vertical);
     m_scannerDock->hide();
     m_scannerDock->installEventFilter(this);
 
@@ -6530,6 +6614,30 @@ void MainWindow::createScannerDock() {
             }
         });
         m_scannerDock->installEventFilter(new DockBorderFilter(border, grip, m_scannerDock));
+
+        // Default to floating AFTER the topLevelChanged connect so the
+        // BorderOverlay receives the initial signal — otherwise the dock
+        // pops out without the VS-style border outline. The View action
+        // also calls setFloating(true) but starting floating here means
+        // restored layouts begin in the right place.
+        m_scannerDock->setFloating(true);
+        // Initial floating geometry — centred on the main window, sized to
+        // comfortably fit the form rows + a few hundred result lines.
+        // 700 px tall = 25% taller than the previous 560.
+        const QSize defaultSize(720, 700);
+        QRect host = geometry();
+        QPoint topLeft(host.center().x() - defaultSize.width() / 2,
+                       host.center().y() - defaultSize.height() / 2);
+        m_scannerDock->setGeometry(QRect(topLeft, defaultSize));
+        // The topLevelChanged signal fired during setFloating(true) above
+        // sized the border with the dock's pre-geometry width/height —
+        // re-sync after we've set the real default geometry.
+        border->setGeometry(0, 0, m_scannerDock->width(), m_scannerDock->height());
+        border->raise();
+        border->show();
+        grip->reposition();
+        grip->raise();
+        grip->show();
     }
 
     // Wire provider getter: lazily captures the active tab's provider at scan time
@@ -8828,15 +8936,22 @@ int main(int argc, char* argv[]) {
     window.showMaximized();
 #endif
 
-    // --screenshot <path>: open default project, grab window, save, exit
+    // --screenshot <path> [scanner]: open default project (optionally also
+    // show the scanner dock), grab the window, save, exit.
     {
         QStringList args = app.arguments();
         int ssIdx = args.indexOf("--screenshot");
         if (ssIdx >= 0 && ssIdx + 1 < args.size()) {
             QString ssPath = args[ssIdx + 1];
-            QMetaObject::invokeMethod(&window, [&window, ssPath]() {
+            bool showScanner = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "scanner");
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner]() {
                 window.project_new();
-                QTimer::singleShot(500, &window, [&window, ssPath]() {
+                if (showScanner && window.scannerDock())
+                    window.scannerDock()->show();
+                // Defer the grab so the dock layout settles + the panel
+                // paints its initial state before we capture.
+                QTimer::singleShot(1500, &window, [&window, ssPath]() {
                     QPixmap px = window.grab();
                     px.save(ssPath);
                     qApp->quit();

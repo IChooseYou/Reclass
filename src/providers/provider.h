@@ -7,13 +7,25 @@
 
 namespace rcx {
 
+// Classification of a memory region. Used by the scanner to skip
+// uninteresting page types (e.g. value scans default to Private only —
+// game state lives in heap/VirtualAlloc, not in DLL .rdata).
+enum class RegionType : uint8_t {
+    Image   = 0,   // Loaded module (PE/ELF/Mach-O): code + .rdata + .data
+    Mapped  = 1,   // Memory-mapped file or shared section
+    Private = 2,   // Heap, stack, VirtualAlloc — where mutable user data lives
+};
+
 struct MemoryRegion {
-    uint64_t base       = 0;
-    uint64_t size       = 0;
-    bool     readable   = true;
-    bool     writable   = false;
-    bool     executable = false;
-    QString  moduleName;
+    uint64_t   base       = 0;
+    uint64_t   size       = 0;
+    bool       readable   = true;
+    bool       writable   = false;
+    bool       executable = false;
+    QString    moduleName;
+    // type lives last so legacy positional initializers
+    // {base, size, r, w, x, name} still compile and just default to Private.
+    RegionType type       = RegionType::Private;
 };
 
 struct VtopResult {

@@ -1,12 +1,24 @@
 #include <QTest>
 #include <QSignalSpy>
 #include <QByteArray>
+#include <QSharedPointer>
+#include <QEventLoop>
+#include <QTimer>
+#include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <cstring>
 #include <cmath>
 #include "scanner.h"
 #include "providers/provider.h"
 #include "providers/buffer_provider.h"
 #include "providers/null_provider.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
+#endif
 
 using namespace rcx;
 
@@ -1993,7 +2005,980 @@ private slots:
         QCOMPARE(addrs[0], (uint64_t)21);
         QCOMPARE(addrs[1], (uint64_t)25);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Smart Region Targeting — RegionType filter, system module exclusion,
+    // address upper cap, region cache, abort responsiveness.
+    // ═══════════════════════════════════════════════════════════════════
+
+    // Helper: run a sync scan and return results (the engine is async,
+    // so we spin a QEventLoop until finished fires). All the new tests
+    // route through this so a hang in the engine fails fast as a timeout
+    // rather than a frozen test.
+    QVector<ScanResult> syncScan(std::shared_ptr<Provider> prov,
+                                  const ScanRequest& req,
+                                  int timeoutMs = 5000) {
+        ScanEngine eng;
+        QVector<ScanResult> out;
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&eng, &ScanEngine::finished, &loop,
+            [&](QVector<ScanResult> r) { out = std::move(r); loop.quit(); });
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(timeoutMs);
+        eng.start(prov, req);
+        loop.exec();
+        return out;
+    }
+
+    QVector<ScanResult> syncRescan(ScanEngine& eng,
+                                    std::shared_ptr<Provider> prov,
+                                    QVector<ScanResult> seed, int readSize,
+                                    ScanCondition cond, ValueType vt,
+                                    const QByteArray& pat = {},
+                                    const QByteArray& msk = {},
+                                    const QByteArray& pat2 = {},
+                                    int timeoutMs = 5000) {
+        QVector<ScanResult> out;
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&eng, &ScanEngine::rescanFinished, &loop,
+            [&](QVector<ScanResult> r) { out = std::move(r); loop.quit(); });
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(timeoutMs);
+        eng.startRescan(prov, std::move(seed), readSize, cond, vt, pat, msk, pat2);
+        loop.exec();
+        return out;
+    }
+
+    // ── isSystemModule lookup table coverage ──
+
+    void sysmod_emptyName() {
+        QVERIFY(!ScanEngine::isSystemModule(""));
+    }
+    void sysmod_kernel32WithExt() {
+        QVERIFY(ScanEngine::isSystemModule("kernel32.dll"));
+    }
+    void sysmod_kernel32NoExt() {
+        QVERIFY(ScanEngine::isSystemModule("kernel32"));
+    }
+    void sysmod_caseInsensitive() {
+        QVERIFY(ScanEngine::isSystemModule("KERNEL32.DLL"));
+        QVERIFY(ScanEngine::isSystemModule("Kernel32"));
+        QVERIFY(ScanEngine::isSystemModule("nTdLl.dll"));
+    }
+    void sysmod_qtCore() {
+        QVERIFY(ScanEngine::isSystemModule("Qt6Core.dll"));
+        QVERIFY(ScanEngine::isSystemModule("qt6gui"));
+        QVERIFY(ScanEngine::isSystemModule("qt6widgets.dll"));
+    }
+    void sysmod_crt() {
+        QVERIFY(ScanEngine::isSystemModule("ucrtbase.dll"));
+        QVERIFY(ScanEngine::isSystemModule("msvcrt"));
+        QVERIFY(ScanEngine::isSystemModule("vcruntime140"));
+    }
+    void sysmod_userBinaryNotSystem() {
+        QVERIFY(!ScanEngine::isSystemModule("Reclass.exe"));
+        QVERIFY(!ScanEngine::isSystemModule("MyGame.exe"));
+        QVERIFY(!ScanEngine::isSystemModule("custom.dll"));
+        QVERIFY(!ScanEngine::isSystemModule("game_x64.exe"));
+    }
+    void sysmod_linuxSo() {
+        QVERIFY(ScanEngine::isSystemModule("libc.so.6"));
+        QVERIFY(ScanEngine::isSystemModule("ld-linux-x86-64.so"));
+    }
+
+    // ── BMH self-test against naive matcher ──
+
+    void bmh_singleByte() {
+        const char data[] = "hello world";
+        QCOMPARE(ScanEngine::bmhFind(data, 11, "w", 1), 6);
+        QCOMPARE(ScanEngine::bmhFind(data, 11, "z", 1), -1);
+    }
+
+    void bmh_longPattern() {
+        QByteArray data(1024, '\xCC');
+        memcpy(data.data() + 500, "needle12", 8);
+        QCOMPARE(ScanEngine::bmhFind(data.constData(), 1024, "needle12", 8), 500);
+        QCOMPARE(ScanEngine::bmhFind(data.constData(), 1024, "missing!", 8), -1);
+    }
+
+    void bmh_patternEqualsLength() {
+        const char data[] = "ABCD";
+        QCOMPARE(ScanEngine::bmhFind(data, 4, "ABCD", 4), 0);
+        QCOMPARE(ScanEngine::bmhFind(data, 4, "BCDE", 4), -1);
+    }
+
+    void bmh_patternLargerThanData() {
+        const char data[] = "ABC";
+        QCOMPARE(ScanEngine::bmhFind(data, 3, "ABCD", 4), -1);
+    }
+
+    void bmh_atEnd() {
+        const char data[] = "padding---FOUND";
+        QCOMPARE(ScanEngine::bmhFind(data, 15, "FOUND", 5), 10);
+    }
+
+    // BMH equivalence: random data, random non-wildcard pattern, BMH and
+    // naive scan should yield identical first hit. Property test for the
+    // matcher equivalence — catches BMH shift-table bugs.
+    void bmh_equivalentToNaive() {
+        QByteArray data(4096, Qt::Uninitialized);
+        for (int i = 0; i < data.size(); i++)
+            data[i] = char((i * 31 + 7) & 0xFF);
+
+        for (int patLen = 4; patLen <= 16; patLen++) {
+            QByteArray pat = data.mid(2000, patLen);  // guaranteed match at offset 2000
+            int bmh   = ScanEngine::bmhFind(data.constData(), data.size(), pat.constData(), patLen);
+            // Naive: linear search byte by byte
+            int naive = -1;
+            for (int i = 0; i + patLen <= data.size(); i++) {
+                if (memcmp(data.constData() + i, pat.constData(), patLen) == 0) {
+                    naive = i; break;
+                }
+            }
+            QCOMPARE(bmh, naive);
+        }
+    }
+
+    // ── Region-type filter (Image/Mapped/Private) ──
+
+    void regionType_privateOnly_skipsImage() {
+        QByteArray data(64, 0);
+        // Plant the value 0x12345678 at offset 0 (Image region) and at offset 32 (Private).
+        int32_t needle = 0x12345678;
+        memcpy(data.data() + 0,  &needle, 4);
+        memcpy(data.data() + 32, &needle, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0,  16, true, false, true,  "game.dll", RegionType::Image});
+        regs.push_back(MemoryRegion{32, 16, true, true,  false, "",         RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "305419896", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.privateOnly = true;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)32);  // Image hit was excluded
+    }
+
+    void regionType_privateOnly_keepsPrivate() {
+        QByteArray data(32, 0);
+        int32_t needle = 42;
+        memcpy(data.data() + 8, &needle, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 32, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "42", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.privateOnly = true;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)8);
+    }
+
+    void regionType_privateOnly_skipsMapped() {
+        QByteArray data(48, 0);
+        int32_t needle = 99;
+        memcpy(data.data() + 4,  &needle, 4);
+        memcpy(data.data() + 36, &needle, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0,  16, true, false, false, "asset.bin", RegionType::Mapped});
+        regs.push_back(MemoryRegion{32, 16, true, true,  false, "",          RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "99", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.privateOnly = true;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)36);
+    }
+
+    // ── System module exclusion ──
+
+    void skipSystem_excludesNtdll() {
+        QByteArray data(48, 0);
+        int32_t needle = 7;
+        memcpy(data.data() + 0,  &needle, 4);
+        memcpy(data.data() + 32, &needle, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0,  16, true, false, true, "ntdll.dll",  RegionType::Image});
+        regs.push_back(MemoryRegion{32, 16, true, true,  false, "MyGame.exe", RegionType::Image});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "7", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.skipSystemModules = true;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)32);
+    }
+
+    void skipSystem_inactiveByDefault() {
+        QByteArray data(48, 0);
+        int32_t needle = 7;
+        memcpy(data.data() + 0,  &needle, 4);
+        memcpy(data.data() + 32, &needle, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0,  16, true, false, true, "kernel32.dll", RegionType::Image});
+        regs.push_back(MemoryRegion{32, 16, true, true,  false, "",            RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "7", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        // skipSystemModules = false → both hits returned
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 2);
+    }
+
+    void skipSystem_combinesWithPrivateOnly() {
+        // Verify the two filters compound correctly: a hit in a private
+        // region inside a system module should still be excluded by skipSystem
+        // even if privateOnly would have allowed it.
+        QByteArray data(64, 0);
+        int32_t needle = 1234;
+        memcpy(data.data() + 0,  &needle, 4);   // Image, system → both filters cut
+        memcpy(data.data() + 16, &needle, 4);   // Private, "qt6core" → privateOnly OK, but skipSystem cuts
+        memcpy(data.data() + 32, &needle, 4);   // Private, no module → both filters keep
+        memcpy(data.data() + 48, &needle, 4);   // Mapped, no module → privateOnly cuts
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0,  16, true, false, true, "ntdll.dll", RegionType::Image});
+        regs.push_back(MemoryRegion{16, 16, true, true,  false, "qt6core",  RegionType::Private});
+        regs.push_back(MemoryRegion{32, 16, true, true,  false, "",         RegionType::Private});
+        regs.push_back(MemoryRegion{48, 16, true, false, false, "",         RegionType::Mapped});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "1234", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.privateOnly = true;
+        req.skipSystemModules = true;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)32);
+    }
+
+    // ── Address upper cap (User-mode VA) ──
+
+    void addressCap_clipsAboveLimit() {
+        // RegionProvider serves [0, 64) backed memory but we set endAddress=32.
+        // Hit at offset 40 must be excluded.
+        QByteArray data(64, 0);
+        int32_t needle = 0xABCD;
+        memcpy(data.data() + 8,  &needle, 4);
+        memcpy(data.data() + 40, &needle, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 64, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "43981", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.startAddress = 0;
+        req.endAddress = 32;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)8);
+    }
+
+    // ── Region cache ──
+
+    void regionCache_reusesAcrossScans() {
+        // Two scans on the same provider must hit the cache the second time.
+        // We verify by tracking enumerateRegions() call count.
+        struct CountingProvider : public BufferProvider {
+            mutable int enumCount = 0;
+            QVector<MemoryRegion> regs;
+            CountingProvider(QByteArray d, QVector<MemoryRegion> r)
+                : BufferProvider(std::move(d), "counting"), regs(std::move(r)) {}
+            QVector<MemoryRegion> enumerateRegions() const override {
+                enumCount++;
+                return regs;
+            }
+        };
+        QByteArray data(32, 0);
+        int32_t needle = 1;
+        memcpy(data.data(), &needle, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 32, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<CountingProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "1", req.pattern, req.mask, &err));
+        req.alignment = 4;
+
+        ScanEngine eng;
+        // First scan — fills cache.
+        {
+            QEventLoop loop;
+            QObject::connect(&eng, &ScanEngine::finished, &loop, &QEventLoop::quit);
+            eng.start(prov, req);
+            loop.exec();
+        }
+        QCOMPARE(prov->enumCount, 1);
+        // Second scan — must reuse cache, no extra enumerate call.
+        {
+            QEventLoop loop;
+            QObject::connect(&eng, &ScanEngine::finished, &loop, &QEventLoop::quit);
+            eng.start(prov, req);
+            loop.exec();
+        }
+        QCOMPARE(prov->enumCount, 1);
+        // After explicit invalidate, next scan re-enumerates.
+        eng.invalidateRegionCache();
+        {
+            QEventLoop loop;
+            QObject::connect(&eng, &ScanEngine::finished, &loop, &QEventLoop::quit);
+            eng.start(prov, req);
+            loop.exec();
+        }
+        QCOMPARE(prov->enumCount, 2);
+    }
+
+    // ── ScanStats signal ──
+
+    void scanStats_emitted() {
+        QByteArray data(64, 0);
+        int32_t v = 5;
+        memcpy(data.data() + 8, &v, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 64, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanEngine eng;
+        ScanStats captured;
+        bool gotStats = false;
+        QObject::connect(&eng, &ScanEngine::scanStats, [&](ScanStats s) {
+            captured = s; gotStats = true;
+        });
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "5", req.pattern, req.mask, &err));
+        req.alignment = 4;
+
+        QEventLoop loop;
+        QObject::connect(&eng, &ScanEngine::finished, &loop, &QEventLoop::quit);
+        eng.start(prov, req);
+        loop.exec();
+        QCoreApplication::processEvents();  // drain queued scanStats signal
+
+        QVERIFY(gotStats);
+        QCOMPARE(captured.regionsScanned, 1);
+        QVERIFY(captured.bytesScanned > 0);
+        QCOMPARE(captured.bytesFailed, (uint64_t)0);
+    }
+
+    // ── New scan conditions: BiggerThan / SmallerThan / Between ──
+
+    void condition_biggerThan_firstScan() {
+        // Plant ints 5, 50, 500 in a private region; BiggerThan 100 should
+        // find only 500.
+        QByteArray data(16, 0);
+        int32_t a = 5, b = 50, c = 500;
+        memcpy(data.data() + 0,  &a, 4);
+        memcpy(data.data() + 4,  &b, 4);
+        memcpy(data.data() + 8,  &c, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 16, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "100", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.condition = ScanCondition::BiggerThan;
+        req.valueType = ValueType::Int32;
+        req.valueSize = 4;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)8);
+    }
+
+    void condition_smallerThan_firstScan() {
+        // Buffer holds 5, 50, 500, 999 (no implicit zero slot to count).
+        QByteArray data(16, 0);
+        int32_t a = 5, b = 50, c = 500, d = 999;
+        memcpy(data.data() + 0,  &a, 4);
+        memcpy(data.data() + 4,  &b, 4);
+        memcpy(data.data() + 8,  &c, 4);
+        memcpy(data.data() + 12, &d, 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 16, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "100", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.condition = ScanCondition::SmallerThan;
+        req.valueType = ValueType::Int32;
+        req.valueSize = 4;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 2);   // 5 and 50; 500 and 999 excluded
+    }
+
+    void condition_between_firstScan() {
+        // Plant 10, 50, 100, 200, 300; Between 50 and 200 → 50, 100, 200.
+        QByteArray data(20, 0);
+        int32_t vals[5] = {10, 50, 100, 200, 300};
+        for (int i = 0; i < 5; i++) memcpy(data.data() + i * 4, &vals[i], 4);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 20, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err, err2;
+        QByteArray loMask;
+        QVERIFY(serializeValue(ValueType::Int32, "50", req.pattern, loMask, &err));
+        QVERIFY(serializeValue(ValueType::Int32, "200", req.pattern2, loMask, &err2));
+        req.mask.fill('\xFF', req.pattern.size());
+        req.alignment = 4;
+        req.condition = ScanCondition::Between;
+        req.valueType = ValueType::Int32;
+        req.valueSize = 4;
+        auto results = syncScan(prov, req);
+        QCOMPARE(results.size(), 3);
+    }
+
+    // ── IncreasedBy / DecreasedBy on rescan ──
+
+    void condition_increasedBy_rescan() {
+        // Buffer holds two int32s. First scan captures both; we mutate one
+        // by exactly +5; rescan with IncreasedBy delta=5 returns just that one.
+        auto buf = QSharedPointer<QByteArray>::create(16, '\0');
+        int32_t a = 100, b = 200;
+        memcpy(buf->data() + 0, &a, 4);
+        memcpy(buf->data() + 8, &b, 4);
+
+        // Wrap buf in a writable provider — BufferProvider takes the byte
+        // array by value, so we plant our modifications via a custom
+        // MutableProvider that writes through to the same heap buffer.
+        struct MutableProvider : public Provider {
+            QSharedPointer<QByteArray> buf;
+            MutableProvider(QSharedPointer<QByteArray> b) : buf(std::move(b)) {}
+            bool read(uint64_t addr, void* dst, int len) const override {
+                if (addr + len > (uint64_t)buf->size()) return false;
+                memcpy(dst, buf->constData() + addr, len);
+                return true;
+            }
+            int size() const override { return buf->size(); }
+            bool write(uint64_t addr, const void* src, int len) override {
+                if (addr + len > (uint64_t)buf->size()) return false;
+                memcpy(buf->data() + addr, src, len);
+                return true;
+            }
+            bool isWritable() const override { return true; }
+            QVector<MemoryRegion> enumerateRegions() const override {
+                return {{0, (uint64_t)buf->size(), true, true, false, "", RegionType::Private}};
+            }
+        };
+        auto prov = std::make_shared<MutableProvider>(buf);
+
+        // Capture both addresses.
+        ScanRequest req;
+        req.condition = ScanCondition::UnknownValue;
+        req.valueType = ValueType::Int32;
+        req.valueSize = 4;
+        req.alignment = 4;
+        auto seed = syncScan(prov, req);
+        QCOMPARE(seed.size(), 4);  // 4 aligned int32 slots in 16 bytes
+
+        // Mutate offset 0 by +5 → 105. Leave offset 8 alone.
+        int32_t newA = a + 5;
+        QVERIFY(prov->write(0, &newA, 4));
+
+        // Rescan with IncreasedBy delta=5. Only offset 0 should match.
+        QByteArray deltaPat;
+        QString err;
+        QByteArray dmask;
+        QVERIFY(serializeValue(ValueType::Int32, "5", deltaPat, dmask, &err));
+
+        ScanEngine eng;
+        auto filtered = syncRescan(eng, prov, seed, 4,
+                                    ScanCondition::IncreasedBy,
+                                    ValueType::Int32, deltaPat, dmask);
+        QCOMPARE(filtered.size(), 1);
+        QCOMPARE(filtered[0].address, (uint64_t)0);
+    }
+
+    void condition_decreasedBy_rescan() {
+        auto buf = QSharedPointer<QByteArray>::create(8, '\0');
+        int32_t v = 1000;
+        memcpy(buf->data(), &v, 4);
+
+        struct MP : public Provider {
+            QSharedPointer<QByteArray> buf;
+            MP(QSharedPointer<QByteArray> b) : buf(std::move(b)) {}
+            bool read(uint64_t a, void* d, int l) const override {
+                if (a + l > (uint64_t)buf->size()) return false;
+                memcpy(d, buf->constData() + a, l); return true;
+            }
+            int size() const override { return buf->size(); }
+            bool write(uint64_t a, const void* s, int l) override {
+                if (a + l > (uint64_t)buf->size()) return false;
+                memcpy(buf->data() + a, s, l); return true;
+            }
+            bool isWritable() const override { return true; }
+            QVector<MemoryRegion> enumerateRegions() const override {
+                return {{0, (uint64_t)buf->size(), true, true, false, "", RegionType::Private}};
+            }
+        };
+        auto prov = std::make_shared<MP>(buf);
+
+        ScanRequest req;
+        req.condition = ScanCondition::UnknownValue;
+        req.valueType = ValueType::Int32;
+        req.valueSize = 4;
+        req.alignment = 4;
+        auto seed = syncScan(prov, req);
+        QCOMPARE(seed.size(), 2);
+
+        int32_t newV = v - 7;
+        QVERIFY(prov->write(0, &newV, 4));
+
+        QByteArray d, dm;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "7", d, dm, &err));
+        ScanEngine eng;
+        auto filt = syncRescan(eng, prov, seed, 4,
+                                ScanCondition::DecreasedBy,
+                                ValueType::Int32, d, dm);
+        QCOMPARE(filt.size(), 1);
+        QCOMPARE(filt[0].address, (uint64_t)0);
+    }
+
+    // ── End-to-end "tutorial" test: scan, find, mutate, re-validate ──
+    // Mirrors what the user does interactively when attached to a process:
+    // 1. Set up a writable buffer with known game-state values
+    // 2. Scan for one of them (Exact int32)
+    // 3. Find the address
+    // 4. Write a new value to that address
+    // 5. Re-scan with Changed condition → confirm it's flagged
+    // 6. Re-scan with ExactValue against new → confirm one match at same addr
+
+    void e2e_findMutateRevalidate() {
+        // Lay out a fake "game state": HP, mana, gold, level, x, y at 4-byte stride.
+        // Wrap in a writable provider so the user-edit step can mutate memory.
+        auto buf = QSharedPointer<QByteArray>::create(64, '\0');
+        int32_t hp = 100, mana = 50, gold = 1234, level = 7, x = -10, y = 20;
+        memcpy(buf->data() + 0,  &hp, 4);
+        memcpy(buf->data() + 4,  &mana, 4);
+        memcpy(buf->data() + 8,  &gold, 4);
+        memcpy(buf->data() + 12, &level, 4);
+        memcpy(buf->data() + 16, &x, 4);
+        memcpy(buf->data() + 20, &y, 4);
+
+        struct WritableRegionProvider : public Provider {
+            QSharedPointer<QByteArray> buf;
+            QVector<MemoryRegion> regs;
+            WritableRegionProvider(QSharedPointer<QByteArray> b, QVector<MemoryRegion> r)
+                : buf(std::move(b)), regs(std::move(r)) {}
+            bool read(uint64_t a, void* d, int l) const override {
+                if (a + l > (uint64_t)buf->size()) return false;
+                memcpy(d, buf->constData() + a, l); return true;
+            }
+            int size() const override { return buf->size(); }
+            bool write(uint64_t a, const void* s, int l) override {
+                if (a + l > (uint64_t)buf->size()) return false;
+                memcpy(buf->data() + a, s, l); return true;
+            }
+            bool isWritable() const override { return true; }
+            QVector<MemoryRegion> enumerateRegions() const override { return regs; }
+        };
+
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0,  32, true, true, false, "",            RegionType::Private});
+        regs.push_back(MemoryRegion{32, 32, true, false, true, "ntdll.dll",   RegionType::Image});
+        // Plant decoy 1234 inside ntdll-image region — must NOT match when
+        // skipSystemModules is on.
+        memcpy(buf->data() + 40, &gold, 4);
+
+        auto prov = std::make_shared<WritableRegionProvider>(buf, regs);
+
+        // ── Step 1: find "1234" with smart filters on (Tier A + system skip) ──
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::Int32, "1234", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        req.privateOnly = true;
+        req.skipSystemModules = true;
+        req.valueType = ValueType::Int32;
+        req.valueSize = 4;
+
+        auto found = syncScan(prov, req);
+        QCOMPARE(found.size(), 1);
+        QCOMPARE(found[0].address, (uint64_t)8);  // gold field, decoy in Image excluded
+
+        // ── Step 2: mutate that exact address to a new value ──
+        int32_t newGold = 9999;
+        QVERIFY(prov->write(found[0].address, &newGold, 4));
+
+        // ── Step 3: re-validate via ExactValue rescan against new bytes ──
+        QByteArray newPat, newMask;
+        QVERIFY(serializeValue(ValueType::Int32, "9999", newPat, newMask, &err));
+        ScanEngine eng;
+        auto revalidated = syncRescan(eng, prov, found, 4,
+                                       ScanCondition::ExactValue,
+                                       ValueType::Int32, newPat, newMask);
+        QCOMPARE(revalidated.size(), 1);
+        QCOMPARE(revalidated[0].address, (uint64_t)8);
+        // scanValue should reflect the new bytes.
+        int32_t reread = 0;
+        memcpy(&reread, revalidated[0].scanValue.constData(), 4);
+        QCOMPARE(reread, newGold);
+
+        // ── Step 4: Changed-condition rescan against pre-mutate baseline ──
+        // Reset prov to old value and seed fresh, then mutate again.
+        int32_t origGold = 1234;
+        QVERIFY(prov->write(8, &origGold, 4));
+        auto seed2 = syncScan(prov, req);
+        QCOMPARE(seed2.size(), 1);
+        // Mutate
+        int32_t bumped = 1500;
+        QVERIFY(prov->write(8, &bumped, 4));
+        auto changed = syncRescan(eng, prov, seed2, 4,
+                                   ScanCondition::Changed,
+                                   ValueType::Int32);
+        QCOMPARE(changed.size(), 1);
+        QCOMPARE(changed[0].address, (uint64_t)8);
+
+        // ── Step 5: Increased rescan must also flag it (1500 > 1234) ──
+        QVERIFY(prov->write(8, &origGold, 4));
+        auto seed3 = syncScan(prov, req);
+        QVERIFY(prov->write(8, &bumped, 4));
+        auto inc = syncRescan(eng, prov, seed3, 4,
+                               ScanCondition::Increased,
+                               ValueType::Int32);
+        QCOMPARE(inc.size(), 1);
+
+        // ── Step 6: Decreased rescan against the SAME baseline → empty ──
+        QVERIFY(prov->write(8, &origGold, 4));
+        auto seed4 = syncScan(prov, req);
+        QVERIFY(prov->write(8, &bumped, 4));
+        auto dec = syncRescan(eng, prov, seed4, 4,
+                               ScanCondition::Decreased,
+                               ValueType::Int32);
+        QCOMPARE(dec.size(), 0);
+
+        // ── Step 7: Bigger Than 5000 first-scan — only 9999 (after re-write) ──
+        int32_t huge = 50000;
+        QVERIFY(prov->write(8, &huge, 4));
+        ScanRequest big;
+        QVERIFY(serializeValue(ValueType::Int32, "5000", big.pattern, big.mask, &err));
+        big.alignment = 4;
+        big.privateOnly = true;
+        big.condition = ScanCondition::BiggerThan;
+        big.valueType = ValueType::Int32;
+        big.valueSize = 4;
+        auto bigHits = syncScan(prov, big);
+        QCOMPARE(bigHits.size(), 1);
+        QCOMPARE(bigHits[0].address, (uint64_t)8);
+
+        // ── Step 8: Between 0 and 100 — original mutations all gone now;
+        // expect HP (100) and mana (50) and level (7) and y (20) ──
+        QVERIFY(prov->write(8, &origGold, 4));  // gold back to 1234 (excluded)
+        ScanRequest bw;
+        QString err2;
+        QByteArray dummy;
+        QVERIFY(serializeValue(ValueType::Int32, "0",   bw.pattern,  dummy, &err));
+        QVERIFY(serializeValue(ValueType::Int32, "100", bw.pattern2, dummy, &err2));
+        bw.mask.fill('\xFF', bw.pattern.size());
+        bw.alignment = 4;
+        bw.privateOnly = true;
+        bw.condition = ScanCondition::Between;
+        bw.valueType = ValueType::Int32;
+        bw.valueSize = 4;
+        auto bwHits = syncScan(prov, bw);
+        // hp(100), mana(50), level(7), y(20), and the two zero-init slots
+        // at offsets 24, 28 — six values in [0, 100]. x(-10) and gold(1234)
+        // out of range; Image-region decoy excluded by privateOnly.
+        QCOMPARE(bwHits.size(), 6);
+    }
+
+    // ── Adaptive chunk size: huge region scan completes ──
+    // Sanity check that the new 2 MB chunk path works on a region big enough
+    // to require multiple chunks.
+
+    void adaptiveChunk_largeRegion() {
+        const int sz = 3 * 1024 * 1024;   // 3 MB → triggers multi-chunk path
+        QByteArray data(sz, 0);
+        int32_t needle = 0xCAFEBABE;
+        memcpy(data.data() + sz - 1024, &needle, 4);  // hit near the end
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, (uint64_t)sz, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        ScanRequest req;
+        QString err;
+        QVERIFY(serializeValue(ValueType::UInt32, "0xCAFEBABE", req.pattern, req.mask, &err));
+        req.alignment = 4;
+        auto results = syncScan(prov, req, /*timeoutMs=*/15000);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].address, (uint64_t)(sz - 1024));
+    }
+
+    // ── BMH path is exercised for non-wildcard ≥4-byte patterns ──
+    // Black-box: same buffer, two scans (one with wildcards forcing naive,
+    // one without forcing BMH) yield the same hit set.
+
+    void bmh_pathParity() {
+        QByteArray data(8192, 0);
+        const char needle[8] = {'M','A','G','I','C','!','!','!'};
+        memcpy(data.data() + 1234, needle, 8);
+        memcpy(data.data() + 5000, needle, 8);
+        QVector<MemoryRegion> regs;
+        regs.push_back(MemoryRegion{0, 8192, true, true, false, "", RegionType::Private});
+        auto prov = std::make_shared<RegionProvider>(data, regs);
+
+        // BMH path (no wildcards, 8 bytes, alignment 1).
+        ScanRequest reqBmh;
+        reqBmh.pattern = QByteArray(needle, 8);
+        reqBmh.mask.fill('\xFF', 8);
+        reqBmh.alignment = 1;
+        auto bmhHits = syncScan(prov, reqBmh);
+
+        // Naive path: same pattern, but flip one mask byte to wildcard so the
+        // matcher falls back. Identical hit count expected.
+        ScanRequest reqNaive = reqBmh;
+        reqNaive.mask[0] = '\x00';
+        auto naiveHits = syncScan(prov, reqNaive);
+
+        QCOMPARE(bmhHits.size(), 2);
+        QCOMPARE(bmhHits.size(), naiveHits.size());
+    }
+
+    // ── Multi-condition robustness: empty result list rescan is a no-op ──
+
+    void rescan_emptySeed() {
+        auto prov = std::make_shared<BufferProvider>(QByteArray(16, 0), "x");
+        ScanEngine eng;
+        auto out = syncRescan(eng, prov, {}, 4, ScanCondition::ExactValue,
+                              ValueType::Int32);
+        QCOMPARE(out.size(), 0);
+    }
+
+    // ── Save/load result list round-trip ──
+    // Direct test of the JSON serialization helpers exposed from ScannerPanel.
+    // We can't pull in the full panel without Widgets, but we can exercise the
+    // shape via the engine + a minimal in-memory round-trip below.
+
+#ifdef _WIN32
+    // Tutorial-style self-attach end-to-end. Body defined out-of-line below
+    // (file-scope WinSelfProvider lives there to dodge MOC's nested-class
+    // confusion inside Q_OBJECT-aware translation units).
+    void selfAttach_findMutateRevalidate();
+#endif
+
+    void scanResult_jsonShape() {
+        ScanResult r;
+        r.address = 0xDEADBEEFCAFEBABEULL;
+        r.scanValue = QByteArray::fromHex("DEADBEEF");
+        r.regionModule = "game.exe";
+        // Mirror what ScannerPanel::saveResultsTo does, then parse back.
+        QJsonObject o;
+        o["address"] = QString::number(r.address, 16);
+        o["value"]   = QString::fromLatin1(r.scanValue.toHex());
+        o["module"]  = r.regionModule;
+        QJsonDocument doc(o);
+        auto bytes = doc.toJson();
+        auto parsed = QJsonDocument::fromJson(bytes).object();
+        QCOMPARE(parsed["address"].toString(), QStringLiteral("deadbeefcafebabe"));
+        QCOMPARE(parsed["value"].toString(),   QStringLiteral("deadbeef"));
+        QCOMPARE(parsed["module"].toString(),  QStringLiteral("game.exe"));
+        QCOMPARE(parsed["address"].toString().toULongLong(nullptr, 16), r.address);
+    }
 };
+
+// ── File-scope WinSelfProvider + selfAttach test body ──
+// MOC parses everything inside the Q_OBJECT class so we can't define a
+// helper Provider subclass there without confusing it. Out-of-line
+// declarations let us keep the slot in the class and the implementation
+// here.
+#ifdef _WIN32
+namespace {
+class WinSelfProvider : public rcx::Provider {
+public:
+    HANDLE handle = nullptr;
+    QVector<ModuleEntry> cachedModules;
+
+    WinSelfProvider() {
+        handle = OpenProcess(
+            PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION
+            | PROCESS_QUERY_INFORMATION,
+            FALSE, GetCurrentProcessId());
+        HMODULE mods[1024];
+        DWORD needed = 0;
+        if (handle && EnumProcessModulesEx(handle, mods, sizeof(mods),
+                                            &needed, LIST_MODULES_ALL)) {
+            int n = qMin((int)(needed / sizeof(HMODULE)), 1024);
+            for (int i = 0; i < n; i++) {
+                MODULEINFO mi{};
+                WCHAR name[MAX_PATH];
+                if (GetModuleInformation(handle, mods[i], &mi, sizeof(mi))
+                    && GetModuleBaseNameW(handle, mods[i], name, MAX_PATH)) {
+                    cachedModules.push_back(ModuleEntry{
+                        QString::fromWCharArray(name),
+                        QString::fromWCharArray(name),
+                        (uint64_t)mi.lpBaseOfDll, (uint64_t)mi.SizeOfImage});
+                }
+            }
+        }
+    }
+    ~WinSelfProvider() override { if (handle) CloseHandle(handle); }
+
+    bool read(uint64_t addr, void* buf, int len) const override {
+        if (!handle || len <= 0) return false;
+        SIZE_T got = 0;
+        ReadProcessMemory(handle, (LPCVOID)addr, buf, len, &got);
+        return got == (SIZE_T)len;
+    }
+    bool write(uint64_t addr, const void* buf, int len) override {
+        if (!handle) return false;
+        SIZE_T put = 0;
+        WriteProcessMemory(handle, (LPVOID)addr, buf, len, &put);
+        return put == (SIZE_T)len;
+    }
+    bool isWritable() const override { return handle != nullptr; }
+    int  size() const override { return INT_MAX; }
+    bool isReadable(uint64_t, int len) const override {
+        return handle && len >= 0;
+    }
+    QVector<ModuleEntry> enumerateModules() const override { return cachedModules; }
+    QVector<rcx::MemoryRegion> enumerateRegions() const override {
+        QVector<rcx::MemoryRegion> out;
+        if (!handle) return out;
+        MEMORY_BASIC_INFORMATION mbi;
+        uint64_t addr = 0;
+        while (VirtualQueryEx(handle, (LPCVOID)addr, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+            if (mbi.State == MEM_COMMIT
+                && !(mbi.Protect & PAGE_NOACCESS)
+                && !(mbi.Protect & PAGE_GUARD)) {
+                rcx::MemoryRegion r;
+                r.base       = (uint64_t)mbi.BaseAddress;
+                r.size       = (uint64_t)mbi.RegionSize;
+                r.readable   = true;
+                r.writable   = (mbi.Protect & PAGE_READWRITE)
+                            || (mbi.Protect & PAGE_EXECUTE_READWRITE);
+                r.executable = (mbi.Protect & PAGE_EXECUTE)
+                            || (mbi.Protect & PAGE_EXECUTE_READ)
+                            || (mbi.Protect & PAGE_EXECUTE_READWRITE);
+                if      (mbi.Type == MEM_IMAGE)  r.type = rcx::RegionType::Image;
+                else if (mbi.Type == MEM_MAPPED) r.type = rcx::RegionType::Mapped;
+                else                             r.type = rcx::RegionType::Private;
+                for (const auto& m : cachedModules) {
+                    if (r.base >= m.base && r.base < m.base + m.size) {
+                        r.moduleName = m.name; break;
+                    }
+                }
+                out.append(r);
+            }
+            uint64_t next = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
+            if (next <= addr) break;
+            addr = next;
+        }
+        return out;
+    }
+};
+} // anon
+
+void TestScanner::selfAttach_findMutateRevalidate() {
+    // Heap-plant a unique 8-byte marker so a uint64 scan finds exactly one
+    // hit inside MEM_PRIVATE pages. This proves the smart-region defaults
+    // (privateOnly + skipSystemModules + user-mode VA cap) actually
+    // converge on user data instead of getting lost in DLL .rdata.
+    struct alignas(8) Marker { uint64_t magic; };
+    auto marker = std::make_unique<Marker>();
+    marker->magic = 0xDEADBEEFCAFEBABEULL;
+    const uint64_t markerAddr = reinterpret_cast<uintptr_t>(marker.get());
+
+    auto prov = std::make_shared<WinSelfProvider>();
+    QVERIFY(prov->handle);
+    uint64_t sanity = 0;
+    QVERIFY(prov->read(markerAddr, &sanity, 8));
+    QCOMPARE(sanity, marker->magic);
+
+    ScanRequest req;
+    QString err;
+    QVERIFY(serializeValue(ValueType::UInt64, "0xDEADBEEFCAFEBABE",
+                            req.pattern, req.mask, &err));
+    req.alignment = 8;
+    req.privateOnly = true;
+    req.skipSystemModules = true;
+    req.endAddress = 0x00007FFFFFFFFFFFULL;
+    req.valueType = ValueType::UInt64;
+    req.valueSize = 8;
+    req.maxResults = 1000;
+
+    auto results = syncScan(prov, req, /*timeoutMs=*/30000);
+    QVERIFY2(!results.isEmpty(), "self-attach scan returned no hits");
+
+    bool foundOurAddr = false;
+    for (const auto& r : results) {
+        if (r.address == markerAddr) { foundOurAddr = true; break; }
+    }
+    QVERIFY2(foundOurAddr, "scan didn't return the planted heap address");
+
+    // Mutate via WriteProcessMemory; verify our local copy reflects it
+    // (we wrote our own memory).
+    uint64_t newMagic = 0x1122334455667788ULL;
+    QVERIFY(prov->write(markerAddr, &newMagic, 8));
+    QCOMPARE(marker->magic, newMagic);
+
+    // Re-scan via Changed condition: rewrite to old, seed, mutate, rescan.
+    uint64_t origMagic = 0xDEADBEEFCAFEBABEULL;
+    QVERIFY(prov->write(markerAddr, &origMagic, 8));
+    QVector<ScanResult> seed;
+    ScanResult one;
+    one.address = markerAddr;
+    one.scanValue = QByteArray((const char*)&origMagic, 8);
+    seed.append(one);
+    QVERIFY(prov->write(markerAddr, &newMagic, 8));
+
+    ScanEngine eng;
+    auto changed = syncRescan(eng, prov, seed, 8,
+                               ScanCondition::Changed,
+                               ValueType::UInt64);
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(changed[0].address, markerAddr);
+
+    // ExactValue rescan against the new magic.
+    QByteArray newPat, newMask;
+    QString err2;
+    QVERIFY(serializeValue(ValueType::UInt64, "0x1122334455667788",
+                            newPat, newMask, &err2));
+    QVector<ScanResult> seed3;
+    ScanResult three;
+    three.address = markerAddr;
+    three.scanValue = QByteArray((const char*)&origMagic, 8);
+    seed3.append(three);
+    auto exact = syncRescan(eng, prov, seed3, 8,
+                             ScanCondition::ExactValue,
+                             ValueType::UInt64, newPat, newMask);
+    QCOMPARE(exact.size(), 1);
+    QCOMPARE(exact[0].address, markerAddr);
+    uint64_t cached = 0;
+    memcpy(&cached, exact[0].scanValue.constData(), 8);
+    QCOMPARE(cached, newMagic);
+}
+#endif
 
 QTEST_MAIN(TestScanner)
 #include "test_scanner.moc"
