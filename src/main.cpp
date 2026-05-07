@@ -64,6 +64,8 @@
 #include <QDesktopServices>
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QScreen>
+#include <QPixmap>
 #include <QWindow>
 #include <QMouseEvent>
 #include <QScrollBar>
@@ -883,6 +885,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // Custom title bar (replaces native menu bar area in QMainWindow)
     m_titleBar = new TitleBarWidget(this);
+    // Object-name so DockOverlay::contentRect() can find it as a fallback
+    // (the primary path is QMainWindow::menuWidget() since we install it
+    // via setMenuWidget below, but naming it explicitly is cheap insurance
+    // against the lookup ever failing).
+    m_titleBar->setObjectName(QStringLiteral("TitleBarWidget"));
     m_titleBar->applyTheme(ThemeManager::instance().current());
     connect(m_titleBar, &TitleBarWidget::layoutPresetSelected,
             this, &MainWindow::applyLayoutPreset);
@@ -937,7 +944,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
     setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
     setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
-    setTabPosition(Qt::TopDockWidgetArea, QTabWidget::North);
+    // Tab strip always renders at the TOP of its dock area, regardless of
+    // which side of the window the area is on. Qt's default is `South` for
+    // Left/Right/Bottom areas, which made the doc-tab strip appear at the
+    // bottom of the right area after a Dock-Right drop — confusing UX.
+    setTabPosition(Qt::TopDockWidgetArea,    QTabWidget::North);
+    setTabPosition(Qt::LeftDockWidgetArea,   QTabWidget::North);
+    setTabPosition(Qt::RightDockWidgetArea,  QTabWidget::North);
+    setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
 
     createWorkspaceDock();
     createScannerDock();
@@ -1227,7 +1241,7 @@ void MainWindow::createMenus() {
         if (m_scannerDock) m_scannerDock->hide();
         if (m_symbolsDock) m_symbolsDock->hide();
 
-        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+        reconcileDockTabBars();
     });
     view->addSeparator();
     auto* fontMenu = view->addMenu(makeIcon(":/vsicons/text-size.svg"), "&Font");
@@ -1988,6 +2002,12 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     pane.tabWidget->setTabPosition(QTabWidget::South);
     pane.tabWidget->tabBar()->setVisible(true);
     pane.tabWidget->setDocumentMode(true);  // kill QTabWidget frame border
+    // Hide the unstyled `<` `>` scroll buttons that Qt adds when tabs
+    // overflow. Overflowing tabs just clip — user can widen the pane to
+    // see the rest. Matches the user's preference: no graphical
+    // clutter, no Qt-default chrome poking through the theme.
+    pane.tabWidget->setUsesScrollButtons(false);
+    pane.tabWidget->setElideMode(Qt::ElideNone);
 
     // Style to match the top dock tab bar, with accent line on selected tab
     {
@@ -2493,7 +2513,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             dockBorder->hide();
             dockGrip->hide();
             // Re-docking creates a new tab bar — reinstall pin/close buttons
-            QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+            reconcileDockTabBars();
         }
     });
     dock->installEventFilter(new DockBorderFilter(dockBorder, dockGrip, dock));
@@ -2503,23 +2523,25 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             lbl->setText(t);
     });
 
-    // Tabify with existing doc docks, or add to top area
-    if (!m_docDocks.isEmpty()) {
-        tabifyDockWidget(m_docDocks.last(), dock);
+    // Tabify with the user's CURRENTLY ACTIVE doc dock — that's the one
+    // they're looking at when they click "+", regardless of how many
+    // separate tab groups exist. Falling back to m_docDocks.last() (the
+    // old behaviour) would put the new tab wherever the most recently
+    // *added* dock lives, which after a float→redock cycle is never
+    // where the user expected. If neither is set, the dock starts a new
+    // group at top.
+    QDockWidget* tabifyTarget = nullptr;
+    if (m_activeDocDock && m_activeDocDock != dock
+        && !m_activeDocDock->isFloating() && m_activeDocDock->isVisible())
+        tabifyTarget = m_activeDocDock;
+    else if (!m_docDocks.isEmpty())
+        tabifyTarget = m_docDocks.last();
+    if (tabifyTarget) {
+        tabifyDockWidget(tabifyTarget, dock);
     } else {
         addDockWidget(Qt::TopDockWidgetArea, dock);
-        // Deferred sentinel — must wait for Qt to finish laying out the
-        // first doc dock before tabifyDockWidget can merge them into tabs.
-        QTimer::singleShot(0, this, [this, dock]() {
-            if (!dock->isVisible()) return;
-            // Check if this dock already has a sentinel (e.g. second createTab raced)
-            for (auto* td : tabifiedDockWidgets(dock))
-                if (m_sentinelDocks.contains(static_cast<QDockWidget*>(td))) return;
-            auto* sentinel = createSentinelDock();
-            tabifyDockWidget(dock, sentinel);
-            dock->raise();
-            setupDockTabBars();
-        });
+        // Sentinel pairing + tab-strip styling is handled by the
+        // synchronous reconcile call further below.
     }
 
     m_docDocks.append(dock);
@@ -2890,7 +2912,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     // Install context menu + pin/close buttons on dock tab bars
     // (deferred — tab bar created after tabification)
-    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+    reconcileDockTabBars();
 
     return dock;
 }
@@ -2922,7 +2944,7 @@ void MainWindow::setupDockOverlay() {
         }
         dock->show();
         dock->raise();
-        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+        reconcileDockTabBars();
     });
 }
 
@@ -2972,71 +2994,181 @@ void MainWindow::onDockDropRequested(QDockWidget* source, QDockWidget* target, i
         }
     };
 
-    // Map split zones to orientation + dock area
-    auto splitToOrientation = [](DropZone z) -> Qt::Orientation {
-        return (z == DropZone::Left || z == DropZone::Right)
-            ? Qt::Horizontal : Qt::Vertical;
-    };
-
     source->show();
+
+    // Resolve a fallback target when the cursor was over dead space —
+    // pick the active doc dock, else the first non-floating doc dock.
+    // Used by Center to prevent the "stayed floating" bug when the user
+    // drops in the central editor area.
+    auto fallbackTarget = [this, source]() -> QDockWidget* {
+        if (m_activeDocDock && m_activeDocDock != source
+            && !m_activeDocDock->isFloating())
+            return m_activeDocDock;
+        for (auto* d : m_docDocks) {
+            if (d != source && !d->isFloating()) return d;
+        }
+        return nullptr;
+    };
 
     if (zone == DropZone::Float) {
         // Leave floating at cursor position
         source->setFloating(true);
         source->move(QCursor::pos() - QPoint(50, 10));
         source->show();
-    } else if (zone == DropZone::Center && target) {
-        // Tabify with target
-        source->setFloating(false);
-        tabifyDockWidget(target, source);
-        source->show();
-        source->raise();
-    } else if (zone == DropZone::Left || zone == DropZone::Right ||
-               zone == DropZone::Top || zone == DropZone::Bottom) {
-        if (target) {
-            // Split: add source next to target with specified orientation
-            Qt::DockWidgetArea area = dockWidgetArea(target);
-            if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
+    } else if (zone == DropZone::Center) {
+        // Tabify only with a doc-dock target (objectName "DocDock_*").
+        // Sidebars (workspace/scanner/symbols/bookmarks) are not valid
+        // tabify targets — tabifying with one would hide the sidebar
+        // behind the new dock. If the resolved target isn't a doc dock,
+        // fall through to the active doc dock; if no doc dock exists,
+        // dock the source at the right window edge so it never silently
+        // stays floating.
+        QDockWidget* tabTarget = nullptr;
+        if (target && m_docDocks.contains(target))
+            tabTarget = target;
+        if (!tabTarget) tabTarget = fallbackTarget();
+        if (tabTarget) {
             source->setFloating(false);
-            splitDockWidget(target, source, splitToOrientation(zone));
-            // For Right/Bottom, the split puts source after target (correct).
-            // For Left/Top, we need to swap the order.
-            if (zone == DropZone::Left || zone == DropZone::Top) {
-                // Qt's splitDockWidget always adds second widget after first.
-                // To put source before target, we re-do the split in reverse.
-                removeDockWidget(source);
-                removeDockWidget(target);
-                addDockWidget(area, source, splitToOrientation(zone));
-                splitDockWidget(source, target, splitToOrientation(zone));
-                source->show();
-                target->show();
-            }
+            tabifyDockWidget(tabTarget, source);
+            source->show();
+            source->raise();
+        } else {
+            source->setFloating(false);
+            addDockWidget(Qt::RightDockWidgetArea, source);
+            source->show();
         }
     } else if (zone >= DropZone::EdgeLeft && zone <= DropZone::EdgeBottom) {
         Qt::DockWidgetArea area = edgeToArea(zone);
+        // Reassign corners so the chosen edge actually takes its full
+        // extent (matching the preview rect). Qt's QMainWindow gives a
+        // corner to exactly one of its two adjacent areas — without
+        // this, BottomDockWidgetArea would be squeezed between Left/
+        // Right (which currently own the bottom corners), and "Dock
+        // Bottom" would just visually be a regular dock somewhere in
+        // the middle. Most-recent-edge-drop wins.
+        switch (area) {
+        case Qt::LeftDockWidgetArea:
+            setCorner(Qt::TopLeftCorner,    Qt::LeftDockWidgetArea);
+            setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
+            break;
+        case Qt::RightDockWidgetArea:
+            setCorner(Qt::TopRightCorner,    Qt::RightDockWidgetArea);
+            setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
+            break;
+        case Qt::TopDockWidgetArea:
+            setCorner(Qt::TopLeftCorner,  Qt::TopDockWidgetArea);
+            setCorner(Qt::TopRightCorner, Qt::TopDockWidgetArea);
+            break;
+        case Qt::BottomDockWidgetArea:
+            setCorner(Qt::BottomLeftCorner,  Qt::BottomDockWidgetArea);
+            setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+            break;
+        default: break;
+        }
         source->setFloating(false);
         addDockWidget(area, source);
         source->show();
+        // Match the preview rect (1/4 of the window) so the dock doesn't
+        // balloon to its sizeHint after a drop.
+        bool horiz = (area == Qt::LeftDockWidgetArea
+                   || area == Qt::RightDockWidgetArea);
+        int defSz = horiz ? width() / 4 : height() / 4;
+        if (source == m_workspaceDock)
+            defSz = computeWorkspaceDockWidth();
+        int sz = loadDockSize(source, defSz);
+        resizeDocks({source}, {sz}, horiz ? Qt::Horizontal : Qt::Vertical);
     }
 
-    // Re-setup tab bars since dock arrangement changed
-    QTimer::singleShot(0, this, [this]() {
-        // Add sentinels to any dock groups that need them
-        for (auto* dock : m_docDocks) {
-            if (dock->isFloating() || !dock->isVisible()) continue;
-            auto tabified = tabifiedDockWidgets(dock);
-            bool hasSentinel = false;
-            for (auto* td : tabified)
-                if (m_sentinelDocks.contains(static_cast<QDockWidget*>(td)))
-                    hasSentinel = true;
-            if (!hasSentinel && tabified.isEmpty()) {
-                auto* s = createSentinelDock();
-                tabifyDockWidget(dock, s);
-                dock->raise();
+    // Synchronous reconcile — collapses the previous family of deferred
+    // 0-timers into one inline call that runs before this drop handler
+    // returns. Idempotent + re-entry-guarded so cascading layout signals
+    // can't blow it up.
+    reconcileDockTabBars();
+}
+
+void MainWindow::reconcileDockTabBars() {
+    // Re-entry guard. Cascading signals (tabifyDockWidget triggers
+    // layoutChanged etc.) could call back in here; we want one pass.
+    if (m_reconciling) return;
+    m_reconciling = true;
+
+    // Phase A — purge orphan sentinels. A sentinel is "orphan" iff it is
+    // not tabified with any visible non-floating doc-dock. Sentinels
+    // still validly partnered with a doc dock survive this pass
+    // untouched (no nuke, no flicker).
+    for (int i = m_sentinelDocks.size() - 1; i >= 0; --i) {
+        QDockWidget* s = m_sentinelDocks[i];
+        if (!s) { m_sentinelDocks.removeAt(i); continue; }
+        bool keep = false;
+        for (auto* td : tabifiedDockWidgets(s)) {
+            auto* qd = static_cast<QDockWidget*>(td);
+            if (m_docDocks.contains(qd) && qd->isVisible() && !qd->isFloating()) {
+                keep = true; break;
             }
         }
-        setupDockTabBars();
-    });
+        if (!keep) {
+            m_sentinelDocks.removeAt(i);
+            removeDockWidget(s);
+            s->deleteLater();
+        }
+    }
+
+    // Phase B — every visible non-floating doc dock that is not already
+    // in a tab group with another doc OR a sentinel gets a fresh
+    // sentinel tabified with it. Solo docks otherwise have no tab bar
+    // (Qt only renders QTabBar when a dock area has 2+ docks).
+    for (auto* dock : m_docDocks) {
+        if (!dock || dock->isFloating() || !dock->isVisible()) continue;
+        bool hasPartner = false;
+        for (auto* td : tabifiedDockWidgets(dock)) {
+            auto* qd = static_cast<QDockWidget*>(td);
+            if (qd == dock) continue;
+            if (m_docDocks.contains(qd) || m_sentinelDocks.contains(qd)) {
+                hasPartner = true; break;
+            }
+        }
+        if (!hasPartner) {
+            auto* s = createSentinelDock();
+            tabifyDockWidget(dock, s);
+            dock->raise();
+        }
+    }
+
+    // Phase B' — make sure the active tab in every doc-dock group is the
+    // doc dock, never the sentinel. After a tab is dragged out of a
+    // group and lands alone, Qt sometimes picks the just-added sentinel
+    // as the current tab — the user sees a blank "+" tab as active.
+    // Explicitly setCurrentIndex on the tab bar to the doc-dock's tab.
+    for (auto* tabBar : findChildren<QTabBar*>()) {
+        if (tabBar->parent() != this) continue;
+        // Find the first tab whose text matches a known doc dock's title.
+        // If the current tab is already a doc dock, leave it alone.
+        int curIdx = tabBar->currentIndex();
+        QString curText = (curIdx >= 0) ? tabBar->tabText(curIdx) : QString();
+        bool curIsDoc = false;
+        for (auto* d : m_docDocks)
+            if (d->windowTitle() == curText) { curIsDoc = true; break; }
+        if (curIsDoc) continue;
+        // Current tab is the sentinel (or unknown). Find any doc-dock
+        // tab in this bar and switch to it.
+        for (int i = 0; i < tabBar->count(); ++i) {
+            QString t = tabBar->tabText(i);
+            for (auto* d : m_docDocks) {
+                if (d->windowTitle() == t) {
+                    tabBar->setCurrentIndex(i);
+                    d->raise();
+                    goto next_bar;
+                }
+            }
+        }
+        next_bar: ;
+    }
+
+    // Phase C — restyle every QTabBar that QMainWindow owns. Reinstall
+    // close buttons / fonts / palette on tab bars that lack them.
+    setupDockTabBars();
+
+    m_reconciling = false;
 }
 
 void MainWindow::refreshDocTabSourceIcon(QDockWidget* docDock) {
@@ -3273,12 +3405,9 @@ void MainWindow::setupDockTabBars() {
                         }
                         if (docks.size() >= 2)
                             resizeDocks(docks, sizes, Qt::Horizontal);
-                        QTimer::singleShot(0, this, [this, target]() {
-                            auto* s = createSentinelDock();
-                            tabifyDockWidget(target, s);
-                            target->raise();
-                            QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
-                        });
+                        // Sentinel pairing + tab-strip styling is handled
+                        // by the synchronous reconcile pass — no defer.
+                        reconcileDockTabBars();
                     });
                     menu.addAction(makeIcon(":/vsicons/split-vertical.svg"),
                                    "New Vertical Document Group",
@@ -3298,12 +3427,7 @@ void MainWindow::setupDockTabBars() {
                         }
                         if (docks.size() >= 2)
                             resizeDocks(docks, sizes, Qt::Vertical);
-                        QTimer::singleShot(0, this, [this, target]() {
-                            auto* s = createSentinelDock();
-                            tabifyDockWidget(target, s);
-                            target->raise();
-                            QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
-                        });
+                        reconcileDockTabBars();
                     });
                 }
             }
@@ -3321,6 +3445,38 @@ void MainWindow::setupDockTabBars() {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    // ── F12: app-only screenshot to <exe-dir>/issue.png ──
+    // Captures only the Reclass main window (including any child
+    // overlays painted on top, e.g. DockOverlay during a drag) — NOT
+    // the whole screen. Triggered from the qApp event filter so it
+    // works even when DockOverlay has the keyboard focus.
+    if (event->type() == QEvent::KeyPress) {
+        auto* ke = static_cast<QKeyEvent*>(event);
+        if (ke->key() == Qt::Key_F12 && !ke->isAutoRepeat()) {
+            QScreen* screen = windowHandle() ? windowHandle()->screen()
+                                             : QGuiApplication::primaryScreen();
+            // grabWindow(winId(), 0, 0, w, h) takes a screen-pixel
+            // snapshot of just this top-level window — preserves any
+            // child overlay painting AND the actual rendered frame
+            // (drop shadows / native chrome / etc.).
+            QPixmap pix;
+            if (screen)
+                pix = screen->grabWindow(winId(), 0, 0, width(), height());
+            else
+                pix = grab();  // fallback: widget-tree paint
+            QString path = QCoreApplication::applicationDirPath()
+                         + QStringLiteral("/issue.png");
+            if (!pix.isNull() && pix.save(path, "PNG")) {
+                setAppStatus(QStringLiteral("Screenshot → ") + path);
+                qDebug() << "[Screenshot] saved" << path
+                         << pix.width() << "x" << pix.height();
+            } else {
+                setAppStatus(QStringLiteral("Screenshot FAILED: ") + path);
+            }
+            return true;
+        }
+    }
+
     // ── Ctrl+Click: UI inspection ──
     if (event->type() == QEvent::MouseButtonPress) {
         auto* me = static_cast<QMouseEvent*>(event);
@@ -3373,7 +3529,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
                     if (dock) {
                         dock->raise();
                         dock->show();
-                        QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+                        reconcileDockTabBars();
                     }
                     return true;
                 }
@@ -5853,7 +6009,7 @@ void MainWindow::applyLayoutPreset(int preset) {
     m_workspaceDock->setVisible(showWorkspace);
 
     // Re-install tab bar buttons — a newly revealed tab bar needs them.
-    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+    reconcileDockTabBars();
 
     QSettings("Reclass", "Reclass").setValue("layoutPreset", preset);
     setAppStatus(showWorkspace ? QStringLiteral("Workspace shown")
@@ -6380,11 +6536,11 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceSearch->setMinimumWidth(0);
     dockContainer->setMinimumWidth(0);
     m_workspaceDock->setWidget(dockContainer);
-    // Floor on dock width — prevents Qt's splitter from crushing workspace
-    // when another dock shares the area.
-    // Min width +30% — keeps long type names + counts readable without
-    // Qt's splitter crushing the dock when the user opens neighbours.
-    m_workspaceDock->setMinimumWidth(235);
+    // Floor on dock width — keeps the dock from being crushed below readable
+    // size when another dock shares the area. computeWorkspaceDockWidth()
+    // returns 180 as its lower bound; matching that here so the user can
+    // collapse to that width but no narrower.
+    m_workspaceDock->setMinimumWidth(180);
     addDockWidget(Qt::TopDockWidgetArea, m_workspaceDock);
     m_workspaceDock->hide();
     // Watch resize events to drive the live divider-size tooltip.
@@ -6513,10 +6669,14 @@ void MainWindow::createWorkspaceDock() {
 void MainWindow::createScannerDock() {
     m_scannerDock = new QDockWidget("Memory Scanner", this);
     m_scannerDock->setObjectName("ScannerDock");
-    // Restrict to bottom (split under the editor) and left (alongside the
-    // workspace dock). Top/right docking made no UX sense — the scanner
-    // either lives under the code or to the side of the project tree.
-    m_scannerDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::LeftDockWidgetArea);
+    // Allow Top in addition to Bottom and Left. The previous restriction
+    // assumed the scanner only ever made sense under the code or beside
+    // the workspace, but with corner-reassignment on EdgeX drops the
+    // scanner can take the full top strip too — same as it now can the
+    // full bottom strip — and that's a valid layout.
+    m_scannerDock->setAllowedAreas(Qt::BottomDockWidgetArea
+                                 | Qt::LeftDockWidgetArea
+                                 | Qt::TopDockWidgetArea);
     m_scannerDock->setFeatures(
         QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
         QDockWidget::DockWidgetFloatable);
@@ -8162,58 +8322,39 @@ void MainWindow::placeSidebarDock(QDockWidget* dock, Qt::DockWidgetArea area,
         } else {
             addDockWidget(area, dock);
         }
-        // Other sidebars still honour the saved size; workspace is
-        // forced to its minimumWidth below (defer-after-show).
-        if (dock != m_workspaceDock) {
-            int def = preferredSize;
-            if (def > 0) {
-                int sz = loadDockSize(dock, def);
-                resizeDocks({dock}, {sz},
-                            horizontal ? Qt::Horizontal : Qt::Vertical);
+        // All sidebars (including workspace) honour the saved size.
+        // First-launch fallback for workspace uses computeWorkspaceDockWidth
+        // (content-aware fit, qBound(180, ..., 420)) instead of the old
+        // hardcoded 235-px cap.
+        int def = preferredSize;
+        if (dock == m_workspaceDock && def <= 0)
+            def = computeWorkspaceDockWidth();
+        if (def > 0) {
+            int sz = loadDockSize(dock, def);
+            // Workspace should never start at the 50/50 split Qt picks
+            // when the central widget has zero size. Cap to 35% of the
+            // window width — user can drag it wider, the new size
+            // persists, but the dock never opens at half-window.
+            if (dock == m_workspaceDock && horizontal) {
+                int cap = qMax(280, width() * 35 / 100);
+                if (sz > cap) sz = cap;
             }
+            // Defer resize until AFTER show() + Qt's layout pass settles.
+            // resizeDocks called pre-show is silently overridden by Qt's
+            // size-hint resolution, which is what was producing 50/50.
+            QPointer<QDockWidget> dockPtr(dock);
+            QTimer::singleShot(0, this, [this, dockPtr, sz, horizontal]() {
+                if (!dockPtr) return;
+                resizeDocks({dockPtr}, {sz},
+                            horizontal ? Qt::Horizontal : Qt::Vertical);
+            });
         }
     }
     dock->show();
     dock->raise();
-    // Workspace dock: ALWAYS open at exactly 235 px, regardless of
-    // tabify-vs-split path or persisted size. Defer via 0-timer so
-    // it runs after Qt's layout has settled — calling resizeDocks
-    // before show()/layout-settle is silently overridden by Qt's
-    // size-hint resolution. We pass a literal 235 (not minimumWidth)
-    // because QDockWidget::minimumWidth() can be raised by child-
-    // widget content minimums (the workspace tree reports ~293).
-    // Also lower the dock's own minimum so 235 isn't clamped up.
-    if (dock == m_workspaceDock) {
-        // Strategy: temporarily cap the dock at 235 px max — the
-        // layout solver MUST honor a max constraint, so the content's
-        // own minimum-width hints are overridden. After Qt's first
-        // event-loop tick (deferred timer), drop the max so the user
-        // can drag the dock wider. Combined with recursive
-        // setMinimumWidth(0) in case content otherwise refuses to lay
-        // out at <=235.
-        std::function<void(QWidget*)> zeroMins = [&zeroMins](QWidget* w) {
-            if (!w) return;
-            w->setMinimumWidth(0);
-            for (QObject* c : w->children()) {
-                if (auto* cw = qobject_cast<QWidget*>(c)) zeroMins(cw);
-            }
-        };
-        zeroMins(m_workspaceDock);
-        if (auto* tb = m_workspaceDock->titleBarWidget()) zeroMins(tb);
-        m_workspaceDock->setMaximumWidth(235);
-        QTimer::singleShot(0, this, [this, horizontal]() {
-            if (!m_workspaceDock) return;
-            resizeDocks({m_workspaceDock}, {235},
-                        horizontal ? Qt::Horizontal : Qt::Vertical);
-            QTimer::singleShot(100, this, [this]() {
-                if (m_workspaceDock)
-                    m_workspaceDock->setMaximumWidth(QWIDGETSIZE_MAX);
-            });
-        });
-    }
     // Tab bar styling needs to pick up the new tab (tabifyDockWidget path) or
     // the new dock layout (split path).
-    QTimer::singleShot(0, this, [this]() { setupDockTabBars(); });
+    reconcileDockTabBars();
     m_placingSidebar = false;
 }
 

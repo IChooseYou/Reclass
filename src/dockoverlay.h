@@ -4,6 +4,7 @@
 #include <QDockWidget>
 #include <QPainter>
 #include <QMainWindow>
+#include <QStatusBar>
 #include <QTabBar>
 #include <QMouseEvent>
 #include <QApplication>
@@ -13,9 +14,14 @@
 namespace rcx {
 
 // ── Drop zone identifiers ──
+// Per-dock split zones (Left/Right/Top/Bottom) are deliberately retained
+// in the enum for ABI/numeric stability but are NEVER produced by the
+// hit-tester or drawn as diamonds. Splitting a sidebar in half is
+// nonsensical UX (e.g. splitting a 280-px workspace into two 140-px
+// columns) — the user wanted these gone.
 enum class DropZone {
     None,
-    Left, Right, Top, Bottom,  // Split zones relative to hovered dock
+    Left, Right, Top, Bottom,  // [removed from UI — kept for value stability]
     Center,                     // Tabify with hovered dock group
     Float,                      // Leave floating
     EdgeLeft, EdgeRight, EdgeTop, EdgeBottom  // Outer window frame zones
@@ -106,29 +112,20 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
 
-        // Soft scrim — derived from theme background so it reads "dim this"
-        // on dark themes and "dim this" on light themes (pure-black scrim
-        // was invisible on dark themes).
-        QColor scrim = m_theme.background.isValid()
-            ? dim(m_theme.background.lightness() < 128 ? QColor(255,255,255)
-                                                       : QColor(0,0,0), 20)
-            : QColor(0, 0, 0, 20);
-        p.fillRect(rect(), scrim);
-
-        // Highlight the hovered dock widget area with an accent tint.
-        if (m_hoveredDock && m_hoveredDock != m_draggedDock) {
-            QRect dr = m_hoveredDock->geometry();
-            p.fillRect(dr, dim(m_accent, 15));
-        }
+        // The full-rect scrim was dropped — it composed weirdly with Qt's
+        // own drag-preview windows and produced a visible odd-color block
+        // across the editor area. The edge strips, diamond, and preview
+        // rect provide all the visual feedback needed without dimming
+        // the rest of the window.
 
         // Edge zone strips
         drawEdgeZones(p);
 
-        // Diamond targets
+        // Diamond target (Center / Tabify) — only when hovering a doc dock
         if (m_hoveredDock && m_hoveredDock != m_draggedDock)
             drawDiamondTargets(p);
 
-        // Preview rectangle
+        // Preview rectangle for the currently-active zone
         if (m_activeZone != DropZone::None && m_activeZone != DropZone::Float)
             drawPreviewRect(p);
 
@@ -170,165 +167,191 @@ private:
     static constexpr int kTargetDist = 52;
     static constexpr int kHitR       = 20;
 
+    // The overlay covers the entire QMainWindow including its custom
+    // title bar and menu bar, but Qt's QMainWindow refuses to dock into
+    // that chrome area — so edge strips drawn at y=0..kEdgeW would
+    // either be invisible (covered by menu bar) or visually wrong
+    // (poking out under the menu bar). Compute a "content rect" that
+    // excludes the chrome, and use it for BOTH drawing and hit-testing
+    // so the two stay in lockstep.
+    QRect contentRect() const {
+        QRect r = rect();
+        // Skip past any QMainWindow chrome: top widget + menu bar.
+        int top = 0;
+        if (auto* tb = m_mainWindow->findChild<QWidget*>(QStringLiteral("TitleBarWidget")))
+            if (tb->isVisible()) top = qMax(top, tb->geometry().bottom() + 1);
+        if (auto* mb = m_mainWindow->menuWidget())
+            if (mb->isVisible()) top = qMax(top, mb->geometry().bottom() + 1);
+        if (top > 0) r.setTop(top);
+        // Skip past the status bar at the bottom.
+        if (auto* sb = m_mainWindow->statusBar())
+            if (sb->isVisible()) r.setBottom(sb->geometry().top() - 1);
+        return r;
+    }
+
+    // Only doc-tab docks (objectName "DocDock_*") are valid Center-tabify
+    // targets. Tabifying with a sidebar (workspace/scanner/symbols/
+    // bookmarks) would hide that sidebar behind the new dock — every
+    // user complaint about "drop on workspace replaced workspace" was
+    // this. Sidebars are reachable via EdgeX zones instead.
+    static bool isTabbableTarget(QDockWidget* d) {
+        return d && d->objectName().startsWith(QStringLiteral("DocDock_"));
+    }
+
     QDockWidget* findDockAt(QPoint localPos) const {
         for (auto* child : m_mainWindow->findChildren<QDockWidget*>()) {
             if (child == m_draggedDock) continue;
             if (!child->isVisible() || child->isFloating()) continue;
             if (child->objectName().startsWith(QStringLiteral("_sentinel_"))) continue;
+            if (!isTabbableTarget(child)) continue;
             if (child->geometry().contains(localPos))
                 return child;
         }
         return nullptr;
     }
 
-    void updateDropTarget(QPoint pos) {
-        QRect wr = rect();
+    // Map an edge zone to its dock area for allowedAreas() filtering.
+    Qt::DockWidgetArea edgeZoneArea(DropZone z) const {
+        switch (z) {
+        case DropZone::EdgeLeft:   return Qt::LeftDockWidgetArea;
+        case DropZone::EdgeRight:  return Qt::RightDockWidgetArea;
+        case DropZone::EdgeTop:    return Qt::TopDockWidgetArea;
+        case DropZone::EdgeBottom: return Qt::BottomDockWidgetArea;
+        default: return Qt::NoDockWidgetArea;
+        }
+    }
 
-        // Edge zones
-        if (pos.x() < kEdgeW) { m_activeZone = DropZone::EdgeLeft; m_hoveredDock = nullptr; return; }
-        if (pos.x() > wr.width() - kEdgeW) { m_activeZone = DropZone::EdgeRight; m_hoveredDock = nullptr; return; }
-        if (pos.y() < kEdgeW) { m_activeZone = DropZone::EdgeTop; m_hoveredDock = nullptr; return; }
-        if (pos.y() > wr.height() - kEdgeW) { m_activeZone = DropZone::EdgeBottom; m_hoveredDock = nullptr; return; }
+    // True iff the dragged dock can actually be placed in the area this
+    // zone targets. Used to filter zone activation so the overlay never
+    // promises a drop that Qt will silently reject.
+    bool zoneAllowed(DropZone z) const {
+        if (!m_draggedDock) return true;
+        Qt::DockWidgetAreas allowed = m_draggedDock->allowedAreas();
+        if (z >= DropZone::EdgeLeft && z <= DropZone::EdgeBottom)
+            return (allowed & edgeZoneArea(z)) != 0;
+        // Center (tabify) and Float don't map to a specific QMainWindow
+        // area — Center docks alongside the hovered peer (which already
+        // lives in an allowed area, since it's docked), Float just makes
+        // a top-level window.
+        return true;
+    }
+
+    void updateDropTarget(QPoint pos) {
+        QRect wr = contentRect();
+
+        // Cursor in the chrome (title bar / menu bar / status bar) — no
+        // drop possible there, just defer.
+        if (!wr.contains(pos)) {
+            m_hoveredDock = nullptr;
+            m_activeZone = DropZone::None;
+            return;
+        }
+
+        // Edge zones — only activate if the dragged dock's allowedAreas
+        // includes that side, and use the content rect so the strips
+        // line up with the dockable area (not the menu bar).
+        if (pos.x() < wr.left() + kEdgeW && zoneAllowed(DropZone::EdgeLeft))   { m_activeZone = DropZone::EdgeLeft;   m_hoveredDock = nullptr; return; }
+        if (pos.x() > wr.right() - kEdgeW && zoneAllowed(DropZone::EdgeRight))  { m_activeZone = DropZone::EdgeRight;  m_hoveredDock = nullptr; return; }
+        if (pos.y() < wr.top() + kEdgeW && zoneAllowed(DropZone::EdgeTop))    { m_activeZone = DropZone::EdgeTop;    m_hoveredDock = nullptr; return; }
+        if (pos.y() > wr.bottom() - kEdgeW && zoneAllowed(DropZone::EdgeBottom)) { m_activeZone = DropZone::EdgeBottom; m_hoveredDock = nullptr; return; }
 
         m_hoveredDock = findDockAt(pos);
         if (!m_hoveredDock) { m_activeZone = DropZone::Float; return; }
 
-        // Diamond hit test
+        // Diamond hit test — only Center remains. Per-dock split zones
+        // (Left/Right/Top/Bottom) were removed: splitting a sidebar dock
+        // into two halves was the cause of the recurring "split makes a
+        // tiny column inside the workspace" bug.
         QPoint center = m_hoveredDock->geometry().center();
         QPoint rel = pos - center;
-
-        struct { int dx; int dy; DropZone zone; } targets[] = {
-            { 0, -kTargetDist, DropZone::Top },
-            { 0,  kTargetDist, DropZone::Bottom },
-            {-kTargetDist, 0,  DropZone::Left },
-            { kTargetDist, 0,  DropZone::Right },
-            { 0, 0,            DropZone::Center },
-        };
-        for (const auto& t : targets) {
-            int dx = rel.x() - t.dx, dy = rel.y() - t.dy;
-            if (dx * dx + dy * dy < kHitR * kHitR) {
-                m_activeZone = t.zone;
-                return;
-            }
+        if (rel.x() * rel.x() + rel.y() * rel.y() < kHitR * kHitR) {
+            m_activeZone = DropZone::Center;
+            return;
         }
-
-        // Quadrant fallback
-        if (qAbs(rel.x()) > qAbs(rel.y()))
-            m_activeZone = (rel.x() < 0) ? DropZone::Left : DropZone::Right;
-        else
-            m_activeZone = (rel.y() < 0) ? DropZone::Top : DropZone::Bottom;
+        // Cursor over a dock body but outside the Center diamond — fall
+        // back to Center (tabify with hovered dock) so dropping anywhere
+        // on a dock face still does something useful.
+        m_activeZone = DropZone::Center;
     }
 
     void drawEdgeZones(QPainter& p) {
-        QColor bg(m_accent.red(), m_accent.green(), m_accent.blue(), 12);
-        QColor hl(m_accent.red(), m_accent.green(), m_accent.blue(), 50);
-        QRect wr = rect();
+        // Edge zones are INVISIBLE until activated (cursor near that
+        // edge). The previous always-on faint-grey strips just looked
+        // like graphical clutter — VS / IntelliJ show edge targets only
+        // as the active highlight. Hit-testing still works for all four
+        // edges; we just don't paint the inactive state anymore.
+        if (m_activeZone < DropZone::EdgeLeft || m_activeZone > DropZone::EdgeBottom)
+            return;
+
+        QRect wr = contentRect();
         int ew = kEdgeW;
+        int L = wr.left(), T = wr.top(), R = wr.right(), B = wr.bottom();
+        int W = wr.width(), H = wr.height();
 
-        auto draw = [&](QRect r, DropZone z) {
-            bool active = (m_activeZone == z);
-            p.fillRect(r, active ? hl : bg);
-            if (active) {
-                // Thin accent line on the edge
-                switch (z) {
-                case DropZone::EdgeLeft:   p.fillRect(r.left(), r.top(), 3, r.height(), m_accent); break;
-                case DropZone::EdgeRight:  p.fillRect(r.right()-2, r.top(), 3, r.height(), m_accent); break;
-                case DropZone::EdgeTop:    p.fillRect(r.left(), r.top(), r.width(), 3, m_accent); break;
-                case DropZone::EdgeBottom: p.fillRect(r.left(), r.bottom()-2, r.width(), 3, m_accent); break;
-                default: break;
-                }
-            }
-        };
+        QRect r;
+        switch (m_activeZone) {
+        case DropZone::EdgeLeft:   r = QRect(L,            T + ew,    ew,        H - 2*ew); break;
+        case DropZone::EdgeRight:  r = QRect(R - ew + 1,   T + ew,    ew,        H - 2*ew); break;
+        case DropZone::EdgeTop:    r = QRect(L + ew,       T,         W - 2*ew,  ew);       break;
+        case DropZone::EdgeBottom: r = QRect(L + ew,       B - ew + 1, W - 2*ew, ew);       break;
+        default: return;
+        }
 
-        draw(QRect(0, ew, ew, wr.height()-2*ew), DropZone::EdgeLeft);
-        draw(QRect(wr.width()-ew, ew, ew, wr.height()-2*ew), DropZone::EdgeRight);
-        draw(QRect(ew, 0, wr.width()-2*ew, ew), DropZone::EdgeTop);
-        draw(QRect(ew, wr.height()-ew, wr.width()-2*ew, ew), DropZone::EdgeBottom);
+        // Filled translucent accent + 3px solid accent stripe along the
+        // inside edge. Visible without being noisy.
+        QColor hl(m_accent.red(), m_accent.green(), m_accent.blue(), 60);
+        p.fillRect(r, hl);
+        switch (m_activeZone) {
+        case DropZone::EdgeLeft:   p.fillRect(r.left(),     r.top(),    3, r.height(), m_accent); break;
+        case DropZone::EdgeRight:  p.fillRect(r.right()-2,  r.top(),    3, r.height(), m_accent); break;
+        case DropZone::EdgeTop:    p.fillRect(r.left(),     r.top(),    r.width(), 3, m_accent); break;
+        case DropZone::EdgeBottom: p.fillRect(r.left(),     r.bottom()-2, r.width(), 3, m_accent); break;
+        default: break;
+        }
     }
 
     void drawDiamondTargets(QPainter& p) {
-        QPoint center = m_hoveredDock->geometry().center();
-        int d = kTargetDist;
+        // Only the Center (Tabify) diamond is drawn now. Per-dock split
+        // diamonds were removed — they made nonsense layouts on small
+        // sidebars (a 280-px workspace dock would offer to split itself
+        // into two 140-px columns).
+        QPoint tp = m_hoveredDock->geometry().center();
         int sz = kTargetSz;
         int half = sz / 2;
+        QRect tr(tp.x() - half, tp.y() - half, sz, sz);
+        bool active = (m_activeZone == DropZone::Center);
 
-        struct Target { int dx; int dy; DropZone zone; };
-        Target targets[] = {
-            { 0, -d, DropZone::Top },
-            { 0,  d, DropZone::Bottom },
-            {-d,  0, DropZone::Left },
-            { d,  0, DropZone::Right },
-            { 0,  0, DropZone::Center },
-        };
+        QColor bg     = active ? textOrWhite(220) : surfaceOrDark(220);
+        QColor border = active ? m_accent
+                                : (m_theme.text.isValid() ? m_theme.text
+                                                          : QColor(255, 255, 255));
+        p.setPen(QPen(border, active ? 2.0 : 1.0));
+        p.setBrush(bg);
+        p.drawRoundedRect(tr, 5, 5);
 
-        for (const auto& t : targets) {
-            QPoint tp(center.x() + t.dx, center.y() + t.dy);
-            QRect tr(tp.x() - half, tp.y() - half, sz, sz);
-            bool active = (m_activeZone == t.zone);
-
-            // Rounded rect background
-            QColor bg = active ? dim(m_accent, 200) : surfaceOrDark(180);
-            QColor border = active ? m_accent : dim(m_accent, 100);
-            p.setPen(QPen(border, 1.5));
-            p.setBrush(bg);
-            p.drawRoundedRect(tr, 5, 5);
-
-            // Arrow icon via polygon — uses theme.text so it's visible on
-            // both light and dark themes (hard-coded white used to vanish
-            // on light backgrounds when the diamond was inactive).
-            p.setPen(Qt::NoPen);
-            p.setBrush(textOrWhite(active ? 240 : 140));
-            int as = active ? 6 : 5;  // arrow size
-            int cx = tp.x(), cy = tp.y();
-
-            switch (t.zone) {
-            case DropZone::Top:
-                p.drawPolygon(QPolygon({QPoint(cx, cy-as), QPoint(cx-as, cy+as/2), QPoint(cx+as, cy+as/2)}));
-                break;
-            case DropZone::Bottom:
-                p.drawPolygon(QPolygon({QPoint(cx, cy+as), QPoint(cx-as, cy-as/2), QPoint(cx+as, cy-as/2)}));
-                break;
-            case DropZone::Left:
-                p.drawPolygon(QPolygon({QPoint(cx-as, cy), QPoint(cx+as/2, cy-as), QPoint(cx+as/2, cy+as)}));
-                break;
-            case DropZone::Right:
-                p.drawPolygon(QPolygon({QPoint(cx+as, cy), QPoint(cx-as/2, cy-as), QPoint(cx-as/2, cy+as)}));
-                break;
-            case DropZone::Center:
-                // Tabify icon: overlapping squares. Theme.text keeps contrast
-                // against the diamond's bg on both light + dark themes.
-                p.fillRect(cx-4, cy-4, 7, 7, textOrWhite(active ? 220 : 120));
-                p.fillRect(cx-1, cy-1, 7, 7, textOrWhite(active ? 180 :  80));
-                break;
-            default: break;
-            }
-        }
-
-        // Connect targets with faint lines (diamond shape)
-        p.setPen(QPen(dim(m_accent, 40), 1));
-        p.setBrush(Qt::NoBrush);
-        QPoint ct = center;
-        p.drawLine(ct.x(), ct.y()-d, ct.x()+d, ct.y());
-        p.drawLine(ct.x()+d, ct.y(), ct.x(), ct.y()+d);
-        p.drawLine(ct.x(), ct.y()+d, ct.x()-d, ct.y());
-        p.drawLine(ct.x()-d, ct.y(), ct.x(), ct.y()-d);
+        p.setPen(Qt::NoPen);
+        int cx = tp.x(), cy = tp.y();
+        // Tabify icon: overlapping squares. Inverts when active so the
+        // icon still reads against the bright text-color fill.
+        p.fillRect(cx-4, cy-4, 7, 7, active ? surfaceOrDark(220) : textOrWhite(160));
+        p.fillRect(cx-1, cy-1, 7, 7, active ? surfaceOrDark(160) : textOrWhite(100));
     }
 
     void drawPreviewRect(QPainter& p) {
         QRect preview = computePreviewRect();
         if (preview.isNull()) return;
 
-        p.setPen(QPen(m_accent, 2));
-        p.setBrush(dim(m_accent, 35));
+        // Theme-text outline carries the contrast; accent provides the
+        // translucent fill so the brand color still reads as a hint.
+        QColor outline = m_theme.text.isValid() ? m_theme.text
+                                                : QColor(255, 255, 255);
+        p.setPen(QPen(outline, 2));
+        p.setBrush(dim(m_accent, 60));
         p.drawRect(preview.adjusted(1, 1, -1, -1));
 
-        // Zone label centered in preview
+        // Zone label centered in preview. Per-dock split labels removed.
         QString label;
         switch (m_activeZone) {
-        case DropZone::Left:       label = QStringLiteral("Split Left"); break;
-        case DropZone::Right:      label = QStringLiteral("Split Right"); break;
-        case DropZone::Top:        label = QStringLiteral("Split Top"); break;
-        case DropZone::Bottom:     label = QStringLiteral("Split Bottom"); break;
         case DropZone::Center:     label = QStringLiteral("Tabify"); break;
         case DropZone::EdgeLeft:   label = QStringLiteral("Dock Left"); break;
         case DropZone::EdgeRight:  label = QStringLiteral("Dock Right"); break;
@@ -345,35 +368,37 @@ private:
             int tw = fm.horizontalAdvance(label) + 16;
             int th = fm.height() + 8;
             QRect lr(preview.center().x() - tw/2, preview.center().y() - th/2, tw, th);
-            p.setPen(Qt::NoPen);
-            p.setBrush(dim(m_accent, 180));
+            // Surface fill + theme-text border + theme-text foreground.
+            // Guarantees the label box and text are both visible regardless
+            // of the theme's accent saturation.
+            QColor labelBorder = m_theme.text.isValid() ? m_theme.text
+                                                        : QColor(255, 255, 255);
+            p.setPen(QPen(labelBorder, 1));
+            p.setBrush(surfaceOrDark(230));
             p.drawRoundedRect(lr, 4, 4);
-            // Label text uses theme.text so it's readable on both themes
-            // (hard-coded white was invisible when the accent was near-white).
-            p.setPen(m_theme.text.isValid() ? m_theme.text : QColor(Qt::white));
+            p.setPen(labelBorder);
             p.drawText(lr, Qt::AlignCenter, label);
         }
     }
 
     QRect computePreviewRect() const {
-        QRect wr = rect();
+        // Edge previews live inside the content rect (no chrome) so the
+        // 1/4-window highlight matches what the user actually gets after
+        // the drop. Using rect() here would draw over the title/menu bar.
+        QRect wr = contentRect();
+        int L = wr.left(), T = wr.top(), W = wr.width(), H = wr.height();
         switch (m_activeZone) {
-        case DropZone::EdgeLeft:   return QRect(0, 0, wr.width()/4, wr.height());
-        case DropZone::EdgeRight:  return QRect(wr.width()*3/4, 0, wr.width()/4, wr.height());
-        case DropZone::EdgeTop:    return QRect(0, 0, wr.width(), wr.height()/4);
-        case DropZone::EdgeBottom: return QRect(0, wr.height()*3/4, wr.width(), wr.height()/4);
+        case DropZone::EdgeLeft:   return QRect(L,             T,             W / 4, H);
+        case DropZone::EdgeRight:  return QRect(L + W * 3 / 4, T,             W / 4, H);
+        case DropZone::EdgeTop:    return QRect(L,             T,             W,     H / 4);
+        case DropZone::EdgeBottom: return QRect(L,             T + H * 3 / 4, W,     H / 4);
         default: break;
         }
         if (!m_hoveredDock) return {};
-        QRect dr = m_hoveredDock->geometry();
-        switch (m_activeZone) {
-        case DropZone::Left:   return QRect(dr.left(), dr.top(), dr.width()/2, dr.height());
-        case DropZone::Right:  return QRect(dr.center().x(), dr.top(), dr.width()/2, dr.height());
-        case DropZone::Top:    return QRect(dr.left(), dr.top(), dr.width(), dr.height()/2);
-        case DropZone::Bottom: return QRect(dr.left(), dr.center().y(), dr.width(), dr.height()/2);
-        case DropZone::Center: return dr;
-        default: return {};
-        }
+        // Center is the only per-dock zone that survives — preview the
+        // entire hovered dock as the tabify target.
+        if (m_activeZone == DropZone::Center) return m_hoveredDock->geometry();
+        return {};
     }
 
     void drawCursorLabel(QPainter& p) {

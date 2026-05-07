@@ -258,6 +258,13 @@ private:
     QDockWidget* createTab(RcxDocument* doc);
     QString tabTitle(const TabState& tab) const;
     void setupDockTabBars();
+    // Synchronous, idempotent: purge orphan sentinels, ensure every
+    // visible solo doc dock has a sentinel partner so its tab strip is
+    // visible, then run setupDockTabBars(). Replaces the family of 0-shot
+    // QTimer::singleShot defers that previously did this work
+    // asynchronously and raced with each other on rapid drag cycles.
+    void reconcileDockTabBars();
+    bool m_reconciling = false;
     void updateWindowTitle();
     // Refresh the floating Memory Scanner dock's title bar so it shows the
     // active editor tab's source name + kind in parentheses, e.g.
