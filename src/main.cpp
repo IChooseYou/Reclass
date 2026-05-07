@@ -1204,43 +1204,83 @@ void MainWindow::createMenus() {
     // View
     auto* view = m_menuBar->addMenu("&View");
     Qt5Qt6AddAction(view, "&Reset Windows", QKeySequence::UnknownKey, QIcon(), this, [this](bool) {
-        // Re-dock all floating docks
+        // Safety button — force every dock back to its canonical area
+        // regardless of how mangled the current layout is. Steps in
+        // order so each operates on a clean preceding state:
+        //   1. Restore the default corner config (Left/Right own all
+        //      four corners, undoing any EdgeX-drop reassignment).
+        //   2. Wipe every sentinel — reconcile will recreate exactly
+        //      the ones we need at the end.
+        //   3. addDockWidget every dock to its canonical area (this
+        //      detaches each from any stale tab group it was caught in).
+        //   4. Tabify all doc docks together in the top area.
+        //   5. Reset visibility / sizes to a sensible default.
+        //   6. reconcileDockTabBars() to restyle and re-pair sentinels.
+
+        // (1) Default corners: Left/Right span the full window height,
+        //     Top/Bottom only span between them. This is the original
+        //     constructor setup.
+        setCorner(Qt::TopLeftCorner,     Qt::LeftDockWidgetArea);
+        setCorner(Qt::BottomLeftCorner,  Qt::LeftDockWidgetArea);
+        setCorner(Qt::TopRightCorner,    Qt::RightDockWidgetArea);
+        setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
+
+        // (2) Nuke every existing sentinel synchronously — reconcile at
+        //     the end will recreate fresh ones for any solo doc dock.
+        for (auto* s : m_sentinelDocks) {
+            if (s) { removeDockWidget(s); s->deleteLater(); }
+        }
+        m_sentinelDocks.clear();
+
+        // (3) Force every dock back to its canonical area. addDockWidget
+        //     on an already-placed dock removes it from its current area
+        //     and re-adds — this is what breaks any "workspace tabified
+        //     with a doc dock" mess.
+        if (m_workspaceDock) {
+            if (m_workspaceDock->isFloating()) m_workspaceDock->setFloating(false);
+            addDockWidget(Qt::LeftDockWidgetArea, m_workspaceDock);
+            m_workspaceDock->show();
+        }
+        if (m_bookmarksDock) {
+            if (m_bookmarksDock->isFloating()) m_bookmarksDock->setFloating(false);
+            addDockWidget(Qt::LeftDockWidgetArea, m_bookmarksDock);
+            m_bookmarksDock->hide();  // hidden by default; View menu toggles
+        }
+        if (m_symbolsDock) {
+            if (m_symbolsDock->isFloating()) m_symbolsDock->setFloating(false);
+            addDockWidget(Qt::RightDockWidgetArea, m_symbolsDock);
+            m_symbolsDock->hide();
+        }
+        if (m_scannerDock) {
+            if (m_scannerDock->isFloating()) m_scannerDock->setFloating(false);
+            addDockWidget(Qt::BottomDockWidgetArea, m_scannerDock);
+            m_scannerDock->hide();
+        }
         for (auto* dock : m_docDocks) {
-            if (dock->isFloating()) {
-                dock->setFloating(false);
-                dock->show();
-            }
+            if (!dock) continue;
+            if (dock->isFloating()) dock->setFloating(false);
+            addDockWidget(Qt::TopDockWidgetArea, dock);
+            dock->show();
         }
-        if (m_workspaceDock && m_workspaceDock->isFloating())
-            m_workspaceDock->setFloating(false);
-        // Memory Scanner stays floating — that's its intended home now.
-        if (m_symbolsDock && m_symbolsDock->isFloating())
-            m_symbolsDock->setFloating(false);
 
-        // Re-tabify all doc docks into a single group
-        if (!m_docDocks.isEmpty()) {
+        // (4) Tabify all doc docks into one group at top.
+        if (m_docDocks.size() > 1) {
             auto* first = m_docDocks.first();
-            for (int i = 1; i < m_docDocks.size(); ++i) {
+            for (int i = 1; i < m_docDocks.size(); ++i)
                 tabifyDockWidget(first, m_docDocks[i]);
-                m_docDocks[i]->show();
-            }
-            // Merge sentinels back; keep only one
-            for (int i = 0; i < m_sentinelDocks.size(); ++i) {
-                if (i == 0)
-                    tabifyDockWidget(first, m_sentinelDocks[i]);
-                else
-                    delete m_sentinelDocks[i];
-            }
-            if (m_sentinelDocks.size() > 1)
-                m_sentinelDocks.resize(1);
             if (m_activeDocDock) m_activeDocDock->raise();
+            else first->raise();
         }
 
-        // Hide sidebar docks (default state)
-        if (m_workspaceDock) m_workspaceDock->hide();
-        if (m_scannerDock) m_scannerDock->hide();
-        if (m_symbolsDock) m_symbolsDock->hide();
+        // (5) Reasonable sizes — workspace at its content-aware default,
+        //     doc area gets the rest.
+        if (m_workspaceDock) {
+            int wsW = computeWorkspaceDockWidth();
+            resizeDocks({m_workspaceDock}, {wsW}, Qt::Horizontal);
+        }
 
+        // (6) One synchronous pass to recreate sentinels for solo docs
+        //     and restyle every tab bar.
         reconcileDockTabBars();
     });
     view->addSeparator();
@@ -3287,7 +3327,13 @@ void MainWindow::setupDockTabBars() {
             QDockWidget* target = findDockByTitle(tabBar->tabText(i));
             if (!existing) {
                 auto* btns = new DockTabButtons(tabBar);
-                btns->applyTheme(theme.hover);
+                // Use theme.selected (not theme.hover) for the X hover.
+                // CE_TabBarTabShape already paints the tab background with
+                // theme.hover when the mouse is over the tab — so a same-
+                // color hover on the X is invisible. theme.selected gives
+                // a distinctly contrasting shade that paints visibly on
+                // top of the already-hovered tab.
+                btns->applyTheme(theme.selected);
                 if (target) {
                     connect(btns->closeBtn, &QToolButton::clicked,
                             target, &QDockWidget::close);
@@ -4335,7 +4381,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             for (int i = 0; i < tabBar->count(); ++i) {
                 auto* btns = qobject_cast<DockTabButtons*>(
                     tabBar->tabButton(i, QTabBar::RightSide));
-                if (btns) btns->applyTheme(theme.hover);
+                if (btns) btns->applyTheme(theme.selected);
             }
             // Update scroll arrow styling
             for (auto* btn : tabBar->findChildren<QToolButton*>(QString(), Qt::FindDirectChildrenOnly)) {

@@ -81,7 +81,6 @@ public:
         closeBtn->setAutoRaise(true);
         closeBtn->setCursor(Qt::PointingHandCursor);
         closeBtn->setFixedSize(16, 16);
-        closeBtn->setToolTip("Close tab");
         closeBtn->setIcon(QIcon(":/vsicons/close.svg"));
         closeBtn->setIconSize(QSize(12, 12));
         hl->addWidget(closeBtn);

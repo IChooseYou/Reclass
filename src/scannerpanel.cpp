@@ -496,6 +496,38 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     mainLayout->addLayout(form);
 
     // ═══════════════════════════════════════════════════════════════════
+    // SECTION — FAST SCAN ALIGNMENT (above "Where to scan")
+    // ═══════════════════════════════════════════════════════════════════
+    // Cheat-Engine convention: higher alignment = faster scan but skips
+    // values stored at unusual offsets. 4 (dword) is the default that
+    // matches typical game state.
+    {
+        auto* fastScanRow = new QHBoxLayout();
+        fastScanRow->setContentsMargins(0, 0, 0, 0);
+        fastScanRow->setSpacing(6);
+
+        m_fastScanLabel = new QLabel(QStringLiteral("Fast Scan (Aligned to):"), this);
+        m_fastScanLabel->setProperty("scannerSection", true);
+        m_fastScanLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        fastScanRow->addWidget(m_fastScanLabel);
+
+        m_fastScanCombo = new QComboBox(this);
+        for (int a : {1, 4, 8, 16, 32, 64})
+            m_fastScanCombo->addItem(QString::number(a), a);
+        m_fastScanCombo->setCurrentIndex(1);  // 4 = CE default
+        m_fastScanCombo->setToolTip(QStringLiteral(
+            "Address alignment for Value scans. 4 (dword) is the Cheat-Engine "
+            "default — fastest, finds 99% of game values. Drop to 1 to scan "
+            "every byte position. Higher values are even faster but only find "
+            "values aligned to that boundary."));
+        m_fastScanCombo->setMaximumWidth(64);
+        fastScanRow->addWidget(m_fastScanCombo);
+
+        fastScanRow->addStretch();
+        mainLayout->addLayout(fastScanRow);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     // SECTION — WHERE TO SCAN
     // ═══════════════════════════════════════════════════════════════════
     mainLayout->addWidget(makeSectionHeader(QStringLiteral("Where to scan")));
@@ -525,38 +557,6 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_structOnlyCheck->setToolTip(QStringLiteral(
         "Only scan inside the bounds of the currently-viewed struct."));
     filterRow->addWidget(m_structOnlyCheck);
-
-    // [iter 59] Spacer between chips and Fast-Scan dropdown so the dropdown
-    // doesn't touch the last chip — visually separates "what to scan" from
-    // "how aggressively".
-    filterRow->addSpacing(8);
-
-    // Fast Scan alignment dropdown — Cheat-Engine convention. Higher
-    // alignment = faster scan but skips values stored at unusual offsets.
-    // 4 is the dword default that matches typical game state layout.
-    m_fastScanLabel = new QLabel(QStringLiteral("Fast Scan:"), this);
-    m_fastScanLabel->setProperty("scannerSection", true);
-    // [iter 60] Right-align label to match its sibling form labels — looks
-    // like a cohesive form row, not a stray label dropped into a chip strip.
-    m_fastScanLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    filterRow->addWidget(m_fastScanLabel);
-    m_fastScanCombo = new QComboBox(this);
-    for (int a : {1, 4, 8, 16, 32, 64})
-        m_fastScanCombo->addItem(QString::number(a), a);
-    m_fastScanCombo->setCurrentIndex(1);  // 4 = CE default
-    m_fastScanCombo->setToolTip(QStringLiteral(
-        "Address alignment for Value scans. 4 (dword) is the Cheat-Engine "
-        "default — fastest, finds 99% of game values. Drop to 1 to scan "
-        "every byte position. Higher values are even faster but only find "
-        "values aligned to that boundary."));
-    // [iter 61] Compact width — the dropdown only ever holds 1-2 digit
-    // numbers, so there's no point letting it stretch and steal pixels
-    // from the chips on its left.
-    m_fastScanCombo->setMaximumWidth(64);
-    // Font is set later in setEditorFont() — using the same `font` value
-    // that's applied to the chip widgets, the Scan-Type combo, and the
-    // Value-Type combo so everything in this row renders with one font.
-    filterRow->addWidget(m_fastScanCombo);
 
     // Stubs kept for API/test compatibility — hidden, never displayed.
     m_fastScanCheck = new FilterChip(QString(), this);
