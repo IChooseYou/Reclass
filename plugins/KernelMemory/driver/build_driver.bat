@@ -2,6 +2,29 @@
 setlocal enabledelayedexpansion
 
 :: ── Auto-detect MSVC (override with MSVC env var) ──
+:: 1. vswhere is the canonical Microsoft discovery tool, ships with the
+::    VS Installer at a stable path, and finds VS regardless of edition
+::    or install location. CI runners (and any non-default install) need
+::    this — the historical hardcoded path search below is a fallback for
+::    minimal environments where vswhere is missing.
+::
+:: Pre-expand %ProgramFiles(x86)% outside the `if (...)` block: the (x86)
+:: parens are themselves cmd metacharacters that crash the parser when
+:: the variable is expanded inside another parenthesised block.
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not defined MSVC (
+    if exist "!VSWHERE!" (
+        for /f "usebackq delims=" %%I in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+            if not defined VSINSTALL set "VSINSTALL=%%I"
+        )
+        if defined VSINSTALL (
+            for /f "delims=" %%V in ('dir /b /ad /o-n "!VSINSTALL!\VC\Tools\MSVC" 2^>nul') do (
+                if not defined MSVC set "MSVC=!VSINSTALL!\VC\Tools\MSVC\%%V"
+            )
+        )
+    )
+)
+:: 2. Fallback: well-known install path for default VS 2022 setups.
 if not defined MSVC (
     set "VSBASE=C:\Program Files\Microsoft Visual Studio\2022"
     for %%E in (Enterprise Professional Community BuildTools) do (
@@ -14,6 +37,10 @@ if not defined MSVC (
 )
 if not defined MSVC (
     echo ERROR: Could not find MSVC toolchain
+    echo Tried vswhere at: !VSWHERE!
+    echo Tried fallback:   C:\Program Files\Microsoft Visual Studio\2022\{Enterprise^|Professional^|Community^|BuildTools}\VC\Tools\MSVC
+    echo Override with MSVC env var pointing at the toolchain root, e.g.
+    echo   set MSVC=C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\14.40.33807
     exit /b 1
 )
 
