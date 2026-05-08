@@ -1,6 +1,7 @@
 #pragma once
 
-#include <QDialog>
+#include "widgets/themed_dialog.h"
+#include "widgets/dialog_button.h"
 #include <QVector>
 #include <cstdint>
 
@@ -8,14 +9,13 @@ class QLineEdit;
 class QCheckBox;
 class QListWidget;
 class QLabel;
-class QDialogButtonBox;
 class QPushButton;
 
 namespace rcx {
 
 struct PdbTypeInfo;
 
-class PdbImportDialog : public QDialog {
+class PdbImportDialog : public ThemedDialog {
     Q_OBJECT
 public:
     explicit PdbImportDialog(QWidget* parent = nullptr);
@@ -31,13 +31,13 @@ private slots:
     void updateSelectionCount();
 
 private:
-    QLineEdit*        m_pathEdit;
-    QPushButton*      m_browseBtn;
-    QLineEdit*        m_filterEdit;
-    QCheckBox*        m_selectAll;
-    QListWidget*      m_typeList;
-    QLabel*           m_countLabel;
-    QDialogButtonBox* m_buttons;
+    QLineEdit*    m_pathEdit;
+    QPushButton*  m_browseBtn;
+    QLineEdit*    m_filterEdit;
+    QCheckBox*    m_selectAll;
+    QListWidget*  m_typeList;
+    QLabel*       m_countLabel;
+    DialogButton* m_importBtn;
 
     struct TypeItem {
         uint32_t typeIndex;

@@ -1,5 +1,6 @@
 #include "processpicker.h"
 #include "ui_processpicker.h"
+#include "widgets/themed_messagebox.h"
 #include <QTableWidgetItem>
 #include <QHeaderView>
 #include <QMessageBox>
@@ -26,7 +27,7 @@
 #endif
 
 ProcessPicker::ProcessPicker(QWidget *parent)
-    : QDialog(parent)
+    : rcx::ThemedDialog(parent)
     , ui(new Ui::ProcessPicker)
     , m_useCustomList(false)
 {
@@ -37,7 +38,7 @@ ProcessPicker::ProcessPicker(QWidget *parent)
 }
 
 ProcessPicker::ProcessPicker(const QList<ProcessInfo>& customProcesses, QWidget *parent)
-    : QDialog(parent)
+    : rcx::ThemedDialog(parent)
     , ui(new Ui::ProcessPicker)
     , m_useCustomList(true)
 {
@@ -97,15 +98,29 @@ void ProcessPicker::initUi()
         "QLineEdit:focus { border-color: %4; }")
         .arg(bg, text, border, highlight));
 
-    QString btnStyle = QStringLiteral(
-        "QPushButton { background: %1; color: %2; border: 1px solid %3; padding: 4px 12px; }"
-        "QPushButton:hover { background: %4; }"
-        "QPushButton:pressed { background: %5; }"
-        "QPushButton:disabled { color: %6; }")
-        .arg(button, text, border, hover, hoverDk, mutedText);
-    ui->refreshButton->setStyleSheet(btnStyle);
-    ui->attachButton->setStyleSheet(btnStyle);
-    ui->cancelButton->setStyleSheet(btnStyle);
+    // Match DialogButton chrome: 28 px fixed height, hairline border,
+    // optional 2 px accent stripe on top for the primary action. Done
+    // via QSS so the .ui-defined QPushButtons stay in place.
+    const QString accent = pal.color(QPalette::Link).name();
+    auto btnStyle = [&](bool primary) {
+        return QStringLiteral(
+            "QPushButton { background: transparent; color: %1;"
+            "  border: 1px solid %2; border-top: 2px solid %3;"
+            "  border-radius: 2px; padding: 2px 14px;"
+            "  min-width: 72px; min-height: 24px; }"
+            "QPushButton:hover { background: %4; }"
+            "QPushButton:pressed { background: %5; }"
+            "QPushButton:disabled { color: %6; border-top-color: %2; }")
+            .arg(text, border,
+                 primary ? accent : QStringLiteral("transparent"),
+                 hover, hoverDk, mutedText);
+    };
+    ui->refreshButton->setStyleSheet(btnStyle(false));
+    ui->attachButton ->setStyleSheet(btnStyle(true));
+    ui->cancelButton ->setStyleSheet(btnStyle(false));
+    ui->refreshButton->setMinimumHeight(28);
+    ui->attachButton ->setMinimumHeight(28);
+    ui->cancelButton ->setMinimumHeight(28);
 
     // Right-click context menu
     ui->processTable->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -186,7 +201,9 @@ void ProcessPicker::enumerateProcesses()
 #ifdef _WIN32
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
-        QMessageBox::warning(this, "Error", "Failed to enumerate processes.");
+        rcx::ThemedMessageBox::warn(this,
+            QStringLiteral("Process List Unavailable"),
+            QStringLiteral("Couldn't enumerate running processes."));
         return;
     }
 
@@ -294,7 +311,9 @@ void ProcessPicker::enumerateProcesses()
     }
 #else
     // Platform not supported
-    QMessageBox::warning(this, "Error", "Process enumeration not supported on this platform.");
+    rcx::ThemedMessageBox::warn(this,
+        QStringLiteral("Not Supported"),
+        QStringLiteral("Process enumeration isn't supported on this platform yet."));
 #endif
     
     m_allProcesses = processes;

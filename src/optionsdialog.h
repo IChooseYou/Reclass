@@ -1,5 +1,5 @@
 #pragma once
-#include <QDialog>
+#include "widgets/themed_dialog.h"
 #include <QLineEdit>
 #include <QTreeWidget>
 #include <QStackedWidget>
@@ -21,7 +21,7 @@ struct OptionsResult {
     bool    braceWrap = false;
 };
 
-class OptionsDialog : public QDialog {
+class OptionsDialog : public ThemedDialog {
     Q_OBJECT
 public:
     explicit OptionsDialog(const OptionsResult& current, QWidget* parent = nullptr);

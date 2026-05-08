@@ -7,44 +7,45 @@
 #include <QCheckBox>
 #include <QListWidget>
 #include <QLabel>
-#include <QDialogButtonBox>
 #include <QPushButton>
 #include <QFileDialog>
-#include <QMessageBox>
 #include <QApplication>
 
 namespace rcx {
 
 PdbImportDialog::PdbImportDialog(QWidget* parent)
-    : QDialog(parent)
+    : ThemedDialog(parent)
 {
-    setWindowTitle("Import from PDB");
+    setWindowTitle(QStringLiteral("Import from PDB"));
     resize(520, 480);
 
     auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(14, 12, 14, 12);
+    layout->setSpacing(8);
 
     // PDB path row
     auto* pathRow = new QHBoxLayout;
-    pathRow->addWidget(new QLabel("PDB File:"));
+    pathRow->addWidget(new QLabel(QStringLiteral("PDB file:")));
     m_pathEdit = new QLineEdit;
-    m_pathEdit->setPlaceholderText("Select a PDB file...");
+    m_pathEdit->setPlaceholderText(QStringLiteral("Select a PDB file..."));
     pathRow->addWidget(m_pathEdit);
-    m_browseBtn = new QPushButton("...");
-    m_browseBtn->setFixedWidth(32);
+    m_browseBtn = new DialogButton(QStringLiteral("..."),
+        DialogButton::Secondary, this);
+    m_browseBtn->setFixedWidth(40);
     pathRow->addWidget(m_browseBtn);
     layout->addLayout(pathRow);
 
     // Filter row
     auto* filterRow = new QHBoxLayout;
-    filterRow->addWidget(new QLabel("Filter:"));
+    filterRow->addWidget(new QLabel(QStringLiteral("Filter:")));
     m_filterEdit = new QLineEdit;
-    m_filterEdit->setPlaceholderText("Type name filter...");
+    m_filterEdit->setPlaceholderText(QStringLiteral("Type name filter..."));
     m_filterEdit->setEnabled(false);
     filterRow->addWidget(m_filterEdit);
     layout->addLayout(filterRow);
 
     // Select all checkbox
-    m_selectAll = new QCheckBox("Select All");
+    m_selectAll = new QCheckBox(QStringLiteral("Select all"));
     m_selectAll->setEnabled(false);
     layout->addWidget(m_selectAll);
 
@@ -54,22 +55,24 @@ PdbImportDialog::PdbImportDialog(QWidget* parent)
     layout->addWidget(m_typeList);
 
     // Count label
-    m_countLabel = new QLabel("No PDB loaded");
+    m_countLabel = new QLabel(QStringLiteral("No PDB loaded."));
     layout->addWidget(m_countLabel);
 
     // Buttons
-    m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    m_buttons->button(QDialogButtonBox::Ok)->setText("Import");
-    m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-    layout->addWidget(m_buttons);
+    auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+        DialogButton::Secondary, this);
+    m_importBtn = new DialogButton(QStringLiteral("Import"),
+        DialogButton::Primary, this);
+    m_importBtn->setEnabled(false);
+    layout->addLayout(makeButtonRow({ cancelBtn, m_importBtn }));
 
-    connect(m_browseBtn, &QPushButton::clicked, this, &PdbImportDialog::browsePdb);
-    connect(m_pathEdit, &QLineEdit::returnPressed, this, &PdbImportDialog::loadPdb);
+    connect(m_browseBtn,  &QPushButton::clicked, this, &PdbImportDialog::browsePdb);
+    connect(m_pathEdit,   &QLineEdit::returnPressed, this, &PdbImportDialog::loadPdb);
     connect(m_filterEdit, &QLineEdit::textChanged, this, &PdbImportDialog::filterChanged);
-    connect(m_selectAll, &QCheckBox::toggled, this, &PdbImportDialog::selectAllToggled);
-    connect(m_typeList, &QListWidget::itemChanged, this, &PdbImportDialog::updateSelectionCount);
-    connect(m_buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_selectAll,  &QCheckBox::toggled, this, &PdbImportDialog::selectAllToggled);
+    connect(m_typeList,   &QListWidget::itemChanged, this, &PdbImportDialog::updateSelectionCount);
+    connect(m_importBtn,  &QPushButton::clicked, this, &QDialog::accept);
+    connect(cancelBtn,    &QPushButton::clicked, this, &QDialog::reject);
 }
 
 QString PdbImportDialog::pdbPath() const {
@@ -103,18 +106,20 @@ void PdbImportDialog::loadPdb() {
 
     m_typeList->clear();
     m_allTypes.clear();
-    m_countLabel->setText("Loading...");
+    m_countLabel->setText(QStringLiteral("Loading..."));
     m_typeList->setEnabled(false);
     m_filterEdit->setEnabled(false);
     m_selectAll->setEnabled(false);
-    m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    m_importBtn->setEnabled(false);
     QApplication::processEvents();
 
     QString error;
     QVector<PdbTypeInfo> types = enumeratePdbTypes(path, &error);
 
     if (types.isEmpty()) {
-        m_countLabel->setText(error.isEmpty() ? "No types found" : error);
+        m_countLabel->setText(error.isEmpty()
+            ? QStringLiteral("No types found in this PDB.")
+            : error);
         return;
     }
 
@@ -176,9 +181,9 @@ void PdbImportDialog::updateSelectionCount() {
         if (m_typeList->item(i)->checkState() == Qt::Checked)
             checked++;
     }
-    m_countLabel->setText(QStringLiteral("%1 of %2 types selected")
+    m_countLabel->setText(QStringLiteral("%1 of %2 types selected.")
         .arg(checked).arg(m_allTypes.size()));
-    m_buttons->button(QDialogButtonBox::Ok)->setEnabled(checked > 0);
+    m_importBtn->setEnabled(checked > 0);
 }
 
 } // namespace rcx

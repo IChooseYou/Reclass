@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QMenu>
 #include <QInputDialog>
+#include "widgets/themed_inputdialog.h"
 #include <QPainter>
 #include <QEventLoop>
 #include <QFileDialog>
@@ -32,6 +33,13 @@ namespace rcx {
 // Forward declaration: defined later — used by lambdas in the constructor
 // that translate sortable-table rows back to m_results indices.
 static int rowToResultIdx(QTableWidget* tbl, int row);
+
+// Forward declaration: numeric delta helper used by populateTable for the
+// Previous → Δ column. Defined lower in the file alongside formatValue.
+struct DeltaInfo { QString text; int direction = 0; bool ok = false; };
+static DeltaInfo computeDelta(ValueType vt,
+                              const QByteArray& prev,
+                              const QByteArray& cur);
 
 // ── FilterChip ──
 // Drop-in replacement for QCheckBox that paints in the same flat-pip style
@@ -312,9 +320,13 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_stageLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     m_stageLabel->setMinimumWidth(0);
 
+    // Secondary (not Subtle) — Subtle uses theme.textDim which on most
+    // themes reads as "disabled" because it's only a hair away from
+    // theme.textMuted. Reset is a real action; users were assuming it
+    // was greyed out.
     m_newScanBtn = new ScanButton(QIcon(QStringLiteral(":/vsicons/clear-all.svg")),
                                    QStringLiteral("&Reset"),
-                                   ScanButton::Subtle, this);
+                                   ScanButton::Secondary, this);
     m_newScanBtn->setToolTip(QStringLiteral(
         "Discard current results and start over.  (Alt+R)"));
     m_newScanBtn->setVisible(false);
@@ -894,8 +906,11 @@ ScannerPanel::ScannerPanel(QWidget* parent)
                                         QStringLiteral("Copy Address"));
         auto* copyVal = menu.addAction(QIcon(QStringLiteral(":/vsicons/clippy.svg")),
                                        QStringLiteral("Copy Value"));
+        // Rebases the active editor tab so its struct view starts at this
+        // result's address. Old label was "Go to Address" — confusingly
+        // sounded like navigation, but the underlying action is a rebase.
         auto* goTo = menu.addAction(QIcon(QStringLiteral(":/vsicons/arrow-right.svg")),
-                                    QStringLiteral("Go to Address"));
+                                    QStringLiteral("Set as Base Address"));
         menu.addSeparator();
         auto* changeAll = menu.addAction(QStringLiteral("Change All Values (%1)").arg(m_results.size()));
         auto* chosen = menu.exec(m_resultTable->viewport()->mapToGlobal(pos));
@@ -913,10 +928,11 @@ ScannerPanel::ScannerPanel(QWidget* parent)
             QString hint = m_lastScanMode == 0
                 ? QStringLiteral("hex bytes (e.g. 90 90 90)")
                 : QStringLiteral("value (e.g. 999)");
-            bool ok;
-            QString text = QInputDialog::getText(this, QStringLiteral("Change All Values"),
-                QStringLiteral("New %1:").arg(hint), QLineEdit::Normal, QString(), &ok);
-            if (!ok || text.isEmpty()) return;
+            auto textOpt = ThemedInputDialog::getText(this,
+                QStringLiteral("Change All Values"),
+                QStringLiteral("New %1:").arg(hint));
+            if (!textOpt || textOpt->isEmpty()) return;
+            const QString text = *textOpt;
 
             std::shared_ptr<Provider> prov;
             if (m_providerGetter) prov = m_providerGetter();
@@ -1223,7 +1239,9 @@ void ScannerPanel::onScanClicked() {
     // disabled while First Scan is in flight (and vice versa) so the
     // workflow can't get into an "I clicked First Scan but it cancelled
     // my re-scan" stuck state.
-    m_scanBtn->setText(QStringLiteral("Cancel"));
+    m_scanBtn->setText(QStringLiteral("Cancel  (Esc)"));
+    m_scanBtn->setToolTip(QStringLiteral(
+        "Cancel the running scan. Keyboard: Esc."));
     // [iter 44] Mark the button so style polish can paint Cancel in a
     // distinct (warmer) color than First Scan.
     m_scanBtn->setProperty("scanCancel", true);
@@ -1519,8 +1537,10 @@ void ScannerPanel::populateTable(bool showPrevious) {
         QStringLiteral("Click to sort by current value. Double-click a cell to edit it.")));
     if (showPrevious)
         m_resultTable->setHorizontalHeaderItem(2, makeHeader(
-            QStringLiteral("Previous"),
-            QStringLiteral("Value at the previous scan, before this Next-Scan narrowing.")));
+            QStringLiteral("Previous → Δ"),
+            QStringLiteral("Value at the previous scan, followed by the signed delta. "
+                           "Increase = green, decrease = red. The Value column foreground is "
+                           "tinted the same way for fast scanning.")));
     if (anyModule)
         m_resultTable->setHorizontalHeaderItem(baseCols, makeHeader(
             QStringLiteral("Module"),
@@ -1539,16 +1559,41 @@ void ScannerPanel::populateTable(bool showPrevious) {
         addrItem->setData(Qt::UserRole, i);
         m_resultTable->setItem(i, 0, addrItem);
 
-        // Value column
+        // Value column. Foreground colour is direction-coded when a
+        // previous-value diff is available: green for increase, red for
+        // decrease, default theme.text otherwise. The delta text itself
+        // lives in the Previous column for compactness.
         auto* valItem = new QTableWidgetItem(formatValue(r.scanValue));
         valItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
+        DeltaInfo delta;
+        if (showPrevious && !r.previousValue.isEmpty())
+            delta = computeDelta(m_lastValueType, r.previousValue, r.scanValue);
+        if (delta.direction > 0)
+            valItem->setForeground(QColor("#7BC97B"));   // increase — green
+        else if (delta.direction < 0)
+            valItem->setForeground(QColor("#E07B7B"));   // decrease — red
         m_resultTable->setItem(i, 1, valItem);
 
-        // Previous column
+        // Previous column. Format: "<prev> → <delta>" so the user sees
+        // the old value and the magnitude/direction of change at a
+        // glance. For non-numeric (Signature) or unchanged values, the
+        // delta text degrades to a simple "→" arrow or nothing.
         if (showPrevious) {
-            auto* prevItem = new QTableWidgetItem(
-                r.previousValue.isEmpty() ? QString() : formatValue(r.previousValue));
+            QString prevText;
+            if (!r.previousValue.isEmpty()) {
+                prevText = formatValue(r.previousValue);
+                if (delta.ok) {
+                    prevText += QStringLiteral("  →  ") + delta.text;
+                } else if (r.previousValue != r.scanValue) {
+                    prevText += QStringLiteral("  →");  // changed but non-numeric
+                }
+            }
+            auto* prevItem = new QTableWidgetItem(prevText);
             prevItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+            if (delta.direction > 0)
+                prevItem->setForeground(QColor("#7BC97B"));
+            else if (delta.direction < 0)
+                prevItem->setForeground(QColor("#E07B7B"));
             m_resultTable->setItem(i, 2, prevItem);
         }
 
@@ -1634,7 +1679,9 @@ void ScannerPanel::onUpdateClicked() {
     // and First Scan stays disabled (so it can't fire while a re-scan
     // is in flight).
     m_scanBtn->setEnabled(false);
-    m_updateBtn->setText(QStringLiteral("Cancel"));
+    m_updateBtn->setText(QStringLiteral("Cancel  (Esc)"));
+    m_updateBtn->setToolTip(QStringLiteral(
+        "Cancel the running re-scan. Keyboard: Esc."));
     // [iter 46] Symmetrical cancel-style mark on Next Scan during re-scan
     // so it visually matches the First Scan cancel state.
     m_updateBtn->setProperty("scanCancel", true);
@@ -2043,6 +2090,50 @@ int ScannerPanel::valueSize() const {
     case ValueType::Int64: case ValueType::UInt64: case ValueType::Double: return 8;
     default: return 16;
     }
+}
+
+// Numeric delta between previous and current scan-cached bytes, scoped
+// to the active value type. Returns {text, direction, ok}: direction
+// 1=up / -1=down / 0=unchanged-or-non-numeric. ok=false → caller falls
+// back to a simple "→" arrow for byte-equal-but-non-numeric data.
+static DeltaInfo computeDelta(ValueType vt,
+                              const QByteArray& prev,
+                              const QByteArray& cur) {
+    DeltaInfo d;
+    if (prev.isEmpty() || cur.isEmpty()) return d;
+    auto sign = [](double v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); };
+    auto fmtInt = [&](long long delta) {
+        d.direction = sign(double(delta));
+        d.text = (delta >= 0)
+            ? QStringLiteral("+%1").arg(delta)
+            : QStringLiteral("%1").arg(delta);  // negative sign included
+        d.ok = true;
+        return d;
+    };
+    auto fmtFlt = [&](double delta) {
+        d.direction = sign(delta);
+        QString num = QString::number(delta, 'g', 6);
+        d.text = (delta >= 0) ? (QStringLiteral("+") + num) : num;
+        d.ok = true;
+        return d;
+    };
+    const char* p = prev.constData();
+    const char* c = cur.constData();
+    int sp = prev.size(), sc = cur.size();
+    switch (vt) {
+    case ValueType::Int8:   if (sp >= 1 && sc >= 1) return fmtInt((long long)(int8_t)c[0]   - (int8_t)p[0]); break;
+    case ValueType::UInt8:  if (sp >= 1 && sc >= 1) return fmtInt((long long)(uint8_t)c[0]  - (uint8_t)p[0]); break;
+    case ValueType::Int16:  if (sp >= 2 && sc >= 2) { int16_t a, b; memcpy(&a,p,2); memcpy(&b,c,2); return fmtInt(b - a); } break;
+    case ValueType::UInt16: if (sp >= 2 && sc >= 2) { uint16_t a, b; memcpy(&a,p,2); memcpy(&b,c,2); return fmtInt((long long)b - a); } break;
+    case ValueType::Int32:  if (sp >= 4 && sc >= 4) { int32_t a, b; memcpy(&a,p,4); memcpy(&b,c,4); return fmtInt((long long)b - a); } break;
+    case ValueType::UInt32: if (sp >= 4 && sc >= 4) { uint32_t a, b; memcpy(&a,p,4); memcpy(&b,c,4); return fmtInt((long long)b - a); } break;
+    case ValueType::Int64:  if (sp >= 8 && sc >= 8) { int64_t a, b; memcpy(&a,p,8); memcpy(&b,c,8); return fmtInt(b - a); } break;
+    case ValueType::UInt64: if (sp >= 8 && sc >= 8) { uint64_t a, b; memcpy(&a,p,8); memcpy(&b,c,8); return fmtInt((long long)(int64_t)(b - a)); } break;
+    case ValueType::Float:  if (sp >= 4 && sc >= 4) { float a, b; memcpy(&a,p,4); memcpy(&b,c,4); return fmtFlt(double(b) - a); } break;
+    case ValueType::Double: if (sp >= 8 && sc >= 8) { double a, b; memcpy(&a,p,8); memcpy(&b,c,8); return fmtFlt(b - a); } break;
+    default: break;
+    }
+    return d;  // ok == false: caller falls back to byte-equality "→" arrow
 }
 
 QString ScannerPanel::formatValue(const QByteArray& bytes) const {

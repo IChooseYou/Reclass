@@ -169,6 +169,14 @@ add_executable(Reclass
     src/rttibrowser.h
     src/gotoaddressdialog.h
     src/commandpalette.h
+    src/widgets/dialog_button.h
+    src/widgets/dialog_button.cpp
+    src/widgets/themed_dialog.h
+    src/widgets/themed_dialog.cpp
+    src/widgets/themed_messagebox.h
+    src/widgets/themed_messagebox.cpp
+    src/widgets/themed_inputdialog.h
+    src/widgets/themed_inputdialog.cpp
     third_party/fadec/decode.c
     third_party/fadec/format.c
     $<$<PLATFORM_ID:Windows>:src/app.rc>
@@ -329,6 +337,15 @@ if(BUILD_TESTING)
     # Disasm/Fadec sources needed by any test that links editor.cpp
     set(DISASM_SRCS src/disasm.cpp third_party/fadec/decode.c third_party/fadec/format.c)
 
+    # Themed dialog widget sources — required by every test that links
+    # processpicker.cpp / controller.cpp / scannerpanel.cpp (they all
+    # use ThemedMessageBox / ThemedDialog).
+    set(WIDGET_SRCS
+        src/widgets/themed_dialog.cpp
+        src/widgets/themed_messagebox.cpp
+        src/widgets/themed_inputdialog.cpp
+        src/widgets/dialog_button.cpp)
+
     # ── Headless tests (Qt::Core only — safe for CI without a display) ──
 
     add_executable(test_core tests/test_core.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
@@ -356,7 +373,7 @@ if(BUILD_TESTING)
         src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
         src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
         src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
         src/resources.qrc)
     target_include_directories(test_default_class_footer PRIVATE src third_party/fadec)
     target_link_libraries(test_default_class_footer PRIVATE
@@ -506,7 +523,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_controller PRIVATE src third_party/fadec)
         target_link_libraries(test_controller PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
@@ -520,7 +537,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_context_menu PRIVATE src third_party/fadec)
         target_link_libraries(test_context_menu PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
@@ -534,7 +551,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_source_management PRIVATE src third_party/fadec)
         target_link_libraries(test_source_management PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
@@ -548,7 +565,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
         src/rtti.cpp src/symbolstore.cpp
         src/providerregistry.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_editor PRIVATE src third_party/fadec)
         target_link_libraries(test_editor PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test
@@ -567,7 +584,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_type_selector PRIVATE src third_party/fadec)
         target_link_libraries(test_type_selector PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
@@ -581,7 +598,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_type_visibility PRIVATE src third_party/fadec)
         target_link_libraries(test_type_visibility PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
@@ -592,14 +609,14 @@ if(BUILD_TESTING)
         add_test(NAME test_type_visibility COMMAND test_type_visibility)
 
         add_executable(test_options_dialog tests/test_options_dialog.cpp
-        src/optionsdialog.cpp src/themes/theme.cpp src/themes/thememanager.cpp)
+        src/optionsdialog.cpp src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
         target_include_directories(test_options_dialog PRIVATE src)
         target_link_libraries(test_options_dialog PRIVATE ${QT}::Widgets ${QT}::Test)
         add_test(NAME test_options_dialog COMMAND test_options_dialog)
 
         # ── Goto Address dialog (UI: real QLineEdit + live validation) ──
         add_executable(test_goto_address tests/test_goto_address.cpp
-            src/addressparser.cpp src/themes/theme.cpp src/themes/thememanager.cpp)
+            src/addressparser.cpp src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
         target_include_directories(test_goto_address PRIVATE src)
         target_link_libraries(test_goto_address PRIVATE ${QT}::Widgets ${QT}::Test)
         add_test(NAME test_goto_address COMMAND test_goto_address)
@@ -637,7 +654,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS}
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
         src/resources.qrc)
         target_include_directories(test_source_provider PRIVATE src third_party/fadec)
         target_link_libraries(test_source_provider PRIVATE
@@ -650,7 +667,7 @@ if(BUILD_TESTING)
 
         add_executable(test_scanner_ui tests/test_scanner_ui.cpp
         src/scanner.cpp src/scannerpanel.cpp src/addressparser.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp)
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
         target_include_directories(test_scanner_ui PRIVATE src)
         target_link_libraries(test_scanner_ui PRIVATE
         ${QT}::Widgets ${QT}::Concurrent ${QT}::Test)
@@ -673,7 +690,8 @@ if(BUILD_TESTING)
             add_executable(test_kernel_provider tests/test_kernel_provider.cpp
             plugins/KernelMemory/KernelMemoryPlugin.cpp
             src/processpicker.cpp src/processpicker.ui
-            src/scanner.cpp)
+            src/scanner.cpp
+            src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
             target_include_directories(test_kernel_provider PRIVATE
             src plugins/KernelMemory)
             target_link_libraries(test_kernel_provider PRIVATE
@@ -686,7 +704,7 @@ if(BUILD_TESTING)
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
         src/rtti.cpp src/symbolstore.cpp
         src/providerregistry.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(bench_large_class PRIVATE src third_party/fadec)
         target_link_libraries(bench_large_class PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
@@ -718,7 +736,7 @@ if(BUILD_TESTING)
         src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(bench_spam_append PRIVATE src third_party/fadec)
         target_link_libraries(bench_spam_append PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test

@@ -1,9 +1,9 @@
 #include "themeeditor.h"
 #include "thememanager.h"
+#include "widgets/dialog_button.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QScrollArea>
-#include <QDialogButtonBox>
 #include <QColorDialog>
 #include <QComboBox>
 #include <cstring>
@@ -23,7 +23,7 @@ static QLabel* makeSectionLabel(const QString& text) {
 // ── Constructor ──
 
 ThemeEditor::ThemeEditor(int themeIndex, QWidget* parent)
-    : QDialog(parent), m_themeIndex(themeIndex)
+    : ThemedDialog(parent), m_themeIndex(themeIndex)
 {
     auto& tm = ThemeManager::instance();
     auto all = tm.themes();
@@ -131,17 +131,17 @@ ThemeEditor::ThemeEditor(int themeIndex, QWidget* parent)
     mainLayout->addWidget(scroll, 1);
 
     // ── Bottom bar ──
-    auto* bottomRow = new QHBoxLayout;
-    bottomRow->addStretch();
-
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, this, [this]() {
+    auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+        DialogButton::Secondary, this);
+    auto* applyBtn  = new DialogButton(QStringLiteral("Save theme"),
+        DialogButton::Primary,   this);
+    connect(applyBtn,  &QPushButton::clicked, this, &QDialog::accept);
+    connect(cancelBtn, &QPushButton::clicked, this, [this]() {
         ThemeManager::instance().revertPreview();
         reject();
     });
-    bottomRow->addWidget(buttons);
-    mainLayout->addLayout(bottomRow);
+    applyBtn->setDefault(true);
+    mainLayout->addLayout(makeButtonRow({ cancelBtn, applyBtn }));
 
     // Initial swatch update + start live preview
     for (int i = 0; i < m_swatches.size(); i++)

@@ -1,9 +1,9 @@
 #include "optionsdialog.h"
 #include "themes/thememanager.h"
+#include "widgets/dialog_button.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
-#include <QDialogButtonBox>
 #include <QPushButton>
 #include <QGroupBox>
 #include <QLabel>
@@ -13,7 +13,7 @@
 namespace rcx {
 
 OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
-    : QDialog(parent)
+    : ThemedDialog(parent)
 {
     setWindowTitle("Options");
     setFixedSize(700, 450);
@@ -199,12 +199,13 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
             m_pages->setCurrentIndex(it.value());
     });
 
-    // -- Button box --
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    mainLayout->addWidget(buttons);
-
+    // -- Button row --
+    auto* cancel = new DialogButton(tr("Cancel"), DialogButton::Secondary, this);
+    auto* ok     = new DialogButton(tr("OK"),     DialogButton::Primary,   this);
+    connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+    connect(ok,     &QPushButton::clicked, this, &QDialog::accept);
+    ok->setDefault(true);
+    mainLayout->addLayout(makeButtonRow({ cancel, ok }));
 }
 
 void OptionsDialog::selectPage(int index) {

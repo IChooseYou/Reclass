@@ -5,11 +5,18 @@
 #include <QApplication>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QDialogButtonBox>
 #include <QListWidget>
 #include <QSettings>
 
 using namespace rcx;
+
+// The dialog uses DialogButton (a QPushButton subclass) for accept/cancel,
+// no QDialogButtonBox. Lookup by visible label.
+static QPushButton* findButton(GotoAddressDialog& dlg, const QString& text) {
+    for (auto* b : dlg.findChildren<QPushButton*>())
+        if (b->text() == text) return b;
+    return nullptr;
+}
 
 // GotoAddressDialog is a thin wrapper around AddressParser. We mostly verify
 // it constructs cleanly, live-validates input, persists recent entries via
@@ -41,8 +48,7 @@ private slots:
 
     void constructsAndDisablesOkInitially() {
         GotoAddressDialog dlg(moduleCbs(), 8);
-        // Find the OK button via the dialog button box
-        auto* ok = dlg.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
+        auto* ok = findButton(dlg, QStringLiteral("Go"));
         QVERIFY(ok);
         QVERIFY(!ok->isEnabled());  // empty input → cannot proceed
     }
@@ -53,8 +59,8 @@ private slots:
         QVERIFY(input);
         input->setText(QStringLiteral("0x1234"));
         QCoreApplication::processEvents();
-        auto* ok = dlg.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
-        QVERIFY(ok->isEnabled());
+        auto* ok = findButton(dlg, QStringLiteral("Go"));
+        QVERIFY(ok && ok->isEnabled());
         QCOMPARE(dlg.resolvedAddress(), 0x1234ULL);
     }
 
@@ -63,8 +69,8 @@ private slots:
         auto* input = dlg.findChild<QLineEdit*>();
         input->setText(QStringLiteral("xyz nonsense"));
         QCoreApplication::processEvents();
-        auto* ok = dlg.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
-        QVERIFY(!ok->isEnabled());
+        auto* ok = findButton(dlg, QStringLiteral("Go"));
+        QVERIFY(ok && !ok->isEnabled());
     }
 
     void evaluatesModuleExpressions() {

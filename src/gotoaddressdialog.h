@@ -1,12 +1,12 @@
 #pragma once
-#include <QDialog>
+#include "widgets/themed_dialog.h"
+#include "widgets/dialog_button.h"
 #include <QLineEdit>
 #include <QListWidget>
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
-#include <QDialogButtonBox>
 #include <QSettings>
 #include <QKeyEvent>
 #include <QStringList>
@@ -24,7 +24,7 @@ namespace rcx {
 //
 // Live-validation: as the user types, the dialog evaluates and shows
 // either the resolved hex address or the parser's error message.
-class GotoAddressDialog : public QDialog {
+class GotoAddressDialog : public ThemedDialog {
 public:
     static constexpr const char* kSettingsKey = "gotoAddress/recent";
     static constexpr int kMaxRecent = 12;
@@ -32,19 +32,12 @@ public:
     explicit GotoAddressDialog(const AddressParserCallbacks& cbs,
                                int pointerSize = 8,
                                QWidget* parent = nullptr)
-        : QDialog(parent), m_cbs(cbs), m_ptrSize(pointerSize) {
+        : ThemedDialog(parent), m_cbs(cbs), m_ptrSize(pointerSize) {
         setWindowTitle(QStringLiteral("Go to Address"));
         setModal(true);
         resize(440, 320);
 
         const auto& t = ThemeManager::instance().current();
-        {
-            QPalette pal = palette();
-            pal.setColor(QPalette::Window, t.background);
-            pal.setColor(QPalette::WindowText, t.text);
-            setPalette(pal);
-            setAutoFillBackground(true);
-        }
 
         QSettings s("Reclass", "Reclass");
         QFont font(s.value("font", "JetBrains Mono").toString(), 10);
@@ -92,21 +85,20 @@ public:
             m_recentList->addItem(entry);
         layout->addWidget(m_recentList, /*stretch=*/1);
 
-        auto* buttons = new QDialogButtonBox(
-            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-        buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Go"));
-        layout->addWidget(buttons);
-
-        m_okButton = buttons->button(QDialogButtonBox::Ok);
+        auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+            DialogButton::Secondary, this);
+        m_okButton = new DialogButton(QStringLiteral("Go"),
+            DialogButton::Primary, this);
         m_okButton->setEnabled(false);
+        layout->addLayout(makeButtonRow({ cancelBtn, m_okButton }));
 
         connect(m_input, &QLineEdit::textChanged,
                 this, &GotoAddressDialog::onTextChanged);
         connect(m_input, &QLineEdit::returnPressed, this, [this]() {
             if (m_okButton->isEnabled()) accept();
         });
-        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        connect(m_okButton, &QPushButton::clicked, this, &QDialog::accept);
+        connect(cancelBtn,  &QPushButton::clicked, this, &QDialog::reject);
         connect(m_recentList, &QListWidget::itemActivated, this,
                 [this](QListWidgetItem* item) {
             if (item) m_input->setText(item->text());

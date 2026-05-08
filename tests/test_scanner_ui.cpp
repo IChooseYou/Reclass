@@ -33,6 +33,13 @@ private slots:
     void init() {
         m_panel = new ScannerPanel();
         m_panel->show();
+        // Default mode is now Value (the hidden mode combo defaults to
+        // index 1 since the user-visible "Scan Type" combo replaced it).
+        // Most tests below drive the signature path, so flip the Scan
+        // Type combo to "Exact Sig" (index 1, data sentinel = -1) which
+        // is the user-facing way to put the panel into signature mode.
+        // Tests that need the default Value state can re-set the combo.
+        m_panel->condCombo()->setCurrentIndex(1);  // "Exact Sig"
         // Clear mode-dependent filter defaults so BufferProvider scans
         // (which have no executable regions) work without filter issues.
         // The initialState_filterCheckboxes test verifies defaults separately.
@@ -66,7 +73,7 @@ private slots:
 
     void initialState_scanButton() {
         // Renamed for workflow clarity: First Scan / Next Scan / Reset.
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("&First Scan"));
     }
 
     void initialState_progressBarHidden() {
@@ -246,7 +253,8 @@ private slots:
 
         // If scan hasn't finished yet, button should be Cancel
         if (m_panel->engine()->isRunning()) {
-            QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("Cancel"));
+            // Button label gained an Esc-shortcut hint in scannerpanel.cpp.
+            QVERIFY(m_panel->scanButton()->text().startsWith(QStringLiteral("Cancel")));
             QVERIFY(m_panel->progressBar()->isVisible());
         }
 
@@ -256,7 +264,7 @@ private slots:
 
         // Button back to Scan
         // Renamed for workflow clarity: First Scan / Next Scan / Reset.
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("&First Scan"));
         QVERIFY(!m_panel->progressBar()->isVisible());
     }
 
@@ -285,12 +293,12 @@ private slots:
         // Need to process any remaining events (the finished handler sets button text)
         QApplication::processEvents();
         // If the panel still shows "Cancel", click it to reset
-        if (m_panel->scanButton()->text() == QStringLiteral("Cancel")) {
+        if (m_panel->scanButton()->text().startsWith(QStringLiteral("Cancel"))) {
             QTest::mouseClick(m_panel->scanButton(), Qt::LeftButton);
             QApplication::processEvents();
         }
         // Renamed for workflow clarity: First Scan / Next Scan / Reset.
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("&First Scan"));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1050,7 +1058,7 @@ private slots:
                          QString::number(newVal - 1));
             }
             // Renamed for workflow clarity: First Scan / Next Scan / Reset.
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("&First Scan"));
             QVERIFY(!m_panel->progressBar()->isVisible());
             QVERIFY(m_panel->updateButton()->isEnabled());
         }
@@ -1111,7 +1119,7 @@ private slots:
                      << "| status:" << m_panel->statusLabel()->text();
 
             // Renamed for workflow clarity: First Scan / Next Scan / Reset.
-        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("First Scan"));
+        QCOMPARE(m_panel->scanButton()->text(), QStringLiteral("&First Scan"));
             QVERIFY(!m_panel->progressBar()->isVisible());
             QVERIFY(m_panel->updateButton()->isEnabled());
         }

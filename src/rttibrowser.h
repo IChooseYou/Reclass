@@ -1,5 +1,6 @@
 #pragma once
-#include <QDialog>
+#include "widgets/themed_dialog.h"
+#include "widgets/dialog_button.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -24,25 +25,20 @@ class Provider;  // unused but lets future extensions read more memory
 //
 // "Copy as Tree" dumps a textual report to the clipboard — useful for
 // pasting into bug reports or shared notes about a target.
-class RttiBrowserDialog : public QDialog {
+class RttiBrowserDialog : public ThemedDialog {
 public:
     explicit RttiBrowserDialog(const RttiInfo& info, Provider* prov = nullptr,
                                QWidget* parent = nullptr)
-        : QDialog(parent), m_info(info) {
+        : ThemedDialog(parent), m_info(info) {
         Q_UNUSED(prov);
-        setWindowTitle(QStringLiteral("RTTI: ") +
-            (info.demangledName.isEmpty() ? info.rawName : info.demangledName));
+        // Two-part title: noun phrase then class name. ThemedDialog
+        // base already palettes the dialog dark.
+        setWindowTitle(QStringLiteral("RTTI · %1").arg(
+            info.demangledName.isEmpty() ? info.rawName : info.demangledName));
         setModal(true);
         resize(720, 480);
 
         const auto& t = ThemeManager::instance().current();
-        {
-            QPalette pal = palette();
-            pal.setColor(QPalette::Window, t.background);
-            pal.setColor(QPalette::WindowText, t.text);
-            setPalette(pal);
-            setAutoFillBackground(true);
-        }
 
         QSettings s("Reclass", "Reclass");
         QFont font(s.value("font", "JetBrains Mono").toString(), 10);
@@ -121,15 +117,17 @@ public:
 
         layout->addWidget(tabs, /*stretch=*/1);
 
-        // Buttons
+        // Buttons — copy is left-aligned (utility action), close right.
         auto* btnRow = new QHBoxLayout;
-        auto* copyBtn = new QPushButton(QStringLiteral("Copy as Tree"));
-        copyBtn->setCursor(Qt::PointingHandCursor);
-        connect(copyBtn, &QPushButton::clicked, this, [this]() {
+        btnRow->setContentsMargins(0, 8, 0, 0);
+        btnRow->setSpacing(8);
+        auto* copyBtn  = new DialogButton(QStringLiteral("Copy as tree"),
+            DialogButton::Secondary, this);
+        auto* closeBtn = new DialogButton(QStringLiteral("Close"),
+            DialogButton::Primary, this);
+        connect(copyBtn,  &QPushButton::clicked, this, [this]() {
             QApplication::clipboard()->setText(buildTextReport(m_info));
         });
-        auto* closeBtn = new QPushButton(QStringLiteral("Close"));
-        closeBtn->setCursor(Qt::PointingHandCursor);
         connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
         btnRow->addWidget(copyBtn);
         btnRow->addStretch();

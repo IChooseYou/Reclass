@@ -11,6 +11,8 @@
 #include <cstring>
 #include "providerregistry.h"
 #include "themes/thememanager.h"
+#include "widgets/themed_messagebox.h"
+#include "widgets/themed_inputdialog.h"
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
 #include <QFile>
@@ -2776,16 +2778,16 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
                                        bm.bitOffset, bm.bitWidth);
     uint64_t maxVal = (bm.bitWidth >= 64) ? UINT64_MAX : ((1ULL << bm.bitWidth) - 1);
 
-    bool ok = false;
-    QString input = QInputDialog::getText(nullptr,
+    auto inputOpt = ThemedInputDialog::getText(nullptr,
         QStringLiteral("Edit Bitfield Value"),
         QStringLiteral("%1 (%2 bits, max %3):")
             .arg(bm.name).arg(bm.bitWidth).arg(maxVal),
-        QLineEdit::Normal,
-        QString::number(curVal), &ok);
-    if (!ok || input.isEmpty()) return;
+        QString::number(curVal));
+    if (!inputOpt || inputOpt->isEmpty()) return;
+    const QString input = *inputOpt;
 
     // Parse value (support hex with 0x prefix)
+    bool ok = false;
     uint64_t newVal;
     if (input.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
         newVal = input.mid(2).toULongLong(&ok, 16);
@@ -2823,13 +2825,13 @@ void RcxController::insertStaticField(uint64_t parentId) {
 }
 
 void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
-    bool ok;
-    QString input = QInputDialog::getText(parent,
-        QStringLiteral("Append bytes"),
+    auto inputOpt = ThemedInputDialog::getText(parent,
+        QStringLiteral("Append Bytes"),
         QStringLiteral("Byte count (decimal or 0x hex):"),
-        QLineEdit::Normal, QStringLiteral("128"), &ok);
-    if (!ok || input.trimmed().isEmpty()) return;
-    QString trimmed = input.trimmed();
+        QStringLiteral("128"));
+    if (!inputOpt || inputOpt->trimmed().isEmpty()) return;
+    QString trimmed = inputOpt->trimmed();
+    bool ok = false;
     int byteCount = 0;
     if (trimmed.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
         byteCount = trimmed.mid(2).toInt(&ok, 16);
@@ -3084,11 +3086,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                        [this, ids, collectIndices]() {
             QStringList types;
             for (const auto& e : kKindMeta) types << e.name;
-            bool ok;
-            QString sel = QInputDialog::getItem(nullptr, "Change Type", "Type:",
-                                                types, 0, false, &ok);
-            if (ok)
-                batchChangeKind(collectIndices(), kindFromString(sel));
+            auto sel = ThemedInputDialog::getItem(nullptr,
+                QStringLiteral("Change Type"),
+                QStringLiteral("New type:"),
+                types, 0);
+            if (sel)
+                batchChangeKind(collectIndices(), kindFromString(*sel));
         });
 
         menu.addSeparator();
@@ -3906,14 +3909,14 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                         .arg(result.pdpte, 16, 16, QChar('0'))
                         .arg(result.pde, 16, 16, QChar('0'))
                         .arg(result.pte, 16, 16, QChar('0'));
-                    QMessageBox::information(
+                    ThemedMessageBox::info(
                         qobject_cast<QWidget*>(parent()),
                         QStringLiteral("Physical Address"), msg);
                 } else {
-                    QMessageBox::warning(
+                    ThemedMessageBox::warn(
                         qobject_cast<QWidget*>(parent()),
                         QStringLiteral("Translation Failed"),
-                        QStringLiteral("Address 0x%1 is not mapped")
+                        QStringLiteral("Address 0x%1 isn't mapped in the current page table.")
                             .arg(nodeAddr, 16, 16, QChar('0')));
                 }
             });
@@ -3923,9 +3926,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         kernelMenu->addAction("Browse Page Tables", [this]() {
             uint64_t cr3 = m_doc->provider->getCr3();
             if (cr3 == 0) {
-                QMessageBox::warning(qobject_cast<QWidget*>(parent()),
-                    QStringLiteral("Error"),
-                    QStringLiteral("Failed to read CR3"));
+                ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
+                    QStringLiteral("Page Table Unavailable"),
+                    QStringLiteral("Couldn't read CR3 from the kernel provider."));
                 return;
             }
             emit requestOpenProviderTab(
@@ -3950,18 +3953,19 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                             [this, nodeAddr, bitOff, bitWid]() {
                             uint64_t pteValue = 0;
                             if (!m_doc->provider->read(nodeAddr, &pteValue, 8)) {
-                                QMessageBox::warning(qobject_cast<QWidget*>(parent()),
-                                    QStringLiteral("Error"),
-                                    QStringLiteral("Failed to read PTE at 0x%1")
+                                ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
+                                    QStringLiteral("PTE Read Failed"),
+                                    QStringLiteral("Couldn't read the page-table entry at 0x%1.")
                                         .arg(nodeAddr, 0, 16));
                                 return;
                             }
                             uint64_t mask = (1ULL << bitWid) - 1;
                             uint64_t frame = ((pteValue >> bitOff) & mask) << bitOff;
                             if (frame == 0) {
-                                QMessageBox::warning(qobject_cast<QWidget*>(parent()),
-                                    QStringLiteral("Error"),
-                                    QStringLiteral("Physical frame is zero (not present?)"));
+                                ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
+                                    QStringLiteral("Frame Not Present"),
+                                    QStringLiteral("The physical frame is zero. The page is likely "
+                                                   "paged out or marked not present."));
                                 return;
                             }
                             emit requestOpenProviderTab(
@@ -5036,9 +5040,10 @@ uint64_t RcxController::findOrCreateStructByName(const QString& typeName, int de
 void RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target) {
     const auto* info = ProviderRegistry::instance().findProvider(providerIdentifier);
     if (!info || !info->plugin) {
-        QMessageBox::warning(qobject_cast<QWidget*>(parent()),
-            "Provider Error",
-            QString("Provider '%1' not found. Is the plugin loaded?").arg(providerIdentifier));
+        ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
+            QStringLiteral("Provider Unavailable"),
+            QStringLiteral("Provider \"%1\" isn't registered. Make sure the plugin is loaded.")
+                .arg(providerIdentifier));
         return;
     }
 
@@ -5046,7 +5051,8 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
     auto provider = info->plugin->createProvider(target, &errorMsg);
     if (!provider) {
         if (!errorMsg.isEmpty())
-            QMessageBox::warning(qobject_cast<QWidget*>(parent()), "Provider Error", errorMsg);
+            ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
+                QStringLiteral("Couldn't Attach"), errorMsg);
         return;
     }
 
@@ -5287,7 +5293,8 @@ void RcxController::selectSource(const QString& text) {
                     emit m_doc->documentChanged();
                     refresh();
                 } else if (!errorMsg.isEmpty()) {
-                    QMessageBox::warning(qobject_cast<QWidget*>(parent()), "Provider Error", errorMsg);
+                    ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
+                        QStringLiteral("Couldn't Attach"), errorMsg);
                 }
             }
         }

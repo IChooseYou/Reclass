@@ -1,5 +1,5 @@
 #pragma once
-#include <QDialog>
+#include "widgets/themed_dialog.h"
 #include <QVector>
 #include <QString>
 
@@ -15,7 +15,7 @@ struct ProfileStats;
 // 15 hottest functions by total time. Bottom half: full table with name /
 // count / total / mean / min / max / last. Auto-refreshes at ~2 Hz while
 // profiling is enabled. Reset clears all aggregated data.
-class ProfilerDialog : public QDialog {
+class ProfilerDialog : public ThemedDialog {
     Q_OBJECT
 public:
     explicit ProfilerDialog(QWidget* parent = nullptr);

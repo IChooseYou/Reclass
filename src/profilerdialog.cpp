@@ -1,6 +1,7 @@
 #include "profilerdialog.h"
 #include "profiler.h"
 #include "themes/thememanager.h"
+#include "widgets/dialog_button.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -101,18 +102,11 @@ protected:
 
 // ── Dialog ──
 
-ProfilerDialog::ProfilerDialog(QWidget* parent) : QDialog(parent) {
+ProfilerDialog::ProfilerDialog(QWidget* parent) : ThemedDialog(parent) {
     setWindowTitle(QStringLiteral("Performance Profiler"));
     resize(820, 640);
 
     const auto& t = ThemeManager::instance().current();
-    {
-        QPalette pal = palette();
-        pal.setColor(QPalette::Window, t.background);
-        pal.setColor(QPalette::WindowText, t.text);
-        setPalette(pal);
-        setAutoFillBackground(true);
-    }
 
     QSettings s("Reclass", "Reclass");
     QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
@@ -139,13 +133,13 @@ ProfilerDialog::ProfilerDialog(QWidget* parent) : QDialog(parent) {
         m_summary->setFont(monoFont);
         row->addWidget(m_summary);
 
-        auto* resetBtn = new QPushButton(QStringLiteral("Reset"));
-        resetBtn->setCursor(Qt::PointingHandCursor);
+        auto* resetBtn = new DialogButton(QStringLiteral("Reset"),
+            DialogButton::Secondary, this);
         connect(resetBtn, &QPushButton::clicked, this, &ProfilerDialog::onReset);
         row->addWidget(resetBtn);
 
-        auto* copyBtn = new QPushButton(QStringLiteral("Copy CSV"));
-        copyBtn->setCursor(Qt::PointingHandCursor);
+        auto* copyBtn = new DialogButton(QStringLiteral("Copy CSV"),
+            DialogButton::Secondary, this);
         connect(copyBtn, &QPushButton::clicked, this, [this]() {
             auto snap = Profiler::instance().snapshot();
             QStringList lines;

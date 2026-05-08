@@ -40,6 +40,24 @@ public:
     QString name() const override { return m_name; }
     QString kind() const override { return QStringLiteral("File"); }
 
+    // Expose the buffer as a single synthetic region named after the
+    // file (or "[buffer]" for in-memory data with no name) so the
+    // scanner's Module column shows e.g. "issue.png+0x6A0A" instead of
+    // an empty cell. moduleName is the source-of-truth for the formatter
+    // in scanner.cpp::formatRegionContext.
+    QVector<MemoryRegion> enumerateRegions() const override {
+        if (m_data.isEmpty()) return {};
+        MemoryRegion r;
+        r.base       = 0;
+        r.size       = (uint64_t)m_data.size();
+        r.readable   = true;
+        r.writable   = true;
+        r.executable = false;
+        r.moduleName = m_name.isEmpty() ? QStringLiteral("[buffer]") : m_name;
+        r.type       = RegionType::Mapped;
+        return { r };
+    }
+
     const QByteArray& data() const { return m_data; }
     QByteArray& data() { return m_data; }
 };

@@ -1,6 +1,6 @@
 #pragma once
 #include "theme.h"
-#include <QDialog>
+#include "widgets/themed_dialog.h"
 #include <QVector>
 #include <QPushButton>
 #include <QLabel>
@@ -12,7 +12,7 @@ class QComboBox;
 
 namespace rcx {
 
-class ThemeEditor : public QDialog {
+class ThemeEditor : public ThemedDialog {
     Q_OBJECT
 public:
     explicit ThemeEditor(int themeIndex, QWidget* parent = nullptr);

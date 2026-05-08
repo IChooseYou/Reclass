@@ -674,7 +674,9 @@ private slots:
         auto results = finSpy.first().first().value<QVector<ScanResult>>();
         QCOMPARE(results.size(), 1);
         QCOMPARE(results[0].address, (uint64_t)16);
-        QCOMPARE(results[0].regionModule, QStringLiteral("code"));
+        // formatRegionContext now returns "name+0xOFFSET"; address 16 in
+        // region with base 16 → offset 0.
+        QCOMPARE(results[0].regionModule, QStringLiteral("code+0x0"));
     }
 
     void scan_filterWritable() {
@@ -753,7 +755,7 @@ private slots:
 
         auto results = finSpy.first().first().value<QVector<ScanResult>>();
         QCOMPARE(results.size(), 1);
-        QCOMPARE(results[0].regionModule, QStringLiteral("Game.exe"));
+        QCOMPARE(results[0].regionModule, QStringLiteral("Game.exe+0x0"));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -942,9 +944,24 @@ private slots:
     // ═══════════════════════════════════════════════════════════════════
 
     void provider_defaultRegionsEmpty() {
-        BufferProvider p(QByteArray(16, '\0'));
-        auto regions = p.enumerateRegions();
-        QVERIFY(regions.isEmpty());
+        // Empty BufferProvider has no regions to expose.
+        BufferProvider empty(QByteArray{});
+        QVERIFY(empty.enumerateRegions().isEmpty());
+
+        // Non-empty BufferProvider exposes a single synthetic region so
+        // the scanner's Module column can show "name+0xOFFSET" instead
+        // of an empty cell. Anonymous (no name passed) gets "[buffer]".
+        BufferProvider anon(QByteArray(16, '\0'));
+        auto anonRegions = anon.enumerateRegions();
+        QCOMPARE(anonRegions.size(), 1);
+        QCOMPARE(anonRegions[0].base, (uint64_t)0);
+        QCOMPARE(anonRegions[0].size, (uint64_t)16);
+        QCOMPARE(anonRegions[0].moduleName, QStringLiteral("[buffer]"));
+
+        BufferProvider named(QByteArray(8, '\0'), QStringLiteral("test.dat"));
+        auto namedRegions = named.enumerateRegions();
+        QCOMPARE(namedRegions.size(), 1);
+        QCOMPARE(namedRegions[0].moduleName, QStringLiteral("test.dat"));
     }
 
     void provider_nullProviderRegionsEmpty() {
@@ -1011,9 +1028,11 @@ private slots:
 
         auto results = finSpy.first().first().value<QVector<ScanResult>>();
         QCOMPARE(results.size(), 3);
-        QCOMPARE(results[0].regionModule, QStringLiteral("region0"));
-        QCOMPARE(results[1].regionModule, QStringLiteral("region1"));
-        QCOMPARE(results[2].regionModule, QStringLiteral("region2"));
+        // Each result lands at offset 4 within its region (base 0/16/32,
+        // hits at 4/20/36). formatRegionContext renders "name+0xOFFSET".
+        QCOMPARE(results[0].regionModule, QStringLiteral("region0+0x4"));
+        QCOMPARE(results[1].regionModule, QStringLiteral("region1+0x4"));
+        QCOMPARE(results[2].regionModule, QStringLiteral("region2+0x4"));
     }
 
     // ═══════════════════════════════════════════════════════════════════

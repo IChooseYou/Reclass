@@ -1,7 +1,7 @@
 #ifndef PROCESSPICKER_H
 #define PROCESSPICKER_H
 
-#include <QDialog>
+#include "widgets/themed_dialog.h"
 #include <QIcon>
 #include <cstdint>
 
@@ -17,7 +17,7 @@ struct ProcessInfo {
     bool is32Bit = false;
 };
 
-class ProcessPicker : public QDialog
+class ProcessPicker : public rcx::ThemedDialog
 {
     Q_OBJECT
 

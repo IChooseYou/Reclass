@@ -11,6 +11,22 @@
 
 namespace rcx {
 
+// Format a result's region context — used at every place we set
+// ScanResult.regionModule. For module-mapped regions, returns
+// "modulename.dll+0xOFFSET" so the user can see the in-module offset
+// (matches the windbg/IDA mental model). For unnamed regions (heap,
+// anonymous mappings, file-provider synthetic regions), returns an
+// empty string — the populateTable code only shows the Module column
+// when at least one result has a non-empty value, so an unnamed-region
+// scan won't get a useless column at all.
+static QString formatRegionContext(const MemoryRegion& region, uint64_t address) {
+    if (region.moduleName.isEmpty()) return QString();
+    uint64_t off = (address >= region.base) ? (address - region.base) : 0;
+    return QStringLiteral("%1+0x%2")
+        .arg(region.moduleName)
+        .arg(off, 0, 16);
+}
+
 // ── System module skip list ──
 // Hard-coded set of well-known Windows + Qt + CRT DLLs and the same set of
 // libs on Linux/macOS. Used by ScanRequest::skipSystemModules to drop matches
@@ -767,7 +783,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                         goto done;
                     ScanResult r;
                     r.address = regStart + off + (uint64_t)i;
-                    r.regionModule = region.moduleName;
+                    r.regionModule = formatRegionContext(region, r.address);
                     r.scanValue = QByteArray(data + i, valSize);
                     results.append(r);
 
@@ -795,7 +811,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                     if (ok) {
                         ScanResult r;
                         r.address = regStart + off + (uint64_t)i;
-                        r.regionModule = region.moduleName;
+                        r.regionModule = formatRegionContext(region, r.address);
                         r.scanValue = std::move(val);
                         results.append(r);
                         if (results.size() >= req.maxResults)
@@ -814,7 +830,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                     if (absI > scanEnd) break;
                     ScanResult r;
                     r.address = regStart + off + (uint64_t)absI;
-                    r.regionModule = region.moduleName;
+                    r.regionModule = formatRegionContext(region, r.address);
                     r.scanValue = QByteArray(data + absI, qMin(16, readLen - absI));
                     results.append(r);
                     if (results.size() >= req.maxResults)
@@ -836,7 +852,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
                     if (match) {
                         ScanResult r;
                         r.address = regStart + off + (uint64_t)i;
-                        r.regionModule = region.moduleName;
+                        r.regionModule = formatRegionContext(region, r.address);
                         r.scanValue = QByteArray(data + i, qMin(16, readLen - i));
                         results.append(r);
 

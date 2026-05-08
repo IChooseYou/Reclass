@@ -4,7 +4,6 @@
 #include <QCheckBox>
 #include <QTreeWidget>
 #include <QStackedWidget>
-#include <QDialogButtonBox>
 #include <QPushButton>
 #include <QGroupBox>
 #include <QLineEdit>
@@ -12,6 +11,7 @@
 #include <QLabel>
 #include "optionsdialog.h"
 #include "themes/thememanager.h"
+#include "widgets/dialog_button.h"
 
 using namespace rcx;
 
@@ -25,7 +25,9 @@ static void applyGlobalTheme(const Theme& theme) {
     pal.setColor(QPalette::Text,            theme.text);
     pal.setColor(QPalette::Button,          theme.button);
     pal.setColor(QPalette::ButtonText,      theme.text);
-    pal.setColor(QPalette::Highlight,       theme.selection);
+    // Match main.cpp's applyGlobalTheme — Highlight is theme.selected,
+    // not theme.selection (which only colors text-selection ranges).
+    pal.setColor(QPalette::Highlight,       theme.selected);
     pal.setColor(QPalette::HighlightedText, theme.text);
     pal.setColor(QPalette::ToolTipBase,     theme.backgroundAlt);
     pal.setColor(QPalette::ToolTipText,     theme.text);
@@ -81,10 +83,15 @@ private slots:
         auto* showIconCheck = dlg.findChild<QCheckBox*>();
         QVERIFY(showIconCheck);
 
-        auto* buttons = dlg.findChild<QDialogButtonBox*>();
-        QVERIFY(buttons);
-        QVERIFY(buttons->button(QDialogButtonBox::Ok));
-        QVERIFY(buttons->button(QDialogButtonBox::Cancel));
+        // Dialog now uses themed DialogButton instances instead of a
+        // QDialogButtonBox. Verify both OK and Cancel are present by label.
+        bool sawOk = false, sawCancel = false;
+        for (auto* b : dlg.findChildren<DialogButton*>()) {
+            if (b->text() == QStringLiteral("OK"))     sawOk = true;
+            if (b->text() == QStringLiteral("Cancel")) sawCancel = true;
+        }
+        QVERIFY(sawOk);
+        QVERIFY(sawCancel);
     }
 
     void resultReflectsInput() {
@@ -103,7 +110,7 @@ private slots:
         QCOMPARE(r.autoStartMcp, true);
     }
 
-    void noStyleSheetOnDialog() {
+    void noStyleSheetOnPaletteWidgets() {
         OptionsResult defaults;
         OptionsDialog dlg(defaults);
 
@@ -116,8 +123,11 @@ private slots:
         auto* fontCombo = dlg.findChild<QComboBox*>("fontCombo");
         QVERIFY(fontCombo->styleSheet().isEmpty());
 
-        // No child widget should have a stylesheet set
+        // Palette-driven widgets stay QSS-free. DialogButton legitimately
+        // applies its own stylesheet (themed primary/secondary chrome),
+        // so skip those.
         for (auto* child : dlg.findChildren<QWidget*>()) {
+            if (qobject_cast<DialogButton*>(child)) continue;
             QVERIFY2(child->styleSheet().isEmpty(),
                       qPrintable(QString("Widget %1 (%2) has unexpected stylesheet: %3")
                           .arg(child->objectName(),
@@ -138,14 +148,16 @@ private slots:
         }
     }
 
-    void paletteHighlightIsSelection() {
-        // After applying theme, QPalette::Highlight must be theme.selection (not theme.hover)
+    void paletteHighlightIsSelected() {
+        // QPalette::Highlight is the row-selection background. main.cpp's
+        // applyGlobalTheme maps it to theme.selected (theme.selection is
+        // a different field — text-selection ranges in QLineEdit etc.).
         auto& tm = ThemeManager::instance();
         const auto& theme = tm.current();
         applyGlobalTheme(theme);
 
         QPalette pal = qApp->palette();
-        QCOMPARE(pal.color(QPalette::Highlight), theme.selection);
+        QCOMPARE(pal.color(QPalette::Highlight), theme.selected);
     }
 
     void treePageSwitching() {

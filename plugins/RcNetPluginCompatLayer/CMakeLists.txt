@@ -20,6 +20,18 @@ set(PLUGIN_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/processpicker.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/processpicker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/processpicker.ui
+    # Themed dialog widgets — required because processpicker now
+    # subclasses rcx::ThemedDialog and uses rcx::ThemedMessageBox.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/widgets/themed_dialog.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/widgets/themed_dialog.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/widgets/themed_messagebox.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/widgets/themed_messagebox.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/widgets/dialog_button.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/widgets/dialog_button.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/themes/theme.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/themes/theme.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/themes/thememanager.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/themes/thememanager.cpp
 )
 
 # -- Optional .NET bridge -------------------------------------------------

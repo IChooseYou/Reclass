@@ -72,6 +72,10 @@
 #include "themes/thememanager.h"
 #include "themes/themeeditor.h"
 #include "optionsdialog.h"
+#include "widgets/themed_messagebox.h"
+#include "widgets/themed_inputdialog.h"
+#include "widgets/themed_dialog.h"
+#include "widgets/dialog_button.h"
 #ifdef _WIN32
 #include <windows.h>
 #include <windowsx.h>
@@ -2035,6 +2039,72 @@ void MainWindow::clearMcpStatus() {
 
 
 
+// Minimap subclass — the read-only narrow QsciScintilla that mirrors
+// the editor at 4pt font. Two custom behaviours layered on top of
+// QsciScintilla:
+//   - Click anywhere on the minimap → emit lineClicked(int) so the
+//     parent pane can scroll the main editor to that line. Using the
+//     base-class mousePressEvent drop-through caused Scintilla's own
+//     selection logic to fire too; we swallow the event entirely.
+//   - Translucent overlay child that paints a rectangle covering the
+//     lines currently visible in the main editor. Position + height
+//     update as the user scrolls or zooms the main editor.
+class MinimapScintilla : public QsciScintilla {
+    Q_OBJECT
+public:
+    explicit MinimapScintilla(QWidget* parent = nullptr) : QsciScintilla(parent) {}
+signals:
+    void lineClicked(int line);
+protected:
+    void mousePressEvent(QMouseEvent* e) override {
+        // Map y → document line. lineAt() returns -1 below the last
+        // line of text; clamp to [0, lines()-1] so a click in the
+        // empty area below the text still scrolls to the bottom.
+        int line = lineAt(e->pos());
+        if (line < 0) line = lines() - 1;
+        if (line < 0) line = 0;
+        emit lineClicked(line);
+        e->accept();  // do not let Scintilla's selection logic run
+    }
+    void mouseMoveEvent(QMouseEvent* e) override {
+        // Treat drag as continuous click — drag-scrub the main editor.
+        if (e->buttons() & Qt::LeftButton) {
+            int line = lineAt(e->pos());
+            if (line < 0) line = lines() - 1;
+            if (line < 0) line = 0;
+            emit lineClicked(line);
+            e->accept();
+            return;
+        }
+        QsciScintilla::mouseMoveEvent(e);
+    }
+};
+
+// Translucent rectangle drawn on top of the minimap to indicate which
+// document lines are currently visible in the main editor. Repositioned
+// from the parent (createSplitPane) on every viewport change.
+class MinimapViewportIndicator : public QWidget {
+public:
+    MinimapViewportIndicator(QWidget* parent, const QColor& tint)
+        : QWidget(parent), m_tint(tint) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+    }
+    void setTint(const QColor& c) { m_tint = c; update(); }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        // Soft fill + 1px outline for clarity on dark and light themes.
+        QColor fill = m_tint; fill.setAlpha(60);
+        QColor edge = m_tint; edge.setAlpha(140);
+        p.fillRect(rect(), fill);
+        p.setPen(edge);
+        p.drawRect(rect().adjusted(0, 0, -1, -1));
+    }
+private:
+    QColor m_tint;
+};
+
 MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     SplitPane pane;
 
@@ -2098,31 +2168,93 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     ecLayout->setSpacing(0);
     ecLayout->addWidget(pane.editor, /*stretch=*/1);
 
-    pane.minimap = new QsciScintilla;
-    pane.minimap->setReadOnly(true);
-    pane.minimap->setWrapMode(QsciScintilla::WrapNone);
-    pane.minimap->setCaretLineVisible(false);
-    pane.minimap->setMarginWidth(0, 0);
-    pane.minimap->setMarginWidth(1, 0);
-    pane.minimap->setMarginWidth(2, 0);
-    pane.minimap->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    pane.minimap->setFixedWidth(110);
+    auto* mm = new MinimapScintilla;
+    pane.minimap = mm;
+    mm->setReadOnly(true);
+    mm->setWrapMode(QsciScintilla::WrapNone);
+    mm->setCaretLineVisible(false);
+    mm->setMarginWidth(0, 0);
+    mm->setMarginWidth(1, 0);
+    mm->setMarginWidth(2, 0);
+    mm->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    mm->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);  // hide both
+    mm->setFixedWidth(110);
+    mm->setCursor(Qt::PointingHandCursor);
     {
         // Very small font so a ~100-line struct fits vertically at a glance.
         QFont mf("JetBrains Mono", 4);
         mf.setFixedPitch(true);
-        pane.minimap->setFont(mf);
+        mm->setFont(mf);
     }
-    pane.minimap->setVisible(
+    // Theme: paper + default-style fore so the minimap reads on dark
+    // themes (Scintilla's default white-on-black would clash). Selection
+    // colours muted because the user can't actually select text here.
+    {
+        const auto& tt = ThemeManager::instance().current();
+        mm->setColor(tt.text);
+        mm->setPaper(tt.background);
+        // Wipe Scintilla's per-style overrides so STYLE_DEFAULT wins.
+        mm->SendScintilla(QsciScintillaBase::SCI_STYLECLEARALL);
+        mm->setSelectionForegroundColor(tt.text);
+        mm->setSelectionBackgroundColor(tt.selected);
+    }
+    mm->setVisible(
         QSettings("Reclass", "Reclass").value("minimap", false).toBool());
-    ecLayout->addWidget(pane.minimap);
+    ecLayout->addWidget(mm);
 
-    connect(pane.editor, &RcxEditor::documentApplied, pane.minimap,
-            [mm = pane.minimap](const QString& text) {
+    // Translucent rectangle overlay covering the lines currently
+    // visible in the main editor. Auto-resizes when the editor is
+    // scrolled or zoomed (zoom changes linesOnScreen → height changes).
+    const auto& iTheme = ThemeManager::instance().current();
+    auto* vIndicator = new MinimapViewportIndicator(mm, iTheme.indHoverSpan);
+    vIndicator->hide();
+
+    QsciScintilla* edSci = pane.editor->scintilla();
+
+    auto syncIndicator = [vIndicator, mmw = mm, edSci]() {
+        if (!mmw->isVisible() || !edSci) { vIndicator->hide(); return; }
+        int total = mmw->lines();
+        if (total <= 0) { vIndicator->hide(); return; }
+        int firstLine = edSci->firstVisibleLine();
+        int linesOnEd = qMax(1, (int)edSci->SendScintilla(
+                                    QsciScintillaBase::SCI_LINESONSCREEN));
+        // Convert from main-editor line indices to minimap pixel rows.
+        // Each minimap line is mm->textHeight(0) tall.
+        int mmLineH = mmw->textHeight(0);
+        if (mmLineH <= 0) { vIndicator->hide(); return; }
+        int y = qBound(0, firstLine * mmLineH, mmw->height());
+        int h = qMax(mmLineH, linesOnEd * mmLineH);
+        if (y + h > mmw->height()) h = mmw->height() - y;
+        vIndicator->setGeometry(0, y, mmw->width(), h);
+        vIndicator->show();
+        vIndicator->raise();
+    };
+
+    connect(pane.editor, &RcxEditor::documentApplied, mm,
+            [mm, syncIndicator](const QString& text) {
         if (!mm->isVisible()) return;
         mm->setReadOnly(false);
         mm->setText(text);
         mm->setReadOnly(true);
+        syncIndicator();
+    });
+    // Fire on every viewport change in the main editor — scrolls,
+    // zoom-in/zoom-out, font-size changes, layout updates.
+    if (edSci) {
+        connect(edSci, &QsciScintilla::SCN_UPDATEUI, mm,
+                [syncIndicator](int) { syncIndicator(); });
+    }
+
+    // Click on minimap → scroll main editor to that line. Centres the
+    // clicked line in the main editor's viewport for a "look here" feel.
+    connect(mm, &MinimapScintilla::lineClicked, pane.editor,
+            [edSci](int line) {
+        if (!edSci) return;
+        int linesOnEd = edSci->SendScintilla(
+            QsciScintillaBase::SCI_LINESONSCREEN);
+        int target = qMax(0, line - linesOnEd / 2);
+        edSci->setFirstVisibleLine(target);
+        edSci->ensureLineVisible(line);
     });
 
     pane.tabWidget->addTab(pane.editorContainer, "Reclass");  // index 0
@@ -4104,9 +4236,12 @@ void MainWindow::showGotoAddressDialog() {
 
     QString err;
     if (!ctrl->navigateToFormula(dlg.formula(), &err)) {
-        QMessageBox::warning(this, QStringLiteral("Go to Address"),
-            QStringLiteral("Failed to evaluate '%1': %2")
-                .arg(dlg.formula(), err.isEmpty() ? QStringLiteral("invalid expression") : err));
+        ThemedMessageBox::warn(this,
+            QStringLiteral("Address Not Resolved"),
+            QStringLiteral("Couldn't evaluate \"%1\". %2")
+                .arg(dlg.formula(),
+                     err.isEmpty() ? QStringLiteral("The expression isn't valid.")
+                                   : err));
         return;
     }
     setAppStatus(QStringLiteral("Jumped to 0x%1")
@@ -4126,9 +4261,11 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
     }
     auto info = walkRtti(*ctrl->document()->provider, vtableAddr);
     if (!info.ok) {
-        QMessageBox::information(this, QStringLiteral("RTTI Browser"),
+        ThemedMessageBox::info(this,
+            QStringLiteral("No RTTI Here"),
             info.error.isEmpty()
-                ? QStringLiteral("No RTTI found at 0x%1").arg(vtableAddr, 0, 16)
+                ? QStringLiteral("No RTTI structures found at 0x%1.")
+                      .arg(vtableAddr, 0, 16)
                 : info.error);
         return;
     }
@@ -4137,44 +4274,27 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
 }
 
 void MainWindow::about() {
-    QDialog dlg(this);
-    dlg.setWindowTitle("About Reclass");
-    dlg.setFixedSize(260, 120);
+    ThemedDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("About Reclass"));
+    dlg.setFixedSize(280, 140);
     auto* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(20, 16, 20, 16);
     lay->setSpacing(12);
 
+    const auto& t = ThemeManager::instance().current();
     auto* buildLabel = new QLabel(
         QStringLiteral("<span style='color:%1;font-size:11px;'>"
                        "Build&ensp;" __DATE__ "&ensp;" __TIME__ "</span>")
-            .arg(ThemeManager::instance().current().textDim.name()));
+            .arg(t.textDim.name()));
     buildLabel->setAlignment(Qt::AlignCenter);
     lay->addWidget(buildLabel);
 
-    auto* ghBtn = new QPushButton("GitHub");
-    ghBtn->setCursor(Qt::PointingHandCursor);
-    {
-        const auto& t = ThemeManager::instance().current();
-        ghBtn->setStyleSheet(QStringLiteral(
-            "QPushButton {"
-            "  background: %1; color: %2; border: 1px solid %3;"
-            "  border-radius: 4px; padding: 5px 16px; font-size: 12px;"
-            "}"
-            "QPushButton:hover { background: %4; border-color: %5; }")
-            .arg(t.indCmdPill.name(), t.text.name(), t.border.name(),
-                 t.button.name(), t.textFaint.name()));
-    }
+    auto* ghBtn = new DialogButton(QStringLiteral("Open GitHub"),
+        DialogButton::Primary, &dlg);
     connect(ghBtn, &QPushButton::clicked, this, []() {
         QDesktopServices::openUrl(QUrl("https://github.com/IChooseYou/Reclass"));
     });
     lay->addWidget(ghBtn, 0, Qt::AlignCenter);
-
-    {
-        QPalette dlgPal = dlg.palette();
-        dlgPal.setColor(QPalette::Window, ThemeManager::instance().current().background);
-        dlg.setPalette(dlgPal);
-        dlg.setAutoFillBackground(true);
-    }
     dlg.exec();
 }
 
@@ -5493,7 +5613,9 @@ void MainWindow::exportToFile(CodeFormat fmt) {
     QString text = renderCodeAll(fmt, tab->doc->tree, aliases, asserts);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Export Failed", "Could not write to: " + path);
+        ThemedMessageBox::warn(this,
+            QStringLiteral("Export Failed"),
+            QStringLiteral("Couldn't write to %1.").arg(path));
         return;
     }
     file.write(text.toUtf8());
@@ -5518,8 +5640,10 @@ void MainWindow::exportReclassXmlAction() {
 
     QString error;
     if (!rcx::exportReclassXml(tab->doc->tree, path, &error)) {
-        QMessageBox::warning(this, "Export Failed",
-            error.isEmpty() ? QStringLiteral("Could not export") : error);
+        ThemedMessageBox::warn(this,
+            QStringLiteral("Export Failed"),
+            error.isEmpty() ? QStringLiteral("Couldn't export the project.")
+                            : error);
         return;
     }
 
@@ -5542,8 +5666,11 @@ void MainWindow::importReclassXml() {
     QString error;
     NodeTree tree = rcx::importReclassXml(filePath, &error);
     if (tree.nodes.isEmpty()) {
-        QMessageBox::warning(this, "Import Failed", error.isEmpty()
-            ? QStringLiteral("No data found in file") : error);
+        ThemedMessageBox::warn(this,
+            QStringLiteral("Import Failed"),
+            error.isEmpty()
+                ? QStringLiteral("The file doesn't contain any class data.")
+                : error);
         return;
     }
 
@@ -5567,11 +5694,13 @@ void MainWindow::importReclassXml() {
 // ── Import from Source ──
 
 void MainWindow::importFromSource() {
-    QDialog dlg(this);
-    dlg.setWindowTitle("Import from Source");
+    ThemedDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Import from Source"));
     dlg.resize(700, 600);
 
     auto* layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(8);
 
     auto* sci = new QsciScintilla(&dlg);
     setupRenderedSci(sci);
@@ -5579,12 +5708,14 @@ void MainWindow::importFromSource() {
     sci->setMarginWidth(0, "00000");
     layout->addWidget(sci);
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    buttons->button(QDialogButtonBox::Ok)->setText("Import");
-    layout->addWidget(buttons);
-
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+        DialogButton::Secondary, &dlg);
+    auto* importBtn = new DialogButton(QStringLiteral("Import"),
+        DialogButton::Primary, &dlg);
+    connect(importBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+    importBtn->setDefault(true);
+    layout->addLayout(ThemedDialog::makeButtonRow({ cancelBtn, importBtn }));
 
     if (dlg.exec() != QDialog::Accepted) return;
 
@@ -5594,8 +5725,11 @@ void MainWindow::importFromSource() {
     QString error;
     NodeTree tree = rcx::importFromSource(source, &error);
     if (tree.nodes.isEmpty()) {
-        QMessageBox::warning(this, "Import Failed", error.isEmpty()
-            ? QStringLiteral("No struct definitions found") : error);
+        ThemedMessageBox::warn(this,
+            QStringLiteral("Import Failed"),
+            error.isEmpty()
+                ? QStringLiteral("No struct definitions were found in the pasted source.")
+                : error);
         return;
     }
 
@@ -5650,16 +5784,20 @@ void MainWindow::showTypeAliasesDialog() {
     auto* tab = activeTab();
     if (!tab) return;
 
-    QDialog dlg(this);
-    dlg.setWindowTitle("Type Aliases");
-    dlg.resize(400, 380);
+    ThemedDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Type Aliases"));
+    dlg.resize(420, 400);
 
     auto* layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(8);
 
     // Preset buttons (stdint + Windows only, no redundant Reset)
     auto* presetRow = new QHBoxLayout;
-    auto* btnStdint  = new QPushButton("stdint (C99)", &dlg);
-    auto* btnWindows = new QPushButton("Windows (basetsd.h)", &dlg);
+    auto* btnStdint  = new DialogButton(QStringLiteral("stdint (C99)"),
+        DialogButton::Secondary, &dlg);
+    auto* btnWindows = new DialogButton(QStringLiteral("Windows (basetsd.h)"),
+        DialogButton::Secondary, &dlg);
     presetRow->addWidget(btnStdint);
     presetRow->addWidget(btnWindows);
     presetRow->addStretch();
@@ -5739,12 +5877,14 @@ void MainWindow::showTypeAliasesDialog() {
 
     layout->addWidget(table);
 
-    auto* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    layout->addWidget(buttons);
-
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+        DialogButton::Secondary, &dlg);
+    auto* okBtn = new DialogButton(QStringLiteral("Save aliases"),
+        DialogButton::Primary, &dlg);
+    connect(okBtn,     &QPushButton::clicked, &dlg, &QDialog::accept);
+    connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+    okBtn->setDefault(true);
+    layout->addLayout(ThemedDialog::makeButtonRow({ cancelBtn, okBtn }));
 
     if (dlg.exec() != QDialog::Accepted) return;
 
@@ -5842,8 +5982,11 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         QString error;
         NodeTree tree = rcx::importReclassXml(filePath, &error);
         if (tree.nodes.isEmpty()) {
-            QMessageBox::warning(this, "Import Failed", error.isEmpty()
-                ? QStringLiteral("No data found in file") : error);
+            ThemedMessageBox::warn(this,
+                QStringLiteral("Import Failed"),
+                error.isEmpty()
+                    ? QStringLiteral("The file doesn't contain any class data.")
+                    : error);
             return nullptr;
         }
         auto* doc = new RcxDocument(this);
@@ -5875,7 +6018,9 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     QApplication::processEvents();
 
     if (!doc->load(filePath)) {
-        QMessageBox::warning(this, "Error", "Failed to load: " + filePath);
+        ThemedMessageBox::warn(this,
+            QStringLiteral("Open Failed"),
+            QStringLiteral("Couldn't load %1.").arg(filePath));
         setAppStatus({});
         endProgress();
         delete doc;
@@ -6414,9 +6559,14 @@ void MainWindow::createWorkspaceDock() {
                         .arg(refDetails.join('\n'));
             }
 
-            auto answer = QMessageBox::question(this, "Delete Type", msg,
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-            if (answer != QMessageBox::Yes) return;
+            const QString deleteLabel = items.size() == 1
+                ? QStringLiteral("Delete type")
+                : QStringLiteral("Delete %1 types").arg(items.size());
+            if (!ThemedMessageBox::confirm(this,
+                    QStringLiteral("Delete Type"),
+                    msg, deleteLabel,
+                    QStringLiteral("Cancel"),
+                    /*destructive=*/true)) return;
 
             // Group deletes by controller for single undo macro per document
             QHash<RcxController*, QVector<uint64_t>> byCtrl;
@@ -7765,21 +7915,28 @@ void MainWindow::promptAddBookmark() {
     QString defaultFormula = c->document()->tree.baseAddressFormula;
     if (defaultFormula.isEmpty())
         defaultFormula = QStringLiteral("0x") + QString::number(c->document()->tree.baseAddress, 16);
-    QDialog dlg(this);
-    dlg.setWindowTitle("Add Bookmark");
+    ThemedDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Add Bookmark"));
+    dlg.setMinimumWidth(420);
     auto* form = new QVBoxLayout(&dlg);
+    form->setContentsMargins(14, 12, 14, 12);
+    form->setSpacing(8);
     auto* nameEdit = new QLineEdit(&dlg);
-    nameEdit->setPlaceholderText("Bookmark name");
+    nameEdit->setPlaceholderText(QStringLiteral("Bookmark name"));
     auto* formulaEdit = new QLineEdit(defaultFormula, &dlg);
-    formulaEdit->setPlaceholderText("Address formula (e.g. <game.exe>+0x12340)");
-    form->addWidget(new QLabel("Name:", &dlg));
+    formulaEdit->setPlaceholderText(QStringLiteral("Address formula (e.g. <game.exe>+0x12340)"));
+    form->addWidget(new QLabel(QStringLiteral("Name:"), &dlg));
     form->addWidget(nameEdit);
-    form->addWidget(new QLabel("Address:", &dlg));
+    form->addWidget(new QLabel(QStringLiteral("Address:"), &dlg));
     form->addWidget(formulaEdit);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    form->addWidget(buttons);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+        DialogButton::Secondary, &dlg);
+    auto* addBtn = new DialogButton(QStringLiteral("Add bookmark"),
+        DialogButton::Primary, &dlg);
+    QObject::connect(addBtn,    &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+    addBtn->setDefault(true);
+    form->addLayout(ThemedDialog::makeButtonRow({ cancelBtn, addBtn }));
     nameEdit->setFocus();
     if (dlg.exec() != QDialog::Accepted) return;
     if (nameEdit->text().trimmed().isEmpty()) return;
@@ -7795,8 +7952,12 @@ void MainWindow::navigateBookmark(int idx) {
     if (idx < 0 || idx >= bms.size()) return;
     QString err;
     if (!c->navigateToFormula(bms[idx].addressFormula, &err)) {
-        QMessageBox::warning(this, "Bookmark",
-            QStringLiteral("Failed to evaluate '%1': %2").arg(bms[idx].addressFormula, err));
+        ThemedMessageBox::warn(this,
+            QStringLiteral("Bookmark Not Resolved"),
+            QStringLiteral("Couldn't evaluate \"%1\". %2")
+                .arg(bms[idx].addressFormula,
+                     err.isEmpty() ? QStringLiteral("The expression isn't valid.")
+                                   : err));
     }
 }
 
@@ -8480,11 +8641,13 @@ void MainWindow::populateSourceMenu() {
 }
 
 void MainWindow::showPluginsDialog() {
-    QDialog dialog(this);
-    dialog.setWindowTitle("Plugins");
-    dialog.resize(600, 400);
+    ThemedDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Plugins"));
+    dialog.resize(620, 420);
 
     auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(8);
 
     auto* list = new QListWidget();
     layout->addWidget(list);
@@ -8522,8 +8685,11 @@ void MainWindow::showPluginsDialog() {
 
     // Button row
     auto* btnLayout = new QHBoxLayout();
+    btnLayout->setContentsMargins(0, 6, 0, 0);
+    btnLayout->setSpacing(8);
 
-    auto* btnLoad = new QPushButton("Load Plugin...");
+    auto* btnLoad = new DialogButton(QStringLiteral("Load plugin..."),
+        DialogButton::Primary, &dialog);
     connect(btnLoad, &QPushButton::clicked, [&, refreshList]() {
         QString path = QFileDialog::getOpenFileName(&dialog, "Load Plugin",
                                                     QCoreApplication::applicationDirPath() + "/Plugins",
@@ -8534,39 +8700,48 @@ void MainWindow::showPluginsDialog() {
                 refreshList();
                 setAppStatus("Plugin loaded successfully");
             } else {
-                QMessageBox::warning(&dialog, "Failed to Load Plugin",
-                                     "Could not load the selected plugin.\nCheck the console for details.");
+                ThemedMessageBox::warn(&dialog,
+                    QStringLiteral("Plugin Load Failed"),
+                    QStringLiteral("Couldn't load the selected plugin. "
+                                   "Check the console for details."));
             }
         }
     });
 
-    auto* btnUnload = new QPushButton("Unload Selected");
+    auto* btnUnload = new DialogButton(QStringLiteral("Unload selected"),
+        DialogButton::Destructive, &dialog);
     connect(btnUnload, &QPushButton::clicked, [&, list, refreshList]() {
         auto* item = list->currentItem();
         if (!item) {
-            QMessageBox::information(&dialog, "No Selection", "Please select a plugin to unload.");
+            ThemedMessageBox::info(&dialog,
+                QStringLiteral("No Plugin Selected"),
+                QStringLiteral("Pick a plugin in the list first, then click Unload Selected."));
             return;
         }
 
         QString pluginName = item->data(Qt::UserRole).toString();
         if (pluginName.isEmpty()) return;
 
-        auto reply = QMessageBox::question(&dialog, "Unload Plugin",
-                                           QString("Are you sure you want to unload '%1'?").arg(pluginName),
-                                           QMessageBox::Yes | QMessageBox::No);
+        if (!ThemedMessageBox::confirm(&dialog,
+                QStringLiteral("Unload Plugin"),
+                QStringLiteral("Unload \"%1\"? Anything currently using it "
+                               "will lose its provider.").arg(pluginName),
+                QStringLiteral("Unload"),
+                QStringLiteral("Cancel"),
+                /*destructive=*/true)) return;
 
-        if (reply == QMessageBox::Yes) {
-            if (m_pluginManager.UnloadPlugin(pluginName)) {
-                refreshList();
-                setAppStatus("Plugin unloaded");
-            } else {
-                QMessageBox::warning(&dialog, "Failed to Unload",
-                                     "Could not unload the selected plugin.");
-            }
+        if (m_pluginManager.UnloadPlugin(pluginName)) {
+            refreshList();
+            setAppStatus("Plugin unloaded");
+        } else {
+            ThemedMessageBox::warn(&dialog,
+                QStringLiteral("Plugin Unload Failed"),
+                QStringLiteral("Couldn't unload \"%1\".").arg(pluginName));
         }
     });
 
-    auto* btnClose = new QPushButton("Close");
+    auto* btnClose = new DialogButton(QStringLiteral("Close"),
+        DialogButton::Secondary, &dialog);
     connect(btnClose, &QPushButton::clicked, &dialog, &QDialog::accept);
 
     btnLayout->addWidget(btnLoad);
@@ -8633,21 +8808,24 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     }
     if (dirtyDocs.isEmpty()) { event->accept(); return; }
 
-    QMessageBox box(this);
-    box.setWindowTitle(QStringLiteral("Unsaved Changes"));
-    box.setIcon(QMessageBox::Warning);
-    box.setText(QStringLiteral("The following project%1 ha%2 unsaved changes:")
-        .arg(dirtyDocs.size() == 1 ? "" : "s",
-             dirtyDocs.size() == 1 ? "s" : "ve"));
-    box.setInformativeText(dirtyNames.join(QStringLiteral("\n")));
-    auto* saveBtn   = box.addButton(QStringLiteral("Save All"),   QMessageBox::AcceptRole);
-    auto* discardBtn = box.addButton(QStringLiteral("Discard"),    QMessageBox::DestructiveRole);
-    auto* cancelBtn = box.addButton(QStringLiteral("Cancel"),     QMessageBox::RejectRole);
-    box.setDefaultButton(saveBtn);
-    box.exec();
-    auto* clicked = box.clickedButton();
-    if (clicked == cancelBtn) { event->ignore(); return; }
-    if (clicked == saveBtn) {
+    // Two complete sentences, picked by count, instead of in-string
+    // pluralization ("project%1 ha%2") — translators (and English
+    // readers) get full grammatical sentences.
+    const QString text = (dirtyDocs.size() == 1)
+        ? QStringLiteral("One project has unsaved changes:")
+        : QStringLiteral("%1 projects have unsaved changes:")
+              .arg(dirtyDocs.size());
+
+    auto choice = ThemedMessageBox::unsavedChanges(this,
+        QStringLiteral("Unsaved Changes"),
+        text,
+        dirtyNames.join(QStringLiteral("\n")));
+
+    if (choice == ThemedMessageBox::UnsavedChoice::Cancel) {
+        event->ignore();
+        return;
+    }
+    if (choice == ThemedMessageBox::UnsavedChoice::Save) {
         // Save each unique dirty doc via the tab that owns it.
         QSet<RcxDocument*> saved;
         for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
@@ -8659,7 +8837,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             }
         }
     }
-    // discardBtn → fall through and accept
+    // Discard → fall through and accept
     event->accept();
 }
 
