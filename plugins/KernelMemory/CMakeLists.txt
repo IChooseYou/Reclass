@@ -47,6 +47,7 @@ add_library(KernelMemoryPlugin SHARED ${PLUGIN_SOURCES})
 
 target_link_libraries(KernelMemoryPlugin PRIVATE
     ${QT}::Widgets
+    ${QT}::Svg
     ${_QT_WINEXTRAS}
 )
 

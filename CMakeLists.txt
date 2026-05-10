@@ -270,8 +270,13 @@ if(APPLE)
         PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/themes")
 endif()
 
-# Copy example .rcx files next to the executable (same logic as themes)
-file(GLOB _example_files "${CMAKE_SOURCE_DIR}/src/examples/*.rcx")
+# Copy example .rcx files next to the executable (same logic as themes).
+# Also pick up sibling sample binaries (.png) referenced by example
+# .rcx files via "savedSources" — png.rcx ships with sample.png so the
+# user opens it and immediately sees real bytes instead of all zeros.
+file(GLOB _example_files
+    "${CMAKE_SOURCE_DIR}/src/examples/*.rcx"
+    "${CMAKE_SOURCE_DIR}/src/examples/*.png")
 
 if(NOT CMAKE_CONFIGURATION_TYPES)
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
@@ -526,12 +531,27 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_controller PRIVATE src third_party/fadec)
         target_link_libraries(test_controller PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         if(WIN32)
             target_link_libraries(test_controller PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
         endif()
         add_test(NAME test_controller COMMAND test_controller)
+
+        # ── Refresh speedups (memory-source-only optimizations) ──
+        add_executable(test_refresh_speedups tests/test_refresh_speedups.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
+        target_include_directories(test_refresh_speedups PRIVATE src third_party/fadec)
+        target_link_libraries(test_refresh_speedups PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+        if(WIN32)
+            target_link_libraries(test_refresh_speedups PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_refresh_speedups COMMAND test_refresh_speedups)
 
         add_executable(test_context_menu tests/test_context_menu.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
@@ -540,7 +560,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_context_menu PRIVATE src third_party/fadec)
         target_link_libraries(test_context_menu PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         if(WIN32)
             target_link_libraries(test_context_menu PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
@@ -554,7 +574,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_source_management PRIVATE src third_party/fadec)
         target_link_libraries(test_source_management PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         if(WIN32)
             target_link_libraries(test_source_management PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
@@ -568,7 +588,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_editor PRIVATE src third_party/fadec)
         target_link_libraries(test_editor PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         add_test(NAME test_editor COMMAND test_editor)
 
@@ -576,7 +596,7 @@ if(BUILD_TESTING)
         src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
         target_include_directories(test_rendered_view PRIVATE src)
         target_link_libraries(test_rendered_view PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         add_test(NAME test_rendered_view COMMAND test_rendered_view)
 
@@ -587,7 +607,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_type_selector PRIVATE src third_party/fadec)
         target_link_libraries(test_type_selector PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         if(WIN32)
             target_link_libraries(test_type_selector PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
@@ -601,7 +621,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_type_visibility PRIVATE src third_party/fadec)
         target_link_libraries(test_type_visibility PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         if(WIN32)
             target_link_libraries(test_type_visibility PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
@@ -611,14 +631,14 @@ if(BUILD_TESTING)
         add_executable(test_options_dialog tests/test_options_dialog.cpp
         src/optionsdialog.cpp src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
         target_include_directories(test_options_dialog PRIVATE src)
-        target_link_libraries(test_options_dialog PRIVATE ${QT}::Widgets ${QT}::Test)
+        target_link_libraries(test_options_dialog PRIVATE ${QT}::Widgets ${QT}::Test ${QT}::Svg)
         add_test(NAME test_options_dialog COMMAND test_options_dialog)
 
         # ── Goto Address dialog (UI: real QLineEdit + live validation) ──
         add_executable(test_goto_address tests/test_goto_address.cpp
             src/addressparser.cpp src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
         target_include_directories(test_goto_address PRIVATE src)
-        target_link_libraries(test_goto_address PRIVATE ${QT}::Widgets ${QT}::Test)
+        target_link_libraries(test_goto_address PRIVATE ${QT}::Widgets ${QT}::Test ${QT}::Svg)
         add_test(NAME test_goto_address COMMAND test_goto_address)
 
         # ── Command Palette (UI: real QMenuBar + QAction enumeration) ──
@@ -670,7 +690,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
         target_include_directories(test_scanner_ui PRIVATE src)
         target_link_libraries(test_scanner_ui PRIVATE
-        ${QT}::Widgets ${QT}::Concurrent ${QT}::Test)
+        ${QT}::Widgets ${QT}::Concurrent ${QT}::Test ${QT}::Svg)
         add_test(NAME test_scanner_ui COMMAND test_scanner_ui)
 
         add_executable(test_mcp tests/test_mcp.cpp)
@@ -695,7 +715,7 @@ if(BUILD_TESTING)
             target_include_directories(test_kernel_provider PRIVATE
             src plugins/KernelMemory)
             target_link_libraries(test_kernel_provider PRIVATE
-            ${QT}::Widgets ${QT}::Concurrent ${QT}::Test
+            ${QT}::Widgets ${QT}::Concurrent ${QT}::Test ${QT}::Svg
             psapi shell32 advapi32 ${_QT_WINEXTRAS})
             add_test(NAME test_kernel_provider COMMAND test_kernel_provider)
         endif()
@@ -707,7 +727,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(bench_large_class PRIVATE src third_party/fadec)
         target_link_libraries(bench_large_class PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         if(WIN32)
             target_link_libraries(bench_large_class PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
@@ -739,7 +759,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(bench_spam_append PRIVATE src third_party/fadec)
         target_link_libraries(bench_spam_append PRIVATE
-        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         if(WIN32)
             target_link_libraries(bench_spam_append PRIVATE dbghelp psapi ${_QT_WINEXTRAS})

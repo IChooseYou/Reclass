@@ -921,7 +921,12 @@ inline constexpr int kMaxTypeW    = 128; // Maximum type column width
 inline constexpr int kMinNameW    = 10;  // Minimum name column width (fits "field_0000")
 inline constexpr int kMaxNameW    = 128; // Maximum name column width
 inline constexpr int kCompactTypeW    = 20; // Type column cap for compact column mode
-inline constexpr int kDefaultRefreshMs = 660; // Auto-refresh interval (ms)
+// Auto-refresh interval (ms) — used as the *base* rate the adaptive
+// loop in RcxController::onRefreshTick widens from. 200 ms feels like
+// real-time inspection for live values; the controller automatically
+// backs off to ~1.5 s when nothing is changing or the window is
+// unfocused, so this number does not gate idle CPU.
+inline constexpr int kDefaultRefreshMs = 200;
 
 // LineGeometry — single source of truth for column math on a composed line.
 // Bundles the prefix (fold indicator), per-depth indent, and a content

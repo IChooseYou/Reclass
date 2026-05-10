@@ -91,7 +91,7 @@ if(HAS_CLR_BRIDGE)
 endif()
 
 # Link Qt
-target_link_libraries(RcNetCompatPlugin PRIVATE ${QT}::Widgets ${_QT_WINEXTRAS})
+target_link_libraries(RcNetCompatPlugin PRIVATE ${QT}::Widgets ${QT}::Svg ${_QT_WINEXTRAS})
 
 # Include directories
 target_include_directories(RcNetCompatPlugin PRIVATE

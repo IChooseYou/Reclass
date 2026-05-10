@@ -35,7 +35,7 @@ set(PLUGIN_SOURCES
 add_library(ProcessMemoryPlugin SHARED ${PLUGIN_SOURCES})
 
 # Link Qt
-target_link_libraries(ProcessMemoryPlugin PRIVATE ${QT}::Widgets ${_QT_WINEXTRAS})
+target_link_libraries(ProcessMemoryPlugin PRIVATE ${QT}::Widgets ${QT}::Svg ${_QT_WINEXTRAS})
 
 # Platform-specific linking
 if(WIN32)

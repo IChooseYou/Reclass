@@ -85,6 +85,12 @@ private slots:
     void showProfilerDialog();
 
 public:
+    // Called once from main() via QTimer::singleShot(0, …) after the
+    // first paint — runs the synchronous plugin scan and the optional
+    // MCP bridge auto-start. Pulled out of MainWindow::ctor so the
+    // window appears ~40 ms sooner. Subsequent calls are no-ops.
+    void loadPluginsDeferred();
+
     // Status bar helpers — separate app / MCP channels
     void setAppStatus(const QString& text);
     void setAppStatus(const QString& text, const QString& dimSuffix);
@@ -165,6 +171,7 @@ private:
     InspectionResult inspectAt(QWidget* widget, QPoint localPos);
     void clearInspection();
     PluginManager   m_pluginManager;
+    bool            m_pluginsLoaded = false;  // set by loadPluginsDeferred
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
     QAction*        m_actRelOfs = nullptr;
@@ -353,6 +360,14 @@ private:
     QToolButton*          m_scanDockCloseBtn = nullptr;
     DockGripWidget*       m_scanDockGrip     = nullptr;
     void createScannerDock();
+public:
+    // Lazy-build the heavy ScannerPanel widget the first time someone
+    // needs it. The dock itself is built synchronously in
+    // createScannerDock; the panel inside it is deferred to keep ~195 ms
+    // off MainWindow::ctor. Public so main() can pre-warm it via
+    // QTimer::singleShot(0, …) after first paint. Idempotent.
+    void ensureScannerPanel();
+private:
 
     // Modules/Symbols dock
     QDockWidget*           m_symbolsDock      = nullptr;
@@ -383,7 +398,14 @@ private:
     };
     QHash<QString, CachedModuleTypes> m_cachedModuleTypes;
 
+public:
+    // Lazy-built. The dock is hidden at startup and accounts for ~360 ms
+    // of QTreeView / QStandardItemModel / QTabWidget construction we
+    // don't want on the path-to-first-paint. Public so main() can pre-
+    // warm via QTimer::singleShot(0, …) and so the View > Modules
+    // toggle action can call it. Idempotent.
     void createSymbolsDock();
+private:
 
     // Bookmarks dock
     QDockWidget* m_bookmarksDock   = nullptr;

@@ -4,6 +4,7 @@
 #include "profiler.h"
 #include "rtti.h"
 #include "providers/provider.h"
+#include <QRegularExpression>
 #include <algorithm>
 #include <numeric>
 
@@ -356,6 +357,47 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                                             /*comment=*/{}, typeW, nameW, ptrTypeOverride,
                                             state.compactColumns);
 
+        // Enum mapping for primitive integer fields: a UInt8/16/32/64
+        // with refId pointing at a top-level enum struct gets its value
+        // resolved to the enum member name. So `color_type = 6` reads
+        // "0x6 (RGBA)" instead of just "0x6". One small targeted look-up
+        // that lets the existing top-level enum types (which are already
+        // first-class in the workspace) double as field annotations,
+        // without forcing the field itself to be an enum struct (which
+        // would lose the inline value rendering).
+        if (sub == 0 && node.refId != 0 && prov.isReadable(absAddr, node.byteSize())) {
+            int refIdx = tree.indexOfId(node.refId);
+            if (refIdx >= 0) {
+                const Node& refNode = tree.nodes[refIdx];
+                if (refNode.isEnum() && !refNode.enumMembers.isEmpty()) {
+                    int64_t v = 0;
+                    switch (node.kind) {
+                    case NodeKind::UInt8:  v = (int64_t)prov.readU8 (absAddr); break;
+                    case NodeKind::UInt16: v = (int64_t)prov.readU16(absAddr); break;
+                    case NodeKind::UInt32: v = (int64_t)prov.readU32(absAddr); break;
+                    case NodeKind::UInt64: v = (int64_t)prov.readU64(absAddr); break;
+                    case NodeKind::Int8:   v = (int8_t)prov.readU8 (absAddr); break;
+                    case NodeKind::Int16:  v = (int16_t)prov.readU16(absAddr); break;
+                    case NodeKind::Int32:  v = (int32_t)prov.readU32(absAddr); break;
+                    case NodeKind::Int64:  v = (int64_t)prov.readU64(absAddr); break;
+                    default: break;
+                    }
+                    QString memberName;
+                    for (const auto& m : refNode.enumMembers) {
+                        if (m.second == v) { memberName = m.first; break; }
+                    }
+                    if (!memberName.isEmpty()) {
+                        // Trim trailing padding so the annotation sits next
+                        // to the value, not floating in the middle of the
+                        // value column.
+                        while (lineText.endsWith(' ')) lineText.chop(1);
+                        lineText += QStringLiteral(" (") + memberName
+                                  + QStringLiteral(")");
+                    }
+                }
+            }
+        }
+
         // Comment annotation: user comment takes priority, then PDB symbol
         // Appended right after value text (not at fixed column) for compact display
         if (sub == 0 && state.showComments) {
@@ -368,6 +410,23 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                     commentText = sym;
             }
             if (!commentText.isEmpty()) {
+                // Embedded newlines in the stored comment would split the
+                // appended `// …` text across multiple Scintilla rows
+                // without LineMeta for the continuations — phantom rows
+                // with broken offset margins. Collapse any newline (and
+                // tabs while we're at it) to a single space + middle-dot
+                // separator so a multi-paragraph user comment stays on
+                // one logical row.
+                if (commentText.contains(QChar('\n'))
+                    || commentText.contains(QChar('\r'))
+                    || commentText.contains(QChar('\t'))) {
+                    commentText.replace(QChar('\r'), QChar(' '));
+                    commentText.replace(QChar('\t'), QChar(' '));
+                    commentText.replace(QChar('\n'), QStringLiteral(" · "));
+                    // Squash runs of >1 spaces left from blank paragraphs.
+                    static const QRegularExpression rxRun(QStringLiteral("  +"));
+                    commentText.replace(rxRun, QStringLiteral(" "));
+                }
                 // Trim trailing spaces (from value column padding) so comment sits close to value
                 while (lineText.endsWith(' ')) lineText.chop(1);
                 // commentStart is in document-column space: LineGeometry adds
@@ -1481,7 +1540,10 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     }  // end PROFILE_SCOPE("compose.widths")
 
     // Emit CommandRow as line 0 (combined: source + address + root class type + name)
-    const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE  0x0  struct NoName {");
+    // Placeholder shown only until controller.updateCommandRow rewrites
+    // it with the real source / base address / class name. "Untitled"
+    // matches MainWindow::rootName's empty-tree fallback at main.cpp:2554.
+    const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE  0x0  struct Untitled {");
     {
         LineMeta lm;
         lm.nodeIdx   = -1;

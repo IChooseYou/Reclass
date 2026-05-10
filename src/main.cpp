@@ -757,6 +757,7 @@ public:
 #include "dockoverlay.h"
 
 static void applyGlobalTheme(const rcx::Theme& theme) {
+    PROFILE_SCOPE("applyGlobalTheme");
     QPalette pal;
     pal.setColor(QPalette::Window,          theme.background);
     pal.setColor(QPalette::WindowText,      theme.text);
@@ -877,6 +878,7 @@ static QString sciGetLineText(QsciScintilla* sci, int line) {
 // MainWindow class declaration is in mainwindow.h
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+    PROFILE_SCOPE("MainWindow::ctor");
     setWindowTitle("Reclass");
     // Initial size +30% over the legacy 1080×720 to give docks + editor
     // more breathing room on first launch.
@@ -957,14 +959,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setTabPosition(Qt::RightDockWidgetArea,  QTabWidget::North);
     setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
 
-    createWorkspaceDock();
-    createScannerDock();
-    createSymbolsDock();
-    createBookmarksDock();
+    { PROFILE_SCOPE("MainWindow::createWorkspaceDock"); createWorkspaceDock(); }
+    { PROFILE_SCOPE("MainWindow::createScannerDock");   createScannerDock();   }
+    // createSymbolsDock used to run here at ~360 ms (3 trees + tab widget +
+    // models + many QSS applies). The dock is hidden by default — fired
+    // from QTimer::singleShot(0,…) below after window.show() instead, and
+    // re-entry-guarded inside the function so the View > Modules menu
+    // action can also call it the moment a user beats the timer to it.
+    { PROFILE_SCOPE("MainWindow::createBookmarksDock"); createBookmarksDock(); }
 
-    createMenus();
-    if (m_titleBar) m_titleBar->finalizeMenuBar();
-    createStatusBar();
+    { PROFILE_SCOPE("MainWindow::createMenus");         createMenus();         }
+    if (m_titleBar) {
+        PROFILE_SCOPE("TitleBarWidget::finalizeMenuBar");
+        m_titleBar->finalizeMenuBar();
+    }
+    { PROFILE_SCOPE("MainWindow::createStatusBar");     createStatusBar();     }
 
     // Eliminate gap between central widget and status bar
     if (auto* ml = layout()) {
@@ -988,15 +997,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             this, &MainWindow::applyTheme);
 
     // Apply theme once at startup (the signal only fires on change, not initial load)
-    applyTheme(ThemeManager::instance().current());
+    {
+        PROFILE_SCOPE("MainWindow::applyTheme(initial)");
+        applyTheme(ThemeManager::instance().current());
+    }
 
-    // Load plugins
-    m_pluginManager.LoadPlugins();
-
-    // Start MCP bridge
+    // Plugin loading was synchronous here (~40 ms of dlopen). Deferred
+    // out of the ctor — see loadPluginsDeferred() below. The MCP bridge
+    // also waits on plugins so it's started in the same deferred batch.
     m_mcp = new McpBridge(this, this);
-    if (QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool())
-        m_mcp->start();
 
     // Active doc tracking is handled per dock in createTab() via visibilityChanged
 
@@ -1447,6 +1456,9 @@ void MainWindow::createMenus() {
                 &QAction::setChecked);
         connect(scanAct, &QAction::toggled, this, [this](bool on) {
             if (on) {
+                // Lazy-build the panel inside the dock if the deferred
+                // post-show timer hasn't run yet. Idempotent.
+                ensureScannerPanel();
                 m_scannerDock->show();
                 m_scannerDock->raise();
                 m_scannerDock->activateWindow();
@@ -1458,8 +1470,30 @@ void MainWindow::createMenus() {
         view->addAction(scanAct);
     }
     {
-        auto* symAct = m_symbolsDock->toggleViewAction();
+        // Symbols/Modules dock is built lazily (createSymbolsDock cost
+        // ~360 ms in profiling, almost entirely tab + tree construction
+        // for a panel that's hidden at startup). Use a free-standing
+        // QAction that builds-on-toggle instead of binding to the
+        // dock's toggleViewAction (which doesn't exist yet at this
+        // point). The deferred build in main() typically gets there
+        // first; if the user beats it to the punch this still works.
+        auto* symAct = new QAction(QStringLiteral("Modules"), this);
         symAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Y));
+        symAct->setCheckable(true);
+        connect(symAct, &QAction::toggled, this, [this, symAct](bool on) {
+            createSymbolsDock();  // idempotent
+            // Re-bind the action to the dock's visibility now that the
+            // dock exists. Qt::UniqueConnection no-ops a second connect
+            // with identical (sender, signal, receiver, slot), so the
+            // first toggle wires it and subsequent toggles are
+            // harmless. Keeps the action in sync when the dock is
+            // closed via its own X button or layout restore.
+            connect(m_symbolsDock, &QDockWidget::visibilityChanged,
+                    symAct, &QAction::setChecked,
+                    Qt::UniqueConnection);
+            if (on) { m_symbolsDock->show(); m_symbolsDock->raise(); }
+            else m_symbolsDock->hide();
+        });
         view->addAction(symAct);
     }
     if (m_bookmarksDock) {
@@ -2577,6 +2611,7 @@ QDockWidget* MainWindow::createSentinelDock() {
 }
 
 QDockWidget* MainWindow::createTab(RcxDocument* doc) {
+    PROFILE_SCOPE("MainWindow::createTab");
     auto* splitter = new QSplitter(Qt::Horizontal);
     splitter->setHandleWidth(1);
     auto* ctrl = new RcxController(doc, splitter);
@@ -4041,8 +4076,8 @@ void MainWindow::selfTest() {
     editorDoc->tree.baseAddressFormula.clear();
     // Point the controller's view at the freshly-built RcxEditor root,
     // not the stale UnnamedClass id from before buildEditorDemo wiped
-    // the tree. Without this the command row reads "struct NoName" and
-    // compose may render the wrong root.
+    // the tree. Without this the command row reads "struct Untitled"
+    // (the empty-tree placeholder) and compose may render the wrong root.
     editorCtrl->setViewRootId(rcxEditorId);
 
     // Find the editor demo's dock (the most recently added doc dock that
@@ -4848,6 +4883,18 @@ void MainWindow::editTheme() {
 }
 
 void MainWindow::showOptionsDialog() { showOptionsDialog(-1); }
+
+void MainWindow::loadPluginsDeferred() {
+    PROFILE_SCOPE("MainWindow::loadPluginsDeferred");
+    if (m_pluginsLoaded) return;
+    m_pluginsLoaded = true;
+    {
+        PROFILE_SCOPE("PluginManager::LoadPlugins");
+        m_pluginManager.LoadPlugins();
+    }
+    if (m_mcp && QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool())
+        m_mcp->start();
+}
 
 void MainWindow::showProfilerDialog() {
     // Lightweight RAII timer aggregator. Dialog auto-enables profiling
@@ -5959,6 +6006,7 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
 }
 
 QDockWidget* MainWindow::project_open(const QString& path) {
+    PROFILE_SCOPE("MainWindow::project_open");
     QString filePath = path;
     if (filePath.isEmpty()) {
         filePath = QFileDialog::getOpenFileName(this,
@@ -6926,17 +6974,11 @@ void MainWindow::createScannerDock() {
         m_scannerDock->setTitleBarWidget(titleBar);
     }
 
-    m_scannerPanel = new ScannerPanel(m_scannerDock);
-    m_scannerPanel->applyTheme(ThemeManager::instance().current());
-    {
-        QSettings settings("Reclass", "Reclass");
-        QString fontName = settings.value("font", "JetBrains Mono").toString();
-        QFont f(fontName, 12);
-        f.setFixedPitch(true);
-        m_scannerPanel->setEditorFont(f);
-        m_scanDockTitle->setFont(f);
-    }
-    m_scannerDock->setWidget(m_scannerPanel);
+    // Placeholder widget so the dock has *something* to show until the
+    // real ScannerPanel is built lazily by ensureScannerPanel(). The
+    // placeholder is replaced via setWidget() — Qt deletes the prior
+    // widget under the dock automatically.
+    m_scannerDock->setWidget(new QWidget(m_scannerDock));
     // Floor on dock height — scanner now has 3 input rows (mode/value, filters,
     // workflow buttons), the breadcrumb, the result filter, the truncation
     // banner, and a results table. 140 px crushed everything; 320 px gives
@@ -6998,6 +7040,35 @@ void MainWindow::createScannerDock() {
         grip->show();
     }
 
+}
+
+// Build the heavy ScannerPanel widget on demand. Pulled out of
+// createScannerDock because it accounts for ~195 ms of MainWindow ctor
+// time on a fresh launch (FilterChips, scan buttons, type/condition
+// combos, sortable results table — a lot of widget construction). The
+// dock itself is built synchronously so menu wiring (`m_scannerDock`
+// references in createMenus) still finds a non-null target; the panel
+// inside it lazy-builds the first time someone asks for it.
+//
+// Idempotent: subsequent calls are no-ops. Triggers:
+//   * QTimer::singleShot(0, …) after window.show() in main()
+//   * View > Memory Scanner toggle (in case the user beats the timer)
+//   * Anything in MainWindow that touches m_scannerPanel directly
+void MainWindow::ensureScannerPanel() {
+    if (m_scannerPanel || !m_scannerDock) return;
+    PROFILE_SCOPE("MainWindow::ensureScannerPanel");
+    m_scannerPanel = new ScannerPanel(m_scannerDock);
+    m_scannerPanel->applyTheme(ThemeManager::instance().current());
+    {
+        QSettings settings("Reclass", "Reclass");
+        QString fontName = settings.value("font", "JetBrains Mono").toString();
+        QFont f(fontName, 12);
+        f.setFixedPitch(true);
+        m_scannerPanel->setEditorFont(f);
+        if (m_scanDockTitle) m_scanDockTitle->setFont(f);
+    }
+    m_scannerDock->setWidget(m_scannerPanel);  // replaces placeholder
+
     // Wire provider getter: lazily captures the active tab's provider at scan time
     m_scannerPanel->setProviderGetter([this]() -> std::shared_ptr<rcx::Provider> {
         auto* ctrl = activeController();
@@ -7041,6 +7112,8 @@ void MainWindow::createScannerDock() {
 }
 
 void MainWindow::createSymbolsDock() {
+    if (m_symbolsDock) return;  // idempotent: deferred + menu may both call
+    PROFILE_SCOPE("MainWindow::createSymbolsDock");
     m_symbolsDock = new QDockWidget("Modules", this);
     m_symbolsDock->setObjectName("SymbolsDock");
     m_symbolsDock->setAllowedAreas(Qt::AllDockWidgetAreas);
@@ -7152,7 +7225,8 @@ void MainWindow::createSymbolsDock() {
              t.text.name(), t.borderFocused.name()));
 
     // ── Modules tab ──
-    {
+    PROFILE_SCOPE("createSymbolsDock.tabs");
+    { PROFILE_SCOPE("createSymbolsDock.modules-tab");
         m_modulesTree = new QTreeView();
         m_modulesModel = new QStandardItemModel(this);
         m_modulesTree->setModel(m_modulesModel);
@@ -7402,7 +7476,7 @@ void MainWindow::createSymbolsDock() {
     }
 
     // ── Symbols tab ──
-    {
+    { PROFILE_SCOPE("createSymbolsDock.symbols-tab");
         auto* symbolsPage = new QWidget();
         auto* symLayout = new QVBoxLayout(symbolsPage);
         symLayout->setContentsMargins(0, 0, 0, 0);
@@ -7611,7 +7685,7 @@ void MainWindow::createSymbolsDock() {
     }
 
     // ── Types tab (PDB type import) ──
-    {
+    { PROFILE_SCOPE("createSymbolsDock.types-tab");
         auto* typesPage = new QWidget();
         auto* typLayout = new QVBoxLayout(typesPage);
         typLayout->setContentsMargins(0, 0, 0, 0);
@@ -8767,6 +8841,17 @@ void MainWindow::changeEvent(QEvent* event) {
     }
     if (event->type() == QEvent::WindowStateChange && m_titleBar)
         m_titleBar->updateMaximizeIcon();
+    // Drive the controller's adaptive refresh rate from window state:
+    // focus loss widens the interval, minimize pauses the timer.
+    // Folded into the same event handler so the wiring lives next to
+    // the activation/border-color logic above.
+    if (event->type() == QEvent::ActivationChange ||
+        event->type() == QEvent::WindowStateChange) {
+        bool focused = isActiveWindow();
+        bool visible = !isMinimized();
+        for (auto& tab : m_tabs)
+            if (tab.ctrl) tab.ctrl->setWindowState(focused, visible);
+    }
     // Keep border overlay on top after any state change
     if (m_borderOverlay) {
         m_borderOverlay->setGeometry(rect());
@@ -9277,6 +9362,25 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName("Reclass");
     app.setStyle(new MenuBarStyle("Fusion")); // Fusion + generous menu sizing
 
+    // ── Profiler bootstrap ──
+    // Enable PROFILE_SCOPE recording before anything else runs so init paths
+    // (theme apply, font registration, popup preload, MainWindow ctor) all
+    // get measured. The dialog auto-pops below after the window shows, so
+    // the user sees results immediately without navigating to View > Profiler.
+    //
+    // Opt-in via `--profile` only — default startup is clean (no
+    // dialog, no overhead). View > Profiler still works for ad-hoc
+    // measurement, and Profiler::instance().setEnabled(true) inside
+    // showProfilerDialog enables sample collection from that point
+    // forward. The early-enable + auto-pop is kept here strictly for
+    // measuring init-path costs that happen before the user can click.
+    // --screenshot also disables it so captures stay clean.
+    const bool autoProfile =
+        app.arguments().contains(QStringLiteral("--profile"))
+        && !app.arguments().contains(QStringLiteral("--screenshot"));
+    if (autoProfile)
+        rcx::Profiler::instance().setEnabled(true);
+
     // Load embedded fonts
     if (QFontDatabase::addApplicationFont(":/fonts/JetBrainsMono.ttf") == -1)
         qWarning("Failed to load embedded JetBrains Mono font");
@@ -9287,13 +9391,17 @@ int main(int argc, char* argv[]) {
         rcx::RcxEditor::setGlobalFontName(savedFont);
     }
 
-    // Global theme
-    applyGlobalTheme(rcx::ThemeManager::instance().current());
-
-    // Pre-pay Qt's one-time DLL/style/font init so first popup open is instant.
-    // Must run after theme (palette needs to be set) but before MainWindow
-    // (which may trigger popup creation via controller).
-    rcx::TypeSelectorPopup::preload();
+    // Global theme — first call is intentionally a no-op-on-empty-app
+    // (no widgets yet to propagate to). The expensive call lives in
+    // MainWindow::applyTheme(), which fires after dock + menu + status
+    // bar are built. Removed the cheap pre-MainWindow call: 1 ms saved
+    // and one fewer redundant qApp->setPalette() pass.
+    //
+    // TypeSelectorPopup::preload() used to run here and cost ~90 ms of
+    // Qt DLL/style cold-start. Deferred to a QTimer::singleShot(0, …)
+    // below so window exposure / first paint don't wait on it. The
+    // first popup open still pays the cost, but the user sees the
+    // window itself ~90 ms sooner.
 
     rcx::MainWindow window;
     window.setWindowIcon(QIcon(":/icons/class.png"));
@@ -9302,6 +9410,55 @@ int main(int argc, char* argv[]) {
 #ifdef __linux__
     window.showMaximized();
 #endif
+
+    // ── Deferred startup work ──
+    // These chunks were running synchronously before window.show() and
+    // adding ~130 ms to perceived startup. Both are safe to defer:
+    //   * TypeSelectorPopup::preload — burns Qt's one-time DLL/style
+    //     cold-start (~90 ms). The popup isn't shown until the user
+    //     clicks a type cell, so the cost shifts off the critical path.
+    //   * PluginManager::LoadPlugins — dlopens every plugin in Plugins/
+    //     (~40 ms). Process attach is the first place a plugin matters,
+    //     and that's interactive — a single tick after first paint is
+    //     plenty. MCP bridge auto-start uses plugin info, so kick that
+    //     too in the same callback if it was scheduled.
+    QTimer::singleShot(0, &window, []() {
+        rcx::TypeSelectorPopup::preload();
+    });
+    QTimer::singleShot(0, &window, [&window]() {
+        window.loadPluginsDeferred();
+    });
+    // Build the ScannerPanel widget after first paint so its ~195 ms
+    // of FilterChip + scan button + results table construction doesn't
+    // gate the user seeing the window. The dock shell already exists
+    // (built by createScannerDock during MainWindow::ctor) so menu
+    // wiring + layout are already correct; we're just lazy-filling
+    // the dock's content. View > Memory Scanner triggers the same
+    // build immediately if the user beats this timer to the punch.
+    QTimer::singleShot(0, &window, [&window]() {
+        window.ensureScannerPanel();
+    });
+    // Symbols/Modules dock is also lazy. Same idea: hidden at startup,
+    // ~360 ms of QTreeView/QTabWidget/QStandardItemModel construction
+    // moved off the path-to-first-paint. The View > Modules action
+    // also calls this if the user beats the timer.
+    QTimer::singleShot(0, &window, [&window]() {
+        window.createSymbolsDock();
+    });
+
+    // Pop the profiler dialog right after the main window is up. Deferred
+    // through the event loop so window exposure / first compose lands in
+    // the profile snapshot before the dialog reads it. Same gate as the
+    // setEnabled call above. invokeMethod (rather than a direct call)
+    // because showProfilerDialog is a private slot — Qt's meta system
+    // bypasses access control for slot invocation, no need to leak the
+    // method into the public API just for one auto-launch hook.
+    if (autoProfile) {
+        QTimer::singleShot(0, &window, [&window]() {
+            QMetaObject::invokeMethod(&window, "showProfilerDialog",
+                                      Qt::QueuedConnection);
+        });
+    }
 
     // --screenshot <path> [scanner]: open default project (optionally also
     // show the scanner dock), grab the window, save, exit.

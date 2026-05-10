@@ -1,6 +1,7 @@
 #pragma once
 #include "provider.h"
 #include <QHash>
+#include <QSet>
 #include <memory>
 
 namespace rcx {
@@ -16,6 +17,14 @@ class SnapshotProvider : public Provider {
     std::shared_ptr<Provider> m_real;
     QHash<uint64_t, QByteArray> m_pages;   // page-aligned addr → 4096-byte page
     int m_mainExtent = 0;                  // logical size of the main struct range
+
+    // Pages we never have to re-read for the lifetime of this snapshot.
+    // Populated by the controller after a refresh once it's seen the page
+    // belongs to a process module's executable image (.text/.rdata/etc.).
+    // Module memory is read-only at runtime, so re-syscalling it every
+    // 200 ms is pure waste — the cost is highest for RTTI-decorated rows
+    // because each one chases a vtable pointer into module memory.
+    QSet<uint64_t> m_permanentPages;
 
     static constexpr uint64_t kPageSize = 4096;
     static constexpr uint64_t kPageMask = ~(kPageSize - 1);
@@ -123,6 +132,27 @@ public:
         m_mainExtent = mainExtent;
     }
 
+    // Merge freshly-read pages into the existing snapshot rather than
+    // wholesale replacing it. Used by the per-tick refresh once we
+    // started skipping pages (permanent / stable / out-of-viewport):
+    // an unread page should retain its previous bytes, not vanish.
+    void mergePages(const PageMap& fresh, int mainExtent) {
+        for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it)
+            m_pages.insert(it.key(), it.value());
+        m_mainExtent = mainExtent;
+    }
+
+    // Mark a page as immutable for the lifetime of this snapshot.
+    // The controller calls this once it has classified the page as
+    // belonging to a read-only module section.
+    void markPermanent(uint64_t pageAddr) {
+        m_permanentPages.insert(pageAddr & kPageMask);
+    }
+    bool isPermanent(uint64_t pageAddr) const {
+        return m_permanentPages.contains(pageAddr & kPageMask);
+    }
+    void clearPermanent() { m_permanentPages.clear(); }
+
     // Patch specific bytes in existing pages (called after user writes a value)
     void patchPages(uint64_t addr, const void* buf, int len) {
         const char* src = static_cast<const char*>(buf);
@@ -143,6 +173,7 @@ public:
     }
 
     const PageMap& pages() const { return m_pages; }
+    const QSet<uint64_t>& permanentPages() const { return m_permanentPages; }
 };
 
 } // namespace rcx

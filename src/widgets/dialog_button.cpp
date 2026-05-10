@@ -33,23 +33,26 @@ void DialogButton::setVariant(Variant v) {
 
 void DialogButton::applyTheme() {
     const auto& t = ThemeManager::instance().current();
-    QString fg, accent, hoverBg, pressedBg;
+    // No top-emphasis stripe — variants are distinguished by hover
+    // tint and focus border only. The earlier 2 px accent line read
+    // as visual noise on small dialogs ("very gross") and offered no
+    // affordance the focus border doesn't already give.
+    QString fg, hoverBg, pressedBg, focusBorder;
     switch (m_variant) {
     case Primary:
-        fg        = t.text.name();
-        accent    = t.indHoverSpan.name();
-        hoverBg   = t.hover.name();
-        pressedBg = t.hover.darker(115).name();
+        fg          = t.text.name();
+        hoverBg     = t.hover.name();
+        pressedBg   = t.hover.darker(115).name();
+        focusBorder = t.indHoverSpan.name();
         break;
     case Secondary:
-        fg        = t.text.name();
-        accent    = QStringLiteral("transparent");
-        hoverBg   = t.hover.name();
-        pressedBg = t.hover.darker(115).name();
+        fg          = t.text.name();
+        hoverBg     = t.hover.name();
+        pressedBg   = t.hover.darker(115).name();
+        focusBorder = t.border.name();
         break;
     case Destructive:
-        fg     = t.text.name();
-        accent = t.indHeatHot.name();
+        fg = t.text.name();
         // Subtle red wash on hover instead of full bright red — keeps
         // the button readable while signalling "this can't be undone."
         hoverBg = QStringLiteral("rgba(%1, %2, %3, 90)")
@@ -60,19 +63,20 @@ void DialogButton::applyTheme() {
                         .arg(t.indHeatHot.red())
                         .arg(t.indHeatHot.green())
                         .arg(t.indHeatHot.blue());
+        focusBorder = t.indHeatHot.name();
         break;
     }
     setStyleSheet(QStringLiteral(
         "QPushButton { background: transparent; color:%1;"
-        "  border: 1px solid %2; border-top: 2px solid %3;"
+        "  border: 1px solid %2;"
         "  border-radius: 2px; padding: 2px 14px; min-width: 72px; }"
-        "QPushButton:hover { background:%4; }"
-        "QPushButton:pressed { background:%5; }"
-        "QPushButton:disabled { color:%6; border-top-color:%2; }"
-        "QPushButton:focus { border-color:%7; }")
-        .arg(fg, t.border.name(), accent,
+        "QPushButton:hover { background:%3; }"
+        "QPushButton:pressed { background:%4; }"
+        "QPushButton:disabled { color:%5; }"
+        "QPushButton:focus { border-color:%6; }")
+        .arg(fg, t.border.name(),
              hoverBg, pressedBg, t.textMuted.name(),
-             t.indHoverSpan.name()));
+             focusBorder));
 }
 
 } // namespace rcx

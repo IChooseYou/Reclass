@@ -3,8 +3,8 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPainter>
-#include <QPainterPath>
 #include <QFontMetrics>
+#include <QSvgRenderer>
 
 namespace rcx {
 
@@ -22,7 +22,7 @@ ThemedMessageBox::ThemedMessageBox(QWidget* parent, Severity sev,
     topRow->setSpacing(16);
 
     m_iconLbl = new QLabel(this);
-    m_iconLbl->setFixedSize(40, 40);
+    m_iconLbl->setFixedSize(32, 32);
     m_iconLbl->setAlignment(Qt::AlignCenter);
     topRow->addWidget(m_iconLbl, 0, Qt::AlignTop);
 
@@ -57,10 +57,10 @@ void ThemedMessageBox::setDetailText(const QString& detail) {
         m_detailLbl->setWordWrap(true);
         m_detailLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
         // Slot the detail block above the button row, indented to align
-        // with the body text (40 px icon + 16 px gap).
+        // with the body text (32 px icon + 16 px gap).
         auto* outer = static_cast<QVBoxLayout*>(layout());
         auto* indent = new QHBoxLayout;
-        indent->setContentsMargins(56, 0, 0, 0);
+        indent->setContentsMargins(48, 0, 0, 0);
         indent->setSpacing(0);
         indent->addWidget(m_detailLbl);
         outer->insertLayout(outer->count() - 1, indent);
@@ -92,52 +92,35 @@ void ThemedMessageBox::applyTheme() {
 
 void ThemedMessageBox::redrawIcon() {
     if (!m_iconLbl) return;
-    const auto& t = ThemeManager::instance().current();
-    QColor accent;
-    QString glyph;
+    // Pull from the same vsicon library QMenu / QAction icons use, so
+    // the dialog reads as part of the app — not a hand-drawn shape
+    // that's never quite centered. The SVGs live in src/vsicons and
+    // are exposed by resources.qrc as ":/vsicons/<name>.svg".
+    QString iconPath;
     switch (m_severity) {
-    case Info:     accent = t.indHoverSpan; glyph = QStringLiteral("i"); break;
-    case Warning:  accent = t.focusGlow;    glyph = QStringLiteral("!"); break;
-    case Critical: accent = t.indHeatHot;   glyph = QStringLiteral("!"); break;
-    case Question: accent = t.indHoverSpan; glyph = QStringLiteral("?"); break;
+    case Info:     iconPath = QStringLiteral(":/vsicons/info.svg");     break;
+    case Warning:  iconPath = QStringLiteral(":/vsicons/warning.svg");  break;
+    case Critical: iconPath = QStringLiteral(":/vsicons/error.svg");    break;
+    case Question: iconPath = QStringLiteral(":/vsicons/question.svg"); break;
     }
-    const int W = 40, H = 40;
-    qreal dpr = devicePixelRatioF();
-    if (dpr <= 0) dpr = 1.0;
+    const int W = 32, H = 32;  // logical px — fixed-size label bounds
+    const qreal dpr = qMax(1.0, devicePixelRatioF());
     QPixmap pm(QSize(W, H) * dpr);
     pm.fill(Qt::transparent);
     pm.setDevicePixelRatio(dpr);
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing, true);
-    p.setRenderHint(QPainter::TextAntialiasing, true);
-
-    if (m_severity == Warning) {
-        // Triangle silhouette is a visual cue users decode pre-attentively
-        // — distinct from the info / question circles below.
-        QPainterPath tri;
-        tri.moveTo(W / 2.0, 4);
-        tri.lineTo(W - 4,   H - 6);
-        tri.lineTo(4,       H - 6);
-        tri.closeSubpath();
-        p.fillPath(tri, accent);
-    } else {
-        p.setPen(Qt::NoPen);
-        p.setBrush(accent);
-        p.drawEllipse(QRectF(4, 4, W - 8, H - 8));
+    QSvgRenderer r(iconPath);
+    if (r.isValid()) {
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        // Render into the full logical W×H — QSvgRenderer respects the
+        // SVG's viewBox and draws centered within the destination, so
+        // off-center shapes (the painter version we used to do) can't
+        // happen here.
+        r.render(&p, QRectF(0, 0, W, H));
     }
-
-    QFont f = font();
-    f.setPointSizeF(f.pointSizeF() + 8);
-    f.setBold(true);
-    p.setFont(f);
-    // Glyph in the dialog background colour so it punches a hole in
-    // the accent shape — works on both light and dark themes without
-    // a separate luminance branch.
-    p.setPen(t.background);
-    QRectF glyphRect(0, m_severity == Warning ? 6 : 0, W, H);
-    p.drawText(glyphRect, Qt::AlignCenter, glyph);
-    p.end();
     m_iconLbl->setPixmap(pm);
+    m_iconLbl->setAlignment(Qt::AlignCenter);
 }
 
 void ThemedMessageBox::info(QWidget* parent, const QString& title,

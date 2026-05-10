@@ -1,4 +1,5 @@
 #include "typeselectorpopup.h"
+#include "profiler.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -995,6 +996,7 @@ static void runPrimerOnce() {
 }
 
 void TypeSelectorPopup::preload() {
+    PROFILE_SCOPE("TypeSelectorPopup::preload");
     runPrimerOnce();
 }
 

@@ -1,0 +1,239 @@
+{
+    "baseAddress": "0",
+    "nextId": "100",
+    "savedSources": [
+        {
+            "kind": "File",
+            "displayName": "sample.png",
+            "filePath": "sample.png",
+            "baseAddress": "0",
+            "baseAddressFormula": ""
+        }
+    ],
+    "nodes": [
+        {
+            "id": "1",
+            "kind": "Struct",
+            "classKeyword": "struct",
+            "name": "header",
+            "structTypeName": "PNG_Header",
+            "comment": "PNG file header. Spec: https://www.w3.org/TR/png/",
+            "parentId": "0",
+            "offset": 0,
+            "collapsed": false
+        },
+
+        {
+            "id": "50",
+            "kind": "Struct",
+            "classKeyword": "enum",
+            "elementKind": "UInt8",
+            "name": "PNG_ColorType",
+            "structTypeName": "PNG_ColorType",
+            "comment": "PNG color type (IHDR byte at offset 0x19).",
+            "parentId": "0",
+            "offset": 0,
+            "enumMembers": [
+                { "name": "Grayscale",       "value": "0" },
+                { "name": "RGB",             "value": "2" },
+                { "name": "Palette",         "value": "3" },
+                { "name": "GrayscaleAlpha",  "value": "4" },
+                { "name": "RGBA",            "value": "6" }
+            ]
+        },
+        {
+            "id": "51",
+            "kind": "Struct",
+            "classKeyword": "enum",
+            "elementKind": "UInt8",
+            "name": "PNG_Compression",
+            "structTypeName": "PNG_Compression",
+            "comment": "Only DEFLATE is defined by the PNG spec.",
+            "parentId": "0",
+            "offset": 0,
+            "enumMembers": [
+                { "name": "Deflate", "value": "0" }
+            ]
+        },
+        {
+            "id": "52",
+            "kind": "Struct",
+            "classKeyword": "enum",
+            "elementKind": "UInt8",
+            "name": "PNG_FilterMethod",
+            "structTypeName": "PNG_FilterMethod",
+            "comment": "Only adaptive filtering is defined by the PNG spec.",
+            "parentId": "0",
+            "offset": 0,
+            "enumMembers": [
+                { "name": "Adaptive", "value": "0" }
+            ]
+        },
+        {
+            "id": "53",
+            "kind": "Struct",
+            "classKeyword": "enum",
+            "elementKind": "UInt8",
+            "name": "PNG_Interlace",
+            "structTypeName": "PNG_Interlace",
+            "comment": "0 = no interlacing, 1 = Adam7 interlacing.",
+            "parentId": "0",
+            "offset": 0,
+            "enumMembers": [
+                { "name": "None",  "value": "0" },
+                { "name": "Adam7", "value": "1" }
+            ]
+        },
+
+        {
+            "id": "2",
+            "kind": "Array",
+            "name": "magic",
+            "comment": "PNG signature: 89 'PNG' CR LF 1A LF.",
+            "parentId": "1",
+            "offset": 0,
+            "elementKind": "UInt8",
+            "arrayLen": 8,
+            "collapsed": true
+        },
+        {
+            "id": "3",
+            "kind": "UInt32",
+            "name": "ihdr_length",
+            "comment": "IHDR chunk data length (always 13), big-endian.",
+            "parentId": "1",
+            "offset": 8,
+            "bigEndian": true
+        },
+        {
+            "id": "4",
+            "kind": "Array",
+            "name": "ihdr_type",
+            "comment": "Chunk type tag for IHDR; bytes 0x49 0x48 0x44 0x52.",
+            "parentId": "1",
+            "offset": 12,
+            "elementKind": "UInt8",
+            "arrayLen": 4,
+            "collapsed": true
+        },
+        {
+            "id": "5",
+            "kind": "UInt32",
+            "name": "width",
+            "comment": "Image width in pixels (big-endian).",
+            "parentId": "1",
+            "offset": 16,
+            "bigEndian": true
+        },
+        {
+            "id": "6",
+            "kind": "UInt32",
+            "name": "height",
+            "comment": "Image height in pixels (big-endian).",
+            "parentId": "1",
+            "offset": 20,
+            "bigEndian": true
+        },
+        {
+            "id": "7",
+            "kind": "UInt8",
+            "name": "bit_depth",
+            "comment": "Bits per channel: 1, 2, 4, 8, or 16.",
+            "parentId": "1",
+            "offset": 24
+        },
+        {
+            "id": "8",
+            "kind": "UInt8",
+            "name": "color_type",
+            "comment": "See PNG_ColorType enum at the bottom of this file.",
+            "parentId": "1",
+            "offset": 25,
+            "refId": "50"
+        },
+        {
+            "id": "9",
+            "kind": "UInt8",
+            "name": "compression",
+            "comment": "See PNG_Compression enum.",
+            "parentId": "1",
+            "offset": 26,
+            "refId": "51"
+        },
+        {
+            "id": "10",
+            "kind": "UInt8",
+            "name": "filter",
+            "comment": "See PNG_FilterMethod enum.",
+            "parentId": "1",
+            "offset": 27,
+            "refId": "52"
+        },
+        {
+            "id": "11",
+            "kind": "UInt8",
+            "name": "interlace",
+            "comment": "See PNG_Interlace enum.",
+            "parentId": "1",
+            "offset": 28,
+            "refId": "53"
+        },
+        {
+            "id": "12",
+            "kind": "UInt32",
+            "name": "ihdr_crc",
+            "comment": "CRC32 over the IHDR chunk (type+data), big-endian.",
+            "parentId": "1",
+            "offset": 29,
+            "bigEndian": true
+        },
+        {
+            "id": "13",
+            "kind": "UInt32",
+            "name": "next_chunk_length",
+            "comment": "Length of the chunk that follows IHDR, big-endian.",
+            "parentId": "1",
+            "offset": 33,
+            "bigEndian": true
+        },
+        {
+            "id": "14",
+            "kind": "Array",
+            "name": "next_chunk_type",
+            "comment": "Type tag of the next chunk (e.g. IDAT, pHYs, sRGB, tEXt).",
+            "parentId": "1",
+            "offset": 37,
+            "elementKind": "UInt8",
+            "arrayLen": 4,
+            "collapsed": true
+        },
+        {
+            "id": "15",
+            "kind": "Hex64",
+            "name": "chunk_data_0",
+            "comment": "First 8 bytes of the next chunk's payload.",
+            "parentId": "1",
+            "offset": 41
+        },
+        { "id": "16", "kind": "Hex64", "name": "chunk_data_1", "parentId": "1", "offset": 49 },
+        { "id": "17", "kind": "Hex64", "name": "chunk_data_2", "parentId": "1", "offset": 57 },
+        { "id": "18", "kind": "Hex64", "name": "chunk_data_3", "parentId": "1", "offset": 65 },
+        { "id": "19", "kind": "Hex64", "name": "chunk_data_4", "parentId": "1", "offset": 73 },
+        { "id": "20", "kind": "Hex64", "name": "chunk_data_5", "parentId": "1", "offset": 81 },
+        { "id": "21", "kind": "Hex64", "name": "chunk_data_6", "parentId": "1", "offset": 89 },
+        { "id": "22", "kind": "Hex64", "name": "chunk_data_7", "parentId": "1", "offset": 97 },
+        { "id": "23", "kind": "Hex64", "name": "chunk_data_8", "parentId": "1", "offset": 105 },
+        { "id": "24", "kind": "Hex64", "name": "chunk_data_9", "parentId": "1", "offset": 113 },
+        {
+            "id": "25",
+            "kind": "Array",
+            "name": "chunk_data_tail",
+            "comment": "Last 7 bytes of the chunk payload before the implicit chunk CRC.",
+            "parentId": "1",
+            "offset": 121,
+            "elementKind": "UInt8",
+            "arrayLen": 7,
+            "collapsed": true
+        }
+    ]
+}

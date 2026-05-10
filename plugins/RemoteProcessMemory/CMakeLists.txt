@@ -78,6 +78,7 @@ add_library(RemoteProcessMemoryPlugin SHARED ${PLUGIN_SOURCES})
 
 target_link_libraries(RemoteProcessMemoryPlugin PRIVATE
     ${QT}::Widgets
+    ${QT}::Svg
     ${_QT_WINEXTRAS}
 )
 

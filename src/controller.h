@@ -8,7 +8,10 @@
 #include <QTimer>
 #include <QFutureWatcher>
 #include <QPointer>
+#include <QPair>
+#include <QJsonArray>
 #include <memory>
+#include <optional>
 
 namespace rcx {
 
@@ -33,6 +36,13 @@ public:
     QString                    dataPath;
     bool                       modified = false;
     QHash<NodeKind, QString>   typeAliases;
+    // Saved-source entries deserialized from the .rcx file at load
+    // time. Held as raw JSON until a controller attaches and lifts
+    // them into its own QVector<SavedSourceEntry> — keeps RcxDocument
+    // free of the controller's struct dependency. Examples like
+    // png.rcx use this to ship a sibling sample binary that the
+    // controller auto-attaches on first load.
+    QJsonArray                 pendingSavedSources;
 
     QString resolveTypeName(NodeKind kind) const {
         auto it = typeAliases.find(kind);
@@ -172,6 +182,12 @@ public:
     const QHash<uint64_t, ValueHistory>& valueHistory() const { return m_valueHistory; }
     const ComposeResult& lastResult() const { return m_lastResult; }
     int  dataExtent() const { return computeDataExtent(); }
+    // Refresh-speedup observability (test-only).
+    int  refreshIntervalMs()  const { return m_refreshTimer ? m_refreshTimer->interval() : 0; }
+    bool refreshTimerActive() const { return m_refreshTimer && m_refreshTimer->isActive(); }
+    int  idleTicks()          const { return m_idleTicks; }
+    int  pageStability(uint64_t pageAddr) const { return m_pageStability.value(pageAddr & ~uint64_t(4095), 0); }
+    const SnapshotProvider* snapshotProv() const { return m_snapshotProv.get(); }
 
 signals:
     void nodeSelected(int nodeIdx);
@@ -246,6 +262,33 @@ private:
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;
 
+    // ── Refresh speedups (memory-source-only optimizations) ──
+    // Per-page stability counter: increments every tick a page's bytes
+    // didn't change, resets to 0 on byte change. Pages stable for >=
+    // kStabilityThreshold ticks get re-read at half rate (every other
+    // tick) so an idle struct stops syscalling at the full cadence.
+    QHash<uint64_t, int> m_pageStability;
+    static constexpr int kStabilityThreshold = 5;
+
+    // Tick counter — used to halve the read cadence for stable pages.
+    uint64_t m_tickCount = 0;
+
+    // Adaptive refresh: counts back-to-back ticks where no page bytes
+    // changed. After kIdleBackoffTicks of these we widen the timer
+    // interval geometrically up to m_refreshIntervalMaxMs. Reset to
+    // m_refreshIntervalBaseMs (snappy) on the next observed change or
+    // window focus-in.
+    int m_idleTicks = 0;
+    int m_refreshIntervalBaseMs = 200;   // snappy default, focused
+    int m_refreshIntervalMaxMs  = 1500;  // backed-off cap
+    int m_refreshIntervalBlurMs = 1500;  // unfocused cap (set on focusOut)
+    static constexpr int kIdleBackoffTicks = 8;
+
+    // Window state — drives focus-/minimize-aware throttling. Wired
+    // from QGuiApplication::applicationStateChanged.
+    bool m_windowFocused = true;
+    bool m_windowVisible = true;
+
     QVector<RcxDocument*>* m_projectDocs = nullptr;
 
     // ── Undo grouping for rapid ←→ cycling ──
@@ -253,6 +296,10 @@ private:
     bool     m_cycleMacroOpen = false;
 
     void connectEditor(RcxEditor* editor);
+    // Lift doc->pendingSavedSources (populated by RcxDocument::load
+    // from the .rcx's "savedSources" array) into m_savedSources and
+    // auto-activate the first one. Called once from the constructor.
+    void ingestPendingSavedSources();
     void appendBytesDialog(QWidget* parent, uint64_t targetId);
     void insertStaticField(uint64_t parentId);
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
@@ -267,6 +314,30 @@ private:
     void onRefreshTick();
     void onReadComplete();
     int  computeDataExtent() const;
+    // Byte range covered by visible lines across all attached editors,
+    // expressed as [absStart, absEnd). Returns std::nullopt when no
+    // editor is showing anything yet (during construction). Used by
+    // onRefreshTick to skip pages that nobody is looking at — the
+    // snapshot retains stale bytes for those, refresh resumes when
+    // the user scrolls them back into view.
+    std::optional<QPair<uint64_t, uint64_t>> viewportAddressRange() const;
+    // Re-classify pages just merged into the snapshot — pages wholly
+    // contained within an executable region get marked permanent so
+    // future ticks skip them entirely.
+    void classifyPermanentPages(const PageMap& fresh);
+    // Adaptive interval helpers — separate from setRefreshInterval so
+    // user-level changes (Options dialog) can update the *base* without
+    // fighting the per-tick adaptive logic.
+    void applyAdaptiveInterval();
+
+public:
+    // Driven by MainWindow on QGuiApplication::applicationStateChanged
+    // and on its own changeEvent (minimize/restore). Public so the
+    // wiring lives in one place instead of every controller subscribing
+    // to a global singleton.
+    void setWindowState(bool focused, bool visible);
+
+private:
     void resetSnapshot();
     void collectPointerRanges(uint64_t structId, uint64_t memBase,
                               int depth, int maxDepth,

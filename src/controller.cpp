@@ -17,9 +17,11 @@
 #include <QSplitter>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QJsonParseError>
 #include <QMenu>
 #include <QWidgetAction>
 #include <QInputDialog>
@@ -204,20 +206,53 @@ bool RcxDocument::save(const QString& path) {
 }
 
 bool RcxDocument::load(const QString& path) {
+    PROFILE_SCOPE("RcxDocument::load");
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
         return false;
+    QByteArray bytes;
+    {
+        PROFILE_SCOPE("RcxDocument::load.read");
+        bytes = file.readAll();
+    }
+
+    // Empty file → fresh empty project (legitimate edge case: a brand-new
+    // .rcx the user just touched). Any non-empty file MUST parse as JSON;
+    // otherwise we'd silently swallow raw binaries (e.g. a .png picked
+    // through "All Files (*)") and present them as a "struct NoName"
+    // placeholder, which looks like a bug to the user.
+    QJsonParseError jerr;
+    QJsonDocument jdoc;
+    {
+        PROFILE_SCOPE("RcxDocument::load.json-parse");
+        jdoc = bytes.isEmpty()
+            ? QJsonDocument(QJsonObject{})
+            : QJsonDocument::fromJson(bytes, &jerr);
+    }
+    if (jdoc.isNull() || !jdoc.isObject()) {
+        qWarning().noquote() << "[load]" << path << "isn't a Reclass project ("
+                             << (jdoc.isNull() ? jerr.errorString()
+                                               : QStringLiteral("not a JSON object"))
+                             << ") — refuse rather than show Untitled placeholder";
+        return false;
+    }
+
     undoStack.clear();
-    QJsonDocument jdoc = QJsonDocument::fromJson(file.readAll());
     QJsonObject root = jdoc.object();
-    tree = NodeTree::fromJson(root);
+    {
+        PROFILE_SCOPE("RcxDocument::load.tree-from-json");
+        tree = NodeTree::fromJson(root);
+    }
 
     // Validate + repair on load: orphans re-rooted, cycles broken, duplicate
     // ids re-numbered. Silent on clean trees; non-fatal on dirty so the user
     // still gets a usable view of even partially-corrupted files.
-    auto vr = tree.validate(/*repair=*/true);
-    if (!vr.clean())
-        qWarning() << "[load] tree validation:" << path << vr.summary();
+    {
+        PROFILE_SCOPE("RcxDocument::load.validate");
+        auto vr = tree.validate(/*repair=*/true);
+        if (!vr.clean())
+            qWarning() << "[load] tree validation:" << path << vr.summary();
+    }
 
     // Load type aliases
     typeAliases.clear();
@@ -229,6 +264,25 @@ bool RcxDocument::load(const QString& path) {
             typeAliases[k] = v;
     }
 
+    // Restore saved sources (if the file shipped any). Stored as raw
+    // JSON on the doc; the controller lifts them into its own
+    // SavedSourceEntry list once it attaches and (for example) the
+    // png.rcx demo can auto-attach its sibling sample .png.
+    // Relative filePaths are resolved against the .rcx directory so
+    // examples are relocatable across install layouts.
+    pendingSavedSources = root["savedSources"].toArray();
+    if (!pendingSavedSources.isEmpty()) {
+        QString rcxDir = QFileInfo(path).absolutePath();
+        for (int i = 0; i < pendingSavedSources.size(); ++i) {
+            QJsonObject so = pendingSavedSources[i].toObject();
+            QString fp = so["filePath"].toString();
+            if (!fp.isEmpty() && QFileInfo(fp).isRelative()) {
+                so["filePath"] = QDir(rcxDir).absoluteFilePath(fp);
+                pendingSavedSources[i] = so;
+            }
+        }
+    }
+
     filePath = path;
     modified = false;
     emit documentChanged();
@@ -236,6 +290,7 @@ bool RcxDocument::load(const QString& path) {
 }
 
 void RcxDocument::loadData(const QString& binaryPath) {
+    PROFILE_SCOPE("RcxDocument::loadData(path)");
     QFile file(binaryPath);
     if (!file.open(QIODevice::ReadOnly))
         return;
@@ -248,6 +303,7 @@ void RcxDocument::loadData(const QString& binaryPath) {
 }
 
 void RcxDocument::loadData(const QByteArray& data) {
+    PROFILE_SCOPE("RcxDocument::loadData(bytes)");
     undoStack.clear();
     provider = std::make_shared<BufferProvider>(data);
     tree.baseAddress = 0;
@@ -285,6 +341,7 @@ void RcxCommand::redo() {
 RcxController::RcxController(RcxDocument* doc, QWidget* parent)
     : QObject(parent), m_doc(doc)
 {
+    PROFILE_SCOPE("RcxController::ctor");
     fmt::setTypeNameProvider(docTypeNameProvider);
     connect(m_doc, &RcxDocument::documentChanged, this, &RcxController::refresh);
     setupAutoRefresh();
@@ -294,6 +351,42 @@ RcxController::RcxController(RcxDocument* doc, QWidget* parent)
     connect(this, &RcxController::nodeSelected, this, [this](int /*nodeIdx*/) {
         hideHexToolbar();
     });
+
+    // Lift any saved sources the .rcx shipped with into our own list,
+    // and (if any) auto-attach the first one. Examples like png.rcx
+    // use this so opening the file just shows the bytes — no manual
+    // "now attach the .png as a source" step.
+    ingestPendingSavedSources();
+}
+
+void RcxController::ingestPendingSavedSources() {
+    PROFILE_SCOPE("RcxController::ingestPendingSavedSources");
+    if (!m_doc || m_doc->pendingSavedSources.isEmpty()) return;
+    QJsonArray arr = m_doc->pendingSavedSources;
+    m_doc->pendingSavedSources = QJsonArray{};   // consume once
+    for (const auto& v : arr) {
+        QJsonObject so = v.toObject();
+        SavedSourceEntry e;
+        e.kind             = so["kind"].toString();
+        e.displayName      = so["displayName"].toString();
+        e.filePath         = so["filePath"].toString();
+        e.providerTarget   = so["providerTarget"].toString();
+        e.baseAddress      = so["baseAddress"].toString("0").toULongLong(nullptr, 16);
+        e.baseAddressFormula = so["baseAddressFormula"].toString();
+        m_savedSources.append(e);
+    }
+    if (m_savedSources.isEmpty()) return;
+    // Auto-activate the first saved source. switchToSavedSource handles
+    // the File / plugin distinction. Skip silently when the referenced
+    // file is missing — the user still gets the layout, just no bytes.
+    const auto& first = m_savedSources.first();
+    if (first.kind == QStringLiteral("File")
+        && !first.filePath.isEmpty()
+        && !QFileInfo::exists(first.filePath)) {
+        qWarning() << "[load] saved source missing:" << first.filePath;
+        return;
+    }
+    switchToSavedSource(0);
 }
 
 RcxController::~RcxController() {
@@ -314,6 +407,7 @@ RcxEditor* RcxController::primaryEditor() const {
 }
 
 RcxEditor* RcxController::addSplitEditor(QWidget* parent) {
+    PROFILE_SCOPE("RcxController::addSplitEditor");
     auto* editor = new RcxEditor(parent);
     m_editors.append(editor);
     connectEditor(editor);
@@ -4158,7 +4252,7 @@ void RcxController::updateCommandRow() {
             QString keyword = n.resolvedClassKeyword();
             QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
             row2 = QStringLiteral("%1 %2%3")
-                .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className, brace);
+                .arg(keyword, className.isEmpty() ? QStringLiteral("Untitled") : className, brace);
         }
     }
     if (row2.isEmpty()) {
@@ -4169,13 +4263,18 @@ void RcxController::updateCommandRow() {
                 QString keyword = n.resolvedClassKeyword();
                 QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
                 row2 = QStringLiteral("%1 %2%3")
-                    .arg(keyword, className.isEmpty() ? QStringLiteral("NoName") : className, brace);
+                    .arg(keyword, className.isEmpty() ? QStringLiteral("Untitled") : className, brace);
                 break;
             }
         }
     }
-    if (row2.isEmpty())
-        row2 = QStringLiteral("struct NoName") + brace;
+    if (row2.isEmpty()) {
+        // No struct nodes at all in the tree → blank project. Show
+        // "Untitled" instead of the old "NoName" placeholder so the
+        // command row doesn't look like a programmer-grade default
+        // leaked into the UI.
+        row2 = QStringLiteral("struct Untitled") + brace;
+    }
 
     QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral("  ") + row2;
 
@@ -5334,8 +5433,53 @@ void RcxController::pushSavedSourcesToEditors() {
 // ── Auto-refresh ──
 
 void RcxController::setRefreshInterval(int ms) {
-    if (m_refreshTimer)
-        m_refreshTimer->setInterval(qMax(1, ms));
+    // The Options dialog feeds the user's chosen "snappy" rate here.
+    // Treat that as the base — the adaptive loop still backs off when
+    // pages stop changing or when the window loses focus, just relative
+    // to this new floor instead of the kDefaultRefreshMs constant.
+    m_refreshIntervalBaseMs = qMax(1, ms);
+    m_refreshIntervalMaxMs  = qMax(m_refreshIntervalBaseMs, 1500);
+    m_refreshIntervalBlurMs = qMax(m_refreshIntervalBaseMs, 1500);
+    applyAdaptiveInterval();
+}
+
+void RcxController::applyAdaptiveInterval() {
+    if (!m_refreshTimer) return;
+    int target;
+    if (!m_windowVisible) {
+        // Stop the timer entirely while minimized — nothing on screen
+        // to update, no reason to syscall. Resume on setWindowState
+        // restoring visibility.
+        if (m_refreshTimer->isActive()) m_refreshTimer->stop();
+        return;
+    }
+    if (!m_windowFocused) {
+        target = m_refreshIntervalBlurMs;
+    } else if (m_idleTicks >= kIdleBackoffTicks) {
+        // Geometric backoff once the struct has been quiet for a while:
+        // base × 2^(idleTicks / threshold), capped. e.g. base=200, after
+        // 8 idle ticks → 400, after 16 → 800, after 24 → 1500 (capped).
+        int factor = 1 << qMin(4, (m_idleTicks - kIdleBackoffTicks) / kIdleBackoffTicks + 1);
+        target = qMin(m_refreshIntervalMaxMs,
+                      m_refreshIntervalBaseMs * factor);
+    } else {
+        target = m_refreshIntervalBaseMs;
+    }
+    if (m_refreshTimer->interval() != target)
+        m_refreshTimer->setInterval(target);
+    if (!m_refreshTimer->isActive())
+        m_refreshTimer->start();
+}
+
+void RcxController::setWindowState(bool focused, bool visible) {
+    bool focusGained = (focused && !m_windowFocused);
+    m_windowFocused = focused;
+    m_windowVisible = visible;
+    // Coming back into focus → snap back to base rate immediately so
+    // the user sees current values, not a stale snapshot from the
+    // last backed-off tick.
+    if (focusGained) m_idleTicks = 0;
+    applyAdaptiveInterval();
 }
 
 void RcxController::setCompactColumns(bool v) {
@@ -5365,8 +5509,11 @@ void RcxController::setShowComments(bool v) {
 
 void RcxController::setupAutoRefresh() {
     int ms = QSettings("Reclass", "Reclass").value("refreshMs", kDefaultRefreshMs).toInt();
+    m_refreshIntervalBaseMs = qMax(1, ms);
+    m_refreshIntervalMaxMs  = qMax(m_refreshIntervalBaseMs, 1500);
+    m_refreshIntervalBlurMs = qMax(m_refreshIntervalBaseMs, 1500);
     m_refreshTimer = new QTimer(this);
-    m_refreshTimer->setInterval(qMax(1, ms));
+    m_refreshTimer->setInterval(m_refreshIntervalBaseMs);
     connect(m_refreshTimer, &QTimer::timeout, this, &RcxController::onRefreshTick);
     m_refreshTimer->start();
 
@@ -5447,6 +5594,8 @@ void RcxController::onRefreshTick() {
     for (auto* editor : m_editors)
         if (editor->isEditing()) return;
 
+    ++m_tickCount;
+
     int extent = computeDataExtent();
     if (extent <= 0) return;
 
@@ -5467,22 +5616,75 @@ void RcxController::onRefreshTick() {
                              visited, ranges, budget);
     }
 
+    // ── Speedup 1: viewport-bounded re-read ──
+    // The first refresh on a fresh attach reads the whole extent so the
+    // snapshot has every page. Subsequent refreshes only re-fetch pages
+    // that intersect the visible viewport (plus a 2-page overscan in
+    // each direction to keep small scrolls instant). Pages outside the
+    // viewport keep their previous snapshot bytes; when the user scrolls
+    // them in, the next tick refreshes them.
+    std::optional<QPair<uint64_t, uint64_t>> viewport;
+    bool firstSnapshot = !m_snapshotProv || m_prevPages.isEmpty();
+    if (!firstSnapshot) viewport = viewportAddressRange();
+
+    constexpr uint64_t kPageSize = 4096;
+    constexpr uint64_t kPageMask = ~(kPageSize - 1);
+    constexpr uint64_t kOverscanPages = 2;
+
+    // Build the set of pages we actually need this tick.
+    QSet<uint64_t> requestPages;
+    for (const auto& r : ranges) {
+        uint64_t pageStart = r.first & kPageMask;
+        uint64_t end = r.first + r.second;
+        uint64_t pageEnd = (end + kPageSize - 1) & kPageMask;
+        for (uint64_t p = pageStart; p < pageEnd; p += kPageSize) {
+            // Speedup 4: never re-read pages we've classified as
+            // permanent (read-only module memory).
+            if (m_snapshotProv && m_snapshotProv->isPermanent(p)) continue;
+
+            if (viewport) {
+                // Restrict main-struct reads to the viewport-overscan
+                // window. Pointer-target ranges (depth > 0 in
+                // collectPointerRanges) aren't position-bound to the
+                // viewport — but they're typically tiny and few.
+                uint64_t lo = (viewport->first  > kOverscanPages * kPageSize)
+                            ? (viewport->first - kOverscanPages * kPageSize) & kPageMask
+                            : 0;
+                uint64_t hi = ((viewport->second + kOverscanPages * kPageSize)
+                              + kPageSize - 1) & kPageMask;
+                bool inViewport = (p >= lo && p < hi);
+                bool isMainRange = (r.first == m_doc->tree.baseAddress);
+                if (isMainRange && !inViewport) {
+                    // Speedup 2: stable backstage page → re-read at half rate.
+                    int stab = m_pageStability.value(p, 0);
+                    bool isStable = (stab >= kStabilityThreshold);
+                    if (isStable && (m_tickCount & 1ULL)) continue;
+                }
+            }
+            requestPages.insert(p);
+        }
+    }
+
+    if (requestPages.isEmpty()) {
+        // Nothing to read this tick (everything is stable + off-screen,
+        // or every page is permanent). Treat as zero-change for the
+        // adaptive backoff so the timer can widen — but don't recompose,
+        // the previous snapshot is already on screen.
+        ++m_idleTicks;
+        applyAdaptiveInterval();
+        return;
+    }
+
     m_readInFlight = true;
     m_readGen = m_refreshGen;
 
     auto prov = m_doc->provider;
-    m_refreshWatcher->setFuture(QtConcurrent::run([prov, ranges]() -> PageMap {
-        constexpr uint64_t kPageSize = 4096;
-        constexpr uint64_t kPageMask = ~(kPageSize - 1);
+    QVector<uint64_t> pageList(requestPages.constBegin(), requestPages.constEnd());
+    m_refreshWatcher->setFuture(QtConcurrent::run([prov, pageList]() -> PageMap {
         PageMap pages;
-        for (const auto& r : ranges) {
-            uint64_t pageStart = r.first & kPageMask;
-            uint64_t end = r.first + r.second;
-            uint64_t pageEnd = (end + kPageSize - 1) & kPageMask;
-            for (uint64_t p = pageStart; p < pageEnd; p += kPageSize) {
-                if (!pages.contains(p))
-                    pages[p] = prov->readBytes(p, static_cast<int>(kPageSize));
-            }
+        pages.reserve(pageList.size());
+        for (uint64_t p : pageList) {
+            pages[p] = prov->readBytes(p, static_cast<int>(kPageSize));
         }
         return pages;
     }));
@@ -5517,40 +5719,133 @@ void RcxController::onReadComplete() {
         }
     }
 
-    // Fast path: no changes at all
-    if (newPages == m_prevPages)
-        return;
-
-    // Compute which byte offsets changed (for change highlighting).
-    // Skip on first snapshot — nothing to compare against.
+    // Compute which byte offsets changed (for change highlighting) and
+    // update per-page stability counters.
     m_changedOffsets.clear();
-    if (!m_prevPages.isEmpty()) {
-        for (auto it = newPages.constBegin(); it != newPages.constEnd(); ++it) {
-            uint64_t pageAddr = it.key();
-            const QByteArray& newPage = it.value();
-            auto oldIt = m_prevPages.constFind(pageAddr);
-            if (oldIt == m_prevPages.constEnd())
-                continue;   // new page, no previous data to diff against
-            const QByteArray& oldPage = oldIt.value();
-            int cmpLen = qMin(oldPage.size(), newPage.size());
-            for (int i = 0; i < cmpLen; ++i) {
-                if (oldPage[i] != newPage[i])
-                    m_changedOffsets.insert(static_cast<int64_t>(pageAddr) + i);
+    bool anyChanged = false;
+    bool firstSnapshot = m_prevPages.isEmpty();
+    for (auto it = newPages.constBegin(); it != newPages.constEnd(); ++it) {
+        uint64_t pageAddr = it.key();
+        const QByteArray& newPage = it.value();
+        auto oldIt = m_prevPages.constFind(pageAddr);
+        if (oldIt == m_prevPages.constEnd()) {
+            // First time we see this page — start its stability counter
+            // at zero. Don't fold it into "anyChanged"; first-sight isn't
+            // a value mutation.
+            m_pageStability[pageAddr] = 0;
+            continue;
+        }
+        const QByteArray& oldPage = oldIt.value();
+        int cmpLen = qMin(oldPage.size(), newPage.size());
+        bool pageChanged = false;
+        for (int i = 0; i < cmpLen; ++i) {
+            if (oldPage[i] != newPage[i]) {
+                m_changedOffsets.insert(static_cast<int64_t>(pageAddr) + i);
+                pageChanged = true;
             }
+        }
+        if (pageChanged) {
+            m_pageStability[pageAddr] = 0;
+            anyChanged = true;
+        } else {
+            m_pageStability[pageAddr] = qMin(kStabilityThreshold + 16,
+                                             m_pageStability.value(pageAddr, 0) + 1);
         }
     }
 
+    // Adaptive: count consecutive ticks with zero observed change.
+    if (anyChanged) {
+        m_idleTicks = 0;
+    } else if (!firstSnapshot) {
+        ++m_idleTicks;
+    }
+    applyAdaptiveInterval();
+
     int mainExtent = computeDataExtent();
-    m_prevPages = newPages;
 
-    if (m_snapshotProv)
-        m_snapshotProv->updatePages(std::move(newPages), mainExtent);
-    else
+    // Merge instead of wholesale replace — pages we deliberately skipped
+    // this tick (backstage / permanent) keep their previous bytes.
+    for (auto it = newPages.constBegin(); it != newPages.constEnd(); ++it)
+        m_prevPages.insert(it.key(), it.value());
+
+    if (m_snapshotProv) {
+        m_snapshotProv->mergePages(newPages, mainExtent);
+    } else {
         m_snapshotProv = std::make_unique<SnapshotProvider>(
-            m_doc->provider, std::move(newPages), mainExtent);
+            m_doc->provider, newPages, mainExtent);
+    }
 
-    refresh();
+    // Speedup 4: classify newly-fetched pages as permanent if they fall
+    // in a read-only module section — module memory doesn't change at
+    // runtime, so we can skip them on every subsequent tick. Must run
+    // after m_snapshotProv exists, otherwise the helper early-returns.
+    classifyPermanentPages(newPages);
+
+    // Compose only when something actually changed (or this is the
+    // first snapshot — there's nothing on screen yet).
+    if (anyChanged || firstSnapshot) {
+        refresh();
+    }
     m_changedOffsets.clear();
+}
+
+// ── Speedup 1: viewport address range ──
+std::optional<QPair<uint64_t, uint64_t>>
+RcxController::viewportAddressRange() const {
+    if (m_editors.isEmpty()) return std::nullopt;
+    bool any = false;
+    uint64_t lo = UINT64_MAX, hi = 0;
+    for (auto* editor : m_editors) {
+        if (!editor || !editor->scintilla()) continue;
+        auto* sci = editor->scintilla();
+        int firstLine = sci->firstVisibleLine();
+        int onScreen  = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINESONSCREEN);
+        // Scintilla counts visual (display) lines; metaForLine takes a
+        // document line. SCI_DOCLINEFROMVISIBLE bridges the two when
+        // wrap is on. (Our editor uses no wrap by default but the call
+        // is safe either way.)
+        for (int v = firstLine; v < firstLine + onScreen; ++v) {
+            int docLine = (int)sci->SendScintilla(QsciScintillaBase::SCI_DOCLINEFROMVISIBLE, v);
+            const LineMeta* lm = editor->metaForLine(docLine);
+            if (!lm) continue;
+            uint64_t addr = lm->offsetAddr;
+            if (addr == 0) continue;  // synthetic / commandRow / no address
+            if (addr < lo) lo = addr;
+            // Conservative high-water — assume each visible line spans
+            // up to 16 bytes (largest hex preview). Overscan in the
+            // caller widens this further.
+            uint64_t hiCandidate = addr + 16;
+            if (hiCandidate > hi) hi = hiCandidate;
+            any = true;
+        }
+    }
+    if (!any) return std::nullopt;
+    return QPair<uint64_t, uint64_t>{lo, hi};
+}
+
+// ── Speedup 4: classify pages whose region is read-only module memory ──
+void RcxController::classifyPermanentPages(const PageMap& fresh) {
+    if (!m_snapshotProv || !m_doc->provider) return;
+    // enumerateRegions can be expensive (10-50 ms on a process with
+    // thousands of mappings), but the SnapshotProvider's wrapper
+    // reuses the real provider's already-cached list — so this is
+    // cheap. We still pay one O(regions × pages) classification scan
+    // per refresh; in practice 'fresh' is at most a few dozen pages.
+    auto regions = m_doc->provider->enumerateRegions();
+    if (regions.isEmpty()) return;
+    constexpr uint64_t kPageSize = 4096;
+    for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) {
+        uint64_t pageAddr = it.key();
+        if (m_snapshotProv->isPermanent(pageAddr)) continue;
+        for (const auto& r : regions) {
+            if (r.moduleName.isEmpty()) continue;
+            if (pageAddr < r.base) continue;
+            if (pageAddr + kPageSize > r.base + r.size) continue;
+            if (!r.executable) continue;
+            m_snapshotProv->markPermanent(pageAddr);
+            break;
+        }
+    }
 }
 
 int RcxController::computeDataExtent() const {
@@ -5581,6 +5876,13 @@ void RcxController::resetSnapshot() {
     m_changedOffsets.clear();
     m_valueHistory.clear();
     m_lastValueAddr.clear();
+    // Speedup-related state — module identity and page stability are
+    // both per-attach. Switching processes (resetProvider →
+    // resetSnapshot) must drop these or stale data leaks across.
+    m_pageStability.clear();
+    m_idleTicks = 0;
+    m_tickCount = 0;
+    applyAdaptiveInterval();  // restart timer if it was paused
 }
 
 void RcxController::handleMarginClick(RcxEditor* editor, int margin,

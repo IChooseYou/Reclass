@@ -575,9 +575,11 @@ private slots:
         QCOMPARE(doc->tree.nodes[idx].parentId, (uint64_t)0);
         QCOMPARE(ctrl->viewRootId(), newId);
 
-        // Command row shows "NoName" for empty-named struct
-        QVERIFY2(sci->text(0).contains("NoName"),
-                 qPrintable("Expected 'NoName' in command row, got: " + sci->text(0)));
+        // Command row shows "Untitled" placeholder for empty-named struct
+        // (was "NoName" — replaced because that programmer-grade default
+        // looked like a bug to users; matches MainWindow::rootName fallback).
+        QVERIFY2(sci->text(0).contains("Untitled"),
+                 qPrintable("Expected 'Untitled' in command row, got: " + sci->text(0)));
 
         // -- Undo removes the new struct --
         doc->undoStack.undo();

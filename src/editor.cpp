@@ -317,6 +317,7 @@ static QFont editorFont() {
 }
 
 RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
+    PROFILE_SCOPE("RcxEditor::ctor");
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
@@ -1007,7 +1008,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             m_sci->setText(newText);
             m_sci->setReadOnly(true);
             // Full-replace just rewrote line 0 to compose's literal
-            // "[▸] source▾  0x0  struct NoName {" placeholder. Invalidate
+            // "[▸] source▾  0x0  struct Untitled {" placeholder. Invalidate
             // the setCommandRowText skip-cache so the controller's
             // updateCommandRow() that runs next is forced to re-paint
             // line 0 with the proper text. Without this clear, the cache
