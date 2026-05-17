@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QMouseEvent>
 #include <functional>
+#include "themes/thememanager.h"
 
 namespace rcx {
 
@@ -56,6 +57,17 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_ShowWithoutActivating);
         setAttribute(Qt::WA_DeleteOnClose, false);
+        // Pass every mouse event through to the window under the tooltip.
+        // Without this the tooltip sits on top of the cursor's actual
+        // target, the original widget receives a Leave event, the
+        // hover-state-driven owner re-evaluates and (in the editor's
+        // case) decides to dismiss the chip-tooltip — which then makes
+        // the cursor re-enter the widget, MouseMove fires, tooltip is
+        // shown again. Non-stop flicker. WA_TransparentForMouseEvents
+        // cuts the loop at the OS level: the cursor never "enters" this
+        // window for hit-test purposes, so the underlying widget keeps
+        // its hover state.
+        setAttribute(Qt::WA_TransparentForMouseEvents);
         setMouseTracking(true);
     }
 
@@ -263,5 +275,36 @@ private:
     bool m_up = true;
     int m_ax = 0, m_bw = 0, m_bh = 0;
 };
+
+// Shared process-wide tooltip. The global QEvent::ToolTip bridge (set up
+// in main.cpp) and the few direct callers (TypeSelectorPopup delegate)
+// route through this single instance so we don't litter the heap with
+// per-widget tooltip objects, and the visible tip simply repositions
+// when the user moves between widgets.
+//
+// Lazy-init on first call; theme is read from ThemeManager each show
+// so theme changes apply without rewiring.
+inline RcxTooltip* sharedRcxTooltip() {
+    static RcxTooltip* s_tip = nullptr;
+    if (!s_tip) s_tip = new RcxTooltip(nullptr);
+    return s_tip;
+}
+
+// Convenience: show plain text from a global cursor position. Caller
+// passes their preferred font (usually the widget's font or the editor
+// font). Theme colors pulled from ThemeManager.
+inline void showRcxTooltip(const QPoint& globalAnchor,
+                            const QString& text,
+                            const QFont& font) {
+    auto* tip = sharedRcxTooltip();
+    const auto& theme = ThemeManager::instance().current();
+    tip->setTheme(theme.backgroundAlt, theme.border,
+                  theme.text, theme.textDim, theme.border);
+    tip->populate(QString(), text, font);
+    tip->showAt(globalAnchor);
+}
+inline void dismissRcxTooltip() {
+    if (auto* t = sharedRcxTooltip(); t->isVisible()) t->dismiss();
+}
 
 } // namespace rcx

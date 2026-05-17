@@ -190,7 +190,7 @@ private:
     static constexpr int kPanelGap     = 40;   // gap between file list and cards
     static constexpr int kCardPanelW   = 340;  // right-side cards panel width
     static constexpr int kCardH        = 84;   // single card row height
-    static constexpr int kEntryH       = 52;   // single file entry row height
+    static constexpr int kEntryH       = 28;   // single-line file entry row height
     static constexpr int kGroupHeaderH = 28;   // group label row height
     static constexpr int kGroupSpacing = 15;   // vertical gap between groups
     static constexpr int kBottomPad    = 24;   // padding below file list / border inset
@@ -360,27 +360,53 @@ private:
                 if (m_hz == HZ_Entry && m_hi == ei) p.fillRect(er, m_t.hover);
 
                 drawIcon(p, e.isExample ? ":/vsicons/book.svg" : ":/vsicons/symbol-structure.svg",
-                         x + 24, fy + 17, 18);
+                         x + 24, fy + (kEntryH - 18) / 2, 18);
 
-                int tx = x + 52, avail = w - 64;
-                QFont nf = font(); nf.setPixelSize(14);
-                p.setFont(nf); p.setPen(m_t.text);
-                QFontMetrics nm(nf);
-                int ny = fy + 8;
-                p.drawText(tx, ny + nm.ascent(),
-                           nm.elidedText(e.fileName, Qt::ElideMiddle, avail * 0.65));
-
-                if (!e.isExample) {
-                    p.setPen(m_t.textDim);
-                    QString dt = e.lastModified.toString("M/d/yyyy h:mm AP");
-                    p.drawText(x + w - 12 - nm.horizontalAdvance(dt), ny + nm.ascent(), dt);
-                }
-
+                int tx = x + 52;
+                QFont nf = font(); nf.setPixelSize(13);
                 QFont pf = font(); pf.setPixelSize(12);
+                QFontMetrics nm(nf), pm(pf);
+
+                // Date (right-anchored, non-examples only) — reserve its
+                // width so the filename+path elision computes against the
+                // actual remaining horizontal space.
+                QString dt;
+                int dateW = 0;
+                if (!e.isExample) {
+                    dt = e.lastModified.toString("M/d/yyyy h:mm AP");
+                    dateW = nm.horizontalAdvance(dt) + 24;
+                }
+                int avail = w - 64 - dateW;
+
+                // Single-line layout: filename, then a faint "·" separator,
+                // then the path in dim color. Two drawText calls but ONE
+                // row of vertical space — earlier layout reserved 52 px so
+                // the path could sit on its own line, which made the list
+                // feel like a folder index instead of a recent-files row.
+                int by = fy + kEntryH / 2 + nm.ascent() / 2 - 2;
+
+                // Filename is always drawn in full; only the path elides
+                // to absorb whatever horizontal space is left over.
+                QString sep = QStringLiteral("  ·  ");
+                int sepW = nm.horizontalAdvance(sep);
+                int nameW = nm.horizontalAdvance(e.fileName);
+                int pathW = qMax(0, avail - nameW - sepW);
+
+                p.setFont(nf); p.setPen(m_t.text);
+                p.drawText(tx, by, e.fileName);
+
+                p.setFont(nf); p.setPen(m_t.textDim);
+                p.drawText(tx + nameW, by, sep);
+
                 p.setFont(pf); p.setPen(m_t.textDim);
-                QFontMetrics pm(pf);
-                p.drawText(tx, ny + nm.height() + 4 + pm.ascent(),
-                           pm.elidedText(e.dirPath, Qt::ElideMiddle, avail));
+                int pathY = fy + kEntryH / 2 + pm.ascent() / 2 - 2;
+                p.drawText(tx + nameW + sepW, pathY,
+                           pm.elidedText(e.dirPath, Qt::ElideMiddle, pathW));
+
+                if (!dt.isEmpty()) {
+                    p.setFont(nf); p.setPen(m_t.textDim);
+                    p.drawText(x + w - 12 - nm.horizontalAdvance(dt), by, dt);
+                }
                 fy += kEntryH;
             }
         }

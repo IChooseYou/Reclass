@@ -381,6 +381,28 @@ struct Bookmark {
     }
 };
 
+class Provider;
+
+// RTTI discovery hook — fired by compose.cpp every time walkRtti() turns
+// up a new vtable. Defined in compose.cpp. The GUI app (main.cpp) wires
+// this to rcx::RttiNameProvider::instance().push(...) so the discovery
+// participates in the unified Symbols panel + expression parser. Test
+// targets leave it nullptr (silent no-op).
+extern void (*g_rttiDiscoveryHook)(const QString& name, uint64_t address,
+                                    const QString& moduleName);
+
+// Unified address→name lookup hook — main.cpp wires this to the
+// NameRegistry so controller.cpp can label addresses from any registered
+// source (PDB / RTTI / bookmarks / plugin). Tests leave nullptr; the
+// controller falls back to SymbolStore directly when this is null.
+extern QString (*g_nameLookupHook)(uint64_t address, const Provider* active);
+
+// Named-source-changed nudge — main.cpp wires this to NameRegistry's
+// emitChanged() so that "Label this address..." in the editor refreshes
+// the unified Symbols panel without dragging NameRegistry into the core
+// (and test) targets.
+extern void (*g_namesChangedHook)();
+
 // ── NodeTree ──
 
 struct NodeTree {
@@ -784,6 +806,37 @@ inline int memberSubFromSelId(uint64_t selId) {
     return (int)((selId & kMemberSubMask) >> kMemberSubShift);
 }
 
+// ── Tail chips ──
+// Unified model for "things that hang off the right side of a row":
+// the user comment, RTTI hint, type-inference hint, enum-value name,
+// and the discoverable AddComment placeholder. Each chip records its
+// own [startCol, endCol) in the line, the rendered text (with prefix
+// glyph already baked in), and any kind-specific payload the click
+// handler needs. One source of truth — replaces the parallel
+// typeHint*/rttiHint*/commentStart fields on LineMeta.
+enum class ChipKind : uint8_t {
+    Enum = 0,    // (RGBA) — int field with refId→enum
+    TypeHint,    // [ptr64] / "0x… [float×2]" — type-inference suggestion
+    Rtti,        // {RTTI: ClassName} — auto-detected vtable
+    Symbol,      // Reclass.exe+0x123 — provider-resolved PDB symbol for a
+                 // pointer's *value* (separate from Node::comment because
+                 // it's auto-derived from the provider, not user-authored)
+    Comment,     // user-authored Node::comment text
+    AddComment   // ghost placeholder when no Comment exists (focus row only)
+};
+
+struct LineChip {
+    ChipKind kind;
+    int      startCol = -1;            // doc-col where chip text begins (post fold prefix)
+    int      endCol   = -1;            // doc-col one past chip text end
+    QString  text;                     // already includes the prefix glyph (/, [, {, ()
+    // Kind-specific payload — only one is meaningful per kind.
+    uint64_t          rttiVtableAddr = 0;        // Rtti
+    QVector<NodeKind> typeHintKinds;             // TypeHint
+    int64_t           enumCurrentValue = 0;      // Enum
+    uint64_t          enumRefNodeId    = 0;      // Enum (the top-level enum struct's id)
+};
+
 struct LineMeta {
     int      nodeIdx        = -1;
     uint64_t nodeId         = 0;
@@ -815,16 +868,28 @@ struct LineMeta {
     bool     isArrayElement  = false;  // true for synthesized primitive array element lines
     bool     isMemberLine   = false;  // true for enum member / bitfield member lines
     bool     isStaticLine   = false;  // true for static field node lines
-    QString  typeHint;                 // Type inference hint text (e.g. "Float×2") — only set for hex nodes when hints enabled
-    int      typeHintStart  = -1;      // Character offset where hint text starts in line text (-1 = none)
-    QVector<NodeKind> typeHintKinds;   // Suggested kinds from inference (empty = no hint)
-    QString  rttiHint;                 // RTTI vtable hint text ("{RTTI: Foo}") — set when value points at MSVC vtable
-    int      rttiHintStart  = -1;      // Character offset where rttiHint begins (-1 = none)
-    uint64_t rttiVtableAddr = 0;       // The pointer value walked (for future click-through to RTTI browser)
-    int      commentStart   = -1;      // Character offset where "// comment" starts in line text (-1 = none)
     int      braceCol       = -1;      // Column of trailing '{' on header lines (-1 = none); avoids per-char IPC scan
     uint64_t parentAddr     = 0;       // Absolute address of enclosing container (for relative offset display)
+
+    // ── Chips (unified annotations after the value column) ──
+    // Replaces the parallel typeHint*/rttiHint*/commentStart fields.
+    // Compose pushes one entry per applicable annotation; editor reads
+    // the array for hit-testing, span lookup, and indicator coloring.
+    // Render order is value-relevant first, user-authored last:
+    //   Enum, TypeHint, Rtti, Comment, AddComment.
+    // AddComment is only emitted when no Comment chip is present and
+    // the editor is asking compose to draw a placeholder for the row.
+    QVector<LineChip> chips;
 };
+
+// Tail-chip lookup — returns first chip of the given kind, or nullptr.
+// O(chips.size()) which is tiny (4 max), no caching needed.
+inline const LineChip* findChip(const LineMeta& lm, ChipKind kind) {
+    for (const auto& c : lm.chips) {
+        if (c.kind == kind) return &c;
+    }
+    return nullptr;
+}
 
 inline bool isSyntheticLine(const LineMeta& lm) {
     return lm.lineKind == LineKind::CommandRow;
@@ -1238,7 +1303,14 @@ struct ViewState {
     int scrollLine = 0;
     int cursorLine = 0;
     int cursorCol  = 0;
-    int xOffset    = 0;  // horizontal scroll in pixels
+    int xOffset    = 0;       // horizontal scroll in pixels
+    // Anchor the cursor by the node that owned it, so a refresh that
+    // shifts line counts (e.g. type change with pointer auto-expansion,
+    // sibling insert/delete above) lands the caret back on the SAME
+    // node — not the now-different node that occupies the old line
+    // number. Falls back to (cursorLine, cursorCol) when 0.
+    uint64_t cursorNodeId  = 0;
+    int      cursorSubLine = 0;
 };
 
 // ── Format function forward declarations ──
@@ -1304,6 +1376,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
                       bool compactColumns = false, bool treeLines = false,
                       bool braceWrap = false, bool typeHints = false,
                       bool showComments = true,
-                      SymbolLookupFn symbolLookup = {});
+                      SymbolLookupFn symbolLookup = {},
+                      bool showRtti = true, bool showEnumChips = true);
 
 } // namespace rcx

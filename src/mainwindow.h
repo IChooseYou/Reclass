@@ -7,7 +7,8 @@
 #include "startpage.h"
 #include "generator.h"
 #include "workspace_model.h"
-namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class DockSizeReadout; }
+#include "names/name_provider.h"
+namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class DockSizeReadout; class UnifiedSymbolPanel; }
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -369,34 +370,15 @@ public:
     void ensureScannerPanel();
 private:
 
-    // Modules/Symbols dock
-    QDockWidget*           m_symbolsDock      = nullptr;
-    QTabWidget*            m_symTabWidget     = nullptr;
-    // Modules tab
-    QTreeView*             m_modulesTree      = nullptr;
-    QStandardItemModel*    m_modulesModel     = nullptr;
-    // Symbols tab
-    QTreeView*             m_symbolsTree      = nullptr;
-    QStandardItemModel*    m_symbolsModel     = nullptr;
-    QSortFilterProxyModel* m_symbolsProxy     = nullptr;
-    QLineEdit*             m_symbolsSearch    = nullptr;
+    // Symbols dock (formerly Modules/Symbols/Types). One unified panel.
+    QDockWidget*              m_symbolsDock     = nullptr;
+    rcx::UnifiedSymbolPanel*  m_unifiedSymbols  = nullptr;
     // Title bar
     QLabel*                m_symDockTitle     = nullptr;
     QToolButton*           m_symDockCloseBtn  = nullptr;
     QToolButton*           m_symDownloadBtn   = nullptr;
     DockGripWidget*        m_symDockGrip      = nullptr;
     rcx::SymbolDownloader* m_symDownloader    = nullptr;
-    // Types tab
-    QTreeView*             m_typesTree      = nullptr;
-    QStandardItemModel*    m_typesModel     = nullptr;
-    QSortFilterProxyModel* m_typesProxy     = nullptr;
-    QLineEdit*             m_typesSearch    = nullptr;
-    QPushButton*           m_typesImportBtn = nullptr;
-    struct CachedModuleTypes {
-        QString pdbPath;
-        QVector<rcx::PdbTypeInfo> types;
-    };
-    QHash<QString, CachedModuleTypes> m_cachedModuleTypes;
 
 public:
     // Lazy-built. The dock is hidden at startup and accounts for ~360 ms
@@ -415,14 +397,19 @@ private:
     void refreshBookmarksDock();
     void promptAddBookmark();
     void navigateBookmark(int idx);
-    void rebuildSymbolsModel();
-    void rebuildTypesModel();
-    void populateTypesModuleItem(QStandardItem* moduleItem);
-    void rebuildModulesModel();
-    void importSelectedTypes();
+    // Refresh the unified symbol panel from SymbolStore. Idempotent; safe to
+    // call before the dock has been built (no-op when m_unifiedSymbols is null).
+    void rebuildSymbols();
     void downloadSymbolsForProcess();
-    // Load PDB symbols + typeIndices into SymbolStore, cache types. Returns symbol count.
+    // Load PDB symbols + typeIndices into SymbolStore. Returns symbol count.
     int loadPdbAndCacheTypes(const QString& pdbPath);
+    // Import one type from a PDB file into the active document by typeIndex.
+    // Mirrors the MCP symbols.importType path.
+    void importTypeFromPdbUI(const QString& pdbPath, uint32_t typeIndex,
+                             const QString& displayName);
+    // Bulk import the types referenced by a multi-row selection (panel emits
+    // this for ≥2 selected rows with non-zero typeIndex).
+    void bulkImportTypesUI(const QVector<rcx::NamedAddress>& entries);
 
     // Start page
     StartPageWidget*      m_startPage        = nullptr;

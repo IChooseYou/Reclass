@@ -167,10 +167,11 @@ private slots:
             if (lm.lineKind != LineKind::Field) continue;
             if (lm.nodeKind != NodeKind::Hex64) continue;
             if (lm.offsetAddr != kStructBase) continue;
-            QVERIFY2(lm.rttiHintStart >= 0,
-                "expected rttiHintStart on field whose value is a vtable");
-            QVERIFY(lm.rttiHint.contains(QStringLiteral("Foo")));
-            QCOMPARE(lm.rttiVtableAddr, vtableVa);
+            const LineChip* rttiChip = findChip(lm, ChipKind::Rtti);
+            QVERIFY2(rttiChip,
+                "expected Rtti chip on field whose value is a vtable");
+            QVERIFY(rttiChip->text.contains(QStringLiteral("Foo")));
+            QCOMPARE(rttiChip->rttiVtableAddr, vtableVa);
             found = true;
             break;
         }
@@ -190,7 +191,7 @@ private slots:
         ComposeResult r = compose(tree, prov);
         for (const auto& lm : r.meta) {
             if (lm.nodeKind == NodeKind::Hex64)
-                QCOMPARE(lm.rttiHintStart, -1);
+                QVERIFY(findChip(lm, ChipKind::Rtti) == nullptr);
         }
     }
 
@@ -206,7 +207,7 @@ private slots:
         ComposeResult r = compose(tree, prov);
         for (const auto& lm : r.meta) {
             if (lm.nodeKind == NodeKind::Hex64)
-                QCOMPARE(lm.rttiHintStart, -1);
+                QVERIFY(findChip(lm, ChipKind::Rtti) == nullptr);
         }
     }
 
@@ -280,9 +281,10 @@ private slots:
         for (const auto& lm : r.meta) {
             if (lm.nodeKind != NodeKind::Hex64) continue;
             if (lm.offsetAddr != kStructBase) continue;
-            QVERIFY2(lm.rttiHintStart >= 0,
-                "expected rttiHintStart from Itanium fallback");
-            QVERIFY(lm.rttiHint.contains(QStringLiteral("Foo")));
+            const LineChip* rttiChip = findChip(lm, ChipKind::Rtti);
+            QVERIFY2(rttiChip,
+                "expected Rtti chip from Itanium fallback");
+            QVERIFY(rttiChip->text.contains(QStringLiteral("Foo")));
             found = true;
         }
         QVERIFY(found);
@@ -306,8 +308,8 @@ private slots:
         bool anyRtti = false;
         bool anyTypeHint = false;
         for (const auto& lm : r.meta) {
-            if (lm.rttiHintStart >= 0) anyRtti = true;
-            if (lm.typeHintStart >= 0) anyTypeHint = true;
+            if (findChip(lm, ChipKind::Rtti)) anyRtti = true;
+            if (findChip(lm, ChipKind::TypeHint)) anyTypeHint = true;
         }
         QVERIFY2(anyRtti,  "RTTI hint should appear regardless of typeHints");
         QVERIFY2(!anyTypeHint, "typeHints=false should suppress green hints");

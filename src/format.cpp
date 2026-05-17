@@ -418,13 +418,15 @@ static QString readValueImpl(const Node& node, const Provider& prov,
     case NodeKind::Float:     { auto s = fmtFloat(rF32(addr));           return display ? s : s.trimmed(); }
     case NodeKind::Double:    { auto s = fmtDouble(rF64(addr));          return display ? s : s.trimmed(); }
     case NodeKind::Bool:      return fmtBool(prov.readU8(addr));
+    // Pointer / function-pointer value formatting: just the address
+    // (and the optional derefed primitive). PDB symbol annotations are
+    // emitted by compose.cpp as ChipKind::Symbol chips so they share
+    // the chip pill + tooltip + color story instead of living in raw
+    // value text as a "// foo" string.
     case NodeKind::Pointer32: {
         uint32_t val = prov.readU32(addr);
         if (!display) return rawHex(val, 8);
-        QString s = fmtPointer32(val);
-        QString sym = prov.getSymbol((uint64_t)val);
-        if (!sym.isEmpty()) s += QStringLiteral("  // ") + sym;
-        return s;
+        return fmtPointer32(val);
     }
     case NodeKind::Pointer64: {
         uint64_t val = prov.readU64(addr);
@@ -435,44 +437,28 @@ static QString readValueImpl(const Node& node, const Provider& prov,
             for (int d = 1; d < node.ptrDepth && target != 0; d++)
                 target = prov.isReadable(target, 8) ? prov.readU64(target) : 0;
             if (target != 0 && prov.isReadable(target, sizeForKind(node.elementKind))) {
-                // Create a temporary node of the target kind to format the value
                 Node tmp;
                 tmp.kind = node.elementKind;
                 tmp.strLen = node.strLen;
                 QString derefVal = readValueImpl(tmp, prov, target, 0, mode);
-                if (display) {
-                    QString arrow = QStringLiteral("-> ");
-                    QString sym = prov.getSymbol(val);
-                    if (!sym.isEmpty())
-                        return arrow + derefVal + QStringLiteral("  // ") + sym;
-                    return arrow + derefVal;
-                }
+                if (display) return QStringLiteral("-> ") + derefVal;
                 return derefVal;
             }
             if (!display) return rawHex(val, 16);
             return fmtPointer64(val);
         }
         if (!display) return rawHex(val, 16);
-        QString s = fmtPointer64(val);
-        QString sym = prov.getSymbol(val);
-        if (!sym.isEmpty()) s += QStringLiteral("  // ") + sym;
-        return s;
+        return fmtPointer64(val);
     }
     case NodeKind::FuncPtr32: {
         uint32_t val = prov.readU32(addr);
         if (!display) return rawHex(val, 8);
-        QString s = fmtPointer32(val);
-        QString sym = prov.getSymbol((uint64_t)val);
-        if (!sym.isEmpty()) s += QStringLiteral("  // ") + sym;
-        return s;
+        return fmtPointer32(val);
     }
     case NodeKind::FuncPtr64: {
         uint64_t val = prov.readU64(addr);
         if (!display) return rawHex(val, 16);
-        QString s = fmtPointer64(val);
-        QString sym = prov.getSymbol(val);
-        if (!sym.isEmpty()) s += QStringLiteral("  // ") + sym;
-        return s;
+        return fmtPointer64(val);
     }
     case NodeKind::Vec2:
     case NodeKind::Vec3:

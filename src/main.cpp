@@ -13,7 +13,6 @@
 #include "imports/import_source.h"
 #include "imports/export_reclass_xml.h"
 #include "imports/import_pdb.h"
-#include "imports/import_pdb_dialog.h"
 #include "symbolstore.h"
 #include "symbol_downloader.h"
 #include "imports/pe_debug_info.h"
@@ -23,6 +22,7 @@
 #include "rtti.h"
 #include "rttibrowser.h"
 #include "rcxtooltip.h"
+#include "tooltip_bridge.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QMenuBar>
@@ -76,6 +76,12 @@
 #include "widgets/themed_inputdialog.h"
 #include "widgets/themed_dialog.h"
 #include "widgets/dialog_button.h"
+#include "widgets/unified_symbol_panel.h"
+#include "names/name_registry.h"
+#include "names/pdb_name_provider.h"
+#include "names/pdb_type_provider.h"
+#include "names/rtti_name_provider.h"
+#include "names/bookmark_name_provider.h"
 #ifdef _WIN32
 #include <windows.h>
 #include <windowsx.h>
@@ -1007,6 +1013,39 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // also waits on plugins so it's started in the same deferred batch.
     m_mcp = new McpBridge(this, this);
 
+    // Register built-in NameProviders. Order = priority for reverse-lookup
+    // (PDB symbols > PDB types > RTTI > Bookmarks). Plugins can register
+    // more later. Splitting PDB symbols vs PDB types into two providers
+    // gives each a distinct filter chip + accent color in the Symbols
+    // panel — addresses the "no visual difference between a PDB function
+    // and a struct definition" feedback.
+    {
+        rcx::NameRegistry::instance().registerProvider(
+            std::make_shared<rcx::PdbNameProvider>());
+        rcx::NameRegistry::instance().registerProvider(
+            std::make_shared<rcx::PdbTypeProvider>());
+        rcx::NameRegistry::instance().registerProvider(
+            std::shared_ptr<rcx::RttiNameProvider>(&rcx::RttiNameProvider::instance(),
+                [](rcx::RttiNameProvider*){ /* singleton — don't delete */ }));
+        auto bm = std::make_shared<rcx::BookmarkNameProvider>(
+            [this]() -> rcx::RcxController* { return activeController(); });
+        rcx::NameRegistry::instance().registerProvider(std::move(bm));
+    }
+    // Hook compose's RTTI walker into the registry so discoveries flow
+    // into the unified Symbols panel and the expression parser. Wire the
+    // unified lookup + change-nudge so controller.cpp can talk to the
+    // registry without dragging it into headless test targets.
+    rcx::g_rttiDiscoveryHook = [](const QString& name, uint64_t address,
+                                   const QString& moduleName) {
+        rcx::RttiNameProvider::instance().push(name, address, moduleName);
+    };
+    rcx::g_nameLookupHook = [](uint64_t addr, const rcx::Provider* active) {
+        return rcx::NameRegistry::instance().nameFor(addr, active);
+    };
+    rcx::g_namesChangedHook = []() {
+        rcx::NameRegistry::instance().emitChanged();
+    };
+
     // Active doc tracking is handled per dock in createTab() via visibilityChanged
 
     // Install global event filter for Ctrl+Click UI inspection
@@ -1361,16 +1400,16 @@ void MainWindow::createMenus() {
                 pane.editor->setRelativeOffsets(checked);
     });
 
-    auto* actTypeHints = view->addAction("Type &Hints");
-    actTypeHints->setCheckable(true);
-    actTypeHints->setChecked(settings.value("typeHints", false).toBool());
-    connect(actTypeHints, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("typeHints", checked);
-        for (auto& tab : m_tabs)
-            tab.ctrl->setTypeHints(checked);
-    });
+    // ── Tail-chip toggles ──
+    // Each chip kind gets its own line so users see exactly what they're
+    // toggling. Labels describe the chip's marker so the menu doesn't
+    // pretend to control something broader (e.g. "Comments" used to be
+    // ambiguous about user comments vs. PDB symbol annotations).
+    view->addSeparator();
+    auto* chipsHeader = view->addAction(QStringLiteral("Tail Chips"));
+    chipsHeader->setEnabled(false);
 
-    auto* actComments = view->addAction("&Comments");
+    auto* actComments = view->addAction(QStringLiteral("Show Comment chips  ( / note )"));
     actComments->setCheckable(true);
     actComments->setChecked(settings.value("showComments", false).toBool());
     connect(actComments, &QAction::triggered, this, [this](bool checked) {
@@ -1378,6 +1417,30 @@ void MainWindow::createMenus() {
         for (auto& tab : m_tabs)
             tab.ctrl->setShowComments(checked);
     });
+
+    // Type-inference chip toggle removed — the inline "[ptr64]" /
+    // "[int32_t×2]" annotations were retired (see compose.cpp). The
+    // RcxController::setTypeHints API survives as a no-op so saved
+    // settings / MCP clients don't break, but there's no UI exposure.
+
+    auto* actRttiChips = view->addAction(QStringLiteral("Show RTTI chips  ( {RTTI: ClassName} )"));
+    actRttiChips->setCheckable(true);
+    actRttiChips->setChecked(settings.value("showRttiChips", true).toBool());
+    connect(actRttiChips, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("showRttiChips", checked);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setShowRtti(checked);
+    });
+
+    auto* actEnumChips = view->addAction(QStringLiteral("Show Enum-value chips  ( (MEMBER) )"));
+    actEnumChips->setCheckable(true);
+    actEnumChips->setChecked(settings.value("showEnumChips", true).toBool());
+    connect(actEnumChips, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("showEnumChips", checked);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setShowEnumChips(checked);
+    });
+    view->addSeparator();
 
     auto* actHoverEffects = view->addAction("Ho&ver Effects");
     actHoverEffects->setCheckable(true);
@@ -1477,7 +1540,7 @@ void MainWindow::createMenus() {
         // dock's toggleViewAction (which doesn't exist yet at this
         // point). The deferred build in main() typically gets there
         // first; if the user beats it to the punch this still works.
-        auto* symAct = new QAction(QStringLiteral("Modules"), this);
+        auto* symAct = new QAction(QStringLiteral("Symbols"), this);
         symAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Y));
         symAct->setCheckable(true);
         connect(symAct, &QAction::toggled, this, [this, symAct](bool on) {
@@ -2181,6 +2244,21 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         pane.editor->setHoverEffects(s.value("hoverEffects", true).toBool());
     }
     pane.editor->setPresentationMode(m_presentationMode);
+    // RTTI chip click is intentionally not wired — the chip is visual
+    // only. Earlier attempts (auto-create class + retype pointer, or
+    // open inline rename on the root) both proved more annoying than
+    // useful; the chip already shows the resolved type-name as data.
+    //
+    // TypeHint overlay chip → commit the inferred kind to the field.
+    // For uniform splits (int32×2), the controller's batch path
+    // applies the kind across the whole hex run.
+    connect(pane.editor, &RcxEditor::typeHintChipClicked, this,
+            [this](int nodeIdx, QVector<NodeKind> kinds) {
+        if (kinds.isEmpty()) return;
+        if (auto* c = activeController())
+            c->changeNodeKind(nodeIdx, kinds.first());
+    });
+
     // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
     connect(pane.editor, &RcxEditor::relativeOffsetsChanged, this, [this](bool rel) {
         QSettings("Reclass", "Reclass").setValue("relativeOffsets", rel);
@@ -2765,6 +2843,8 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
     ctrl->setTypeHints(QSettings("Reclass", "Reclass").value("typeHints", false).toBool());
     ctrl->setShowComments(QSettings("Reclass", "Reclass").value("showComments", false).toBool());
+    ctrl->setShowRtti(QSettings("Reclass", "Reclass").value("showRttiChips", true).toBool());
+    ctrl->setShowEnumChips(QSettings("Reclass", "Reclass").value("showEnumChips", true).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
@@ -3038,7 +3118,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                     dockGuard->setWindowTitle(tabTitle(*it2));
                 }
                 rebuildWorkspaceModel();
-                rebuildModulesModel();
+                rebuildSymbols();
                 updateWindowTitle();
             });
     });
@@ -3668,15 +3748,21 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
         if (ke->key() == Qt::Key_F12 && !ke->isAutoRepeat()) {
             QScreen* screen = windowHandle() ? windowHandle()->screen()
                                              : QGuiApplication::primaryScreen();
-            // grabWindow(winId(), 0, 0, w, h) takes a screen-pixel
-            // snapshot of just this top-level window — preserves any
-            // child overlay painting AND the actual rendered frame
-            // (drop shadows / native chrome / etc.).
+            // grab the SCREEN rect that this window occupies (rather
+            // than the window only) so any visible top-level popups
+            // overlapping the editor — hover preview, autocomplete,
+            // tooltips — get captured along with the main UI. The
+            // previous grabWindow(winId(), …) call missed Qt::ToolTip
+            // child popups entirely because they are independent
+            // top-level windows, not painted into winId().
             QPixmap pix;
-            if (screen)
-                pix = screen->grabWindow(winId(), 0, 0, width(), height());
-            else
+            if (screen) {
+                QPoint tl = mapToGlobal(QPoint(0, 0));
+                pix = screen->grabWindow(0, tl.x(), tl.y(),
+                                         width(), height());
+            } else {
                 pix = grab();  // fallback: widget-tree paint
+            }
             QString path = QCoreApplication::applicationDirPath()
                          + QStringLiteral("/issue.png");
             if (!pix.isNull() && pix.save(path, "PNG")) {
@@ -4005,13 +4091,15 @@ static uint64_t buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
     // beyond +0 / +8 — the user sees them as hex64 and can rename / retype
     // them live (which is the whole point of a Reclass tutorial).
     auto addPtr = [&](uint64_t parent, int off, const QString& name,
-                      uint64_t refId = 0) {
+                      uint64_t refId = 0,
+                      const QString& comment = {}) {
         Node n;
         n.kind = NodeKind::Pointer64;
         n.name = name;
         n.parentId = parent;
         n.offset = off;
         n.refId = refId;
+        n.comment = comment;
         tree.addNode(n);
     };
     auto addHex = [&](uint64_t parent, int off, const QString& name) {
@@ -4023,18 +4111,54 @@ static uint64_t buildEditorDemo(NodeTree& tree, uintptr_t editorAddr) {
         tree.addNode(n);
     };
 
+    // ── Tutorial: example enum so the Enum chip lights up on a member ──
+    // A small RGBA-style enum used by an int field below. Demonstrates
+    // the Enum chip ((MEMBER)) on a UInt32 whose refId points at this
+    // top-level enum struct.
+    Node demoEnum;
+    demoEnum.kind = NodeKind::Struct;
+    demoEnum.classKeyword = QStringLiteral("enum");
+    demoEnum.name = QStringLiteral("EditorColor");
+    demoEnum.structTypeName = QStringLiteral("EditorColor");
+    demoEnum.enumMembers = {
+        {QStringLiteral("BLACK"), 0},
+        {QStringLiteral("RED"),   1},
+        {QStringLiteral("GREEN"), 2},
+        {QStringLiteral("BLUE"),  3},
+    };
+    int dei = tree.addNode(demoEnum);
+    uint64_t demoEnumId = tree.nodes[dei].id;
+
+    // __vptr — the merged RTTI+Symbol chip is auto-emitted by compose
+    // (the live demo's whole point), so no user comment is needed here.
+    // Earlier the demo seeded a teaching comment on every demo field,
+    // but that turned into noise once chips landed: real Reclass docs
+    // never have a tutorial-text comment on every field, and seeing
+    // one made the demo look like "what is this shit" (user verbatim).
     addPtr(rootId, 0, QStringLiteral("__vptr"), vtId);
     addPtr(rootId, 8, QStringLiteral("d_ptr"));
+    // Enum chip demo: a UInt32 field referencing the enum above. The
+    // (MEMBER) chip fires automatically when the live memory at this
+    // offset matches an enum value — no comment needed.
+    {
+        Node n;
+        n.kind = NodeKind::UInt32;
+        n.name = QStringLiteral("colorMode");
+        n.parentId = rootId;
+        n.offset = 0x10;
+        n.refId = demoEnumId;
+        tree.addNode(n);
+    }
     // The rest of the object: raw memory visible as Hex64 fields with
-    // section labels grouping QWidget's body vs RcxEditor's own members.
-    // The user lays a vtable cursor over them and the auto-RTTI hint lights
-    // them up live (or will once Itanium walking lands).
-    for (int off = 0x10; off < 0x40; off += 8)
-        addHex(rootId, off, QStringLiteral("qwidget_internal_%1").arg(off, 2, 16, QLatin1Char('0')));
-    for (int off = 0x40; off < 0x100; off += 8)
-        addHex(rootId, off, QStringLiteral("rcxeditor_member_%1").arg(off, 3, 16, QLatin1Char('0')));
-    for (int off = 0x100; off < 0x200; off += 8)
-        addHex(rootId, off, QStringLiteral("field_%1").arg(off, 3, 16, QLatin1Char('0')));
+    // no auto-generated names. Tutorial-style "qwidget_internal_18 /
+    // rcxeditor_member_050 / field_00c4" labels were dropped because
+    // they LOOKED like reverse-engineering progress already made by us
+    // on the user's behalf — when the actual point of the tutorial is
+    // for the user to discover, name, and type these fields themselves.
+    // Blank names also let the eye go straight to the values + chips.
+    // Loop starts at 0x18 — colorMode UInt32 (above) already occupies 0x10.
+    for (int off = 0x18; off < 0x200; off += 8)
+        addHex(rootId, off, QString());
     return rootId;
 }
 
@@ -4065,10 +4189,37 @@ void MainWindow::selfTest() {
     editorDoc->tree.initialClass = QStringLiteral("RcxEditor");
 
     // Attach to self via processmemory plugin — provider supplies live bytes
-    // so the vtable + d_ptr fields show real values.
-    DWORD pid = GetCurrentProcessId();
-    QString target = QString("%1:Reclass.exe").arg(pid);
-    editorCtrl->attachViaPlugin(QStringLiteral("processmemory"), target);
+    // so the vtable + d_ptr fields show real values. Guard against the
+    // plugin being missing at runtime (user deleted the DLL, custom build
+    // without it, etc.) — without the check, attachViaPlugin pops a
+    // "Provider Unavailable" dialog mid-tutorial which derails the flow.
+    // Silent skip is fine; the cmd row falls back to the "source▾"
+    // placeholder and the tutorial still demonstrates the layout, just
+    // with empty bytes instead of live ones.
+    if (ProviderRegistry::instance().findProvider(QStringLiteral("processmemory"))) {
+        DWORD pid = GetCurrentProcessId();
+        QString target = QString("%1:Reclass.exe").arg(pid);
+        editorCtrl->attachViaPlugin(QStringLiteral("processmemory"), target);
+    }
+
+    // Live self-attach is a foot-gun: writing to e.g. __vptr would stomp
+    // this RcxEditor instance's vtable and Qt's next virtual dispatch
+    // crashes the editor (Reclass+0x… → call qword ptr [rax+30h] with
+    // rax=1). The tutorial is for INSPECTION — disable writes entirely
+    // through the controller. The provider can still report writable;
+    // setNodeValue + cmd::WriteBytes refuse to commit while the override
+    // is on, so undo/redo also can't replay an old write later.
+    editorCtrl->setReadOnlyOverride(true);
+
+    // Tutorial: turn every chip kind on so the user sees the full set in
+    // the demo (Comment / TypeHint / Rtti / Enum). These respect each
+    // tab's controller, so the user's persisted View toggles for *other*
+    // tabs aren't affected — only the demo flips them on for visibility.
+    editorCtrl->setShowComments(true);
+    editorCtrl->setShowRtti(true);
+    editorCtrl->setShowEnumChips(true);
+    // setTypeHints intentionally not called — TypeHint chips were
+    // retired (see compose.cpp).
 
     // The plugin attach can rewrite baseAddress to its own default — pin
     // it back at the actual editor object so the demo lands where intended.
@@ -4294,7 +4445,20 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
         setAppStatus(QStringLiteral("No active provider for RTTI"));
         return;
     }
-    auto info = walkRtti(*ctrl->document()->provider, vtableAddr);
+    // Compose runs RTTI through the snapshot provider — its page-cache
+    // already holds the vtable + type_info + name pages that produced the
+    // chip's hint text. The live provider may fail isReadable on the same
+    // pages a moment later (process unmapped them, page protection, etc.),
+    // so try the snapshot first; only fall back to live if the snapshot is
+    // gone. This is what makes the click-through actually match what the
+    // chip claims.
+    RttiInfo info;
+    if (auto* snap = ctrl->snapshotProv()) {
+        info = walkRtti(*snap, vtableAddr);
+    }
+    if (!info.ok) {
+        info = walkRtti(*ctrl->document()->provider, vtableAddr);
+    }
     if (!info.ok) {
         ThemedMessageBox::info(this,
             QStringLiteral("No RTTI Here"),
@@ -4720,79 +4884,8 @@ void MainWindow::applyTheme(const Theme& theme) {
             .arg(theme.hover.name()));
     if (m_symDockGrip)
         m_symDockGrip->setGripColor(theme.textFaint);
-    QString searchBoxStyle = QStringLiteral(
-        "QLineEdit { background: %1; color: %2;"
-        " border: none;"
-        " padding: 4px 8px 4px 2px; }"
-        "QLineEdit QToolButton { padding: 0px 8px; }"
-        "QLineEdit QToolButton:hover { background: %3; }")
-        .arg(theme.background.name(), theme.textDim.name(),
-             theme.hover.name());
-    if (m_symbolsSearch)
-        m_symbolsSearch->setStyleSheet(searchBoxStyle);
-    if (m_typesSearch)
-        m_typesSearch->setStyleSheet(searchBoxStyle);
-    if (m_symbolsTree) {
-        QPalette tp = m_symbolsTree->palette();
-        tp.setColor(QPalette::Text, theme.textDim);
-        tp.setColor(QPalette::Highlight, theme.selected);
-        tp.setColor(QPalette::HighlightedText, theme.text);
-        m_symbolsTree->setPalette(tp);
-        m_symbolsTree->setStyleSheet(QStringLiteral(
-            "QTreeView { background: %1; border: none; padding-left: 4px; }"
-            "QTreeView::branch:has-children:closed { image: url(:/vsicons/chevron-right.svg); }"
-            "QTreeView::branch:has-children:open { image: url(:/vsicons/chevron-down.svg); }"
-            "QTreeView::branch { width: 12px; }"
-            "QAbstractScrollArea::corner { background: %1; border: none; }"
-            "QHeaderView { background: %1; border: none; }"
-            "QHeaderView::section { background: %1; border: none; }")
-            .arg(theme.background.name()));
-    }
-    if (auto* sep = m_symbolsDock ? m_symbolsDock->findChild<QFrame*>("symbolsSep") : nullptr)
-        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
-    if (auto* sep = m_symbolsDock ? m_symbolsDock->findChild<QFrame*>("typesSep") : nullptr)
-        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
-    if (m_typesTree) {
-        QPalette tp = m_typesTree->palette();
-        tp.setColor(QPalette::Text, theme.textDim);
-        tp.setColor(QPalette::Highlight, theme.selected);
-        tp.setColor(QPalette::HighlightedText, theme.text);
-        m_typesTree->setPalette(tp);
-        m_typesTree->setStyleSheet(m_symbolsTree->styleSheet());
-    }
-    if (m_typesImportBtn) {
-        m_typesImportBtn->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1px solid %3;"
-            "  padding: 4px 16px; border-radius: 3px; }"
-            "QPushButton:hover { background: %4; }"
-            "QPushButton:disabled { color: %5; }")
-            .arg(theme.background.name(), theme.text.name(), theme.border.name(),
-                 theme.hover.name(), theme.textMuted.name()));
-    }
-    if (m_modulesTree) {
-        QPalette tp = m_modulesTree->palette();
-        tp.setColor(QPalette::Text, theme.textDim);
-        tp.setColor(QPalette::Highlight, theme.selected);
-        tp.setColor(QPalette::HighlightedText, theme.text);
-        m_modulesTree->setPalette(tp);
-        m_modulesTree->setStyleSheet(QStringLiteral(
-            "QTreeView { background: %1; border: none; padding-left: 4px; }"
-            "QAbstractScrollArea::corner { background: %1; border: none; }"
-            "QHeaderView { background: %1; border: none; }"
-            "QHeaderView::section { background: %1; border: none; }")
-            .arg(theme.background.name()));
-    }
-    if (m_symTabWidget) {
-        m_symTabWidget->setStyleSheet(QStringLiteral(
-            "QTabWidget::pane { border: none; }"
-            "QTabBar { background: %1; }"
-            "QTabBar::tab { background: %1; color: %2; border: none;"
-            " border-bottom: 2px solid transparent; padding: 4px 12px; }"
-            "QTabBar::tab:selected { color: %3; border-bottom: 2px solid %4; }"
-            "QTabBar::tab:hover { color: %3; }")
-            .arg(theme.backgroundAlt.name(), theme.textMuted.name(),
-                 theme.text.name(), theme.borderFocused.name()));
-    }
+    if (m_unifiedSymbols)
+        m_unifiedSymbols->applyTheme(theme);
 
     // Doc dock floating title bars
     for (auto* dock : m_docDocks) {
@@ -5012,18 +5105,8 @@ void MainWindow::setEditorFont(const QString& fontName) {
         m_scanDockTitle->setFont(f);
     if (m_symDockTitle)
         m_symDockTitle->setFont(f);
-    if (m_symbolsSearch)
-        m_symbolsSearch->setFont(f);
-    if (m_symbolsTree)
-        m_symbolsTree->setFont(f);
-    if (m_modulesTree)
-        m_modulesTree->setFont(f);
-    if (m_symTabWidget)
-        m_symTabWidget->setFont(f);
-    if (m_typesSearch)
-        m_typesSearch->setFont(f);
-    if (m_typesTree)
-        m_typesTree->setFont(f);
+    if (m_unifiedSymbols)
+        m_unifiedSymbols->applyTheme(ThemeManager::instance().current());
     // Sync doc dock float title fonts
     for (auto* dock : m_docDocks) {
         if (auto* lbl = dock->findChild<QLabel*>("dockFloatTitle"))
@@ -5469,12 +5552,14 @@ QString MainWindow::generateDebugText(RcxEditor* editor) const {
         if (lm) {
             int lk = (int)lm->lineKind;
             const char* kindName = (lk >= 0 && lk <= 6) ? lineKindNames[lk] : "?";
+            const LineChip* dbgComment  = findChip(*lm, ChipKind::Comment);
+            const LineChip* dbgTypeHint = findChip(*lm, ChipKind::TypeHint);
             meta = QStringLiteral("  ## L=%1 %2 nKind=%3 depth=%4 cmtStart=%5 tW=%6 nW=%7")
                 .arg(i)
                 .arg(QString::fromLatin1(kindName))
                 .arg(QString::fromLatin1(kindToString(lm->nodeKind)))
                 .arg(lm->depth)
-                .arg(lm->commentStart)
+                .arg(dbgComment ? dbgComment->startCol : -1)
                 .arg(lm->effectiveTypeW)
                 .arg(lm->effectiveNameW);
             if (lm->isStaticLine) meta += QStringLiteral(" static");
@@ -5482,7 +5567,7 @@ QString MainWindow::generateDebugText(RcxEditor* editor) const {
             if (lm->isMemberLine) meta += QStringLiteral(" member");
             if (lm->isArrayElement) meta += QStringLiteral(" arrElem");
             if (lm->foldHead) meta += lm->foldCollapsed ? QStringLiteral(" fold+") : QStringLiteral(" fold-");
-            if (lm->typeHintStart >= 0) meta += QStringLiteral(" hint@%1").arg(lm->typeHintStart);
+            if (dbgTypeHint) meta += QStringLiteral(" hint@%1").arg(dbgTypeHint->startCol);
         }
 
         output.append(margin + QStringLiteral("|") + annotated + meta);
@@ -5792,10 +5877,6 @@ void MainWindow::importFromSource() {
       createTab(doc);
     }
     rebuildWorkspaceModel();
-    if (!m_docDocks.isEmpty()) {
-        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
-    }
-    m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 classes from source").arg(classCount));
 }
 
@@ -5810,19 +5891,29 @@ void MainWindow::importPdb() {
     if (pdbPath.isEmpty()) return;
 
     int symCount = loadPdbAndCacheTypes(pdbPath);
-    rebuildSymbolsModel();
+    rebuildSymbols();
+    if (m_symbolsDock) m_symbolsDock->show();
 
-    m_symbolsDock->show();
-    if (m_symTabWidget) m_symTabWidget->setCurrentIndex(2);  // Types tab
-
-    // Count types from the PDB we just loaded
+    // Count the types that were just loaded so the status reflects whether
+    // this PDB was stripped of TPI data (typical for MS user-mode public
+    // PDBs like advapi32) or carries real type definitions (ntdll, ntos,
+    // private builds).
     int typeCount = 0;
     QString baseName = QFileInfo(pdbPath).completeBaseName();
-    auto cIt = m_cachedModuleTypes.constFind(baseName);
-    if (cIt != m_cachedModuleTypes.constEnd())
-        typeCount = cIt->types.size();
-    setAppStatus(QStringLiteral("Loaded %1 symbols + %2 types from %3 — select types to import")
-        .arg(symCount).arg(typeCount).arg(QFileInfo(pdbPath).fileName()));
+    QString canonical = rcx::SymbolStore::instance().resolveAlias(baseName);
+    if (const auto* set = rcx::SymbolStore::instance().moduleData(canonical))
+        typeCount = set->types.size();
+
+    QString fname = QFileInfo(pdbPath).fileName();
+    if (typeCount > 0) {
+        setAppStatus(QStringLiteral("Loaded %1 symbols + %2 types from %3 — "
+                                    "right-click a type to import")
+            .arg(symCount).arg(typeCount).arg(fname));
+    } else {
+        setAppStatus(QStringLiteral("Loaded %1 symbols from %2 "
+                                    "(public PDB — no type info)")
+            .arg(symCount).arg(fname));
+    }
 }
 
 // ── Type Aliases Dialog ──
@@ -5996,10 +6087,12 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
 
     auto* dock = createTab(doc);
 
-    // Dock the first editor tab — don't force workspace open (user can open via View menu)
-    if (m_docDocks.size() == 1 && m_workspaceDock) {
-        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
-    }
+    // Workspace stays hidden until the user opens it via View menu.
+    // The dock's visibilityChanged handler in createWorkspaceDock
+    // triggers rebuildWorkspaceModel() the first time it's shown, so
+    // we don't pay the tree-walk + QStandardItem construction cost
+    // until the user actually wants to see it. (placeSidebarDock used
+    // to fire here and force-show the dock on every "New Class".)
 
     rebuildWorkspaceModelNow();
     return dock;
@@ -6045,10 +6138,6 @@ QDockWidget* MainWindow::project_open(const QString& path) {
           dock = createTab(doc);
         }
         rebuildWorkspaceModel();
-        if (!m_docDocks.isEmpty()) {
-        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
-    }
-    m_workspaceDock->show();
         int classCount = 0;
         for (const auto& n : doc->tree.nodes)
             if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
@@ -6089,10 +6178,6 @@ QDockWidget* MainWindow::project_open(const QString& path) {
       dock = createTab(doc);
     }
     rebuildWorkspaceModel();
-    if (!m_docDocks.isEmpty()) {
-        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
-    }
-    m_workspaceDock->show();
     addRecentFile(filePath);
 
     int classCount = 0;
@@ -6785,10 +6870,24 @@ void MainWindow::createWorkspaceDock() {
     // returns 180 as its lower bound; matching that here so the user can
     // collapse to that width but no narrower.
     m_workspaceDock->setMinimumWidth(180);
-    addDockWidget(Qt::TopDockWidgetArea, m_workspaceDock);
+    // Initial placement is LeftDockWidgetArea (not Top) so the first
+    // time the user opens the workspace via View menu it appears in
+    // the expected sidebar position. We used to put it in Top and rely
+    // on placeSidebarDock to move it on the first project open — but
+    // that's also what was force-showing the dock on load, which the
+    // user explicitly didn't want.
+    addDockWidget(Qt::LeftDockWidgetArea, m_workspaceDock);
     m_workspaceDock->hide();
     // Watch resize events to drive the live divider-size tooltip.
     m_workspaceDock->installEventFilter(this);
+    // Rebuild the workspace model the moment it becomes visible. We
+    // skip rebuilds while hidden (see rebuildWorkspaceModelNow) so the
+    // first show after a load has a stale empty model — this fixes
+    // that without doing the work eagerly.
+    connect(m_workspaceDock, &QDockWidget::visibilityChanged, this,
+            [this](bool visible) {
+        if (visible) rebuildWorkspaceModel();
+    });
 
     connect(m_workspaceTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& index) {
         if (!index.data(rcx::RoleSectionHeader).toString().isEmpty()) return;
@@ -7114,7 +7213,7 @@ void MainWindow::ensureScannerPanel() {
 void MainWindow::createSymbolsDock() {
     if (m_symbolsDock) return;  // idempotent: deferred + menu may both call
     PROFILE_SCOPE("MainWindow::createSymbolsDock");
-    m_symbolsDock = new QDockWidget("Modules", this);
+    m_symbolsDock = new QDockWidget("Symbols", this);
     m_symbolsDock->setObjectName("SymbolsDock");
     m_symbolsDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     m_symbolsDock->setFeatures(
@@ -7143,7 +7242,7 @@ void MainWindow::createSymbolsDock() {
         m_symDockGrip = new DockGripWidget(titleBar);
         layout->addWidget(m_symDockGrip);
 
-        m_symDockTitle = new QLabel("Modules", titleBar);
+        m_symDockTitle = new QLabel("Symbols", titleBar);
         m_symDockTitle->setStyleSheet(
             QStringLiteral("color: %1;").arg(t.textDim.name()));
         m_symDockTitle->setFont(monoFont);
@@ -7180,644 +7279,56 @@ void MainWindow::createSymbolsDock() {
         m_symbolsDock->setTitleBarWidget(titleBar);
     }
 
-    // Helper: style a tree view to match theme
-    auto styleTree = [&](QTreeView* tree) {
-        tree->setFont(monoFont);
-        QPalette tp = tree->palette();
-        tp.setColor(QPalette::Text, t.textDim);
-        tp.setColor(QPalette::Highlight, t.selected);
-        tp.setColor(QPalette::HighlightedText, t.text);
-        tree->setPalette(tp);
-        tree->setStyleSheet(QStringLiteral(
-            "QTreeView { background: %1; border: none; padding-left: 4px; }"
-            "QTreeView::branch:has-children:closed { image: url(:/vsicons/chevron-right.svg); }"
-            "QTreeView::branch:has-children:open { image: url(:/vsicons/chevron-down.svg); }"
-            "QTreeView::branch { width: 12px; }"
-            "QAbstractScrollArea::corner { background: %1; border: none; }"
-            "QHeaderView { background: %1; border: none; }"
-            "QHeaderView::section { background: %1; border: none; }")
-            .arg(t.background.name()));
-        tree->setHeaderHidden(true);
-        tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        tree->setMouseTracking(true);
-        tree->setSelectionMode(QAbstractItemView::SingleSelection);
-        tree->setIndentation(12);
-    };
-
-    // Container with tab widget
+    // Container hosting the unified Symbols panel (no tab widget — one list).
     auto* container = new QWidget(m_symbolsDock);
     auto* containerLayout = new QVBoxLayout(container);
     containerLayout->setContentsMargins(0, 0, 0, 0);
     containerLayout->setSpacing(0);
 
-    m_symTabWidget = new QTabWidget(container);
-    m_symTabWidget->setObjectName(QStringLiteral("symTabWidget"));
-    m_symTabWidget->setDocumentMode(true);
-    m_symTabWidget->setFont(monoFont);
-    m_symTabWidget->setStyleSheet(QStringLiteral(
-        "QTabWidget::pane { border: none; }"
-        "QTabBar { background: %1; }"
-        "QTabBar::tab { background: %1; color: %2; border: none;"
-        " border-bottom: 2px solid transparent; padding: 4px 12px; }"
-        "QTabBar::tab:selected { color: %3; border-bottom: 2px solid %4; }"
-        "QTabBar::tab:hover { color: %3; }")
-        .arg(t.backgroundAlt.name(), t.textMuted.name(),
-             t.text.name(), t.borderFocused.name()));
+    m_unifiedSymbols = new rcx::UnifiedSymbolPanel(container);
+    m_unifiedSymbols->setActiveProviderFn([this]() -> const rcx::Provider* {
+        auto* ctrl = activeController();
+        return (ctrl && ctrl->document()) ? ctrl->document()->provider.get() : nullptr;
+    });
+    containerLayout->addWidget(m_unifiedSymbols, 1);
 
-    // ── Modules tab ──
-    PROFILE_SCOPE("createSymbolsDock.tabs");
-    { PROFILE_SCOPE("createSymbolsDock.modules-tab");
-        m_modulesTree = new QTreeView();
-        m_modulesModel = new QStandardItemModel(this);
-        m_modulesTree->setModel(m_modulesModel);
-        styleTree(m_modulesTree);
-        m_modulesTree->setExpandsOnDoubleClick(false);
+    connect(m_unifiedSymbols, &rcx::UnifiedSymbolPanel::navigateRequested, this,
+            [this](const rcx::NamedAddress& e) {
+        if (e.address == 0) return;
+        auto* ctrl = activeController();
+        if (!ctrl) return;
+        ctrl->document()->tree.baseAddress = e.address;
+        ctrl->document()->tree.baseAddressFormula.clear();
+        ctrl->resetChangeTracking();
+        ctrl->refresh();
+        setAppStatus(QStringLiteral("Navigated to %1 (0x%2)")
+            .arg(e.name).arg(e.address, 0, 16));
+    });
 
-        // Double-click: set base address and trigger PDB import
-        connect(m_modulesTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& idx) {
-            auto* item = m_modulesModel->itemFromIndex(idx);
-            if (!item) return;
+    connect(m_unifiedSymbols, &rcx::UnifiedSymbolPanel::importTypeRequested, this,
+            [this](const rcx::NamedAddress& e) {
+        if (e.typeIndex == 0 || e.meta.isEmpty()) return;
+        importTypeFromPdbUI(e.meta, e.typeIndex, e.name);
+    });
 
-            uint64_t base = item->data(Qt::UserRole).toULongLong();
-            QString name = item->data(Qt::UserRole + 1).toString();
-            QString fullPath = item->data(Qt::UserRole + 2).toString();
+    connect(m_unifiedSymbols, &rcx::UnifiedSymbolPanel::importSelectedRequested, this,
+            [this](const QVector<rcx::NamedAddress>& sel) {
+        bulkImportTypesUI(sel);
+    });
 
-            auto* ctrl = activeController();
-            if (!ctrl) return;
-
-            // Set base address
-            ctrl->document()->tree.baseAddress = base;
-            ctrl->document()->tree.baseAddressFormula.clear();
-            ctrl->resetChangeTracking();
-            ctrl->refresh();
-
-            // Already have symbols for this module?
-            QString canonical = rcx::SymbolStore::instance().resolveAlias(name);
-            if (rcx::SymbolStore::instance().moduleData(canonical)) {
-                setAppStatus(QStringLiteral("Base set to %1 (0x%2) — symbols already loaded")
-                    .arg(name).arg(base, 0, 16));
+    connect(m_unifiedSymbols, &rcx::UnifiedSymbolPanel::removeRequested, this,
+            [this](const rcx::NamedAddress& e) {
+        for (const auto& p : rcx::NameRegistry::instance().providers()) {
+            if (p->id() == e.source && p->supportsRemove()) {
+                p->remove(e.name);
+                if (auto* ctrl = activeController()) ctrl->refresh();
+                rcx::NameRegistry::instance().emitChanged();
+                setAppStatus(QStringLiteral("Removed %1").arg(e.name));
                 return;
             }
-
-            // Try to load symbols: local PDB → cache → download
-            auto prov = ctrl->document()->provider;
-            if (!prov) return;
-
-            auto info = rcx::extractPdbDebugInfo(*prov, base);
-            if (!info.valid) {
-                setAppStatus(QStringLiteral("Base set to %1 (0x%2) — no debug info")
-                    .arg(name).arg(base, 0, 16));
-                return;
-            }
-
-            // Helper to load a PDB file into the symbol store (with type indices)
-            auto loadPdb = [this, name](const QString& pdbPath) -> bool {
-                int count = loadPdbAndCacheTypes(pdbPath);
-                if (count <= 0) return false;
-                setAppStatus(QStringLiteral("Loaded %1 symbols for %2").arg(count).arg(name));
-                rebuildSymbolsModel();
-                if (auto* c = activeController()) c->refresh();
-                return true;
-            };
-
-            // Check local
-            QString localPdb = rcx::SymbolDownloader::findLocal(fullPath, info.pdbName);
-            if (!localPdb.isEmpty() && loadPdb(localPdb)) return;
-
-            // Check cache
-            if (!m_symDownloader)
-                m_symDownloader = new rcx::SymbolDownloader(this);
-            rcx::SymbolDownloader::DownloadRequest req;
-            req.moduleName = name;
-            req.pdbName = info.pdbName;
-            req.guidString = info.guidString;
-            req.age = info.age;
-
-            QString cached = m_symDownloader->findCached(req);
-            if (!cached.isEmpty() && loadPdb(cached)) return;
-
-            // Download
-            setAppStatus(QStringLiteral("Downloading symbols for %1...").arg(name));
-
-            // One-shot connection for this download
-            auto conn = std::make_shared<QMetaObject::Connection>();
-            *conn = connect(m_symDownloader, &rcx::SymbolDownloader::finished,
-                    this, [this, conn, loadPdb](const QString& mod, const QString& localPath,
-                                                bool success, const QString& error) {
-                disconnect(*conn);
-                if (!success) {
-                    setAppStatus(QStringLiteral("Failed to download %1: %2").arg(mod, error));
-                    return;
-                }
-                loadPdb(localPath);
-            });
-            m_symDownloader->download(req);
-        });
-
-        // Context menu for modules
-        m_modulesTree->setContextMenuPolicy(Qt::CustomContextMenu);
-        connect(m_modulesTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
-            QModelIndex idx = m_modulesTree->indexAt(pos);
-            if (!idx.isValid()) return;
-            auto* item = m_modulesModel->itemFromIndex(idx);
-            if (!item) return;
-
-            uint64_t base = item->data(Qt::UserRole).toULongLong();
-            QString name = item->data(Qt::UserRole + 1).toString();
-
-            QString fullPath = item->data(Qt::UserRole + 2).toString();
-
-            QMenu menu;
-            auto* actCopyBase = menu.addAction("Copy Base Address");
-            connect(actCopyBase, &QAction::triggered, this, [base]() {
-                QApplication::clipboard()->setText(
-                    QStringLiteral("0x%1").arg(base, 16, 16, QLatin1Char('0')));
-            });
-            auto* actGoTo = menu.addAction("Go to Address");
-            connect(actGoTo, &QAction::triggered, this, [this, base]() {
-                auto* ctrl = activeController();
-                if (!ctrl) return;
-                ctrl->document()->tree.baseAddress = base;
-                ctrl->document()->tree.baseAddressFormula.clear();
-                ctrl->resetChangeTracking();
-                ctrl->refresh();
-            });
-            menu.addSeparator();
-            // Check if symbols already loaded — change label accordingly
-            QString canonical = rcx::SymbolStore::instance().resolveAlias(name);
-            const auto* existingSyms = rcx::SymbolStore::instance().moduleData(canonical);
-            auto* actDownload = menu.addAction(existingSyms
-                ? QStringLiteral("Reload Symbols (%1 loaded)").arg(existingSyms->nameToRva.size())
-                : QStringLiteral("Download Symbols"));
-            connect(actDownload, &QAction::triggered, this, [this, name, base, fullPath]() {
-                auto* ctrl = activeController();
-                if (!ctrl || !ctrl->document()->provider) return;
-                auto prov = ctrl->document()->provider;
-
-                auto info = rcx::extractPdbDebugInfo(*prov, base);
-                if (!info.valid) {
-                    setAppStatus(QStringLiteral("No debug info found in %1").arg(name));
-                    return;
-                }
-
-                // Check local first
-                QString localPdb = rcx::SymbolDownloader::findLocal(fullPath, info.pdbName);
-                if (!localPdb.isEmpty()) {
-                    QString symErr;
-                    auto result = rcx::extractPdbSymbols(localPdb, &symErr);
-                    if (!result.symbols.isEmpty()) {
-                        QVector<QPair<QString, uint32_t>> pairs;
-                        pairs.reserve(result.symbols.size());
-                        for (const auto& s : result.symbols)
-                            pairs.emplaceBack(s.name, s.rva);
-                        int count = rcx::SymbolStore::instance().addModule(
-                            result.moduleName, localPdb, pairs);
-                        setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (local)")
-                            .arg(count).arg(name));
-                    }
-                    rebuildSymbolsModel();
-                    if (auto* c = activeController()) c->refresh();
-                    return;
-                }
-
-                // Download from MS symbol server
-                if (!m_symDownloader) {
-                    m_symDownloader = new rcx::SymbolDownloader(this);
-                    connect(m_symDownloader, &rcx::SymbolDownloader::progress,
-                            this, [this](const QString& mod, int received, int total) {
-                        if (total > 0)
-                            setAppStatus(QStringLiteral("Downloading %1... %2/%3 KB")
-                                .arg(mod).arg(received/1024).arg(total/1024));
-                        else
-                            setAppStatus(QStringLiteral("Downloading %1... %2 KB")
-                                .arg(mod).arg(received/1024));
-                    });
-                    connect(m_symDownloader, &rcx::SymbolDownloader::finished,
-                            this, [this](const QString& mod, const QString& localPath,
-                                         bool success, const QString& error) {
-                        if (!success) {
-                            setAppStatus(QStringLiteral("Failed to download %1: %2").arg(mod, error));
-                            return;
-                        }
-                        QString symErr;
-                        auto result = rcx::extractPdbSymbols(localPath, &symErr);
-                        if (!result.symbols.isEmpty()) {
-                            QVector<QPair<QString, uint32_t>> pairs;
-                            pairs.reserve(result.symbols.size());
-                            for (const auto& s : result.symbols)
-                                pairs.emplaceBack(s.name, s.rva);
-                            int count = rcx::SymbolStore::instance().addModule(
-                                result.moduleName, localPath, pairs);
-                            setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
-                                .arg(count).arg(mod));
-                        }
-                        rebuildSymbolsModel();
-                        if (auto* c = activeController()) c->refresh();
-                    });
-                }
-
-                rcx::SymbolDownloader::DownloadRequest req;
-                req.moduleName = name;
-                req.pdbName = info.pdbName;
-                req.guidString = info.guidString;
-                req.age = info.age;
-
-                QString cached = m_symDownloader->findCached(req);
-                if (!cached.isEmpty()) {
-                    QString symErr;
-                    auto result = rcx::extractPdbSymbols(cached, &symErr);
-                    if (!result.symbols.isEmpty()) {
-                        QVector<QPair<QString, uint32_t>> pairs;
-                        pairs.reserve(result.symbols.size());
-                        for (const auto& s : result.symbols)
-                            pairs.emplaceBack(s.name, s.rva);
-                        int count = rcx::SymbolStore::instance().addModule(
-                            result.moduleName, cached, pairs);
-                        setAppStatus(QStringLiteral("Loaded %1 symbols for %2 (cached)")
-                            .arg(count).arg(name));
-                    }
-                    rebuildSymbolsModel();
-                    if (auto* c = activeController()) c->refresh();
-                    return;
-                }
-
-                m_symDownloader->download(req);
-            });
-            auto* actBrowse = menu.addAction("Load PDB...");
-            connect(actBrowse, &QAction::triggered, this, [this, name]() {
-                QString path = QFileDialog::getOpenFileName(this,
-                    QStringLiteral("Select PDB for %1").arg(name), {},
-                    "PDB Files (*.pdb);;All Files (*)");
-                if (path.isEmpty()) return;
-
-                QString symErr;
-                auto result = rcx::extractPdbSymbols(path, &symErr);
-                if (result.symbols.isEmpty()) {
-                    setAppStatus(symErr.isEmpty()
-                        ? QStringLiteral("No symbols found in PDB")
-                        : symErr);
-                    return;
-                }
-                QVector<QPair<QString, uint32_t>> pairs;
-                pairs.reserve(result.symbols.size());
-                for (const auto& s : result.symbols)
-                    pairs.emplaceBack(s.name, s.rva);
-                int count = rcx::SymbolStore::instance().addModule(
-                    result.moduleName, path, pairs);
-                setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
-                    .arg(count).arg(name));
-                rebuildSymbolsModel();
-                if (auto* c = activeController()) c->refresh();
-            });
-            menu.exec(m_modulesTree->viewport()->mapToGlobal(pos));
-        });
-
-        m_symTabWidget->addTab(m_modulesTree, "Modules");
-    }
-
-    // ── Symbols tab ──
-    { PROFILE_SCOPE("createSymbolsDock.symbols-tab");
-        auto* symbolsPage = new QWidget();
-        auto* symLayout = new QVBoxLayout(symbolsPage);
-        symLayout->setContentsMargins(0, 0, 0, 0);
-        symLayout->setSpacing(0);
-
-        // Search/filter box
-        m_symbolsSearch = new QLineEdit(symbolsPage);
-        m_symbolsSearch->setPlaceholderText(QStringLiteral("Filter symbols..."));
-        m_symbolsSearch->setFont(monoFont);
-        {
-            auto* searchAction = m_symbolsSearch->addAction(
-                QIcon(QStringLiteral(":/vsicons/search.svg")),
-                QLineEdit::LeadingPosition);
-            for (auto* btn : m_symbolsSearch->findChildren<QToolButton*>()) {
-                if (btn->defaultAction() == searchAction) {
-                    btn->setIconSize(QSize(14, 14));
-                    break;
-                }
-            }
         }
-        {
-            auto* clearAction = m_symbolsSearch->addAction(
-                QIcon(QStringLiteral(":/vsicons/close.svg")),
-                QLineEdit::TrailingPosition);
-            clearAction->setVisible(false);
-            connect(clearAction, &QAction::triggered,
-                    m_symbolsSearch, &QLineEdit::clear);
-            connect(m_symbolsSearch, &QLineEdit::textChanged,
-                    clearAction, [clearAction](const QString& text) {
-                clearAction->setVisible(!text.isEmpty());
-            });
-            for (auto* btn : m_symbolsSearch->findChildren<QToolButton*>()) {
-                if (btn->defaultAction() == clearAction) {
-                    btn->setIconSize(QSize(14, 14));
-                    break;
-                }
-            }
-        }
-        m_symbolsSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2;"
-            " border: none;"
-            " padding: 4px 8px 4px 2px; }"
-            "QLineEdit QToolButton { padding: 0px 8px; }"
-            "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(t.background.name(), t.textDim.name(),
-                 t.hover.name()));
-        m_symbolsSearch->setContentsMargins(6, 6, 6, 6);
-        symLayout->addWidget(m_symbolsSearch);
+    });
 
-        // Separator
-        auto* sep = new QFrame(symbolsPage);
-        sep->setObjectName(QStringLiteral("symbolsSep"));
-        sep->setFrameShape(QFrame::HLine);
-        sep->setFixedHeight(1);
-        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
-        symLayout->addWidget(sep);
-
-        // Symbols tree
-        m_symbolsTree = new QTreeView(symbolsPage);
-        m_symbolsModel = new QStandardItemModel(this);
-        m_symbolsModel->setHorizontalHeaderLabels({"Name"});
-
-        m_symbolsProxy = new QSortFilterProxyModel(this);
-        m_symbolsProxy->setSourceModel(m_symbolsModel);
-        m_symbolsProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-        m_symbolsProxy->setRecursiveFilteringEnabled(true);
-
-        m_symbolsTree->setModel(m_symbolsProxy);
-        m_symbolsTree->setExpandsOnDoubleClick(false);
-        styleTree(m_symbolsTree);
-
-        // Populate a module item's children (replaces sentinel with real symbols)
-        auto populateModuleItem = [this](QStandardItem* item) {
-            if (!item || item->parent()) return;
-            if (item->rowCount() == 1 && item->child(0)->text().isEmpty()) {
-                item->removeRows(0, 1);
-                QString moduleName = item->data(Qt::UserRole).toString();
-                const auto* set = rcx::SymbolStore::instance().moduleData(moduleName);
-                if (set) {
-                    static const QIcon symIcon(":/vsicons/symbol-method.svg");
-                    for (const auto& sym : set->rvaToName) {
-                        auto* child = new QStandardItem(symIcon,
-                            QStringLiteral("%1  [0x%2]")
-                                .arg(sym.second)
-                                .arg(sym.first, 8, 16, QLatin1Char('0')));
-                        child->setData(moduleName, Qt::UserRole);
-                        child->setData(sym.first, Qt::UserRole + 1);
-                        child->setData(sym.second, Qt::UserRole + 2);
-                        item->appendRow(child);
-                    }
-                }
-            }
-        };
-
-        // Debounced search — force-populate all modules so filter can match children
-        auto* searchTimer = new QTimer(this);
-        searchTimer->setSingleShot(true);
-        searchTimer->setInterval(150);
-        connect(searchTimer, &QTimer::timeout, this, [this, populateModuleItem]() {
-            QString text = m_symbolsSearch->text();
-            if (!text.isEmpty()) {
-                // Force-populate all modules that still have sentinels
-                for (int i = 0; i < m_symbolsModel->rowCount(); i++)
-                    populateModuleItem(m_symbolsModel->item(i));
-            }
-            m_symbolsProxy->setFilterFixedString(text);
-            if (!text.isEmpty())
-                m_symbolsTree->expandAll();
-            else
-                m_symbolsTree->collapseAll();
-        });
-        connect(m_symbolsSearch, &QLineEdit::textChanged, this, [searchTimer]() {
-            searchTimer->start();
-        });
-
-        symLayout->addWidget(m_symbolsTree);
-
-        // Lazy-load children when a module node is expanded
-        connect(m_symbolsTree, &QTreeView::expanded, this, [this, populateModuleItem](const QModelIndex& proxyIdx) {
-            QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
-            populateModuleItem(m_symbolsModel->itemFromIndex(srcIdx));
-        });
-
-        // Double-click symbol → navigate to moduleBase + RVA
-        connect(m_symbolsTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& proxyIdx) {
-            QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
-            auto* item = m_symbolsModel->itemFromIndex(srcIdx);
-            if (!item) return;
-
-            // Module-level: toggle expand
-            if (!item->parent()) {
-                if (m_symbolsTree->isExpanded(proxyIdx))
-                    m_symbolsTree->collapse(proxyIdx);
-                else
-                    m_symbolsTree->expand(proxyIdx);
-                return;
-            }
-
-            // Symbol-level: navigate to moduleBase + RVA
-            QString moduleName = item->data(Qt::UserRole).toString();
-            uint32_t rva = item->data(Qt::UserRole + 1).toUInt();
-
-            auto* ctrl = activeController();
-            if (!ctrl || !ctrl->document()->provider) return;
-
-            uint64_t moduleBase = ctrl->document()->provider->symbolToAddress(moduleName);
-            if (moduleBase == 0)
-                moduleBase = ctrl->document()->provider->symbolToAddress(moduleName + QStringLiteral(".dll"));
-            if (moduleBase == 0)
-                moduleBase = ctrl->document()->provider->symbolToAddress(moduleName + QStringLiteral(".exe"));
-            if (moduleBase == 0)
-                moduleBase = ctrl->document()->provider->symbolToAddress(moduleName + QStringLiteral(".sys"));
-            if (moduleBase == 0) return;
-
-            uint64_t addr = moduleBase + rva;
-            ctrl->document()->tree.baseAddress = addr;
-            ctrl->document()->tree.baseAddressFormula.clear();
-            ctrl->resetChangeTracking();
-            ctrl->refresh();
-
-            QString symName = item->data(Qt::UserRole + 2).toString();
-            setAppStatus(QStringLiteral("Navigated to %1!%2 (0x%3)")
-                .arg(moduleName, symName)
-                .arg(addr, 0, 16));
-        });
-
-        // Context menu for symbols
-        m_symbolsTree->setContextMenuPolicy(Qt::CustomContextMenu);
-        connect(m_symbolsTree, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
-            QModelIndex proxyIdx = m_symbolsTree->indexAt(pos);
-            if (!proxyIdx.isValid()) return;
-            QModelIndex srcIdx = m_symbolsProxy->mapToSource(proxyIdx);
-            auto* item = m_symbolsModel->itemFromIndex(srcIdx);
-            if (!item) return;
-
-            QMenu menu;
-            if (!item->parent()) {
-                QString moduleName = item->data(Qt::UserRole).toString();
-                auto* actUnload = menu.addAction("Unload Module");
-                connect(actUnload, &QAction::triggered, this, [this, moduleName]() {
-                    rcx::SymbolStore::instance().unloadModule(moduleName);
-                    rebuildSymbolsModel();
-                    if (auto* ctrl = activeController())
-                        ctrl->refresh();
-                });
-            } else {
-                QString moduleName = item->data(Qt::UserRole).toString();
-                QString symName = item->data(Qt::UserRole + 2).toString();
-                uint32_t rva = item->data(Qt::UserRole + 1).toUInt();
-                QString fullName = moduleName + QStringLiteral("!") + symName;
-
-                auto* actCopyName = menu.addAction("Copy Symbol Name");
-                connect(actCopyName, &QAction::triggered, this, [fullName]() {
-                    QApplication::clipboard()->setText(fullName);
-                });
-                auto* actCopyRva = menu.addAction("Copy RVA");
-                connect(actCopyRva, &QAction::triggered, this, [rva]() {
-                    QApplication::clipboard()->setText(
-                        QStringLiteral("0x%1").arg(rva, 8, 16, QLatin1Char('0')));
-                });
-            }
-            menu.exec(m_symbolsTree->viewport()->mapToGlobal(pos));
-        });
-
-        m_symTabWidget->addTab(symbolsPage, "Symbols");
-    }
-
-    // ── Types tab (PDB type import) ──
-    { PROFILE_SCOPE("createSymbolsDock.types-tab");
-        auto* typesPage = new QWidget();
-        auto* typLayout = new QVBoxLayout(typesPage);
-        typLayout->setContentsMargins(0, 0, 0, 0);
-        typLayout->setSpacing(0);
-
-        // Search/filter box
-        m_typesSearch = new QLineEdit(typesPage);
-        m_typesSearch->setPlaceholderText(QStringLiteral("Filter types..."));
-        m_typesSearch->setFont(monoFont);
-        {
-            auto* sa = m_typesSearch->addAction(
-                QIcon(QStringLiteral(":/vsicons/search.svg")),
-                QLineEdit::LeadingPosition);
-            for (auto* btn : m_typesSearch->findChildren<QToolButton*>())
-                if (btn->defaultAction() == sa) { btn->setIconSize(QSize(14, 14)); break; }
-        }
-        {
-            auto* ca = m_typesSearch->addAction(
-                QIcon(QStringLiteral(":/vsicons/close.svg")),
-                QLineEdit::TrailingPosition);
-            ca->setVisible(false);
-            connect(ca, &QAction::triggered, m_typesSearch, &QLineEdit::clear);
-            connect(m_typesSearch, &QLineEdit::textChanged, ca,
-                    [ca](const QString& text) { ca->setVisible(!text.isEmpty()); });
-            for (auto* btn : m_typesSearch->findChildren<QToolButton*>())
-                if (btn->defaultAction() == ca) { btn->setIconSize(QSize(14, 14)); break; }
-        }
-        m_typesSearch->setStyleSheet(m_symbolsSearch->styleSheet());
-        m_typesSearch->setContentsMargins(6, 6, 6, 6);
-        typLayout->addWidget(m_typesSearch);
-
-        auto* typSep = new QFrame(typesPage);
-        typSep->setObjectName(QStringLiteral("typesSep"));
-        typSep->setFrameShape(QFrame::HLine);
-        typSep->setFixedHeight(1);
-        typSep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
-        typLayout->addWidget(typSep);
-
-        // Types tree (checkable items)
-        m_typesTree = new QTreeView(typesPage);
-        m_typesModel = new QStandardItemModel(this);
-        m_typesProxy = new QSortFilterProxyModel(this);
-        m_typesProxy->setSourceModel(m_typesModel);
-        m_typesProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-        m_typesProxy->setRecursiveFilteringEnabled(true);
-        m_typesTree->setModel(m_typesProxy);
-        m_typesTree->setExpandsOnDoubleClick(true);
-        styleTree(m_typesTree);
-
-        // Debounced search
-        auto* typSearchTimer = new QTimer(this);
-        typSearchTimer->setSingleShot(true);
-        typSearchTimer->setInterval(150);
-        connect(typSearchTimer, &QTimer::timeout, this, [this]() {
-            QString text = m_typesSearch->text();
-            // Force-populate all modules so filter can match children
-            if (!text.isEmpty()) {
-                for (int i = 0; i < m_typesModel->rowCount(); i++) {
-                    auto* mod = m_typesModel->item(i);
-                    if (mod && mod->rowCount() == 1 && mod->child(0)->text().isEmpty())
-                        populateTypesModuleItem(mod);
-                }
-            }
-            m_typesProxy->setFilterFixedString(text);
-            if (!text.isEmpty()) m_typesTree->expandAll();
-            else m_typesTree->collapseAll();
-        });
-        connect(m_typesSearch, &QLineEdit::textChanged, this, [typSearchTimer]() {
-            typSearchTimer->start();
-        });
-
-        // Lazy-load children on expand
-        connect(m_typesTree, &QTreeView::expanded, this, [this](const QModelIndex& proxyIdx) {
-            QModelIndex srcIdx = m_typesProxy->mapToSource(proxyIdx);
-            auto* item = m_typesModel->itemFromIndex(srcIdx);
-            if (item && !item->parent() && item->rowCount() == 1
-                && item->child(0)->text().isEmpty())
-                populateTypesModuleItem(item);
-        });
-
-        // Update import button when check states change
-        connect(m_typesModel, &QStandardItemModel::dataChanged, this,
-                [this](const QModelIndex&, const QModelIndex&, const QVector<int>& roles) {
-            if (!roles.isEmpty() && !roles.contains(Qt::CheckStateRole)) return;
-            bool anyChecked = false;
-            for (int i = 0; i < m_typesModel->rowCount() && !anyChecked; i++) {
-                auto* mod = m_typesModel->item(i);
-                if (!mod) continue;
-                for (int j = 0; j < mod->rowCount(); j++) {
-                    if (mod->child(j) && mod->child(j)->checkState() == Qt::Checked)
-                        { anyChecked = true; break; }
-                }
-            }
-            if (m_typesImportBtn) m_typesImportBtn->setEnabled(anyChecked);
-        });
-
-        typLayout->addWidget(m_typesTree);
-
-        // Import button row
-        auto* btnRow = new QHBoxLayout;
-        btnRow->setContentsMargins(6, 4, 6, 4);
-        btnRow->addStretch();
-        m_typesImportBtn = new QPushButton(QStringLiteral("Import Selected"), typesPage);
-        m_typesImportBtn->setCursor(Qt::PointingHandCursor);
-        m_typesImportBtn->setEnabled(false);
-        m_typesImportBtn->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1px solid %3;"
-            "  padding: 4px 16px; border-radius: 3px; }"
-            "QPushButton:hover { background: %4; }"
-            "QPushButton:disabled { color: %5; }")
-            .arg(t.background.name(), t.text.name(), t.border.name(),
-                 t.hover.name(), t.textMuted.name()));
-        connect(m_typesImportBtn, &QPushButton::clicked, this, &MainWindow::importSelectedTypes);
-        btnRow->addWidget(m_typesImportBtn);
-        typLayout->addLayout(btnRow);
-
-        m_symTabWidget->addTab(typesPage, "Types");
-    }
-
-    containerLayout->addWidget(m_symTabWidget);
-    // Allow free resizing — remove Qt's default minimum size constraints
-    m_modulesTree->setMinimumWidth(0);
-    m_modulesTree->setMinimumHeight(0);
-    m_symbolsTree->setMinimumWidth(0);
-    m_symbolsTree->setMinimumHeight(0);
-    m_symbolsSearch->setMinimumWidth(0);
-    if (m_typesTree) { m_typesTree->setMinimumWidth(0); m_typesTree->setMinimumHeight(0); }
-    if (m_typesSearch) m_typesSearch->setMinimumWidth(0);
-    m_symTabWidget->setMinimumWidth(0);
-    m_symTabWidget->setMinimumHeight(0);
-    container->setMinimumWidth(0);
-    container->setMinimumHeight(0);
     m_symbolsDock->setWidget(container);
     // Symbols dock is taller and needs room for module list + symbol tree.
     m_symbolsDock->setMinimumWidth(220);
@@ -7871,17 +7382,19 @@ int MainWindow::loadPdbAndCacheTypes(const QString& pdbPath) {
         rcx::SymbolStore::instance().addModuleTypeIndices(
             result.moduleName, typeIndices);
 
-    // Cache enumerated types for the Types tab
+    // Standalone TPI types — populates the unified Symbols panel with the
+    // struct/enum definitions even when no symbol names them. Right-click
+    // a type row → "Import type" pulls it into the active document.
     QString typeErr;
     auto types = rcx::enumeratePdbTypes(pdbPath, &typeErr);
     if (!types.isEmpty()) {
         std::sort(types.begin(), types.end(), [](const auto& a, const auto& b) {
             return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
         });
-        m_cachedModuleTypes[result.moduleName] = { pdbPath, types };
-        rebuildTypesModel();
+        rcx::SymbolStore::instance().addModuleTypes(result.moduleName, types);
     }
 
+    rcx::NameRegistry::instance().emitChanged();
     return count;
 }
 
@@ -8035,91 +7548,68 @@ void MainWindow::navigateBookmark(int idx) {
     }
 }
 
-void MainWindow::rebuildSymbolsModel() {
-    if (!m_symbolsModel) return;
-    m_symbolsModel->clear();
-    m_symbolsModel->setHorizontalHeaderLabels({"Name"});
-
-    auto& store = rcx::SymbolStore::instance();
-    for (const auto& moduleName : store.loadedModules()) {
-        const auto* set = store.moduleData(moduleName);
-        if (!set) continue;
-
-        int count = set->nameToRva.size();
-        static const QIcon modIcon(":/vsicons/symbol-structure.svg");
-        auto* moduleItem = new QStandardItem(modIcon,
-            QStringLiteral("%1  (%2 symbols)").arg(moduleName).arg(count));
-        moduleItem->setData(moduleName, Qt::UserRole);
-        moduleItem->setToolTip(set->pdbPath);
-
-        // Sentinel child for lazy loading (shows expand arrow)
-        moduleItem->appendRow(new QStandardItem());
-
-        m_symbolsModel->appendRow(moduleItem);
-    }
+void MainWindow::rebuildSymbols() {
+    // The unified panel listens for NameRegistry::providersChanged and
+    // refreshes itself, so the canonical way to nudge it is via the
+    // registry signal. Direct rebuild() is kept for callers that just want
+    // to force a re-pull regardless of provider state changes.
+    if (m_unifiedSymbols) m_unifiedSymbols->rebuild();
+    rcx::NameRegistry::instance().emitChanged();
 }
 
-void MainWindow::rebuildTypesModel() {
-    if (!m_typesModel) return;
-    m_typesModel->clear();
+void MainWindow::importTypeFromPdbUI(const QString& pdbPath,
+                                     uint32_t typeIndex,
+                                     const QString& displayName) {
+    if (typeIndex == 0 || pdbPath.isEmpty()) return;
 
-    static const QIcon modIcon(":/vsicons/symbol-structure.svg");
-    for (auto it = m_cachedModuleTypes.constBegin(); it != m_cachedModuleTypes.constEnd(); ++it) {
-        auto* moduleItem = new QStandardItem(modIcon,
-            QStringLiteral("%1  (%2 types)").arg(it.key()).arg(it->types.size()));
-        moduleItem->setData(it.key(), Qt::UserRole);
-        moduleItem->setCheckable(false);
-        moduleItem->appendRow(new QStandardItem()); // sentinel for lazy load
-        m_typesModel->appendRow(moduleItem);
+    auto* tab = activeTab();
+    if (!tab) {
+        project_new();
+        tab = activeTab();
+        if (!tab) return;
     }
 
-    if (m_typesImportBtn) m_typesImportBtn->setEnabled(false);
-}
-
-void MainWindow::populateTypesModuleItem(QStandardItem* moduleItem) {
-    if (!moduleItem || moduleItem->parent()) return;
-    // Already populated?
-    if (!(moduleItem->rowCount() == 1 && moduleItem->child(0)->text().isEmpty()))
+    QString importedTypeName;
+    QString err;
+    rcx::NodeTree importedTree = rcx::importTypeForSymbol(
+        pdbPath, typeIndex, &importedTypeName, &err);
+    if (importedTree.nodes.isEmpty()) {
+        setAppStatus(err.isEmpty()
+            ? QStringLiteral("Failed to import type %1").arg(displayName)
+            : err);
         return;
-    moduleItem->removeRows(0, 1);
-
-    QString moduleName = moduleItem->data(Qt::UserRole).toString();
-    auto cacheIt = m_cachedModuleTypes.constFind(moduleName);
-    if (cacheIt == m_cachedModuleTypes.constEnd()) return;
-
-    static const QIcon typeIcon(":/vsicons/symbol-class.svg");
-    for (const auto& ti : cacheIt->types) {
-        QString label = QStringLiteral("%1  (%2 bytes, %3 fields)")
-            .arg(ti.name).arg(ti.size).arg(ti.childCount);
-        auto* child = new QStandardItem(typeIcon, label);
-        child->setCheckable(true);
-        child->setCheckState(Qt::Unchecked);
-        child->setData(moduleName, Qt::UserRole);
-        child->setData(ti.typeIndex, Qt::UserRole + 1);
-        child->setData(ti.name, Qt::UserRole + 2);
-        moduleItem->appendRow(child);
     }
 
-    // Connect check state changes to update import button
-    // (done via model dataChanged, connected once below)
+    auto& tree = tab->doc->tree;
+    tab->ctrl->setSuppressRefresh(true);
+    tab->doc->undoStack.beginMacro(
+        QStringLiteral("Import type %1").arg(displayName));
+    QHash<uint64_t, uint64_t> idMap;
+    for (const auto& node : importedTree.nodes) idMap[node.id] = tree.reserveId();
+    for (const auto& node : importedTree.nodes) {
+        rcx::Node copy = node;
+        copy.id = idMap.value(node.id, node.id);
+        copy.parentId = idMap.value(node.parentId, node.parentId);
+        if (copy.refId != 0)
+            copy.refId = idMap.value(node.refId, node.refId);
+        tab->doc->undoStack.push(new rcx::RcxCommand(tab->ctrl, rcx::cmd::Insert{copy}));
+    }
+    tab->doc->undoStack.endMacro();
+    tab->ctrl->setSuppressRefresh(false);
+    tab->ctrl->refresh();
+    rebuildWorkspaceModel();
+    setAppStatus(QStringLiteral("Imported %1 (%2 nodes)")
+        .arg(importedTypeName).arg(importedTree.nodes.size()));
 }
 
-void MainWindow::importSelectedTypes() {
-    // Collect checked type indices grouped by module
-    QHash<QString, QVector<uint32_t>> selectedByModule;
-    for (int i = 0; i < m_typesModel->rowCount(); i++) {
-        auto* moduleItem = m_typesModel->item(i);
-        if (!moduleItem) continue;
-        QString moduleName = moduleItem->data(Qt::UserRole).toString();
-        for (int j = 0; j < moduleItem->rowCount(); j++) {
-            auto* child = moduleItem->child(j);
-            if (child && child->checkState() == Qt::Checked) {
-                uint32_t typeIdx = child->data(Qt::UserRole + 1).toUInt();
-                selectedByModule[moduleName].append(typeIdx);
-            }
-        }
+void MainWindow::bulkImportTypesUI(const QVector<rcx::NamedAddress>& entries) {
+    // Group by pdbPath (stored in NamedAddress::meta by PdbNameProvider).
+    QHash<QString, QVector<uint32_t>> byPdb;
+    for (const auto& e : entries) {
+        if (e.typeIndex == 0 || e.meta.isEmpty()) continue;
+        byPdb[e.meta].append(e.typeIndex);
     }
-    if (selectedByModule.isEmpty()) return;
+    if (byPdb.isEmpty()) return;
 
     auto* tab = activeTab();
     if (!tab) {
@@ -8129,107 +7619,35 @@ void MainWindow::importSelectedTypes() {
     }
 
     int totalImported = 0;
-    for (auto it = selectedByModule.constBegin(); it != selectedByModule.constEnd(); ++it) {
-        auto cacheIt = m_cachedModuleTypes.constFind(it.key());
-        if (cacheIt == m_cachedModuleTypes.constEnd()) continue;
-
-        const auto& indices = it.value();
-        QProgressDialog progress("Importing types...", "Cancel", 0, indices.size(), this);
-        progress.setWindowModality(Qt::WindowModal);
-        progress.setMinimumDuration(200);
-
-        QString error;
-        rcx::NodeTree importedTree = rcx::importPdbSelected(cacheIt->pdbPath, indices, &error,
-            [&](int current, int total) -> bool {
-                progress.setMaximum(total);
-                progress.setValue(current);
-                QApplication::processEvents();
-                return !progress.wasCanceled();
-            });
-        progress.close();
+    for (auto it = byPdb.constBegin(); it != byPdb.constEnd(); ++it) {
+        QString err;
+        rcx::NodeTree importedTree = rcx::importPdbSelected(it.key(), it.value(), &err);
         if (importedTree.nodes.isEmpty()) continue;
 
-        // Merge into active document (remap IDs to avoid collisions)
         auto& tree = tab->doc->tree;
         tab->ctrl->setSuppressRefresh(true);
         tab->doc->undoStack.beginMacro(QStringLiteral("Import PDB types"));
-
         QHash<uint64_t, uint64_t> idMap;
-        for (const auto& node : importedTree.nodes)
-            idMap[node.id] = tree.reserveId();
-
+        for (const auto& node : importedTree.nodes) idMap[node.id] = tree.reserveId();
         for (const auto& node : importedTree.nodes) {
             rcx::Node copy = node;
             copy.id = idMap.value(node.id, node.id);
             copy.parentId = idMap.value(node.parentId, node.parentId);
             if (copy.refId != 0)
                 copy.refId = idMap.value(node.refId, node.refId);
-            tab->doc->undoStack.push(new rcx::RcxCommand(tab->ctrl,
-                rcx::cmd::Insert{copy}));
+            tab->doc->undoStack.push(new rcx::RcxCommand(tab->ctrl, rcx::cmd::Insert{copy}));
         }
-
         tab->doc->undoStack.endMacro();
         tab->ctrl->setSuppressRefresh(false);
-        tab->ctrl->refresh();
 
-        int classCount = 0;
+        int rootStructs = 0;
         for (const auto& n : importedTree.nodes)
-            if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct) classCount++;
-        totalImported += classCount;
+            if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct) rootStructs++;
+        totalImported += rootStructs;
     }
-
+    tab->ctrl->refresh();
     rebuildWorkspaceModel();
-    if (!m_docDocks.isEmpty()) {
-        placeSidebarDock(m_workspaceDock, Qt::LeftDockWidgetArea);
-    }
-    m_workspaceDock->show();
     setAppStatus(QStringLiteral("Imported %1 types into current project").arg(totalImported));
-
-    // Uncheck all items after import
-    for (int i = 0; i < m_typesModel->rowCount(); i++) {
-        auto* mod = m_typesModel->item(i);
-        if (!mod) continue;
-        for (int j = 0; j < mod->rowCount(); j++) {
-            auto* child = mod->child(j);
-            if (child && child->isCheckable())
-                child->setCheckState(Qt::Unchecked);
-        }
-    }
-    if (m_typesImportBtn) m_typesImportBtn->setEnabled(false);
-}
-
-void MainWindow::rebuildModulesModel() {
-    if (!m_modulesModel) return;
-    m_modulesModel->clear();
-
-    auto* ctrl = activeController();
-    if (!ctrl || !ctrl->document()->provider) return;
-
-    auto modules = ctrl->document()->provider->enumerateModules();
-    if (modules.isEmpty()) return;
-
-    static const QIcon modIcon(":/vsicons/symbol-structure.svg");
-    static const QIcon modLoadedIcon(":/vsicons/symbol-key.svg");
-    auto& store = rcx::SymbolStore::instance();
-    for (const auto& mod : modules) {
-        QString canonical = store.resolveAlias(mod.name);
-        const auto* symSet = store.moduleData(canonical);
-        bool hasSymbols = (symSet != nullptr);
-        int symCount = hasSymbols ? symSet->nameToRva.size() : 0;
-
-        QString label = hasSymbols
-            ? QStringLiteral("%1  [0x%2]  (%3 KB)  \u2713 %4 syms")
-                .arg(mod.name).arg(mod.base, 0, 16).arg(mod.size / 1024).arg(symCount)
-            : QStringLiteral("%1  [0x%2]  (%3 KB)")
-                .arg(mod.name).arg(mod.base, 0, 16).arg(mod.size / 1024);
-
-        auto* item = new QStandardItem(hasSymbols ? modLoadedIcon : modIcon, label);
-        item->setData(QVariant::fromValue(mod.base), Qt::UserRole);
-        item->setData(mod.name, Qt::UserRole + 1);
-        item->setData(mod.fullPath, Qt::UserRole + 2);
-        item->setToolTip(mod.fullPath.isEmpty() ? mod.name : mod.fullPath);
-        m_modulesModel->appendRow(item);
-    }
 }
 
 void MainWindow::downloadSymbolsForProcess() {
@@ -8277,7 +7695,7 @@ void MainWindow::downloadSymbolsForProcess() {
                 setAppStatus(QStringLiteral("Loaded %1 symbols for %2")
                     .arg(count).arg(mod));
             }
-            rebuildSymbolsModel();
+            rebuildSymbols();
             if (auto* c = activeController())
                 c->refresh();
         });
@@ -8353,7 +7771,7 @@ void MainWindow::downloadSymbolsForProcess() {
         pending.push_back(PendingModule{mod.name, mod.fullPath, mod.base, info});
     }
 
-    rebuildSymbolsModel();
+    rebuildSymbols();
 
     if (pending.isEmpty()) {
         setAppStatus(QStringLiteral("All available symbols loaded"));
@@ -8416,6 +7834,17 @@ void MainWindow::rebuildWorkspaceModel() {
 }
 
 void MainWindow::rebuildWorkspaceModelNow() {
+    // Skip entirely when the dock is hidden — the rebuild walks every
+    // tab and emits a QStandardItem per struct, which on big projects
+    // costs hundreds of ms. Pointless when nobody can see the result.
+    // The dock's visibilityChanged handler in createWorkspaceDock
+    // re-triggers this when the user actually opens the workspace, so
+    // the model is fresh the first time it's painted. We DON'T touch
+    // m_workspaceGen here, so the next call after the dock becomes
+    // visible sees the gen drift and runs the real rebuild.
+    if (m_workspaceDock && !m_workspaceDock->isVisible())
+        return;
+
     // Generation gate — hash (tab list, struct id+name+keyword+pinned status)
     // and skip the rebuild when the result would be identical. Catches the
     // common "documentChanged fired but only baseAddress / values changed"
@@ -9361,6 +8790,10 @@ int main(int argc, char* argv[]) {
     app.setApplicationName("Reclass");
     app.setOrganizationName("Reclass");
     app.setStyle(new MenuBarStyle("Fusion")); // Fusion + generous menu sizing
+
+    // Replace Qt's default tooltips with RcxTooltip everywhere. See class
+    // comment for the focus/flicker bug this fixes.
+    qApp->installEventFilter(new rcx::GlobalTooltipBridge(&app));
 
     // ── Profiler bootstrap ──
     // Enable PROFILE_SCOPE recording before anything else runs so init paths

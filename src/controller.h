@@ -113,6 +113,13 @@ public:
                       bool isAscii = false, uint64_t resolvedAddr = 0);
     void duplicateNode(int nodeIdx);
     void convertToTypedPointer(uint64_t nodeId);
+    // Attach a (possibly new) class to the clicked-on node based on an
+    // RTTI demangled name. Always creates a NEW root struct named
+    // baseName, appending _N suffix when the name collides — multiple
+    // RTTI overlay clicks on different fields each get their own class
+    // even when the type names match. Pointer kind + refId are set in
+    // one undo macro. Returns the resulting struct id.
+    uint64_t attachRttiClassToPointer(uint64_t nodeId, const QString& baseName);
     void splitHexNode(uint64_t nodeId);
     void toggleBitfieldBit(uint64_t nodeId, int memberIdx);
     void editBitfieldValue(uint64_t nodeId, int memberIdx);
@@ -158,6 +165,16 @@ public:
     bool typeHints() const { return m_typeHints; }
     void setShowComments(bool v);
     bool showComments() const { return m_showComments; }
+    void setShowRtti(bool v);
+    bool showRtti() const { return m_showRtti; }
+    void setShowEnumChips(bool v);
+    bool showEnumChips() const { return m_showEnumChips; }
+    // Read-only override: force value/byte writes to no-op even when the
+    // underlying provider reports isWritable(). Used by the live-self
+    // tutorial — writing into the editor's own memory (e.g. setting the
+    // __vptr value to 1) crashes the next virtual dispatch.
+    void setReadOnlyOverride(bool v) { m_readOnlyOverride = v; }
+    bool readOnlyOverride() const { return m_readOnlyOverride; }
     void resetProvider();
 
     // MCP bridge accessors
@@ -218,6 +235,9 @@ private:
     bool               m_braceWrap = false;
     bool               m_typeHints = false;
     bool               m_showComments = false;
+    bool               m_showRtti = true;          // chip toggle, default ON (current behavior)
+    bool               m_showEnumChips = true;     // chip toggle, default ON
+    bool               m_readOnlyOverride = false; // tutorial safety; see header
     uint64_t           m_viewRootId = 0;
 
     // ── Saved sources for quick-switch ──

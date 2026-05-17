@@ -13,6 +13,7 @@
 #include "themes/thememanager.h"
 #include "widgets/themed_messagebox.h"
 #include "widgets/themed_inputdialog.h"
+#include "widgets/enum_picker_popup.h"
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
 #include <QFile>
@@ -983,6 +984,18 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 cmd::ChangeEnumMembers{structId, oldMembers, members}));
             return;
         }
+        // Array: "+1" grows arrayLen by one. Without this branch we'd
+        // insert a Hex64 child into a typed array (e.g. uint8_t[7]),
+        // which leaves the header label out of sync with the contents
+        // and breaks the element-by-element rendering (chunk_data_tail
+        // showed a single 8-byte hex blob under a "uint8_t[7]" header).
+        if (parent.kind == NodeKind::Array) {
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::ChangeArrayMeta{parent.id,
+                    parent.elementKind, parent.elementKind,
+                    parent.arrayLen, parent.arrayLen + 1}));
+            return;
+        }
         // Embedded struct with refId: append to the referenced root class
         uint64_t targetId = structId;
         if (m_doc->tree.childrenOf(structId).isEmpty() && parent.refId != 0)
@@ -1021,11 +1034,29 @@ void RcxController::connectEditor(RcxEditor* editor) {
 
     connect(editor, &RcxEditor::appendBytesRequested,
             this, [this](uint64_t structId, int byteCount) {
-        // If this is an embedded struct with refId (virtual children),
-        // append to the referenced root class definition instead
-        uint64_t targetId = structId;
         int si = m_doc->tree.indexOfId(structId);
-        if (si >= 0 && m_doc->tree.childrenOf(structId).isEmpty()
+        if (si < 0) return;
+
+        // Array: grow arrayLen by enough elements to cover `byteCount`
+        // (rounded up). Inserting raw Hex64/Hex8 children here would
+        // produce the same out-of-sync header bug as the +1 path.
+        if (m_doc->tree.nodes[si].kind == NodeKind::Array) {
+            const Node& arr = m_doc->tree.nodes[si];
+            int elemSize = qMax(1, sizeForKind(arr.elementKind));
+            int addCount = (byteCount + elemSize - 1) / elemSize;
+            if (addCount <= 0) return;
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::ChangeArrayMeta{arr.id,
+                    arr.elementKind, arr.elementKind,
+                    arr.arrayLen, arr.arrayLen + addCount}));
+            return;
+        }
+
+        // Struct path: append raw Hex64 + Hex8 padding. If the struct
+        // is an embedded reference (refId != 0), redirect to the
+        // referenced root class so the change persists across uses.
+        uint64_t targetId = structId;
+        if (m_doc->tree.childrenOf(structId).isEmpty()
             && m_doc->tree.nodes[si].refId != 0)
             targetId = m_doc->tree.nodes[si].refId;
         int hex64Count = byteCount / 8;
@@ -1096,6 +1127,115 @@ void RcxController::connectEditor(RcxEditor* editor) {
             members.emplaceBack(QStringLiteral("Member%1").arg(nextVal + i), nextVal + i);
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeEnumMembers{enumId, oldMembers, members}));
+    });
+
+    // Enum chip clicked — pop a themed member picker at the chip position;
+    // on selection, write the chosen member's value back to the field.
+    // The chip carries (enumRefNodeId, currentValue) so we don't have to
+    // recompute them. EnumPickerPopup mirrors the type-chooser's visual
+    // conventions (custom-painted rows with accent stripe + colored pip,
+    // fuzzy filter when >10 members, footer crumb with keyboard hints)
+    // so the whole app reads as one design family.
+    connect(editor, &RcxEditor::enumChipClicked, this,
+            [this, editor](int nodeIdx, uint64_t enumRefNodeId,
+                           int64_t currentValue, QPoint globalPos) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        int enumIdx = m_doc->tree.indexOfId(enumRefNodeId);
+        if (enumIdx < 0) return;
+        const Node& enumNode = m_doc->tree.nodes[enumIdx];
+        if (!enumNode.isEnum() || enumNode.enumMembers.isEmpty()) return;
+
+        QVector<EnumPickerPopup::Member> members;
+        members.reserve(enumNode.enumMembers.size());
+        for (const auto& m : enumNode.enumMembers)
+            members.append({m.first, m.second});
+
+        const auto& t = ThemeManager::instance().current();
+        auto* popup = new EnumPickerPopup(editor);
+        popup->setAttribute(Qt::WA_DeleteOnClose, true);
+        popup->setOnChosen([this, nodeIdx](int64_t pickVal) {
+            if (nodeIdx >= m_doc->tree.nodes.size()) return;
+            setNodeValue(nodeIdx, /*subLine=*/0,
+                         QString::number(pickVal),
+                         /*isAscii=*/false, /*resolvedAddr=*/0);
+        });
+
+        QString enumName = enumNode.name.isEmpty()
+            ? QStringLiteral("(anonymous)") : enumNode.name;
+        popup->show(enumName, members, currentValue, t.indDataChanged, globalPos);
+    });
+
+    // TypeHint chip clicked — commit the inferred type. One click = one
+    // commit: single-kind suggestion converts the field; multi-kind
+    // suggestion (e.g. float×2) splits the original hex node into N
+    // contiguous fields covering the SAME byte range — no padding
+    // overflow into the next sibling.
+    //
+    // The first changeNodeKind shrinks the node to kinds[0] and inserts
+    // a hex-pad sibling at offset+sizeof(kinds[0]) covering the gap.
+    // Walking by `ni + 1` is wrong: insertNode appends to the end of
+    // the array, so the pad sibling lives there, not at ni+1 (where the
+    // *original* next field still is — converting that one is what
+    // ate the next 4 bytes in the bug report). Find the pad by
+    // OFFSET inside the same parent and convert it in place.
+    connect(editor, &RcxEditor::typeHintChipClicked, this,
+            [this](int nodeIdx, QVector<NodeKind> kinds) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        if (kinds.isEmpty()) return;
+        uint64_t nodeId = m_doc->tree.nodes[nodeIdx].id;
+
+        // Collect the node IDs that the click actually touched so we can
+        // narrow the selection to JUST those rows afterwards. Without
+        // this, a pre-existing multi-select stays around and the user
+        // sees the status bar say "41/49 selected" right after a chip
+        // click that only mutated 1–2 fields.
+        QSet<uint64_t> touched;
+
+        if (kinds.size() == 1) {
+            changeNodeKind(nodeIdx, kinds[0]);
+            touched.insert(nodeId);
+        } else {
+            const Node& orig = m_doc->tree.nodes[nodeIdx];
+            uint64_t parentId = orig.parentId;
+            int curOffset = orig.offset;
+            m_doc->undoStack.beginMacro(
+                QStringLiteral("Split into %1 fields").arg(kinds.size()));
+            int ni = m_doc->tree.indexOfId(nodeId);
+            if (ni >= 0) {
+                changeNodeKind(ni, kinds[0]);
+                touched.insert(nodeId);
+                curOffset += sizeForKind(kinds[0]);
+            }
+            for (int k = 1; k < kinds.size(); ++k) {
+                int padIdx = -1;
+                for (int sib : m_doc->tree.childrenOf(parentId)) {
+                    const Node& sn = m_doc->tree.nodes[sib];
+                    if (sn.offset == curOffset && isHexNode(sn.kind)) {
+                        padIdx = sib;
+                        break;
+                    }
+                }
+                if (padIdx < 0) break;
+                touched.insert(m_doc->tree.nodes[padIdx].id);
+                changeNodeKind(padIdx, kinds[k]);
+                curOffset += sizeForKind(kinds[k]);
+            }
+            m_doc->undoStack.endMacro();
+        }
+
+        // Narrow selection to just the converted node(s). Mirrors the
+        // single-line pattern in insertNodeBelow: clear, insert, then
+        // refresh overlays + command row + emit count.
+        m_selIds.clear();
+        for (uint64_t id : touched) {
+            // Verify still present — changeNodeKind may have replaced it.
+            if (m_doc->tree.indexOfId(id) >= 0)
+                m_selIds.insert(id);
+        }
+        m_anchorLine = -1;
+        updateCommandRow();
+        applySelectionOverlays();
+        emit selectionChanged(m_selIds.size());
     });
 
     // Live expression evaluation for BaseAddress editing
@@ -1471,18 +1611,31 @@ void RcxController::refresh() {
     // exception compose might throw.
     ComposeDocGuard composeGuard(m_doc);
 
-    // Build symbol lookup callback if PDB symbols are loaded
+    // Build symbol lookup callback. The unified NameRegistry aggregates
+    // every registered NameProvider (PDB + RTTI + bookmarks + future
+    // plugin sources) so a single callback labels addresses from any
+    // source. We reach it through a function-pointer hook (set by the
+    // GUI app in main.cpp) so this translation unit stays headless-safe
+    // for test targets that don't link the names library.
+    //
+    // PdbNameProvider::nameFor already routes through SymbolStore's
+    // binary-search reverse index AND demangles the result, so we don't
+    // need a separate SymbolStore fallback — adding one would just paint
+    // raw "??0?$vector@..." mangled names back over the humanised result.
+    // Test builds (which don't set the hook) fall back to SymbolStore so
+    // they still get symbol annotations, just without demangling.
     SymbolLookupFn symLookup;
-    if (SymbolStore::instance().hasSymbols() && m_doc->provider) {
+    if (m_doc->provider) {
         auto* prov = m_doc->provider.get();
         symLookup = [prov](uint64_t addr) -> QString {
+            if (g_nameLookupHook) return g_nameLookupHook(addr, prov);
             return SymbolStore::instance().getSymbolForAddress(addr, prov);
         };
     }
 
     // Compose against snapshot provider if active, otherwise real provider
     if (m_snapshotProv)
-        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
+        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup, m_showRtti, m_showEnumChips);
     else
         m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
 
@@ -2147,11 +2300,17 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
                 if (ai >= 0)
                     tree.nodes[ai].offset = isUndo ? adj.oldOffset : adj.newOffset;
             }
-            // The changed node's value format changed; clear its history.
-            // If offAdjs is empty (same-size change), still bump gen to
-            // discard in-flight reads that would record the old format.
-            if (c.offAdjs.isEmpty()) m_refreshGen++;
-            clearNodeHistory(c.nodeId);
+            // Bump refresh-gen to discard any in-flight async read that
+            // would record the OLD-format value into the NEW node.
+            m_refreshGen++;
+            // Keep the value-history entries across kind changes. The
+            // earlier behavior wiped them ("format changed, history is
+            // stale") but that made the hover popup go silent the moment
+            // a user accepted a TypeHint chip on a hot field — the most
+            // common moment when seeing the trend is most useful. Mixed
+            // old/new format strings ride in the ring for at most
+            // ValueHistory::kCapacity (10) entries; once the cycle laps,
+            // all entries are in the new format on their own.
             clearHistoryForAdjs(c.offAdjs);
         } else if constexpr (std::is_same_v<T, cmd::Rename>) {
             int idx = tree.indexOfId(c.nodeId);
@@ -2215,6 +2374,13 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             resetSnapshot();
         } else if constexpr (std::is_same_v<T, cmd::WriteBytes>) {
             const QByteArray& bytes = isUndo ? c.oldBytes : c.newBytes;
+            // Tutorial / self-attach safety — refuse the byte write
+            // even on undo/redo so a previously-queued write can't
+            // execute later and stomp the editor's own memory.
+            if (m_readOnlyOverride) {
+                success = false;
+                return;  // exits the std::visit lambda for this command
+            }
             // Write through snapshot (patches pages only on success) or provider directly.
             // If write fails, the snapshot is NOT patched, so the next compose shows the
             // real unchanged value — no optimistic visual leak.
@@ -2298,6 +2464,16 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
                                   bool isAscii, uint64_t resolvedAddr) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
     if (!m_doc->provider->isWritable()) return;
+    // Tutorial / self-attach safety: writing into the editor's own
+    // memory through a fully-writable provider is fatal (e.g. stomping
+    // the __vptr value crashes the next virtual dispatch on this
+    // RcxEditor instance). The override is set by MainWindow::selfTest.
+    if (m_readOnlyOverride) {
+        // Silent no-op — UI didn't have a status channel handy and a
+        // dialog would interrupt the tutorial flow. Edit commits but
+        // doesn't reach the provider; refresh shows the original bytes.
+        return;
+    }
 
     const Node& node = m_doc->tree.nodes[nodeIdx];
 
@@ -2478,6 +2654,81 @@ void RcxController::convertToTypedPointer(uint64_t nodeId) {
     m_doc->undoStack.endMacro();
     m_suppressRefresh = false;
     refresh();
+}
+
+uint64_t RcxController::attachRttiClassToPointer(uint64_t nodeId,
+                                                  const QString& baseName) {
+    // Mirrors convertToTypedPointer but takes a user-provided base name
+    // (the demangled RTTI class) instead of the synthetic "NewClass".
+    // Per design: ALWAYS create a fresh class — even when a class with
+    // the same name already exists, we suffix _2 / _3 / etc. so each
+    // RTTI chip click yields a distinct, independently-editable struct.
+    int ni = m_doc->tree.indexOfId(nodeId);
+    if (ni < 0) return 0;
+    const Node& node = m_doc->tree.nodes[ni];
+
+    NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
+        ? NodeKind::Pointer64 : NodeKind::Pointer32;
+
+    // Generate unique name: baseName, baseName_2, baseName_3, ...
+    // Empty baseName defends against an empty demangled string — fall
+    // back to "NewClass" so we never produce an empty structTypeName.
+    QString seed = baseName.isEmpty() ? QStringLiteral("NewClass") : baseName;
+    QString typeName = seed;
+    int suffix = 2;
+    while (true) {
+        bool exists = false;
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.kind == NodeKind::Struct && n.structTypeName == typeName)
+                { exists = true; break; }
+        }
+        if (!exists) break;
+        typeName = QStringLiteral("%1_%2").arg(seed).arg(suffix++);
+    }
+
+    Node rootStruct;
+    rootStruct.kind = NodeKind::Struct;
+    rootStruct.name = QStringLiteral("instance");
+    rootStruct.structTypeName = typeName;
+    rootStruct.classKeyword = QStringLiteral("class");
+    rootStruct.parentId = 0;
+    rootStruct.offset = 0;
+    rootStruct.id = m_doc->tree.reserveId();
+
+    constexpr int kDefaultFields = 16;
+    bool is32 = (m_doc->tree.pointerSize < 8);
+    NodeKind hexKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
+    int stride = is32 ? 4 : 8;
+    QVector<Node> children;
+    for (int i = 0; i < kDefaultFields; i++) {
+        Node c;
+        c.kind = hexKind;
+        c.name = QStringLiteral("field_%1").arg(i * stride, 2, 16, QChar('0'));
+        c.parentId = rootStruct.id;
+        c.offset = i * stride;
+        c.id = m_doc->tree.reserveId();
+        children.append(c);
+    }
+
+    uint64_t oldRefId = node.refId;
+
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(
+        QStringLiteral("Attach RTTI class %1").arg(typeName));
+
+    if (node.kind != ptrKind)
+        changeNodeKind(ni, ptrKind);
+
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{rootStruct, {}}));
+    for (const Node& c : children)
+        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{c, {}}));
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::ChangePointerRef{nodeId, oldRefId, rootStruct.id}));
+
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = false;
+    refresh();
+    return rootStruct.id;
 }
 
 void RcxController::splitHexNode(uint64_t nodeId) {
@@ -3230,8 +3481,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addSeparator();
 
-        // Batch comment (only when comments are enabled)
-        if (m_showComments) menu.addAction(icon("edit.svg"), QString("&Comment %1 nodes\t;").arg(count), [this, ids]() {
+        // Comment is always available — discoverability matters even when
+        // showComments is off (users can author comments before turning the
+        // display on). Action signature stays the same; the rendered chip
+        // simply won't appear until the toggle flips.
+        menu.addAction(icon("edit.svg"), QString("&Comment %1 nodes\t;").arg(count), [this, ids]() {
             // Gather existing comment from first node as default
             QString existing;
             for (uint64_t id : ids) {
@@ -3470,9 +3724,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // ── Inference-based quick convert (from type hints) ──
         if (isHexNode(node.kind) && line >= 0 && line < m_lastResult.meta.size()) {
             const auto& lm = m_lastResult.meta[line];
-            if (!lm.typeHintKinds.isEmpty()) {
-                NodeKind suggested = lm.typeHintKinds[0];
-                if (lm.typeHintKinds.size() == 1) {
+            const LineChip* tipChip = findChip(lm, ChipKind::TypeHint);
+            if (tipChip && !tipChip->typeHintKinds.isEmpty()) {
+                const QVector<NodeKind>& tipKinds = tipChip->typeHintKinds;
+                NodeKind suggested = tipKinds[0];
+                if (tipKinds.size() == 1) {
                     auto* m = kindMeta(suggested);
                     QString label = QStringLiteral("Convert to %1").arg(QString::fromLatin1(m->typeName));
                     menu.addAction(label, [this, nodeId, suggested]() {
@@ -3480,11 +3736,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                         if (ni >= 0) changeNodeKind(ni, suggested);
                     });
                 } else {
-                    auto* m = kindMeta(lm.typeHintKinds[0]);
+                    auto* m = kindMeta(tipKinds[0]);
                     QString label = QStringLiteral("Split into %1\u00D7%2")
                         .arg(QString::fromLatin1(m->typeName))
-                        .arg(lm.typeHintKinds.size());
-                    menu.addAction(label, [this, nodeId, kinds = lm.typeHintKinds]() {
+                        .arg(tipKinds.size());
+                    menu.addAction(label, [this, nodeId, kinds = tipKinds]() {
                         int ni = m_doc->tree.indexOfId(nodeId);
                         if (ni < 0) return;
                         changeNodeKind(ni, kinds[0]);
@@ -3603,11 +3859,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             editor->beginInlineEdit(EditTarget::Type, line);
         });
 
-        if (m_showComments) {
-            menu.addAction(icon("edit.svg"), "&Comment\t;", [editor, line]() {
-                editor->beginInlineEdit(EditTarget::Comment, line);
-            });
-        }
+        // Comment is always available — see batch path for rationale.
+        menu.addAction(icon("edit.svg"), "&Comment\t;", [editor, line]() {
+            editor->beginInlineEdit(EditTarget::Comment, line);
+        });
 
         menu.addSeparator();
 
@@ -3919,6 +4174,34 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         foldMenu->addAction("Expand All\tCtrl+Shift+]", [this, editor]() {
             emit editor->expandAllRequested();
         });
+    }
+
+    // ── Label this address (user-defined symbol via bookmark) ──
+    if (hasNode) {
+        uint64_t labelNodeId = m_doc->tree.nodes[nodeIdx].id;
+        menu.addAction(icon("symbol-key.svg"), "Label this address...",
+                       [this, labelNodeId]() {
+            int ni = m_doc->tree.indexOfId(labelNodeId);
+            if (ni < 0) return;
+            int64_t off = m_doc->tree.computeOffset(ni);
+            if (off < 0) return;
+            uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
+            auto entered = ThemedInputDialog::getText(nullptr,
+                QStringLiteral("Label this address"),
+                QStringLiteral("Name for 0x%1").arg(addr, 0, 16),
+                {}, QStringLiteral("symbol name"));
+            if (!entered || entered->trimmed().isEmpty()) return;
+            QString formula;
+            if (!m_doc->tree.baseAddressFormula.isEmpty() && off >= 0)
+                formula = QStringLiteral("%1+0x%2")
+                    .arg(m_doc->tree.baseAddressFormula)
+                    .arg((qulonglong)off, 0, 16);
+            else
+                formula = QStringLiteral("0x%1").arg(addr, 0, 16);
+            addBookmark(entered->trimmed(), formula);
+            if (g_namesChangedHook) g_namesChangedHook();
+        });
+        menu.addSeparator();
     }
 
     // ── Copy ──
@@ -5504,6 +5787,16 @@ void RcxController::setTypeHints(bool v) {
 
 void RcxController::setShowComments(bool v) {
     m_showComments = v;
+    refresh();
+}
+
+void RcxController::setShowRtti(bool v) {
+    m_showRtti = v;
+    refresh();
+}
+
+void RcxController::setShowEnumChips(bool v) {
+    m_showEnumChips = v;
     refresh();
 }
 

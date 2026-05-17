@@ -60,6 +60,35 @@ void SymbolStore::addModuleTypeIndices(const QString& moduleName,
     it->nameToTypeIndex = nameToTypeIndex;
 }
 
+void SymbolStore::addModuleTypes(const QString& moduleName,
+                                 const QVector<PdbTypeInfo>& types) {
+    QString canonical = resolveAlias(moduleName);
+    auto it = m_modules.find(canonical);
+    if (it == m_modules.end()) return;
+    it->types = types;
+}
+
+void SymbolStore::addRttiHits(const QString& moduleName,
+                              const QVector<QPair<QString, uint32_t>>& hits) {
+    QString canonical = resolveAlias(moduleName);
+    auto it = m_modules.find(canonical);
+    if (it == m_modules.end()) {
+        // No PDB set for this module yet — spin one up so RTTI hits still
+        // participate in resolve()/getSymbolForAddress(). The pdbPath is
+        // intentionally empty to mark it as RTTI-only.
+        PdbSymbolSet set;
+        set.moduleName = canonical;
+        m_modules.insert(canonical, set);
+        it = m_modules.find(canonical);
+    }
+    for (const auto& h : hits) {
+        if (it->nameToRva.contains(h.first)) continue;
+        it->nameToRva.insert(h.first, h.second);
+        it->rvaToName.emplaceBack(h.second, h.first);
+    }
+    it->sortRvaIndex();
+}
+
 uint32_t SymbolStore::typeIndexForSymbol(const QString& qualifiedSymbol) const {
     int bangIdx = qualifiedSymbol.indexOf('!');
     if (bangIdx <= 0 || bangIdx >= qualifiedSymbol.size() - 1)

@@ -56,10 +56,16 @@ Theme Theme::fromJson(const QJsonObject& o) {
         if (o.contains(kThemeFields[i].key))
             t.*kThemeFields[i].ptr = QColor(o[kThemeFields[i].key].toString());
     }
-    // Derive heat colors by blending from textDim toward warm anchors.
-    // Cold = textDim nudged 30% toward warm gold (subtle "refined once").
-    // Warm = textDim nudged 60% toward orange (clearly changing).
-    // Hot  = markerPtr (the theme's danger color).
+    // Derive heat colors as an amber gradient — never red. Red reads as
+    // "error" and makes a quietly-mutating value feel alarming when
+    // it's just doing its job. Amber/orange is the "warm activity"
+    // hue: the eye picks up movement without firing the threat
+    // response. Old palette had Hot = markerPtr (saturated red), which
+    // was unreadable on the live struct view where dozens of heated
+    // rows might be on screen at once.
+    //   Cold (1 unique value seen recently)  → faint gold, just a wash
+    //   Warm (2–4)                            → clear amber
+    //   Hot  (5+)                             → saturated amber (no red)
     auto lerpRgb = [](const QColor& a, const QColor& b, double f) {
         return QColor(qBound(0, a.red()   + int((b.red()   - a.red())   * f), 255),
                       qBound(0, a.green() + int((b.green() - a.green()) * f), 255),
@@ -67,11 +73,11 @@ Theme Theme::fromJson(const QJsonObject& o) {
     };
     QColor dim = t.textDim.isValid() ? t.textDim : QColor(133, 133, 133);
     if (!t.indHeatCold.isValid())
-        t.indHeatCold = lerpRgb(dim, QColor(210, 170, 100), 0.30);
+        t.indHeatCold = lerpRgb(dim, QColor(220, 180, 120), 0.35);
     if (!t.indHeatWarm.isValid())
-        t.indHeatWarm = lerpRgb(dim, QColor(235, 145, 50), 0.60);
+        t.indHeatWarm = QColor(225, 170, 90);   // clear amber
     if (!t.indHeatHot.isValid())
-        t.indHeatHot = t.markerPtr;
+        t.indHeatHot = QColor(232, 165, 92);    // saturated amber, not red
 
     if (!t.focusGlow.isValid())
         t.focusGlow = t.borderFocused.isValid() ? t.borderFocused : QColor("#4fc3f7");

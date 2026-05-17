@@ -15,16 +15,18 @@ ThemedMessageBox::ThemedMessageBox(QWidget* parent, Severity sev,
     setModal(true);
 
     auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(22, 20, 22, 16);
-    outer->setSpacing(14);
+    // Tighter top, more bottom — buttons sit flush against the bottom
+    // edge of the dialog rather than floating in extra padding.
+    outer->setContentsMargins(24, 22, 24, 18);
+    outer->setSpacing(18);
 
     auto* topRow = new QHBoxLayout;
     topRow->setSpacing(16);
 
-    m_iconLbl = new QLabel(this);
-    m_iconLbl->setFixedSize(32, 32);
-    m_iconLbl->setAlignment(Qt::AlignCenter);
-    topRow->addWidget(m_iconLbl, 0, Qt::AlignTop);
+    // Severity icon removed — title bar + message text convey severity
+    // without the noisy colored glyph. m_iconLbl kept null so existing
+    // code that touches it stays safe.
+    m_iconLbl = nullptr;
 
     m_textLbl = new QLabel(text, this);
     m_textLbl->setWordWrap(true);
@@ -38,15 +40,18 @@ ThemedMessageBox::ThemedMessageBox(QWidget* parent, Severity sev,
     outer->addLayout(topRow);
 
     m_buttonRow = new QHBoxLayout;
-    m_buttonRow->setContentsMargins(0, 8, 0, 0);
-    m_buttonRow->setSpacing(8);
+    // Extra top padding above the button row so the buttons feel like
+    // a distinct action zone, not text-row sibling. 12 px between
+    // buttons (was 8) — chunkier buttons need more breathing room or
+    // they read as a fused strip.
+    m_buttonRow->setContentsMargins(0, 4, 0, 0);
+    m_buttonRow->setSpacing(12);
     m_buttonRow->addStretch(1);
     outer->addLayout(m_buttonRow);
 
-    setMinimumWidth(380);
-    setMaximumWidth(620);
+    setMinimumWidth(420);
+    setMaximumWidth(640);
 
-    redrawIcon();
     applyTheme();
 }
 
@@ -87,40 +92,10 @@ void ThemedMessageBox::applyTheme() {
         m_textLbl->setStyleSheet(QStringLiteral("color: %1;").arg(t.text.name()));
     if (m_detailLbl)
         m_detailLbl->setStyleSheet(QStringLiteral("color: %1;").arg(t.textDim.name()));
-    redrawIcon();
 }
 
 void ThemedMessageBox::redrawIcon() {
-    if (!m_iconLbl) return;
-    // Pull from the same vsicon library QMenu / QAction icons use, so
-    // the dialog reads as part of the app — not a hand-drawn shape
-    // that's never quite centered. The SVGs live in src/vsicons and
-    // are exposed by resources.qrc as ":/vsicons/<name>.svg".
-    QString iconPath;
-    switch (m_severity) {
-    case Info:     iconPath = QStringLiteral(":/vsicons/info.svg");     break;
-    case Warning:  iconPath = QStringLiteral(":/vsicons/warning.svg");  break;
-    case Critical: iconPath = QStringLiteral(":/vsicons/error.svg");    break;
-    case Question: iconPath = QStringLiteral(":/vsicons/question.svg"); break;
-    }
-    const int W = 32, H = 32;  // logical px — fixed-size label bounds
-    const qreal dpr = qMax(1.0, devicePixelRatioF());
-    QPixmap pm(QSize(W, H) * dpr);
-    pm.fill(Qt::transparent);
-    pm.setDevicePixelRatio(dpr);
-    QSvgRenderer r(iconPath);
-    if (r.isValid()) {
-        QPainter p(&pm);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        // Render into the full logical W×H — QSvgRenderer respects the
-        // SVG's viewBox and draws centered within the destination, so
-        // off-center shapes (the painter version we used to do) can't
-        // happen here.
-        r.render(&p, QRectF(0, 0, W, H));
-    }
-    m_iconLbl->setPixmap(pm);
-    m_iconLbl->setAlignment(Qt::AlignCenter);
+    // Severity icon removed — see ctor for the rationale.
 }
 
 void ThemedMessageBox::info(QWidget* parent, const QString& title,

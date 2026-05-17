@@ -2413,7 +2413,7 @@ QJsonObject McpBridge::toolSymbolsLoad(const QJsonObject& args) {
     if (tab && tab->ctrl)
         tab->ctrl->refresh();
 
-    m_mainWindow->rebuildSymbolsModel();
+    m_mainWindow->rebuildSymbols();
 
     QJsonObject out;
     out["moduleName"] = result.moduleName;

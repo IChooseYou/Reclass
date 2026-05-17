@@ -22,91 +22,10 @@
 #include <QToolTip>
 #include <QHelpEvent>
 #include "themes/thememanager.h"
+#include "widgets/category_chip.h"
+#include "widgets/fuzzy_match.h"
 
 namespace rcx {
-
-// ── CategoryChip — flat custom-painted toggle button ──
-// No CSS, no Fusion — pure QPainter with direct theme colors.
-
-class CategoryChip : public QAbstractButton {
-public:
-    explicit CategoryChip(const QString& label, QWidget* parent = nullptr)
-        : QAbstractButton(parent), m_label(label)
-    {
-        setCheckable(true);
-        setChecked(true);
-        setCursor(Qt::PointingHandCursor);
-        setAttribute(Qt::WA_Hover, true);
-        setMouseTracking(true);
-    }
-
-    void setCount(int n) { m_count = n; m_totalCount = -1; update(); }
-    void setCount(int visible, int total) { m_count = visible; m_totalCount = total; update(); }
-    void setGroupColor(const QColor& c) { m_groupColor = c; update(); }
-
-    QSize sizeHint() const override {
-        QFontMetrics fm(font());
-        QString text = chipText();
-        // Natural width: pip(5) + gap(4) + text + 16px total horizontal pad
-        // (split as 8 on each side at paint time, since the block is centred).
-        // Chips are further equalized to the row's max width by
-        // TypeSelectorPopup so the 4-chip row reads as a uniform strip even
-        // when digit counts differ between labels.
-        return QSize(5 + 4 + fm.horizontalAdvance(text) + 16, fm.height() + 4);
-    }
-
-    QSize minimumSizeHint() const override { return sizeHint(); }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, false);
-        const auto& t = ThemeManager::instance().current();
-        bool hov = underMouse();
-        bool chk = isChecked();
-        QColor gc = m_groupColor.isValid() ? m_groupColor : t.textMuted;
-
-        if (hov) p.fillRect(rect(), t.hover);
-
-        // Centre the pip + text block horizontally. Combined with chips being
-        // equalized to a uniform width, this yields consistent visual spacing
-        // on both sides of every chip regardless of how many digits its count
-        // has. (Previously content hugged the left edge and each chip had
-        // different right-over-run, making the row look ragged.)
-        const int pipSz = 5;
-        const int gap   = 4;
-        QFontMetrics fm(font());
-        int textW  = fm.horizontalAdvance(chipText());
-        int blockW = pipSz + gap + textW;
-        int x      = (width() - blockW) / 2;
-        int baseline = (height() + fm.ascent() - fm.descent()) / 2;
-
-        p.fillRect(x, (height() - pipSz) / 2, pipSz, pipSz, chk ? gc : t.textFaint);
-        x += pipSz + gap;
-
-        p.setPen(chk ? gc : t.textMuted);
-        p.setFont(font());
-        p.drawText(x, baseline, chipText());
-    }
-
-    void enterEvent(QEnterEvent*) override { update(); }
-    void leaveEvent(QEvent*) override { update(); }
-
-private:
-    QString chipText() const {
-        if (m_count < 0) return m_label;
-        // Space between label and count so "Int(11)" reads as "Int (11)" —
-        // less cramped and avoids visual collision with neighbouring chips.
-        if (m_totalCount >= 0 && m_totalCount != m_count)
-            return QStringLiteral("%1 (%2/%3)").arg(m_label).arg(m_count).arg(m_totalCount);
-        return QStringLiteral("%1 (%2)").arg(m_label).arg(m_count);
-    }
-
-    QString m_label;
-    int m_count = -1;
-    int m_totalCount = -1;
-    QColor m_groupColor;
-};
 
 // ── parseTypeSpec ──
 
@@ -141,77 +60,9 @@ TypeSpec parseTypeSpec(const QString& text) {
     return spec;
 }
 
-// ── Fuzzy scorer: subsequence match with word-boundary bonuses ──
-// Hot path — uses stack arrays and pre-lowered QChars to avoid heap allocs.
-
-static constexpr int kMaxFuzzyLen = 64;
-
-static int fuzzyScore(const QString& pattern, const QString& text,
-                      QVector<int>* outPositions = nullptr) {
-    int pLen = pattern.size(), tLen = text.size();
-    if (pLen == 0) return 1;
-    if (pLen > tLen) return 0;
-    if (pLen > kMaxFuzzyLen || tLen > 256) {
-        // Fallback: prefix match only for very long names
-        if (text.startsWith(pattern, Qt::CaseInsensitive)) return 1;
-        return 0;
-    }
-
-    // Pre-compute lowercase chars on the stack
-    QChar pLow[kMaxFuzzyLen];
-    for (int i = 0; i < pLen; i++) pLow[i] = pattern[i].toLower();
-    QChar tLow[256];
-    for (int i = 0; i < tLen; i++) tLow[i] = text[i].toLower();
-
-    // Quick subsequence reject using pre-lowered arrays
-    { int pi = 0;
-      for (int ti = 0; ti < tLen && pi < pLen; ti++)
-          if (pLow[pi] == tLow[ti]) pi++;
-      if (pi < pLen) return 0;
-    }
-
-    // Recursive best-match (bounded: max 4 branches per pattern char)
-    // Stack arrays instead of QVector to avoid heap allocation
-    int bestPos[kMaxFuzzyLen];
-    int curPos[kMaxFuzzyLen];
-    int best = 0;
-    int bestLen = 0;
-
-    auto solve = [&](auto& self, int pi, int ti, int curLen, int score) -> void {
-        if (pi == pLen) {
-            if (score > best) {
-                best = score;
-                bestLen = curLen;
-                memcpy(bestPos, curPos, curLen * sizeof(int));
-            }
-            return;
-        }
-        int maxTi = tLen - (pLen - pi);
-        int branches = 0;
-        for (int i = ti; i <= maxTi && branches < 4; i++) {
-            if (pLow[pi] != tLow[i]) continue;
-            int bonus = 1;
-            if (i == 0)                                          bonus = 10;
-            else if (text[i - 1] == '_' || text[i - 1] == ' ') bonus = 8;
-            else if (text[i].isUpper() && text[i - 1].isLower()) bonus = 8;
-            if (curLen > 0 && i == curPos[curLen - 1] + 1)      bonus += 5;
-            curPos[curLen] = i;
-            self(self, pi + 1, i + 1, curLen + 1, score + bonus);
-            branches++;
-        }
-    };
-
-    solve(solve, 0, 0, 0, 0);
-    if (best > 0) {
-        best += qMax(0, 20 - (tLen - pLen));  // tightness bonus
-        if (pLen == tLen) best += 20;          // exact match bonus
-        if (outPositions) {
-            outPositions->resize(bestLen);
-            memcpy(outPositions->data(), bestPos, bestLen * sizeof(int));
-        }
-    }
-    return best;
-}
+// Fuzzy scorer lives in widgets/fuzzy_match.h (strict substring + word-start
+// initials, replaces an older loose subsequence matcher that produced
+// hundreds of false-positive matches in big symbol lists).
 
 // ── Per-group accent colors (derived from theme semantic colors) ──
 
@@ -346,7 +197,11 @@ public:
         const int rightW = 6 + kBarW + 6 + kSzCol + 6;  // gap + bar + gap + size + pad
         const int nameEnd = r.right() - rightW;
 
-        // ── Icon ──
+        // ── Icon ── tinted with the row's group color so a "Hex" entry
+        // reads as purple end-to-end (accent stripe, section pip, AND
+        // icon), an "Int" entry as blue, etc. Without tinting, every row
+        // got the same neutral SVG fill and lost its group cue past the
+        // 2 px accent stripe.
         const int iconSz = m_fm.height();
         if (entry) {
             static QIcon sI(QStringLiteral(":/vsicons/symbol-class.svg"));
@@ -355,13 +210,16 @@ public:
             const QIcon& ico = (entry->entryKind == TypeEntry::Composite)
                 ? (entry->category == TypeEntry::CatEnum ? eI : sI) : pI;
             const int iy = y + (h - iconSz) / 2;
-            if (isDisabled) {
-                painter->setOpacity(0.25);
-                ico.paint(painter, x, iy, iconSz, iconSz);
-                painter->setOpacity(1.0);
-            } else {
-                ico.paint(painter, x, iy, iconSz, iconSz);
+            QPixmap pm = ico.pixmap(iconSz, iconSz);
+            if (!pm.isNull()) {
+                QPainter pp(&pm);
+                pp.setCompositionMode(QPainter::CompositionMode_SourceIn);
+                pp.fillRect(pm.rect(), groupCol);
+                pp.end();
             }
+            painter->setOpacity(isDisabled ? 0.25 : 1.0);
+            painter->drawPixmap(x, iy, pm);
+            painter->setOpacity(1.0);
         }
         x += iconSz + 4;
 
@@ -697,12 +555,12 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         auto* normBtn = new QToolButton;
         normBtn->setCheckable(true);
         normBtn->setChecked(true);
-        normBtn->setText(QStringLiteral("\u2261")); // ≡
+        normBtn->setText(QStringLiteral("\u2630")); // \u2630 (looser = normal)
         normBtn->setToolTip(QStringLiteral("Normal density"));
         normBtn->setStyleSheet(vbtnStyle);
         auto* compBtn = new QToolButton;
         compBtn->setCheckable(true);
-        compBtn->setText(QStringLiteral("\u2630")); // ☰
+        compBtn->setText(QStringLiteral("\u2261")); // \u2261 (tighter = compact)
         compBtn->setToolTip(QStringLiteral("Compact density"));
         compBtn->setStyleSheet(vbtnStyle);
         slay->addWidget(normBtn);
@@ -1688,6 +1546,13 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 buckets[t.kindGroup].append(t);
         }
 
+        // In grouped view, each section sorts largest → smallest by byte size
+        // (dynamic-size entries with sizeBytes==0 sink to the bottom); ties
+        // break alphabetically.
+        auto bySizeDesc = [](const TypeEntry& a, const TypeEntry& b) {
+            if (a.sizeBytes != b.sizeBytes) return a.sizeBytes > b.sizeBytes;
+            return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
+        };
         auto alphabetical = [](const TypeEntry& a, const TypeEntry& b) {
             return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
         };
@@ -1739,10 +1604,10 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                         else other.append(p);
                     }
                     std::sort(sameSize.begin(), sameSize.end(), alphabetical);
-                    std::sort(other.begin(), other.end(), alphabetical);
+                    std::sort(other.begin(), other.end(), bySizeDesc);
                     items = sameSize + other;
                 } else {
-                    std::sort(items.begin(), items.end(), alphabetical);
+                    std::sort(items.begin(), items.end(), bySizeDesc);
                 }
                 appendSection(QString::fromLatin1(kGroupLabels[gi]), items);
             }

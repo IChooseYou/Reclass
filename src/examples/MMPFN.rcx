@@ -1,6 +1,6 @@
 {
     "baseAddress": "FFFFCA8010000000",
-    "nextId": "3000",
+    "nextId": "3002",
     "nodes": [
         {
             "id": "100",
@@ -30,7 +30,6 @@
             "refId": "100",
             "collapsed": true
         },
-
         {
             "id": "200",
             "kind": "Struct",
@@ -86,7 +85,6 @@
             "offset": 0,
             "parentId": "220"
         },
-
         {
             "id": "300",
             "kind": "Struct",
@@ -184,7 +182,6 @@
             "refId": "1000",
             "collapsed": true
         },
-
         {
             "id": "400",
             "kind": "Struct",
@@ -202,7 +199,6 @@
             "offset": 0,
             "parentId": "400"
         },
-
         {
             "id": "500",
             "kind": "Struct",
@@ -220,7 +216,6 @@
             "offset": 0,
             "parentId": "500"
         },
-
         {
             "id": "600",
             "kind": "Struct",
@@ -238,7 +233,6 @@
             "offset": 0,
             "parentId": "600"
         },
-
         {
             "id": "700",
             "kind": "Struct",
@@ -256,7 +250,6 @@
             "offset": 0,
             "parentId": "700"
         },
-
         {
             "id": "800",
             "kind": "Struct",
@@ -274,7 +267,6 @@
             "offset": 0,
             "parentId": "800"
         },
-
         {
             "id": "900",
             "kind": "Struct",
@@ -292,7 +284,6 @@
             "offset": 0,
             "parentId": "900"
         },
-
         {
             "id": "1000",
             "kind": "Struct",
@@ -310,7 +301,6 @@
             "offset": 0,
             "parentId": "1000"
         },
-
         {
             "id": "1100",
             "kind": "Struct",
@@ -328,7 +318,6 @@
             "offset": 0,
             "parentId": "1100"
         },
-
         {
             "id": "1200",
             "kind": "Struct",
@@ -346,7 +335,6 @@
             "offset": 0,
             "parentId": "1200"
         },
-
         {
             "id": "1300",
             "kind": "Struct",
@@ -364,7 +352,6 @@
             "offset": 0,
             "parentId": "1300"
         },
-
         {
             "id": "1400",
             "kind": "Struct",
@@ -382,7 +369,6 @@
             "offset": 0,
             "parentId": "1400"
         },
-
         {
             "id": "1500",
             "kind": "Struct",
@@ -400,7 +386,6 @@
             "offset": 0,
             "parentId": "1500"
         },
-
         {
             "id": "1600",
             "kind": "Struct",
@@ -418,7 +403,6 @@
             "offset": 0,
             "parentId": "1600"
         },
-
         {
             "id": "1700",
             "kind": "Struct",
@@ -436,7 +420,6 @@
             "offset": 0,
             "parentId": "1700"
         },
-
         {
             "id": "2000",
             "kind": "Struct",
@@ -532,7 +515,6 @@
             "refId": "300",
             "collapsed": true
         },
-
         {
             "id": "2020",
             "kind": "Struct",
@@ -543,7 +525,6 @@
             "refId": "1200",
             "collapsed": true
         },
-
         {
             "id": "2030",
             "kind": "Struct",
@@ -590,7 +571,6 @@
             "refId": "1500",
             "collapsed": true
         },
-
         {
             "id": "2040",
             "kind": "Struct",
@@ -601,7 +581,6 @@
             "refId": "1700",
             "collapsed": true
         },
-
         {
             "id": "2050",
             "kind": "Struct",
@@ -611,6 +590,30 @@
             "parentId": "2000",
             "refId": "1600",
             "collapsed": true
+        },
+        {
+            "arrayLen": 1,
+            "collapsed": true,
+            "elementKind": "UInt8",
+            "id": "3000",
+            "kind": "Hex64",
+            "name": "",
+            "offset": 16,
+            "parentId": "2000",
+            "refId": "0",
+            "strLen": 64
+        },
+        {
+            "arrayLen": 1,
+            "collapsed": true,
+            "elementKind": "UInt8",
+            "id": "3001",
+            "kind": "Hex16",
+            "name": "",
+            "offset": 34,
+            "parentId": "2000",
+            "refId": "0",
+            "strLen": 64
         }
     ]
 }

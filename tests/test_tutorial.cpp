@@ -256,12 +256,13 @@ private slots:
             // Pointer header is the first node-bearing line in this view.
             if (lm.nodeKind != NodeKind::Pointer64) continue;
             foundVptr = true;
-            QVERIFY2(lm.rttiHintStart >= 0,
+            const LineChip* rttiChip = findChip(lm, ChipKind::Rtti);
+            QVERIFY2(rttiChip,
                 "RTTI hint should fire on typed-pointer header — "
                 "compose.cpp's typed-pointer block isn't running, "
                 "or rttiForVtable's Itanium fallback didn't catch this candidate.");
-            QVERIFY(lm.rttiHint.contains(QStringLiteral("RcxEditor")));
-            QCOMPARE(lm.rttiVtableAddr, kImageBase + 0x1000);
+            QVERIFY(rttiChip->text.contains(QStringLiteral("RcxEditor")));
+            QCOMPARE(rttiChip->rttiVtableAddr, kImageBase + 0x1000);
             break;
         }
         QVERIFY2(foundVptr, "did not locate the __vptr Pointer64 line");
@@ -301,9 +302,10 @@ private slots:
         for (const auto& lm : r.meta) {
             if (lm.nodeKind != NodeKind::Hex64) continue;
             foundField = true;
-            QVERIFY2(lm.rttiHintStart >= 0,
+            const LineChip* rttiChip = findChip(lm, ChipKind::Rtti);
+            QVERIFY2(rttiChip,
                 "Hex64 RTTI hint should fire — composeLeaf path baseline.");
-            QVERIFY(lm.rttiHint.contains(QStringLiteral("RcxEditor")));
+            QVERIFY(rttiChip->text.contains(QStringLiteral("RcxEditor")));
             break;
         }
         QVERIFY(foundField);
@@ -546,16 +548,17 @@ private slots:
             if (lm.lineKind == LineKind::CommandRow) continue;
             if (lm.nodeKind != NodeKind::Pointer64) continue;
             foundVptr = true;
-            gotHint = lm.rttiHint;
-            QVERIFY2(lm.rttiHintStart >= 0,
+            const LineChip* rttiChip = findChip(lm, ChipKind::Rtti);
+            gotHint = rttiChip ? rttiChip->text : QString();
+            QVERIFY2(rttiChip,
                 qPrintable(QStringLiteral(
                     "typed-pointer composeNode block did NOT attach RTTI hint "
                     "for vtable 0x%1 — this is the live-demo bug")
                     .arg(vtable, 0, 16)));
-            QVERIFY2(lm.rttiHint.contains(QStringLiteral("TutorialTest"))
-                     || lm.rttiHint.contains(QStringLiteral("QObject"))
-                     || !lm.rttiHint.isEmpty(),
-                qPrintable(QStringLiteral("hint was: '%1'").arg(lm.rttiHint)));
+            QVERIFY2(gotHint.contains(QStringLiteral("TutorialTest"))
+                     || gotHint.contains(QStringLiteral("QObject"))
+                     || !gotHint.isEmpty(),
+                qPrintable(QStringLiteral("hint was: '%1'").arg(gotHint)));
             break;
         }
         QVERIFY2(foundVptr, "did not locate the __vptr line");
@@ -637,7 +640,7 @@ private slots:
             if (lm.lineKind == LineKind::CommandRow) continue;
             if (lm.nodeKind != NodeKind::Pointer64) continue;
             foundVptr = true;
-            QVERIFY2(lm.rttiHintStart >= 0,
+            QVERIFY2(findChip(lm, ChipKind::Rtti) != nullptr,
                 "RTTI hint did NOT fire when composing through "
                 "SnapshotProvider — this is the live-demo bug.");
             break;
@@ -709,7 +712,7 @@ private slots:
             if (lm.lineKind == LineKind::CommandRow) continue;
             if (lm.nodeKind != NodeKind::Pointer64) continue;
             foundVptr = true;
-            QVERIFY2(lm.rttiHintStart >= 0,
+            QVERIFY2(findChip(lm, ChipKind::Rtti) != nullptr,
                 qPrintable(QStringLiteral(
                     "with showComments=true the typed-pointer hint did NOT fire — "
                     "this matches the live-demo behaviour and is the real bug.")));

@@ -1329,11 +1329,21 @@ private slots:
         ComposeResult result = compose(tree, prov);
 
         // Inject heatLevel=2 (warm) on field1, field2, field3 — simulates
-        // heat accumulated before the delete
+        // heat accumulated before the delete.
+        // Per-byte heat (the user-requested change for hex rows): a hex
+        // field only lights up the bytes listed in changedByteIndices.
+        // Tests have to populate it manually because real population
+        // happens in the controller's refresh tick against a snapshot
+        // diff — that whole pipeline isn't running here.
         for (auto& lm : result.meta) {
             for (int i = 1; i <= 3; i++) {
-                if (lm.nodeId == fieldIds[i])
+                if (lm.nodeId == fieldIds[i]) {
                     lm.heatLevel = 2;
+                    if (defs[i].kind == NodeKind::Hex32) {
+                        lm.changedByteIndices = {0, 1, 2, 3};
+                        lm.lineByteCount = 4;
+                    }
+                }
             }
         }
 
@@ -1633,13 +1643,16 @@ private slots:
         int hoverCol = (vs.start + vs.end) / 2;  // middle of value span
         QPoint vp = colToViewport(m_editor->scintilla(), ptrLine, hoverCol);
         sendMouseMove(m_editor->scintilla()->viewport(), vp);
-        QApplication::processEvents();
-
-        // Verify struct preview popup is shown
-        QVERIFY2(m_editor->structPreviewPopup() != nullptr,
-                 "Struct preview popup was not created");
-        QVERIFY2(m_editor->structPreviewPopup()->isVisible(),
-                 "Struct preview popup is not visible");
+        // Preview popups dwell for 700ms before showing. QTRY_VERIFY
+        // polls until the condition holds or 2s elapses — much more
+        // resilient than a single qWait against timer + event-loop
+        // scheduling slop.
+        // Hover preview host shows StructTargetPreview for collapsed
+        // typed pointers. Wait for the dwell timer + the host to claim
+        // the row, then assert the active preview is "struct_target".
+        QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup() != nullptr, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup()->isVisible(), 2000);
+        QCOMPARE(m_editor->hoverPopupActiveId(), QStringLiteral("struct_target"));
 
         // Restore original document for other tests
         m_editor->setProviderRef(nullptr, nullptr, nullptr);
@@ -1713,11 +1726,13 @@ private slots:
         sendMouseMove(m_editor->scintilla()->viewport(), vp);
         QApplication::processEvents();
 
-        // Struct preview popup should NOT be visible (pointer is expanded)
-        bool popupVisible = m_editor->structPreviewPopup()
-                            && m_editor->structPreviewPopup()->isVisible();
-        QVERIFY2(!popupVisible,
-                 "Struct preview popup should not appear for expanded pointer");
+        // Struct preview should NOT be the active preview when the
+        // pointer is expanded (StructTargetPreview is ineligible).
+        bool stuckPopup = m_editor->hoverPopup()
+                          && m_editor->hoverPopup()->isVisible()
+                          && m_editor->hoverPopupActiveId() == QStringLiteral("struct_target");
+        QVERIFY2(!stuckPopup,
+                 "Struct preview should not appear for expanded pointer");
 
         // Restore
         m_editor->setProviderRef(nullptr, nullptr, nullptr);
@@ -2791,11 +2806,12 @@ private slots:
         int hoverCol = (vs.start + vs.end) / 2;
         QPoint vpFP = colToViewport(m_editor->scintilla(), fpLine, hoverCol);
         sendMouseMove(m_editor->scintilla()->viewport(), vpFP);
-        QApplication::processEvents();
-
-        QWidget* popup = m_editor->disasmPopup();
-        QVERIFY2(popup && popup->isVisible(),
-                 "Disasm popup should be visible after hovering the FuncPtr value");
+        // Preview popups dwell for 700ms before showing — poll with
+        // generous timeout to absorb event-loop scheduling slop.
+        QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup() != nullptr, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup()->isVisible(), 2000);
+        QCOMPARE(m_editor->hoverPopupActiveId(), QStringLiteral("disasm"));
+        QWidget* popup = m_editor->hoverPopup();
 
         // See-through behavior: when the user moves the mouse down from the
         // viewport onto the popup, the popup's mouseMoveEvent override forwards

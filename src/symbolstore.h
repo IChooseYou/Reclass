@@ -1,4 +1,5 @@
 #pragma once
+#include "imports/import_pdb.h"  // for PdbTypeInfo
 #include <QString>
 #include <QStringList>
 #include <QHash>
@@ -16,6 +17,11 @@ struct PdbSymbolSet {
     QHash<QString, uint32_t> nameToRva;
     QHash<QString, uint32_t> nameToTypeIndex; // symbol name → TPI typeIndex (0 = no type info)
     QVector<QPair<uint32_t, QString>> rvaToName;  // sorted by RVA for binary search
+    // Standalone TPI type list (struct/union/enum definitions). Populated by
+    // loadPdbAndCacheTypes via enumeratePdbTypes; surfaced in the unified
+    // Symbols panel as address-less entries that the user can right-click
+    // to import.
+    QVector<PdbTypeInfo> types;
 
     void sortRvaIndex() {
         std::sort(rvaToName.begin(), rvaToName.end(),
@@ -40,6 +46,20 @@ public:
     // Called after addModule with the typeIndex data from PdbSymbol records.
     void addModuleTypeIndices(const QString& moduleName,
                               const QHash<QString, uint32_t>& nameToTypeIndex);
+
+    // Store the enumerated TPI type list for a previously-added module.
+    // Used by PdbNameProvider to surface standalone struct/enum definitions
+    // in the unified Symbols panel.
+    void addModuleTypes(const QString& moduleName,
+                       const QVector<PdbTypeInfo>& types);
+
+    // Merge RTTI-discovered class→RVA hits into a module's symbol set so
+    // they participate in normal name resolution (expression parser,
+    // reverse lookup). Duplicates are skipped. Callers usually accumulate
+    // RTTI hits via NameRegistry's RttiNameProvider, but this entrypoint
+    // lets the legacy compose path benefit too.
+    void addRttiHits(const QString& moduleName,
+                     const QVector<QPair<QString, uint32_t>>& hits);
 
     // Look up the TPI typeIndex for a qualified symbol (e.g. "ntdll!g_pShimEngineModule").
     // Returns 0 if not found or no type info available.

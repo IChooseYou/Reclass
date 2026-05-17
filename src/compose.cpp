@@ -10,6 +10,14 @@
 
 namespace rcx {
 
+// RTTI discovery hook — GUI app sets this so each successful walkRtti()
+// surfaces the demangled class name in the unified Symbols panel and in
+// the expression parser. Tests leave it nullptr (no-op).
+void (*g_rttiDiscoveryHook)(const QString& name, uint64_t address,
+                             const QString& moduleName) = nullptr;
+QString (*g_nameLookupHook)(uint64_t address, const Provider* active) = nullptr;
+void (*g_namesChangedHook)() = nullptr;
+
 namespace {
 
 // ── Value preview for type hints ──
@@ -76,8 +84,10 @@ struct ComposeState {
     bool               compactColumns = false;  // compact column mode: cap type width, overflow long types
     bool               treeLines      = false;  // draw Unicode tree connectors in indentation
     bool               braceWrap      = false;  // opening brace on its own line
-    bool               typeHints      = false;  // show type inference hints on hex nodes
-    bool               showComments   = true;   // show user comments and PDB symbol annotations
+    bool               typeHints      = false;  // show TypeHint chips on hex nodes ("[ptr64]")
+    bool               showComments   = true;   // show Comment chips ("/ note") + PDB symbol annotations
+    bool               showRtti       = true;   // show Rtti chips ("{RTTI: ClassName}")
+    bool               showEnumChips  = true;   // show Enum chips ("(MEMBER)") on int fields with enum refId
     SymbolLookupFn     symbolLookup;             // optional PDB symbol lookup callback
     QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
@@ -281,6 +291,13 @@ static const RttiInfo& rttiForVtable(ComposeState& state, const Provider& prov,
         info = walkRtti(prov, candidateAddr, /*ptrSize=*/8, /*maxVtableSlots=*/0);
         if (!info.ok)
             info = walkRttiItanium(prov, candidateAddr, /*ptrSize=*/8, /*maxVtableSlots=*/0);
+        if (info.ok && !info.demangledName.isEmpty() && g_rttiDiscoveryHook) {
+            // Surface the discovery in the unified Symbols panel + make it
+            // resolve in the expression parser. The hook is set by the
+            // GUI app (main.cpp), nullptr in headless test builds.
+            g_rttiDiscoveryHook(info.demangledName, info.vtableAddress,
+                                info.moduleName);
+        }
     }
     return state.rttiCache.insert(candidateAddr, info).value();
 }
@@ -357,128 +374,216 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                                             /*comment=*/{}, typeW, nameW, ptrTypeOverride,
                                             state.compactColumns);
 
-        // Enum mapping for primitive integer fields: a UInt8/16/32/64
-        // with refId pointing at a top-level enum struct gets its value
-        // resolved to the enum member name. So `color_type = 6` reads
-        // "0x6 (RGBA)" instead of just "0x6". One small targeted look-up
-        // that lets the existing top-level enum types (which are already
-        // first-class in the workspace) double as field annotations,
-        // without forcing the field itself to be an enum struct (which
-        // would lose the inline value rendering).
-        if (sub == 0 && node.refId != 0 && prov.isReadable(absAddr, node.byteSize())) {
-            int refIdx = tree.indexOfId(node.refId);
-            if (refIdx >= 0) {
-                const Node& refNode = tree.nodes[refIdx];
-                if (refNode.isEnum() && !refNode.enumMembers.isEmpty()) {
-                    int64_t v = 0;
-                    switch (node.kind) {
-                    case NodeKind::UInt8:  v = (int64_t)prov.readU8 (absAddr); break;
-                    case NodeKind::UInt16: v = (int64_t)prov.readU16(absAddr); break;
-                    case NodeKind::UInt32: v = (int64_t)prov.readU32(absAddr); break;
-                    case NodeKind::UInt64: v = (int64_t)prov.readU64(absAddr); break;
-                    case NodeKind::Int8:   v = (int8_t)prov.readU8 (absAddr); break;
-                    case NodeKind::Int16:  v = (int16_t)prov.readU16(absAddr); break;
-                    case NodeKind::Int32:  v = (int32_t)prov.readU32(absAddr); break;
-                    case NodeKind::Int64:  v = (int64_t)prov.readU64(absAddr); break;
-                    default: break;
-                    }
-                    QString memberName;
-                    for (const auto& m : refNode.enumMembers) {
-                        if (m.second == v) { memberName = m.first; break; }
-                    }
-                    if (!memberName.isEmpty()) {
-                        // Trim trailing padding so the annotation sits next
-                        // to the value, not floating in the middle of the
-                        // value column.
-                        while (lineText.endsWith(' ')) lineText.chop(1);
-                        lineText += QStringLiteral(" (") + memberName
-                                  + QStringLiteral(")");
-                    }
-                }
-            }
-        }
-
-        // Comment annotation: user comment takes priority, then PDB symbol
-        // Appended right after value text (not at fixed column) for compact display
-        if (sub == 0 && state.showComments) {
-            QString commentText;
-            if (!node.comment.isEmpty())
-                commentText = node.comment;
-            else if (state.symbolLookup) {
-                QString sym = state.symbolLookup(absAddr);
-                if (!sym.isEmpty())
-                    commentText = sym;
-            }
-            if (!commentText.isEmpty()) {
-                // Embedded newlines in the stored comment would split the
-                // appended `// …` text across multiple Scintilla rows
-                // without LineMeta for the continuations — phantom rows
-                // with broken offset margins. Collapse any newline (and
-                // tabs while we're at it) to a single space + middle-dot
-                // separator so a multi-paragraph user comment stays on
-                // one logical row.
-                if (commentText.contains(QChar('\n'))
-                    || commentText.contains(QChar('\r'))
-                    || commentText.contains(QChar('\t'))) {
-                    commentText.replace(QChar('\r'), QChar(' '));
-                    commentText.replace(QChar('\t'), QChar(' '));
-                    commentText.replace(QChar('\n'), QStringLiteral(" · "));
-                    // Squash runs of >1 spaces left from blank paragraphs.
+        // ── Chip block: Enum, TypeHint, Rtti, Comment ──
+        // Each chip appends "  <text>" to lineText and records its
+        // [startCol, endCol) in lm.chips. One emit pattern, one source
+        // of truth for the editor's hit-test, indicator passes, and
+        // inline-comment span lookup. Legacy commentStart / typeHint*
+        // / rttiHint* fields are populated alongside while step 5 of
+        // the migration finishes; remove them then.
+        if (sub == 0) {
+            // Defensive sanitizer for any chip text: chips occupy a
+            // single Scintilla row, no exceptions. Any \r/\n/\t in the
+            // source (Node::comment, PDB symbol with embedded newlines,
+            // typeHint with weird payload) would split the chip across
+            // logical rows without LineMeta for the continuations —
+            // phantom rows, broken offset margins, broken hit-tests.
+            // Collapse all of it to a middle-dot separator + squashed
+            // runs of spaces. Multi-line chips can come back later as
+            // an explicit feature; for now, single row only.
+            auto sanitizeChip = [](QString s) -> QString {
+                if (s.contains(QChar('\n')) || s.contains(QChar('\r'))
+                    || s.contains(QChar('\t'))) {
+                    s.replace(QChar('\r'), QChar(' '));
+                    s.replace(QChar('\t'), QChar(' '));
+                    s.replace(QChar('\n'), QStringLiteral(" · "));
                     static const QRegularExpression rxRun(QStringLiteral("  +"));
-                    commentText.replace(rxRun, QStringLiteral(" "));
+                    s.replace(rxRun, QStringLiteral(" "));
                 }
-                // Trim trailing spaces (from value column padding) so comment sits close to value
-                while (lineText.endsWith(' ')) lineText.chop(1);
-                // commentStart is in document-column space: LineGeometry adds
-                // the fold prefix (kFoldCol for Field lines), then the comment
-                // sits 2 chars after the trimmed lineText.
-                lm.commentStart = LineGeometry::forLine(lm).documentColumn(lineText.size() + 2);
-                lineText += QStringLiteral("  // ") + commentText;
-            }
-        }
+                return s;
+            };
+            auto pushChip = [&](ChipKind kind, const QString& rawText,
+                                const std::function<void(LineChip&)>& fillPayload = {}) {
+                QString text = sanitizeChip(rawText);
+                LineChip c;
+                c.kind = kind;
+                c.text = text;
+                // Trim the value-column padding so chips sit next to
+                // value, then append "  " + text to the Scintilla buffer.
+                // Scintilla owns paint/scroll/zoom/resize natively — no
+                // overlay widget, no sync code, no race.
+                while (lineText.endsWith(QLatin1Char(' '))) lineText.chop(1);
+                lineText += QStringLiteral("  ") + text;
+                c.startCol = LineGeometry::forLine(lm)
+                                 .documentColumn(lineText.size() - text.size());
+                c.endCol   = LineGeometry::forLine(lm)
+                                 .documentColumn(lineText.size());
+                if (fillPayload) fillPayload(c);
+                lm.chips.push_back(std::move(c));
+            };
 
-        // Type inference hint for hex nodes (when enabled)
-        if (state.typeHints && isHexNode(node.kind) && sub == 0) {
-            const int sz = sizeForKind(node.kind);
-            QByteArray b = prov.isReadable(absAddr, sz)
-                ? prov.readBytes(absAddr, sz) : QByteArray(sz, '\0');
-            auto suggestions = inferTypes(
-                reinterpret_cast<const uint8_t*>(b.constData()), sz);
-            if (!suggestions.isEmpty() && suggestions[0].strength >= 3) {
-                lm.typeHintStart = LineGeometry::forLine(lm).documentColumn(lineText.size() + 2);
-                lm.typeHintKinds = suggestions[0].kinds;
-                QString typeName = formatHint(suggestions[0]);
-                QString preview = formatPreview(
-                    reinterpret_cast<const uint8_t*>(b.constData()), sz, suggestions[0]);
-                // Value-first with bracketed type: "0x7ff718570000 [ptr64]"
-                if (!preview.isEmpty())
-                    lm.typeHint = preview + QStringLiteral(" [") + typeName + QStringLiteral("]");
-                else
-                    lm.typeHint = QStringLiteral("[") + typeName + QStringLiteral("]");
-                lineText += QStringLiteral("  ") + lm.typeHint;
+            // 1. Enum — int field whose refId points at a top-level enum.
+            if (state.showEnumChips
+                && node.refId != 0
+                && (node.kind == NodeKind::UInt8 || node.kind == NodeKind::UInt16
+                 || node.kind == NodeKind::UInt32 || node.kind == NodeKind::UInt64
+                 || node.kind == NodeKind::Int8  || node.kind == NodeKind::Int16
+                 || node.kind == NodeKind::Int32 || node.kind == NodeKind::Int64)
+                && prov.isReadable(absAddr, node.byteSize())) {
+                int refIdx = tree.indexOfId(node.refId);
+                if (refIdx >= 0) {
+                    const Node& refNode = tree.nodes[refIdx];
+                    if (refNode.isEnum() && !refNode.enumMembers.isEmpty()) {
+                        int64_t v = 0;
+                        switch (node.kind) {
+                        case NodeKind::UInt8:  v = (int64_t)prov.readU8 (absAddr); break;
+                        case NodeKind::UInt16: v = (int64_t)prov.readU16(absAddr); break;
+                        case NodeKind::UInt32: v = (int64_t)prov.readU32(absAddr); break;
+                        case NodeKind::UInt64: v = (int64_t)prov.readU64(absAddr); break;
+                        case NodeKind::Int8:   v = (int8_t) prov.readU8 (absAddr); break;
+                        case NodeKind::Int16:  v = (int16_t)prov.readU16(absAddr); break;
+                        case NodeKind::Int32:  v = (int32_t)prov.readU32(absAddr); break;
+                        case NodeKind::Int64:  v = (int64_t)prov.readU64(absAddr); break;
+                        default: break;
+                        }
+                        QString memberName;
+                        for (const auto& m : refNode.enumMembers) {
+                            if (m.second == v) { memberName = m.first; break; }
+                        }
+                        if (!memberName.isEmpty()) {
+                            QString chipText = QStringLiteral("(") + memberName
+                                             + QStringLiteral(")");
+                            pushChip(ChipKind::Enum, chipText, [&](LineChip& c) {
+                                c.enumCurrentValue = v;
+                                c.enumRefNodeId    = node.refId;
+                            });
+                        }
+                    }
+                }
             }
-        }
 
-        // RTTI auto-detect: hex64/Pointer64 whose value lands inside a known
-        // module is a vtable candidate. The module-range scan rejects ~99% of
-        // values cheaply; surviving candidates run walkRtti once and the
-        // result is cached for the rest of this compose pass. Independent of
-        // state.typeHints — RTTI is "real signal" worth showing on its own.
-        // Also independent of state.showComments.
-        if (sub == 0
-            && (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64)
-            && prov.isReadable(absAddr, 8)) {
-            uint64_t candidate = prov.readU64(absAddr);
-            if (candidate != 0 && candidate != UINT64_MAX) {
-                const RttiInfo& info = rttiForVtable(state, prov, candidate);
-                if (info.ok && !info.demangledName.isEmpty()) {
-                    QString hint = QStringLiteral(" {RTTI: ") + info.demangledName
-                                 + QStringLiteral("}");
-                    lm.rttiHintStart  = LineGeometry::forLine(lm)
-                                           .documentColumn(lineText.size() + 1);
-                    lm.rttiVtableAddr = candidate;
-                    lm.rttiHint       = hint;
-                    lineText += hint;
+            // (TypeHint chips were removed — the inline "[ptr64]" /
+            // "[int32_t×2]" annotations on hex rows competed with the
+            // actual values for visual attention and added noise without
+            // earning their keep. Inference still drives the right-click
+            // "Convert to inferred type" suggestion path, just not the
+            // inline chip.)
+
+            // 3. RTTI / Symbol — annotation chips.
+            //    Priority (per user: "RTTI always more accurate"):
+            //      1. RTTI resolved  → overlay chip with demangled name only,
+            //                          NO "Reclass.exe+0x..." symbol suffix.
+            //                          Click → create class of that name.
+            //      2. Pointer with value 0 → overlay "(Name class…)" CTA chip.
+            //                          Click → rename current tab's root struct.
+            //                          Only on Pointer32/Pointer64 (not Hex64)
+            //                          to keep raw uninitialized hex rows quiet.
+            //      3. Symbol only    → inline Symbol chip (legacy, addr→name
+            //                          via PDB). Falls back when RTTI fails.
+            {
+                QString rttiName;
+                uint64_t rttiVtable = 0;
+                bool isNullPointer = false;
+                if (state.showRtti
+                    && (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64)
+                    && prov.isReadable(absAddr, 8)) {
+                    uint64_t candidate = prov.readU64(absAddr);
+                    if (candidate == 0
+                        && (node.kind == NodeKind::Pointer64
+                            || node.kind == NodeKind::Pointer32)) {
+                        // Null vtable slot — chip becomes a "name this class"
+                        // call-to-action. Excluded for raw Hex64 because every
+                        // zero-byte row would otherwise sprout a chip.
+                        isNullPointer = true;
+                    } else if (candidate != 0 && candidate != UINT64_MAX) {
+                        const RttiInfo& info = rttiForVtable(state, prov, candidate);
+                        if (info.ok && !info.demangledName.isEmpty()) {
+                            rttiName = info.demangledName;
+                            rttiVtable = candidate;
+                        }
+                    }
+                }
+
+                QString ptrSym;
+                if ((node.kind == NodeKind::Pointer32 || node.kind == NodeKind::Pointer64
+                  || node.kind == NodeKind::FuncPtr32 || node.kind == NodeKind::FuncPtr64)
+                    && prov.isReadable(absAddr, node.byteSize())) {
+                    uint64_t pv = 0;
+                    if (node.kind == NodeKind::Pointer64 || node.kind == NodeKind::FuncPtr64)
+                        pv = prov.readU64(absAddr);
+                    else
+                        pv = (uint64_t)prov.readU32(absAddr);
+                    if (pv != 0) ptrSym = prov.getSymbol(pv);
+                }
+
+                if (!rttiName.isEmpty()) {
+                    // Plain demangled name, inline. Indicator pass styles
+                    // it as a clickable pill. Symbol suppressed when RTTI
+                    // resolves (annotation merge — RTTI supersedes the
+                    // .exe+0x... fallback).
+                    pushChip(ChipKind::Rtti, rttiName, [&](LineChip& c) {
+                        c.rttiVtableAddr = rttiVtable;
+                    });
+                } else if (isNullPointer) {
+                    pushChip(ChipKind::Rtti, QStringLiteral("(Name class…)"),
+                             [](LineChip& c) { c.rttiVtableAddr = 0; });
+                } else if (!ptrSym.isEmpty()) {
+                    pushChip(ChipKind::Symbol, ptrSym);
+                }
+            }
+
+            // 3b. TypeHint — type-inference annotation on hex preview nodes.
+            //     Click target is wired to convert the field to the inferred
+            //     type (handled in MainWindow). Only fires when inference
+            //     confidence is strong (strength >= 3), so stable zero-byte
+            //     runs and randomness don't bait users into wrong conversions.
+            if (isHexNode(node.kind)) {
+                const int sz = sizeForKind(node.kind);
+                QByteArray b = prov.isReadable(absAddr, sz)
+                    ? prov.readBytes(absAddr, sz) : QByteArray(sz, '\0');
+                auto suggestions = inferTypes(
+                    reinterpret_cast<const uint8_t*>(b.constData()), sz);
+                if (!suggestions.isEmpty() && suggestions[0].strength >= 3) {
+                    QString hint = formatHint(suggestions[0]);
+                    QVector<NodeKind> kinds = suggestions[0].kinds;
+                    pushChip(ChipKind::TypeHint, hint, [&](LineChip& c) {
+                        c.typeHintKinds = kinds;
+                    });
+                }
+            }
+
+            // 4. Comment — user-authored Node::comment, falls back to
+            //    state.symbolLookup() for the field's OWN address (not
+            //    the pointer's value — that's the Symbol chip above).
+            if (state.showComments) {
+                QString commentText;
+                if (!node.comment.isEmpty())
+                    commentText = node.comment;
+                else if (state.symbolLookup) {
+                    QString sym = state.symbolLookup(absAddr);
+                    if (!sym.isEmpty())
+                        commentText = sym;
+                }
+                if (!commentText.isEmpty()) {
+                    // Defensive: collapse embedded \r/\n/\t so the chip text
+                    // stays on one Scintilla row. Without this, a stored
+                    // multi-line comment turns into phantom rows with no
+                    // LineMeta backing them.
+                    if (commentText.contains(QChar('\n'))
+                        || commentText.contains(QChar('\r'))
+                        || commentText.contains(QChar('\t'))) {
+                        commentText.replace(QChar('\r'), QChar(' '));
+                        commentText.replace(QChar('\t'), QChar(' '));
+                        commentText.replace(QChar('\n'), QStringLiteral(" · "));
+                        static const QRegularExpression rxRun(QStringLiteral("  +"));
+                        commentText.replace(rxRun, QStringLiteral(" "));
+                    }
+                    // Comment chip is a green pill — no glyph prefix,
+                    // the chip pill + text color already mark it as a
+                    // user comment. (The earlier "/ " marker doubled the
+                    // signal and looked awkward next to the cleaner
+                    // [TypeHint] / {RTTI} / (Enum) glyph chips.)
+                    pushChip(ChipKind::Comment, commentText);
                 }
             }
         }
@@ -847,29 +952,8 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         // For arrays, render children as condensed (no header/footer for struct elements)
         bool childrenAreArrayElements = (node.kind == NodeKind::Array);
         int elementIdx = 0;
-        // Gap-ruler tracking: accumulate consecutive unnamed (padding) children's
-        // bytes; when we reach the next named child, emit a "+0xN gap" marker line.
-        int gapBytes = 0;
         for (int ri = 0; ri < regular.size(); ri++) {
             int childIdx = regular[ri];
-            const Node& child = tree.nodes[childIdx];
-            // Emit gap-ruler line just before a named field that follows padding.
-            if (!childrenAreArrayElements && !child.name.isEmpty() && gapBytes > 0) {
-                LineMeta gm;
-                gm.nodeIdx    = -1;        // non-interactive
-                gm.nodeId     = 0;
-                gm.depth      = childDepth;
-                gm.lineKind   = LineKind::Continuation;
-                gm.isContinuation = true;
-                gm.parentAddr = absAddr;
-                gm.foldLevel  = computeFoldLevel(childDepth, false);
-                uint64_t gapStartAddr = absAddr + (uint64_t)child.offset - (uint64_t)gapBytes;
-                gm.offsetText = fmt::fmtOffsetMargin(gapStartAddr, false, state.offsetHexDigits);
-                gm.offsetAddr = gapStartAddr;
-                QString body = fmt::indent(childDepth)
-                             + QStringLiteral("[+0x%1 gap]").arg(gapBytes, 0, 16);
-                state.emitLine(body, std::move(gm));
-            }
             // A regular child has more siblings if there are more regular children
             // or if static fields follow after all regular children
             bool hasMore = (ri < regular.size() - 1)
@@ -881,16 +965,6 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                         childrenAreArrayElements, node.id,
                         childrenAreArrayElements ? elementIdx++ : -1,
                         childrenAreArrayElements ? absAddr : 0);
-            // Update gap accumulation: empty-name children contribute, named ones reset.
-            if (!childrenAreArrayElements) {
-                if (child.name.isEmpty()) {
-                    int sz = (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
-                           ? tree.structSpan(child.id, &state.childMap) : child.byteSize();
-                    gapBytes += sz;
-                } else {
-                    gapBytes = 0;
-                }
-            }
         }
 
         // ── Static fields: render after regular children, before footer ──
@@ -1220,24 +1294,95 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 // pointers route through composeNode), so we duplicate the
                 // detect-and-attach here. Same per-pass cache, same amber
                 // indicator, same `{RTTI: …}` text.
+                // Local helper so the typed-pointer header path can push
+                // chips with the same documentColumn math used in
+                // composeLeaf. Each chip records its [startCol, endCol)
+                // in document-column space (post fold-prefix).
+                // Defensive sanitizer (mirror of composeLeaf's pushChip):
+                // every chip is single-line, period.
+                auto sanitizeChip = [](QString s) -> QString {
+                    if (s.contains(QChar('\n')) || s.contains(QChar('\r'))
+                        || s.contains(QChar('\t'))) {
+                        s.replace(QChar('\r'), QChar(' '));
+                        s.replace(QChar('\t'), QChar(' '));
+                        s.replace(QChar('\n'), QStringLiteral(" · "));
+                        static const QRegularExpression rxRun(QStringLiteral("  +"));
+                        s.replace(rxRun, QStringLiteral(" "));
+                    }
+                    return s;
+                };
+                auto pushPtrChip = [&](ChipKind kind, const QString& rawText,
+                                       auto&& fillPayload) {
+                    QString chipText = sanitizeChip(rawText);
+                    LineChip chip;
+                    chip.kind = kind;
+                    chip.text = chipText;
+                    // Trim padding, append "  " + chip text. Indicator
+                    // pass styles it as a clickable pill.
+                    while (ptrText.endsWith(QLatin1Char(' '))) ptrText.chop(1);
+                    ptrText += QStringLiteral("  ") + chipText;
+                    chip.startCol = LineGeometry::forLine(lm)
+                        .documentColumn(ptrText.size() - chipText.size());
+                    chip.endCol   = LineGeometry::forLine(lm)
+                        .documentColumn(ptrText.size());
+                    fillPayload(chip);
+                    lm.chips.push_back(std::move(chip));
+                };
+
+                // RTTI / Symbol — same priority ladder as composeLeaf:
+                //   1. RTTI resolved → overlay chip, demangled name only,
+                //      Symbol suppressed (RTTI supersedes).
+                //   2. Pointer value 0 → overlay "(Name class…)" CTA.
+                //   3. Symbol only → inline chip.
+                QString rttiName;
+                uint64_t rttiVtable = 0;
+                QString ptrSym;
+                bool isNullPointer = false;
                 if (prov.isReadable(absAddr, 8)) {
                     uint64_t candidate = prov.readU64(absAddr);
-                    if (candidate != 0 && candidate != UINT64_MAX) {
-                        const RttiInfo& info = rttiForVtable(state, prov, candidate);
-                        if (info.ok && !info.demangledName.isEmpty()) {
-                            // Trim trailing spaces so the hint sits close
-                            // to the visible end of the pointer line.
-                            while (ptrText.endsWith(' ')) ptrText.chop(1);
-                            QString hint = QStringLiteral(" {RTTI: ")
-                                         + info.demangledName
-                                         + QStringLiteral("}");
-                            lm.rttiHintStart  = LineGeometry::forLine(lm)
-                                                   .documentColumn(ptrText.size() + 1);
-                            lm.rttiVtableAddr = candidate;
-                            lm.rttiHint       = hint;
-                            ptrText += hint;
+                    if (candidate == 0) {
+                        if (state.showRtti) isNullPointer = true;
+                    } else if (candidate != UINT64_MAX) {
+                        if (state.showRtti) {
+                            const RttiInfo& info = rttiForVtable(state, prov, candidate);
+                            if (info.ok && !info.demangledName.isEmpty()) {
+                                rttiName = info.demangledName;
+                                rttiVtable = candidate;
+                            }
                         }
+                        ptrSym = prov.getSymbol(candidate);
                     }
+                }
+                if (!rttiName.isEmpty()) {
+                    pushPtrChip(ChipKind::Rtti, rttiName, [&](LineChip& c) {
+                        c.rttiVtableAddr = rttiVtable;
+                    });
+                } else if (isNullPointer) {
+                    pushPtrChip(ChipKind::Rtti, QStringLiteral("(Name class…)"),
+                                [](LineChip& c) { c.rttiVtableAddr = 0; });
+                } else if (!ptrSym.isEmpty()) {
+                    pushPtrChip(ChipKind::Symbol, ptrSym, [](LineChip&) {});
+                }
+
+                // Comment chip on typed-pointer header. composeLeaf
+                // already emits this for raw pointer fields — without
+                // it here, user-authored Node::comment is invisible on
+                // typed pointers (the live demo's __vptr row showed
+                // the RTTI + Symbol chips fine but the "Qt vtable
+                // pointer …" comment was just dropped).
+                if (state.showComments && !node.comment.isEmpty()) {
+                    QString commentText = node.comment;
+                    if (commentText.contains(QChar('\n'))
+                        || commentText.contains(QChar('\r'))
+                        || commentText.contains(QChar('\t'))) {
+                        commentText.replace(QChar('\r'), QChar(' '));
+                        commentText.replace(QChar('\t'), QChar(' '));
+                        commentText.replace(QChar('\n'), QStringLiteral(" · "));
+                        static const QRegularExpression rxRun(QStringLiteral("  +"));
+                        commentText.replace(rxRun, QStringLiteral(" "));
+                    }
+                    pushPtrChip(ChipKind::Comment, commentText,
+                                [](LineChip&) {});
                 }
                 if (state.braceWrap && !effectiveCollapsed && ptrText.endsWith(QChar('{'))) {
                     ptrText.chop(1);
@@ -1365,7 +1510,8 @@ void composeNode(ComposeState& state, const NodeTree& tree,
 ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewRootId,
                       bool compactColumns, bool treeLines, bool braceWrap,
                       bool typeHints, bool showComments,
-                      SymbolLookupFn symbolLookup) {
+                      SymbolLookupFn symbolLookup,
+                      bool showRtti, bool showEnumChips) {
     PROFILE_SCOPE("compose");
     ComposeState state;
     state.compactColumns = compactColumns;
@@ -1373,6 +1519,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     state.braceWrap = braceWrap;
     state.typeHints = typeHints;
     state.showComments = showComments;
+    state.showRtti = showRtti;
+    state.showEnumChips = showEnumChips;
     state.symbolLookup = std::move(symbolLookup);
 
     // Precompute parent→children map

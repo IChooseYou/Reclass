@@ -201,6 +201,26 @@ inline FeatureResult countPtrFeatures64(uint64_t val) {
     if (val > 0x00007FFFFFFFFFFFULL && val < 0xFFFF800000000000ULL)
         return {0, 5};
 
+    uint32_t low  = (uint32_t)val;
+    uint32_t high = (uint32_t)(val >> 32);
+
+    // Hard reject: "packed two-int32" sentinel patterns. Real heap/code/
+    // stack pointers have near-random low halves; when one half is a
+    // sentinel-shaped value (sign-extended -1, all-zero with non-zero
+    // other half, mega-aligned-round-number with a small int alongside),
+    // the u64 is almost always a [val][val] struct, not an address.
+    //
+    //   ▸ low  == 0xFFFFFFFF  →  e.g. 0x0000038F`FFFFFFFF — packed [-1][int]
+    //   ▸ high == 0xFFFFFFFF  →  e.g. 0xFFFFFFFF`00002B00 — packed [int][-1]
+    //     (real Windows kernel addresses start with 0xFFFFFx, never the
+    //     full 0xFFFFFFFF prefix — those are -1 sign-extends)
+    //   ▸ low is 1 MB-aligned AND high is a small int (<0x10000)
+    //     → e.g. 0x0000001C`00800000 — packed [size=8MB][count=28]
+    if (low == 0xFFFFFFFFu) return {0, 5};
+    if (high == 0xFFFFFFFFu) return {0, 5};
+    if (low != 0 && (low & 0x000FFFFFu) == 0 && high < 0x10000u)
+        return {0, 5};
+
     int passed = 0, checked = 5;
     // Feature 1: aligned to 8 (heap/vtable allocations)
     passed += ((val & 7) == 0) ? 1 : 0;
@@ -278,7 +298,11 @@ inline int featureScore(FeatureResult r) {
 }
 
 inline int strengthFromScore(int score) {
-    if (score >= 75) return 3;
+    // 85+ for "strong" (was 75): firmer evidence reduces chip flicker
+    // between competing candidates whose scores wobble across data
+    // ticks. compose.cpp only emits chips at strength >= 3, so this
+    // raises the visibility bar without touching display logic.
+    if (score >= 85) return 3;
     if (score >= 50) return 2;
     if (score >= 25) return 1;
     return 0;
@@ -470,8 +494,15 @@ inline QVector<TypeSuggestion> pruneAndRank(QVector<Candidate>& cands, int maxRe
         if (!dup) deduped.append(c);
     }
 
-    // Dominance: if top >= 1.5× second, keep only top
-    if (deduped.size() >= 2 && deduped[0].score >= deduped[1].score * 3 / 2)
+    // Dominance: if top >= 1.5× second, keep only top.
+    // Also require a meaningful absolute gap (10 pts) — without this,
+    // top=82/second=80 reads as "top wins" even though the two are
+    // statistically tied and small data jitter flips them tick-to-tick.
+    // The 10-point floor turns wobble-between-1.5×-close-scores into
+    // a stable "ambiguous, show only the higher one once it pulls away".
+    if (deduped.size() >= 2
+        && deduped[0].score >= deduped[1].score * 3 / 2
+        && (deduped[0].score - deduped[1].score) >= 10)
         deduped.resize(1);
     else if (deduped.size() > maxResults)
         deduped.resize(maxResults);

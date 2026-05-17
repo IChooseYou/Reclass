@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QVariantAnimation>
 #include <functional>
+#include <memory>
 
 class QLabel;
 class QLineEdit;
@@ -15,6 +16,8 @@ class QsciScintilla;
 class QsciLexerCPP;
 
 namespace rcx {
+
+class HoverPreviewRegistry;  // src/widgets/hover_preview.h
 
 class RcxEditor : public QWidget {
     Q_OBJECT
@@ -28,9 +31,13 @@ public:
     void restoreViewState(const ViewState& vs);
 
     QsciScintilla* scintilla() const { return m_sci; }
+    // m_historyPopup is the inline-edit value-history popup (with "Set"
+    // buttons); m_popupHost is the unified hover preview host. Tests
+    // and external observers query whichever is relevant via the
+    // accessors below.
     QWidget* historyPopup() const { return m_historyPopup; }
-    QWidget* disasmPopup() const { return m_disasmPopup; }
-    QWidget* structPreviewPopup() const { return m_structPreviewPopup; }
+    QWidget* hoverPopup() const;          // returns m_popupHost
+    QString  hoverPopupActiveId() const;  // active preview's id (empty if host not visible)
     const LineMeta* metaForLine(int line) const;
     int currentNodeIndex() const;
     void scrollToNodeId(uint64_t nodeId);
@@ -98,6 +105,25 @@ signals:
     void insertAboveRequested(int nodeIdx, NodeKind kind);
     void commentEditRequested();
     void relativeOffsetsChanged(bool relative);
+    // Tail-chip click signals.
+    //
+    // RTTI chip click — extended to carry the demangled class name and
+    // the hosting node id so MainWindow can attachRttiClassToPointer()
+    // directly (auto-create class + wire pointer). vtableAddr is kept
+    // for the "Open RTTI Browser" menu path which still uses it.
+    void rttiChipClicked(uint64_t vtableAddr, QString className,
+                          uint64_t hostNodeId);
+    // Null-vtable RTTI chip click — fires when the user clicks the
+    // "(Name class…)" CTA chip on a pointer field with value 0x00.
+    // MainWindow opens inline rename on the current tab's root struct.
+    void rttiNullChipClicked();
+    void enumChipClicked(int nodeIdx, uint64_t enumRefNodeId, int64_t currentValue,
+                         QPoint globalPos);
+    // TypeHint chip clicked — caller (controller) converts the hex node
+    // to the inferred kind(s). One click commits the inference; if the
+    // suggestion is a multi-kind split (e.g. int32×2) one click splits
+    // the whole run.
+    void typeHintChipClicked(int nodeIdx, QVector<NodeKind> inferredKinds);
     void appendBytesRequested(uint64_t structId, int byteCount);
     void trimHexRequested(uint64_t structId);
     void appendEnumMembersRequested(uint64_t enumId, int count);
@@ -160,6 +186,15 @@ private:
     // ── Hover cursor + highlight ──
     QPoint m_lastHoverPos;
     bool   m_hoverInside = false;
+    // ── Chip hover / pressed state ──
+    // Tracks the clickable chip the cursor is currently over, so the
+    // pill can light up (hover) or sink (pressed) like a button. Held
+    // in screen-line + doc-column space so a single chip span can be
+    // identified across scroll. -1 line == nothing hovered.
+    int  m_chipHoverLine     = -1;
+    int  m_chipHoverStartCol = -1;
+    int  m_chipHoverEndCol   = -1;
+    bool m_chipPressed       = false;
     uint64_t m_hoveredNodeId = 0;
     int      m_hoveredLine = -1;
     uint64_t m_prevHoveredNodeId = 0;  // for incremental marker update
@@ -196,6 +231,17 @@ private:
         int        commentCol = -1;  // fixed comment column (stored at edit start)
         bool       lastValidationOk = true;  // track state to avoid redundant updates
         bool       hexOverwrite = false;  // true for hex-byte / ASCII-preview fixed-length editing
+        // Trailing padding written by beginInlineEdit so the comment area
+        // exists on a line that compose left short. Tracked here so
+        // endInlineEdit can strip it back off — leaving Scintilla in sync
+        // with m_prevText. Without this, the next applyDocument's diff
+        // computes against a stale prefix and corrupts an unrelated line.
+        long       padBytes  = 0;     // utf-8 bytes appended to the line
+        long       padPos    = 0;     // byte position right before padding
+        // For Comment-edit's trim-then-placeholder dance: bytes of trailing
+        // whitespace begin trimmed away. End restores them so the line ends
+        // up byte-identical to its pre-begin shape.
+        int        padRestoreSpaces = 0;
     };
     InlineEditState m_editState;
     QStringList m_staticCompletions;  // autocomplete words for StaticExpr editing
@@ -213,9 +259,19 @@ private:
     const QHash<uint64_t, ValueHistory>* m_valueHistory = nullptr;
     std::function<QString(const QString&)> m_exprEvaluator;
     QLabel* m_exprResultLabel = nullptr;
-    QWidget* m_historyPopup = nullptr;  // ValueHistoryPopup (file-local class in editor.cpp)
-    QWidget* m_disasmPopup = nullptr;        // TitleBodyPopup (file-local class in editor.cpp)
-    QWidget* m_structPreviewPopup = nullptr; // TitleBodyPopup (file-local class in editor.cpp)
+    QWidget* m_historyPopup = nullptr;  // inline-edit ValueHistoryPopup (file-local in editor.cpp)
+    // The unified hover preview host (HoverPopupHost, file-local in
+    // editor.cpp) replaces the old m_disasmPopup + m_structPreviewPopup
+    // pair. It hosts whichever HoverPreview is eligible for the row
+    // under the cursor — value history, hex dump, disasm, struct
+    // target, future matrix/vector/color, etc. — and the user cycles
+    // through them with Tab / Shift+Tab.
+    QWidget* m_popupHost = nullptr;
+    // The registry owning the HoverPreview subclasses. Filled once in
+    // setupScintilla. New preview kinds drop in as one registry->add()
+    // call there. Stored as unique_ptr<HoverPreviewRegistry> in the
+    // impl; the header keeps it forward-declared.
+    std::unique_ptr<HoverPreviewRegistry> m_previewRegistry;
     QWidget* m_arrowTooltip = nullptr;       // RcxTooltip (arrow callout)
     const Provider* m_disasmProvider = nullptr;   // snapshot or real — for reading tree data
     const Provider* m_disasmRealProv = nullptr;   // real process provider — for reading code at arbitrary addresses
@@ -238,6 +294,18 @@ private:
     // ── Hover effects toggle ──
     bool m_hoverEffects = true;
 
+    // ── Hover dwell for preview popups ──
+    // Value-history / disasm / struct-preview popups wait this long
+    // before appearing so casual mouse-overs don't keep flashing them
+    // open. The arrow tooltip (RcxTooltip) on command-row spans is
+    // intentionally NOT gated — it's a discoverability cue that needs
+    // to feel instant. Timer restarts whenever the (nodeId, line)
+    // hover target changes; popup blocks read m_hoverDwellElapsed
+    // before showing.
+    QTimer*  m_hoverDwellTimer = nullptr;
+    bool     m_hoverDwellElapsed = false;
+    uint64_t m_dwellNodeId = 0;
+    int      m_dwellLine = -1;
 
     // ── Presentation mode (smooth scroll + focus glow) ──
     bool m_presentationMode = false;
@@ -288,6 +356,18 @@ private:
     void updateEditableIndicators(int line);
     void applyHoverCursor();
     void applyHoverHighlight();
+    // Resolve the index in `eligible` of the preview the user last
+    // picked for `kind` (QSettings persistence). Falls back to 0 when
+    // no preference is recorded or the recorded id is gone.
+    int  pickLastUsedPreviewIdx(const QVector<class HoverPreview*>& eligible,
+                                NodeKind kind) const;
+    // Chip button-state visuals — repaint the hover/pressed pill overlay
+    // for the chip the cursor currently maps to. Idempotent; called from
+    // MouseMove, MouseButtonPress, MouseButtonRelease, Leave.
+    struct HitInfo;
+    void updateChipHover(const HitInfo& h);
+    void clearChipButtonState();
+    void applyChipButtonOverlay();
     void validateEditLive();
     void setEditComment(const QString& comment);
     void clampEditSelection();

@@ -1069,7 +1069,19 @@ QVector<PdbTypeInfo> enumeratePdbTypes(const QString& pdbPath, QString* errorMsg
     const TypeTable& tt = *pdb.typeTable;
     QVector<PdbTypeInfo> result;
 
-    for (uint32_t ti = tt.firstIndex(); ti < tt.lastIndex(); ti++) {
+    // Diagnostics: distinguish "TPI stream is empty (stripped public PDB)"
+    // from "TPI has records but none are UDTs we recognise" from "all the
+    // UDTs are forward-declarations". Microsoft's public symbol server
+    // ships most user-mode DLLs (advapi32, kernel32, …) with their TPI
+    // stripped, so loading them yields 0 types and that's expected — the
+    // diagnostic clarifies why.
+    const uint32_t firstTi = tt.firstIndex();
+    const uint32_t lastTi  = tt.lastIndex();
+    int skippedNonUdt = 0;
+    int skippedFwd = 0;
+    int skippedAnon = 0;
+
+    for (uint32_t ti = firstTi; ti < lastTi; ti++) {
         const auto* rec = tt.get(ti);
         if (!rec) continue;
 
@@ -1077,7 +1089,7 @@ QVector<PdbTypeInfo> enumeratePdbTypes(const QString& pdbPath, QString* errorMsg
                       rec->header.kind == TRK::LF_CLASS ||
                       rec->header.kind == TRK::LF_UNION);
         bool isEnum = (rec->header.kind == TRK::LF_ENUM);
-        if (!isUDT && !isEnum) continue;
+        if (!isUDT && !isEnum) { skippedNonUdt++; continue; }
 
         const char* name = nullptr;
         uint16_t fieldCount = 0;
@@ -1085,7 +1097,7 @@ QVector<PdbTypeInfo> enumeratePdbTypes(const QString& pdbPath, QString* errorMsg
         uint64_t size = 0;
 
         if (isEnum) {
-            if (rec->data.LF_ENUM.property.fwdref) continue;
+            if (rec->data.LF_ENUM.property.fwdref) { skippedFwd++; continue; }
             fieldCount = rec->data.LF_ENUM.count;
             name = rec->data.LF_ENUM.name;
             // Size from underlying type
@@ -1097,7 +1109,7 @@ QVector<PdbTypeInfo> enumeratePdbTypes(const QString& pdbPath, QString* errorMsg
                 size = 4;
             }
         } else if (rec->header.kind == TRK::LF_UNION) {
-            if (rec->data.LF_UNION.property.fwdref) continue;
+            if (rec->data.LF_UNION.property.fwdref) { skippedFwd++; continue; }
             isUnion = true;
             fieldCount = rec->data.LF_UNION.count;
             const char* sizeData = rec->data.LF_UNION.data;
@@ -1105,16 +1117,16 @@ QVector<PdbTypeInfo> enumeratePdbTypes(const QString& pdbPath, QString* errorMsg
             size = leafValue(sizeData, sizeKind);
             name = leafName(sizeData, sizeKind);
         } else {
-            if (rec->data.LF_CLASS.property.fwdref) continue;
+            if (rec->data.LF_CLASS.property.fwdref) { skippedFwd++; continue; }
             fieldCount = rec->data.LF_CLASS.count;
             const char* sizeData = rec->data.LF_CLASS.data;
             size = leafValue(sizeData, rec->data.LF_CLASS.lfEasy.kind);
             name = leafName(sizeData, rec->data.LF_CLASS.lfEasy.kind);
         }
 
-        if (!name || name[0] == '\0') continue;
+        if (!name || name[0] == '\0') { skippedAnon++; continue; }
         // Skip anonymous types with compiler-generated names
-        if (name[0] == '<') continue;
+        if (name[0] == '<') { skippedAnon++; continue; }
 
         PdbTypeInfo info;
         info.typeIndex = ti;
@@ -1129,8 +1141,20 @@ QVector<PdbTypeInfo> enumeratePdbTypes(const QString& pdbPath, QString* errorMsg
     int enumCount = 0;
     for (const auto& r : result)
         if (r.isEnum) enumCount++;
-    qDebug() << "[PDB] enumeratePdbTypes:" << result.size() << "types,"
-             << enumCount << "enums";
+
+    const uint32_t tpiRange = (lastTi > firstTi) ? (lastTi - firstTi) : 0;
+    if (tpiRange == 0) {
+        qDebug() << "[PDB] enumeratePdbTypes:" << pdbPath
+                 << "— TPI stream is empty (stripped public PDB —"
+                    " Microsoft's symbol server ships most user-mode DLLs"
+                    " without type info; expected for advapi32/kernel32/etc."
+                    " ntdll/ntoskrnl are exceptions and do carry types)";
+    } else {
+        qDebug() << "[PDB] enumeratePdbTypes:" << result.size() << "types,"
+                 << enumCount << "enums  (TPI range" << tpiRange
+                 << "records: skipped" << skippedNonUdt << "non-UDT,"
+                 << skippedFwd << "fwdref," << skippedAnon << "anon)";
+    }
 
     return result;
 }
