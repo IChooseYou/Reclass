@@ -943,22 +943,27 @@ public:
     QWidget* widget(const LineMeta& lm, const Node& node,
                     const HoverContext& ctx, QWidget* parent) override {
         if (!ctx.tree || !ctx.dataProvider) return nullptr;
-        ComposeResult cr = rcx::compose(*ctx.tree, *ctx.dataProvider, node.refId);
+        // compactColumns=true caps the type column at its natural width
+        // and overflows long names rather than pre-padding to the layout
+        // maximum — the popup is a narrow excerpt, not a full editor
+        // pane, and the user explicitly called out the wide spacing in
+        // the standard compose output as "expensive". Other compose
+        // flags (treeLines, braceWrap, typeHints, showComments) stay
+        // at their defaults so the popup body matches the editor's
+        // visual language for the same fields.
+        ComposeResult cr = rcx::compose(*ctx.tree, *ctx.dataProvider,
+            node.refId, /*compactColumns=*/true);
         const QStringList lines = cr.text.split('\n');
         constexpr int kMaxLines = 5;
 
-        // The editor renders the address column as a Scintilla margin
-        // (separate from cr.text). The popup body is a plain QLabel so
-        // we have to glue the address back on manually if we want the
-        // row to read like an editor row. Plus a slot-offset column
-        // (+0xNN within the composed target struct) so the user can see
-        // "this is the 3rd 8-byte slot" without arithmetic.
-        //
-        // The slot-offset baseline is the FIRST data row's address (not
-        // cr.layout.baseAddress, which is the original document tree's
-        // base — typically a different struct entirely from the target
-        // being previewed here). First data row becomes +0x00, next
-        // +0x08, etc.
+        // Prepend each row with its slot offset (+0xNN) within the
+        // composed target struct. Baseline is the FIRST data row's
+        // address (not cr.layout.baseAddress, which is the original
+        // document tree's base — typically a different struct entirely
+        // from the target being previewed here). First data row becomes
+        // +0x00, next +0x08, etc. No absolute address column — the user
+        // signalled they want the popup concise, and the offset alone
+        // is enough to identify which slot is which.
         uint64_t baseAddr = 0;
         bool baseSet = false;
         QString body;
@@ -968,20 +973,33 @@ public:
             const QString& line = lines[i];
             if (line.trimmed().isEmpty()) continue;
             const LineMeta& m = cr.meta[i];
-            // Address column: 8-12 hex digits, uppercase, matches the
-            // editor margin. Empty offsetText means continuation lines
-            // — skip those (we want only the heads).
-            if (m.offsetText.isEmpty()) continue;
+            if (m.offsetText.isEmpty()) continue;  // continuation
             if (!baseSet) { baseAddr = m.offsetAddr; baseSet = true; }
-            const QString addrCol = m.offsetText;
             const uint64_t slotOff = (m.offsetAddr >= baseAddr)
                 ? (m.offsetAddr - baseAddr) : 0;
             const QString offCol = QStringLiteral("+0x")
                 + QString::number(slotOff, 16).toUpper()
                     .rightJustified(2, QChar('0'));
             if (emitted > 0) body += '\n';
-            body += addrCol + QStringLiteral("  ") + offCol
-                  + QStringLiteral("  ") + line;
+            // Strip leading whitespace + tree connectors so each line
+            // starts flush after the offset column. The popup is a flat
+            // preview, not a nested-tree view — the connector glyphs add
+            // noise without conveying structure here.
+            QString trimmed = line;
+            int j = 0;
+            while (j < trimmed.size()) {
+                QChar c = trimmed[j];
+                if (c.isSpace()
+                    || c == QChar(u'├') || c == QChar(u'└')
+                    || c == QChar(u'│') || c == QChar(u'▸')
+                    || c == QChar(u'▾')) {
+                    ++j;
+                } else {
+                    break;
+                }
+            }
+            trimmed = trimmed.mid(j);
+            body += offCol + QStringLiteral("  ") + trimmed;
             ++emitted;
         }
         if (body.isEmpty()) return nullptr;
