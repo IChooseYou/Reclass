@@ -996,12 +996,14 @@ public:
             if (rows[i].kind != rows[0].kind) { homogeneous = false; break; }
         }
 
-        // If homogeneous, strip the type prefix from each row (it just
-        // repeats "fnptr64" / "hex64" / etc.) and emit a single header
-        // showing the row count + shared type. Heterogeneous: keep the
-        // inline type column on every row.
+        // If homogeneous AND we have more than one row, strip the type
+        // prefix from each row (it just repeats "fnptr64" / "hex64" /
+        // etc.) and emit a single header showing the row count + shared
+        // type. With only one row there's nothing to deduplicate, so
+        // we leave the inline type column alone — a "[1 × fnptr64]"
+        // header reads as pointless noise.
         QString header;
-        if (homogeneous) {
+        if (homogeneous && rows.size() > 1) {
             const KindMeta* km = kindMeta(rows[0].kind);
             const QString typeName = km ? QString::fromLatin1(km->typeName)
                                         : QStringLiteral("field");
