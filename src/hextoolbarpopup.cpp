@@ -407,8 +407,10 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         m_offsetEdit->move(pad + lw + 4, y + (lineH - m_offsetEdit->height()) / 2);
         const auto& theme = t;
         m_offsetEdit->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: 1px solid %3; padding: 0 2px; }")
-            .arg(theme.background.name(), theme.text.name(), theme.border.name()));
+            "QLineEdit { background: %1; color: %2; border: 1px solid %3; padding: 0 2px; }"
+            "QLineEdit:focus { border-color: %4; }")
+            .arg(theme.background.name(), theme.text.name(),
+                 theme.border.name(), theme.borderFocused.name()));
         m_offsetEdit->show();
 
         // Go button

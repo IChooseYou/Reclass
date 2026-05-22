@@ -61,8 +61,10 @@ public:
         m_input->setPlaceholderText(QStringLiteral("0x..."));
         m_input->setStyleSheet(QStringLiteral(
             "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
-            " padding: 6px 8px; font-size: 11pt; }")
-            .arg(t.backgroundAlt.name(), t.text.name(), t.border.name()));
+            " padding: 6px 8px; font-size: 11pt; }"
+            "QLineEdit:focus { border-color: %4; }")
+            .arg(t.backgroundAlt.name(), t.text.name(),
+                 t.border.name(), t.borderFocused.name()));
         layout->addWidget(m_input);
 
         m_status = new QLabel(QStringLiteral(" "));

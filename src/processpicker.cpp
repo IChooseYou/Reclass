@@ -76,6 +76,11 @@ void ProcessPicker::initUi()
     QString surface  = pal.color(QPalette::AlternateBase).name();
     QString button   = pal.color(QPalette::Button).name();
     QString highlight= pal.color(QPalette::Highlight).name();
+    // QPalette::Link is mapped to theme.indHoverSpan in applyGlobalTheme,
+    // which equals theme.borderFocused in the dark VS theme. Use Link
+    // instead of Highlight (= theme.selected, ~invisible dark navy) for
+    // input focus rings so the focus state is actually visible.
+    QString focusBorder = pal.color(QPalette::Link).name();
     QString border   = pal.color(QPalette::Mid).darker(120).name();
     QString mutedText= pal.color(QPalette::Disabled, QPalette::WindowText).name();
     QString hoverDk  = pal.color(QPalette::Mid).darker(130).name();
@@ -96,7 +101,7 @@ void ProcessPicker::initUi()
     ui->filterEdit->setStyleSheet(QStringLiteral(
         "QLineEdit { background: %1; color: %2; border: 1px solid %3; padding: 2px 4px; }"
         "QLineEdit:focus { border-color: %4; }")
-        .arg(bg, text, border, highlight));
+        .arg(bg, text, border, focusBorder));
 
     // Match DialogButton chrome: 28 px fixed height, hairline border,
     // optional 2 px accent stripe on top for the primary action. Done
