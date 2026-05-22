@@ -976,8 +976,9 @@ public:
             const QString addrCol = m.offsetText;
             const uint64_t slotOff = (m.offsetAddr >= baseAddr)
                 ? (m.offsetAddr - baseAddr) : 0;
-            const QString offCol = QStringLiteral("+0x%1")
-                .arg(slotOff, 2, 16, QChar('0')).toUpper().replace("0X", "0x");
+            const QString offCol = QStringLiteral("+0x")
+                + QString::number(slotOff, 16).toUpper()
+                    .rightJustified(2, QChar('0'));
             if (emitted > 0) body += '\n';
             body += addrCol + QStringLiteral("  ") + offCol
                   + QStringLiteral("  ") + line;
