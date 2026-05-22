@@ -88,6 +88,14 @@ Theme Theme::fromJson(const QJsonObject& o) {
     if (!t.indRttiHint.isValid())
         t.indRttiHint = QColor("#d19a66");
 
+    // Marker defaults — every shipped theme defines these, but user-supplied
+    // themes may omit one or more. Provide sane fallbacks so destructive-action
+    // UI (Discard buttons, title-bar X hover, null-pointer rows) doesn't paint
+    // black on a custom theme that forgot the field.
+    if (!t.markerPtr.isValid())   t.markerPtr   = QColor("#f44747");
+    if (!t.markerCycle.isValid()) t.markerCycle = QColor("#e8a35c");
+    if (!t.markerError.isValid()) t.markerError = QColor("#5a1d1d");
+
     // Ensure hover is visually distinct from background
     if (t.hover.isValid() && t.background.isValid()) {
         int dist = qAbs(t.hover.red() - t.background.red())
