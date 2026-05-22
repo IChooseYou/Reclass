@@ -790,7 +790,10 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
 
     qApp->setPalette(pal);
 
-    // Global scrollbar styling — track matches control bg, handle is solid
+    // Global scrollbar styling — track matches control bg, handle is solid.
+    // Also a QToolTip rule so the dozens of QToolTip::showText calls + every
+    // .setToolTip() across the app render in our dark palette instead of
+    // Qt's default white-balloon-with-black-text Windows look.
     qApp->setStyleSheet(QStringLiteral(
         "QScrollBar:vertical { background: palette(window); width: 8px; margin: 0; border: none; }"
         "QScrollBar::handle:vertical { background: %1; min-height: 20px; border: none; }"
@@ -801,8 +804,10 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
         "QScrollBar::handle:horizontal { background: %1; min-width: 20px; border: none; }"
         "QScrollBar::handle:horizontal:hover { background: %2; }"
         "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
-        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }")
-        .arg(theme.textFaint.name(), theme.textDim.name()));
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
+        "QToolTip { background: %3; color: %4; border: 1px solid %5; padding: 3px 6px; }")
+        .arg(theme.textFaint.name(), theme.textDim.name(),
+             theme.backgroundAlt.name(), theme.text.name(), theme.border.name()));
 }
 
 class BorderOverlay : public QWidget {
@@ -7416,8 +7421,10 @@ void MainWindow::createBookmarksDock() {
     layout->addWidget(m_bookmarksList, 1);
 
     auto* btnRow = new QHBoxLayout();
-    auto* addBtn = new QPushButton("Add", container);
-    auto* removeBtn = new QPushButton("Remove", container);
+    auto* addBtn = new rcx::DialogButton(QStringLiteral("Add"),
+        rcx::DialogButton::Primary, container);
+    auto* removeBtn = new rcx::DialogButton(QStringLiteral("Remove"),
+        rcx::DialogButton::Secondary, container);
     btnRow->addWidget(addBtn);
     btnRow->addWidget(removeBtn);
     btnRow->addStretch();
@@ -8024,11 +8031,18 @@ void MainWindow::placeSidebarDock(QDockWidget* dock, Qt::DockWidgetArea area,
     if (peer) {
         tabifyDockWidget(peer, dock);
     } else {
-        if (horizontal && !m_docDocks.isEmpty()) {
-            splitDockWidget(dock, m_docDocks.first(), Qt::Horizontal);
-        } else {
-            addDockWidget(area, dock);
-        }
+        // Previously: when the requested area was horizontal AND any
+        // doc dock existed, we called splitDockWidget(dock,
+        // m_docDocks.first(), Qt::Horizontal). The intent was to force
+        // the sidebar into a full-height left/right strip, but
+        // splitDockWidget uses the doc dock as a splitting anchor and
+        // bisects its main-window-level area. When the doc dock
+        // already contained a split editor (multiple SplitPanes), the
+        // user saw three columns: bookmarks + the editor's two panes.
+        // A plain addDockWidget puts the new dock in the requested
+        // area without touching the doc dock — the editor's internal
+        // panes stay where they were.
+        addDockWidget(area, dock);
         // All sidebars (including workspace) honour the saved size.
         // First-launch fallback for workspace uses computeWorkspaceDockWidth
         // (content-aware fit, qBound(180, ..., 420)) instead of the old
