@@ -2419,8 +2419,10 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     pane.findBar->setFixedHeight(24);
     pane.findBar->setStyleSheet(
         QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
-                        " padding: 2px 6px; font-size: 13px; }")
-            .arg(fbTheme.backgroundAlt.name(), fbTheme.text.name(), fbTheme.border.name()));
+                        " padding: 2px 6px; font-size: 13px; }"
+                        "QLineEdit:focus { border-color: %4; }")
+            .arg(fbTheme.backgroundAlt.name(), fbTheme.text.name(),
+                 fbTheme.border.name(), fbTheme.borderFocused.name()));
     fcLayout->addWidget(ccPrevBtn);
     fcLayout->addWidget(ccNextBtn);
     fcLayout->addWidget(ccCloseBtn);

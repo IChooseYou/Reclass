@@ -1651,8 +1651,10 @@ void RcxEditor::applyTheme(const Theme& theme) {
     if (m_findBarContainer) {
         m_findBar->setStyleSheet(
             QStringLiteral("QLineEdit { background: %1; color: %2; border: 1px solid %3;"
-                            " padding: 2px 6px; font-size: 13px; }")
-                .arg(theme.backgroundAlt.name(), theme.text.name(), theme.border.name()));
+                            " padding: 2px 6px; font-size: 13px; }"
+                            "QLineEdit:focus { border-color: %4; }")
+                .arg(theme.backgroundAlt.name(), theme.text.name(),
+                     theme.border.name(), theme.borderFocused.name()));
         m_findBarContainer->setStyleSheet(
             QStringLiteral("QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
                             "QToolButton:hover { background: %4; }"
