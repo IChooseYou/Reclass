@@ -60,6 +60,16 @@ public:
     // Short label shown in the popup's title area (e.g. "Hex Dump").
     virtual QString tabLabel() const = 0;
 
+    // Optional richer title fragment derived from the hovered row. The
+    // host displays this AFTER the kind name in place of tabLabel(),
+    // when non-empty. Lets a preview surface the actual referent (a
+    // struct name, vtable class name, etc.) instead of the static
+    // category label. Returns empty by default; previews that don't
+    // override fall back to tabLabel().
+    virtual QString subtitle(const LineMeta& /*lm*/) const {
+        return QString();
+    }
+
     // Cheap (no-allocation, no provider reads) eligibility check —
     // runs on every hover tick. Heavy work belongs in widget().
     virtual bool eligible(const LineMeta& lm,

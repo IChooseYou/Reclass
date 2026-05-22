@@ -733,7 +733,13 @@ private:
         const KindMeta* km = kindMeta(m_lastLm.nodeKind);
         QString kindStr = km ? QString::fromLatin1(km->typeName)
                              : QStringLiteral("field");
-        QString preview = m_eligible[m_active]->tabLabel();
+        // Prefer the preview's row-derived subtitle (e.g. the resolved
+        // struct / vtable class name from lm.pointerTargetName) over
+        // the generic tabLabel(). Previews opt in by overriding
+        // subtitle(); falls back to tabLabel() when empty.
+        QString preview = m_eligible[m_active]->subtitle(m_lastLm);
+        if (preview.isEmpty())
+            preview = m_eligible[m_active]->tabLabel();
         // "kind  ·  Preview Name" — kind in textDim, separator dot in
         // textMuted, preview name in accent (no bold; bold reads as
         // noise next to the editor's already-bold type identifiers).
@@ -918,6 +924,13 @@ class StructTargetPreview : public HoverPreview {
 public:
     QString id() const override { return QStringLiteral("struct_target"); }
     QString tabLabel() const override { return QStringLiteral("Struct"); }
+    // Surface the actual referent type instead of the generic
+    // "Struct" label. lm.pointerTargetName is populated by compose for
+    // every Pointer32/64 row whose target resolves (e.g. "rcx::RcxEditor"
+    // for a vptr). Empty falls back to the generic label via the host.
+    QString subtitle(const LineMeta& lm) const override {
+        return lm.pointerTargetName;
+    }
     bool eligible(const LineMeta& lm, const Node& node,
                   const HoverContext& ctx) const override {
         if (lm.nodeKind != NodeKind::Pointer32
@@ -931,36 +944,41 @@ public:
                     const HoverContext& ctx, QWidget* parent) override {
         if (!ctx.tree || !ctx.dataProvider) return nullptr;
         ComposeResult cr = rcx::compose(*ctx.tree, *ctx.dataProvider, node.refId);
-        QStringList lines = cr.text.split('\n');
+        const QStringList lines = cr.text.split('\n');
         constexpr int kMaxLines = 5;
+
+        // The editor renders the address column as a Scintilla margin
+        // (separate from cr.text). The popup body is a plain QLabel so
+        // we have to glue the address back on manually if we want the
+        // row to read like an editor row. Plus a slot-offset column
+        // (+0xNN within the composed target struct) so the user can see
+        // "this is the 3rd 8-byte slot" without arithmetic.
+        const uint64_t baseAddr = cr.layout.baseAddress;
         QString body;
-        int count = 0;
-        // Skip line 0 (command row) — start at index 1.
-        for (int i = 1; i < lines.size() && count < kMaxLines; ++i) {
-            QString line = lines[i];
-            // Strip the editor's tree chrome — indent spaces, tree
-            // connectors (│ ├ └), fold arrows (▸ ▾) — so the popup
-            // body sits flush against the popup's left edge instead of
-            // mirroring the editor's nested-view leading whitespace.
-            // Without this, struct preview rows looked centered with a
-            // big left gutter when shown in the 528 px popup.
-            int j = 0;
-            while (j < line.size()) {
-                QChar c = line[j];
-                if (c.isSpace()
-                    || c == QChar(u'├') || c == QChar(u'└')
-                    || c == QChar(u'│') || c == QChar(u'▸')
-                    || c == QChar(u'▾')) {
-                    ++j;
-                } else {
-                    break;
-                }
-            }
-            line = line.mid(j);
-            if (line.isEmpty()) continue;
-            if (count > 0) body += '\n';
-            body += line;
-            ++count;
+        int emitted = 0;
+        // Skip line 0 (command row); meta is indexed the same as lines.
+        for (int i = 1; i < lines.size() && i < cr.meta.size()
+                                          && emitted < kMaxLines; ++i) {
+            const QString& line = lines[i];
+            if (line.trimmed().isEmpty()) continue;
+            const LineMeta& m = cr.meta[i];
+            // Address column: 8-12 hex digits, uppercase, matches the
+            // editor margin. Empty offsetText means continuation lines
+            // — skip those (we want only the heads).
+            if (m.offsetText.isEmpty()) continue;
+            const QString addrCol = m.offsetText;
+            // Slot offset within the target struct. baseAddr is the
+            // composed struct's base; offsetAddr is the row's absolute.
+            // Difference is always small for the first 5 slots; render
+            // as +0xNN (2 hex digits) to keep the column narrow.
+            const uint64_t slotOff = (m.offsetAddr >= baseAddr)
+                ? (m.offsetAddr - baseAddr) : 0;
+            const QString offCol = QStringLiteral("+0x%1")
+                .arg(slotOff, 2, 16, QChar('0')).toUpper().replace("0X", "0x");
+            if (emitted > 0) body += '\n';
+            body += addrCol + QStringLiteral("  ") + offCol
+                  + QStringLiteral("  ") + line;
+            ++emitted;
         }
         if (body.isEmpty()) return nullptr;
         return buildTextBodyWidget(body, ctx.editorFont,
