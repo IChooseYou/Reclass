@@ -956,35 +956,22 @@ public:
         const QStringList lines = cr.text.split('\n');
         constexpr int kMaxLines = 5;
 
-        // Prepend each row with its slot offset (+0xNN) within the
-        // composed target struct. Baseline is the FIRST data row's
-        // address (not cr.layout.baseAddress, which is the original
-        // document tree's base — typically a different struct entirely
-        // from the target being previewed here). First data row becomes
-        // +0x00, next +0x08, etc. No absolute address column — the user
-        // signalled they want the popup concise, and the offset alone
-        // is enough to identify which slot is which.
-        uint64_t baseAddr = 0;
-        bool baseSet = false;
-        QString body;
-        int emitted = 0;
+        // Two-pass build. Pass 1 collects up to kMaxLines candidate
+        // rows (skipping continuation lines + blanks), records each
+        // row's NodeKind, and pre-strips the leading whitespace + tree
+        // connectors. Pass 2 detects whether every row shares the same
+        // NodeKind — vtables and similar homogeneous structs do — and
+        // if so, drops the now-redundant per-row type column and
+        // promotes it to a single header line. Heterogeneous structs
+        // keep their inline type column for disambiguation.
+        struct Row { QString trimmed; NodeKind kind; uint64_t addr; };
+        QVector<Row> rows;
         for (int i = 1; i < lines.size() && i < cr.meta.size()
-                                          && emitted < kMaxLines; ++i) {
+                                          && rows.size() < kMaxLines; ++i) {
             const QString& line = lines[i];
             if (line.trimmed().isEmpty()) continue;
             const LineMeta& m = cr.meta[i];
             if (m.offsetText.isEmpty()) continue;  // continuation
-            if (!baseSet) { baseAddr = m.offsetAddr; baseSet = true; }
-            const uint64_t slotOff = (m.offsetAddr >= baseAddr)
-                ? (m.offsetAddr - baseAddr) : 0;
-            const QString offCol = QStringLiteral("+0x")
-                + QString::number(slotOff, 16).toUpper()
-                    .rightJustified(2, QChar('0'));
-            if (emitted > 0) body += '\n';
-            // Strip leading whitespace + tree connectors so each line
-            // starts flush after the offset column. The popup is a flat
-            // preview, not a nested-tree view — the connector glyphs add
-            // noise without conveying structure here.
             QString trimmed = line;
             int j = 0;
             while (j < trimmed.size()) {
@@ -999,8 +986,50 @@ public:
                 }
             }
             trimmed = trimmed.mid(j);
-            body += offCol + QStringLiteral("  ") + trimmed;
-            ++emitted;
+            rows.append({trimmed, m.nodeKind, m.offsetAddr});
+        }
+        if (rows.isEmpty()) return nullptr;
+
+        // Homogeneous test: all visible rows the same nodeKind.
+        bool homogeneous = true;
+        for (int i = 1; i < rows.size(); ++i) {
+            if (rows[i].kind != rows[0].kind) { homogeneous = false; break; }
+        }
+
+        // If homogeneous, strip the type prefix from each row (it just
+        // repeats "fnptr64" / "hex64" / etc.) and emit a single header
+        // showing the row count + shared type. Heterogeneous: keep the
+        // inline type column on every row.
+        QString header;
+        if (homogeneous) {
+            const KindMeta* km = kindMeta(rows[0].kind);
+            const QString typeName = km ? QString::fromLatin1(km->typeName)
+                                        : QStringLiteral("field");
+            header = QStringLiteral("[%1 × %2]\n")
+                .arg(rows.size()).arg(typeName);
+            for (auto& r : rows) {
+                // Strip the leading type token + its trailing whitespace.
+                if (r.trimmed.startsWith(typeName)) {
+                    int k = typeName.size();
+                    while (k < r.trimmed.size() && r.trimmed[k].isSpace()) ++k;
+                    r.trimmed = r.trimmed.mid(k);
+                }
+            }
+        }
+
+        // Emit. Each row gets a +0xNN offset prefix; baseline is the
+        // first row's absolute address so the column reads 0/8/10/18/20
+        // for an 8-byte-stride layout.
+        const uint64_t baseAddr = rows[0].addr;
+        QString body = header;
+        for (int i = 0; i < rows.size(); ++i) {
+            const uint64_t slotOff = (rows[i].addr >= baseAddr)
+                ? (rows[i].addr - baseAddr) : 0;
+            const QString offCol = QStringLiteral("+0x")
+                + QString::number(slotOff, 16).toUpper()
+                    .rightJustified(2, QChar('0'));
+            if (i > 0) body += '\n';
+            body += offCol + QStringLiteral("  ") + rows[i].trimmed;
         }
         if (body.isEmpty()) return nullptr;
         return buildTextBodyWidget(body, ctx.editorFont,
