@@ -279,7 +279,7 @@ private slots:
         OptionsResult defaults;
         OptionsDialog dlg(defaults);
         dlg.show();
-        QTest::qWaitForWindowExposed(&dlg);
+        QVERIFY(QTest::qWaitForWindowExposed(&dlg));
 
         // Dialog's effective palette should match the app palette
         QPalette dlgPal = dlg.palette();

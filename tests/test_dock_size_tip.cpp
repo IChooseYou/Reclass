@@ -119,7 +119,7 @@ void TestDockSizeTip::probeQtSeparatorCursorMechanism()
 {
     auto a = build();
     a.win->show();
-    QTest::qWaitForWindowExposed(a.win);
+    QVERIFY(QTest::qWaitForWindowExposed(a.win));
 
     QPoint sep = separatorMidpoint(a);
     QCursor::setPos(a.win->mapToGlobal(sep));
@@ -170,7 +170,7 @@ void TestDockSizeTip::synthesizedDragChangesDockWidth()
 {
     auto a = build();
     a.win->show();
-    QTest::qWaitForWindowExposed(a.win);
+    QVERIFY(QTest::qWaitForWindowExposed(a.win));
 
     int w0 = a.dock->width();
     QPoint sep = separatorMidpoint(a);
@@ -209,7 +209,7 @@ void TestDockSizeTip::readoutFiresOnEveryMoveDuringDrag()
 {
     auto a = build();
     a.win->show();
-    QTest::qWaitForWindowExposed(a.win);
+    QVERIFY(QTest::qWaitForWindowExposed(a.win));
 
     // Local replica of MainWindow::eventFilter's MouseMove gate.
     int readoutCount = 0;
@@ -290,7 +290,7 @@ void TestDockSizeTip::resizeEventsFireContinuouslyDuringDrag()
 {
     auto a = build();
     a.win->show();
-    QTest::qWaitForWindowExposed(a.win);
+    QVERIFY(QTest::qWaitForWindowExposed(a.win));
 
     ResizeCounter rc;
     a.dock->installEventFilter(&rc);
@@ -375,7 +375,7 @@ void TestDockSizeTip::fullPipelineReadoutUpdatesPerPixel()
 {
     auto a = build();
     a.win->show();
-    QTest::qWaitForWindowExposed(a.win);
+    QVERIFY(QTest::qWaitForWindowExposed(a.win));
 
     FullPipelineFilter filt;
     filt.dock = a.dock;
@@ -447,7 +447,7 @@ void TestDockSizeTip::workspaceOpensAtMinimumWidth()
     workspace->raise();
 
     win->show();
-    QTest::qWaitForWindowExposed(win);
+    QVERIFY(QTest::qWaitForWindowExposed(win));
     QApplication::processEvents();
 
     LOG("\nworkspace.width() = %d px (expected 235)\n", workspace->width());
@@ -481,7 +481,7 @@ void TestDockSizeTip::tooltipBodyTextChangesPerUpdate()
     win->resize(1200, 700);
     win->setCentralWidget(new QTextEdit(win));
     win->show();
-    QTest::qWaitForWindowExposed(win);
+    QVERIFY(QTest::qWaitForWindowExposed(win));
 
     auto* tip = new DockSizeReadout(win);
     PaintCounter pc;
