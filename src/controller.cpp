@@ -706,29 +706,39 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (nodeIdx >= 0) emit nodeSelected(nodeIdx);
     });
 
-    // Left/Right arrow: cycle through same-size type variants
+    // Left/Right arrow: cycle through same-size type variants. With a
+    // multi-row selection that spans different sizes (e.g. a Hex64 + two
+    // Hex32s), each selected node cycles within its OWN size class — so
+    // the Hex64 walks through 8-byte variants while the Hex32s walk
+    // through 4-byte ones, in one combined undo step. Previously the
+    // handler computed one global target from the cursor's size and
+    // dropped any selected node whose size didn't match, which surprised
+    // users with mixed-size selections.
     connect(editor, &RcxEditor::cycleSameSizeTypeRequested,
             this, [this](int nodeIdx, int direction) {
         if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
-        NodeKind cur = m_doc->tree.nodes[nodeIdx].kind;
-        int sz = sizeForKind(cur);
-        // Build filtered variant list: exclude string/vector unless already that type
-        bool curIsString = isStringKind(cur);
-        bool curIsVector = isVectorKind(cur);
-        QVector<NodeKind> variants;
-        for (const auto& m : kKindMeta) {
-            if (m.size != sz || isContainerKind(m.kind)) continue;
-            if (!curIsString && isStringKind(m.kind)) continue;
-            if (!curIsVector && isVectorKind(m.kind)) continue;
-            variants.append(m.kind);
-        }
-        if (variants.size() <= 1) {
-            emit statusHint(QStringLiteral("No type variants for %1-byte fields").arg(sz));
-            return;
-        }
-        int idx = variants.indexOf(cur);
-        if (idx < 0) return;
-        NodeKind target = variants[(idx + direction + variants.size()) % variants.size()];
+
+        // Per-node target picker: builds the variant list for the node's
+        // own size + string/vector specialisation rules and rotates by
+        // `direction`. Returns the input kind unchanged when there is no
+        // alternate variant (containers, lone-of-their-size kinds).
+        auto computeTarget = [direction](NodeKind kind) -> NodeKind {
+            int sz = sizeForKind(kind);
+            if (sz <= 0 || isContainerKind(kind)) return kind;
+            bool isStr = isStringKind(kind);
+            bool isVec = isVectorKind(kind);
+            QVector<NodeKind> variants;
+            for (const auto& m : kKindMeta) {
+                if (m.size != sz || isContainerKind(m.kind)) continue;
+                if (!isStr && isStringKind(m.kind)) continue;
+                if (!isVec && isVectorKind(m.kind)) continue;
+                variants.append(m.kind);
+            }
+            if (variants.size() <= 1) return kind;
+            int i = variants.indexOf(kind);
+            if (i < 0) return kind;
+            return variants[(i + direction + variants.size()) % variants.size()];
+        };
 
         // Group rapid ←→ presses into a single undo macro
         if (!m_cycleMacroTimer) {
@@ -748,23 +758,37 @@ void RcxController::connectEditor(RcxEditor* editor) {
         }
         m_cycleMacroTimer->start();  // restart the 800ms timer
 
-        // Apply to ALL selected nodes of the same size
+        // Apply to ALL selected nodes — each rotates within its own size class.
         if (m_selIds.size() > 1) {
-            QVector<int> indices;
+            QVector<QPair<uint64_t, NodeKind>> jobs;  // (nodeId, targetKind)
+            int skipped = 0;
             for (uint64_t sid : m_selIds) {
                 uint64_t nid = sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
                                        | kMemberBit | kMemberSubMask);
                 int ni = m_doc->tree.indexOfId(nid);
-                if (ni >= 0 && sizeForKind(m_doc->tree.nodes[ni].kind) == sz)
-                    indices.append(ni);
+                if (ni < 0) { skipped++; continue; }
+                NodeKind curK = m_doc->tree.nodes[ni].kind;
+                NodeKind tgtK = computeTarget(curK);
+                if (tgtK == curK) { skipped++; continue; }
+                jobs.append({m_doc->tree.nodes[ni].id, tgtK});
             }
-            int skipped = (int)m_selIds.size() - indices.size();
-            if (indices.size() > 1) {
-                batchChangeKind(indices, target);
+            if (!jobs.isEmpty()) {
+                QSet<uint64_t> savedSel = m_selIds;
+                m_suppressRefresh = true;
+                m_doc->undoStack.beginMacro(
+                    QStringLiteral("Cycle type for %1 nodes").arg(jobs.size()));
+                for (const auto& job : jobs) {
+                    int ix = m_doc->tree.indexOfId(job.first);
+                    if (ix >= 0) changeNodeKind(ix, job.second);
+                }
+                m_doc->undoStack.endMacro();
+                m_suppressRefresh = false;
+                m_selIds = savedSel;
+                refresh();
                 if (skipped > 0)
-                    emit statusHint(QStringLiteral("Changed %1 nodes (%2 skipped: different size)")
-                        .arg(indices.size()).arg(skipped));
-                // Re-emit so status bar updates with new type
+                    emit statusHint(
+                        QStringLiteral("Cycled %1 nodes (%2 skipped: container or only variant)")
+                            .arg(jobs.size()).arg(skipped));
                 int ni = m_doc->tree.indexOfId(
                     *m_selIds.begin() & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
                                           | kMemberBit | kMemberSubMask));
@@ -772,8 +796,17 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 return;
             }
         }
+
+        // Single-selection (or multi-selection where nothing was eligible):
+        // operate on the cursor's node only.
+        NodeKind cur = m_doc->tree.nodes[nodeIdx].kind;
+        NodeKind target = computeTarget(cur);
+        if (target == cur) {
+            emit statusHint(QStringLiteral("No type variants for %1-byte fields")
+                .arg(sizeForKind(cur)));
+            return;
+        }
         changeNodeKind(nodeIdx, target);
-        // Re-emit so status bar updates with new type after ←→
         nodeIdx = m_doc->tree.indexOfId(m_doc->tree.nodes[nodeIdx].id);
         if (nodeIdx >= 0) emit nodeSelected(nodeIdx);
     });

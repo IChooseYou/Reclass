@@ -8323,17 +8323,26 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if (dirtyDocs.isEmpty()) { event->accept(); return; }
 
     // Two complete sentences, picked by count, instead of in-string
-    // pluralization ("project%1 ha%2") — translators (and English
-    // readers) get full grammatical sentences.
-    const QString text = (dirtyDocs.size() == 1)
-        ? QStringLiteral("One project has unsaved changes:")
-        : QStringLiteral("%1 projects have unsaved changes:")
-              .arg(dirtyDocs.size());
+    // pluralization. When there's exactly one dirty project the name
+    // sits in the body sentence itself — no need for a separate detail
+    // line that just repeats it. Many dirty projects: count in the body,
+    // names in a scrollable list below.
+    QString text;
+    QString detail;
+    if (dirtyDocs.size() == 1) {
+        text = QStringLiteral("%1 has unsaved changes.")
+                   .arg(dirtyNames.first());
+        // No detail — body says it all.
+    } else {
+        text = QStringLiteral("%1 projects have unsaved changes:")
+                   .arg(dirtyDocs.size());
+        detail = dirtyNames.join(QStringLiteral("\n"));
+    }
 
     auto choice = ThemedMessageBox::unsavedChanges(this,
         QStringLiteral("Unsaved Changes"),
         text,
-        dirtyNames.join(QStringLiteral("\n")));
+        detail);
 
     if (choice == ThemedMessageBox::UnsavedChoice::Cancel) {
         event->ignore();

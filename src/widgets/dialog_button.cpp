@@ -28,84 +28,57 @@ void DialogButton::setVariant(Variant v) {
     applyTheme();
 }
 
-// Choose readable foreground (black or white) for a filled background.
-// Pure-luminance heuristic — the indHoverSpan accent can land anywhere
-// on the theme dial (deep blue, warm orange, etc.) so per-theme
-// branching would multiply with no payoff.
-static QString contrastingFg(const QColor& bg) {
-    // Relative luminance per WCAG (simplified — gamma omitted for cost).
-    double L = (0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()) / 255.0;
-    return L > 0.55 ? QStringLiteral("#000000") : QStringLiteral("#ffffff");
-}
-
 void DialogButton::applyTheme() {
     const auto& t = ThemeManager::instance().current();
-    // The three variants should be visually distinct AT REST, not only on
-    // hover. Earlier all three started flat-transparent and only their
-    // hover tints differed — meaning the user couldn't tell Cancel from
-    // Discard without mousing over both. The redesign:
+    // All variants are outline-only at rest — no filled accent. Earlier
+    // rev had Primary filled in indHoverSpan (purple) while Destructive
+    // used indHeatHot (amber); the two competed and read as garish in a
+    // small dialog. New language:
     //
-    //   Primary     → filled accent. The obvious "this is the action you
-    //                 want" target. Auto-contrast foreground (black on
-    //                 light accents, white on dark accents).
-    //   Secondary   → outline-only with neutral border. The "back out"
-    //                 affordance, low-key but readable.
-    //   Destructive → red border + red text at rest, flips to filled
-    //                 red on hover — visible WARNING even before hover.
-    //                 The earlier rgba(...,90) wash read as a dirty
-    //                 smudge; this is a clean red identity.
-    QString bg, fg, border, hoverBg, hoverFg, pressedBg, focusBorder;
+    //   Primary     → text in t.text, border in t.borderFocused.
+    //                 The default-button highlight (Qt's :default
+    //                 selector) is what flags it as the action target —
+    //                 no big fill needed.
+    //   Secondary   → text in t.textDim, border in t.border. The "back
+    //                 out" affordance, lowest-key.
+    //   Destructive → text + border in markerPtr (the conventional red
+    //                 warning hue, not the amber indHeatHot which read
+    //                 as "warm hint" not "irreversible action").
+    //
+    // All three flip to a soft `t.hover` fill on mouseover so the
+    // hit-target is unambiguous without committing to a color identity
+    // at rest. No rounded corners — the rest of the app reads square.
+    QString bg = QStringLiteral("transparent");
+    QString hoverFill = t.hover.name();
+    QString hoverFg, fg, border, focusBorder;
     switch (m_variant) {
-    case Primary: {
-        QColor accent = t.indHoverSpan;
-        bg          = accent.name();
-        fg          = contrastingFg(accent);
-        border      = accent.name();
-        hoverBg     = accent.lighter(115).name();
-        hoverFg     = fg;
-        pressedBg   = accent.darker(112).name();
-        focusBorder = accent.lighter(125).name();
-        break;
-    }
-    case Secondary:
-        bg          = QStringLiteral("transparent");
+    case Primary:
         fg          = t.text.name();
-        border      = t.border.name();
-        hoverBg     = t.hover.name();
+        border      = t.borderFocused.name();
         hoverFg     = t.text.name();
-        pressedBg   = t.hover.darker(112).name();
+        focusBorder = t.borderFocused.name();
+        break;
+    case Secondary:
+        fg          = t.textDim.name();
+        border      = t.border.name();
+        hoverFg     = t.text.name();
         focusBorder = t.borderFocused.name();
         break;
     case Destructive: {
-        QColor warn = t.indHeatHot;
-        bg          = QStringLiteral("transparent");
+        QColor warn = t.markerPtr.isValid() ? t.markerPtr : t.indHeatHot;
         fg          = warn.name();
         border      = warn.name();
-        hoverBg     = warn.name();
-        hoverFg     = contrastingFg(warn);
-        pressedBg   = warn.darker(115).name();
-        focusBorder = warn.lighter(125).name();
+        hoverFg     = warn.name();
+        focusBorder = warn.name();
         break;
     }
     }
-    // Stylesheet notes:
-    //   • Wider min-width (88) lets "Save changes" sit on one line
-    //     without truncation; "OK" / "Cancel" still look balanced.
-    //   • 4 px radius reads as a button rather than a flat rectangle
-    //     without going full-pill.
-    //   • Vertical padding 5 px keeps text optically centered in 30 px
-    //     height (was 2 px which sat the text high).
-    //   • Disabled is unified across variants — text muted, no fill.
-    //   • :focus combines a stronger border with an outline offset
-    //     equivalent (via a 2 px outer ring drawn by tightening padding
-    //     and bumping border width) — keyboard users can see which
-    //     button Enter will hit.
     setStyleSheet(QStringLiteral(
         "QPushButton {"
         "  background: %1;"
         "  color: %2;"
         "  border: 1px solid %3;"
-        "  border-radius: 4px;"
+        "  border-radius: 0px;"
         "  padding: 5px 16px;"
         "  min-width: 88px;"
         "  font-weight: 500;"
@@ -113,19 +86,17 @@ void DialogButton::applyTheme() {
         "QPushButton:hover {"
         "  background: %4;"
         "  color: %5;"
-        "  border-color: %4;"
         "}"
         "QPushButton:pressed {"
         "  background: %6;"
         "  color: %5;"
-        "  border-color: %6;"
         "}"
         "QPushButton:focus {"
         "  border: 1px solid %7;"
         "  padding: 5px 16px;"
         "}"
         "QPushButton:default {"
-        "  border-width: 1px;"
+        "  border: 1px solid %7;"
         "}"
         "QPushButton:disabled {"
         "  background: transparent;"
@@ -133,7 +104,7 @@ void DialogButton::applyTheme() {
         "  border-color: %9;"
         "}")
         .arg(bg, fg, border,
-             hoverBg, hoverFg, pressedBg,
+             hoverFill, hoverFg, t.hover.darker(115).name(),
              focusBorder,
              t.textMuted.name(), t.border.name()));
 }

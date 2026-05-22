@@ -2,6 +2,7 @@
 #include "dialog_button.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QListWidget>
 #include <QPainter>
 #include <QFontMetrics>
 #include <QSvgRenderer>
@@ -57,22 +58,45 @@ ThemedMessageBox::ThemedMessageBox(QWidget* parent, Severity sev,
 
 void ThemedMessageBox::setDetailText(const QString& detail) {
     if (detail.isEmpty()) return;
-    if (!m_detailLbl) {
-        m_detailLbl = new QLabel(detail, this);
-        m_detailLbl->setWordWrap(true);
-        m_detailLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        // Slot the detail block above the button row, indented to align
-        // with the body text (32 px icon + 16 px gap).
-        auto* outer = static_cast<QVBoxLayout*>(layout());
-        auto* indent = new QHBoxLayout;
-        indent->setContentsMargins(48, 0, 0, 0);
-        indent->setSpacing(0);
-        indent->addWidget(m_detailLbl);
-        outer->insertLayout(outer->count() - 1, indent);
+    // Detail is one name-per-line. Switch to a scrollable list once we
+    // have more than 6 entries — a long QLabel of 300 newline-separated
+    // names would stretch the dialog past the screen. The list itself
+    // caps at ~10 rows; the rest scroll.
+    QStringList items = detail.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    auto* outer = static_cast<QVBoxLayout*>(layout());
+    if (items.size() > 6) {
+        if (!m_detailList) {
+            m_detailList = new QListWidget(this);
+            m_detailList->setFocusPolicy(Qt::NoFocus);
+            m_detailList->setSelectionMode(QAbstractItemView::NoSelection);
+            m_detailList->setFrameShape(QFrame::NoFrame);
+            // ~10 rows visible, the rest scroll. Concrete pixel height
+            // is computed from the current font so density-changing
+            // themes still get the right window size.
+            QFontMetrics fm(m_detailList->font());
+            int rowH = fm.height() + 4;
+            m_detailList->setFixedHeight(rowH * 10 + 4);
+            outer->insertWidget(outer->count() - 1, m_detailList);
+        }
+        m_detailList->clear();
+        m_detailList->addItems(items);
+        if (m_detailLbl) m_detailLbl->setVisible(false);
     } else {
-        m_detailLbl->setText(detail);
+        if (!m_detailLbl) {
+            m_detailLbl = new QLabel(detail, this);
+            m_detailLbl->setWordWrap(true);
+            m_detailLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            // No left indent — the body text above is unindented; an
+            // arbitrary 48 px gutter (a leftover from the era of the
+            // severity icon) just made the listed names look orphaned.
+            outer->insertWidget(outer->count() - 1, m_detailLbl);
+        } else {
+            m_detailLbl->setText(detail);
+            m_detailLbl->setVisible(true);
+        }
+        if (m_detailList) m_detailList->setVisible(false);
     }
-    applyTheme();  // make sure the new label picks up theme color
+    applyTheme();  // make sure the new label/list picks up theme color
 }
 
 void ThemedMessageBox::appendButton(QPushButton* button) {
@@ -92,6 +116,15 @@ void ThemedMessageBox::applyTheme() {
         m_textLbl->setStyleSheet(QStringLiteral("color: %1;").arg(t.text.name()));
     if (m_detailLbl)
         m_detailLbl->setStyleSheet(QStringLiteral("color: %1;").arg(t.textDim.name()));
+    if (m_detailList) {
+        m_detailList->setStyleSheet(QStringLiteral(
+            "QListWidget { background: %1; color: %2; border: 1px solid %3;"
+            " border-radius: 0px; padding: 4px; }"
+            "QListWidget::item { padding: 2px 4px; }"
+            "QListWidget::item:hover { background: %4; }")
+            .arg(t.backgroundAlt.name(), t.textDim.name(),
+                 t.border.name(), t.hover.name()));
+    }
 }
 
 void ThemedMessageBox::redrawIcon() {

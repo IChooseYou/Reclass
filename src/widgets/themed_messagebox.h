@@ -4,6 +4,8 @@
 #include <QLabel>
 #include <QPushButton>
 
+class QListWidget;
+
 namespace rcx {
 
 // Drop-in replacement for the QMessageBox calls scattered across the
@@ -86,6 +88,7 @@ private:
     QLabel*      m_iconLbl;
     QLabel*      m_textLbl;
     QLabel*      m_detailLbl = nullptr;
+    QListWidget* m_detailList = nullptr;
     QHBoxLayout* m_buttonRow;
     void redrawIcon();
 };
