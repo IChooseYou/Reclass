@@ -953,10 +953,16 @@ public:
         // row to read like an editor row. Plus a slot-offset column
         // (+0xNN within the composed target struct) so the user can see
         // "this is the 3rd 8-byte slot" without arithmetic.
-        const uint64_t baseAddr = cr.layout.baseAddress;
+        //
+        // The slot-offset baseline is the FIRST data row's address (not
+        // cr.layout.baseAddress, which is the original document tree's
+        // base — typically a different struct entirely from the target
+        // being previewed here). First data row becomes +0x00, next
+        // +0x08, etc.
+        uint64_t baseAddr = 0;
+        bool baseSet = false;
         QString body;
         int emitted = 0;
-        // Skip line 0 (command row); meta is indexed the same as lines.
         for (int i = 1; i < lines.size() && i < cr.meta.size()
                                           && emitted < kMaxLines; ++i) {
             const QString& line = lines[i];
@@ -966,11 +972,8 @@ public:
             // editor margin. Empty offsetText means continuation lines
             // — skip those (we want only the heads).
             if (m.offsetText.isEmpty()) continue;
+            if (!baseSet) { baseAddr = m.offsetAddr; baseSet = true; }
             const QString addrCol = m.offsetText;
-            // Slot offset within the target struct. baseAddr is the
-            // composed struct's base; offsetAddr is the row's absolute.
-            // Difference is always small for the first 5 slots; render
-            // as +0xNN (2 hex digits) to keep the column narrow.
             const uint64_t slotOff = (m.offsetAddr >= baseAddr)
                 ? (m.offsetAddr - baseAddr) : 0;
             const QString offCol = QStringLiteral("+0x%1")
