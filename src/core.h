@@ -708,6 +708,24 @@ inline int Node::totalByteSize(const NodeTree& tree) const {
     return byteSize();
 }
 
+// Enumerate every root struct's display name. Used by the unsaved-changes
+// dialog so a multi-class document (one .rcx file with several top-level
+// structs — common when you press `+` to add a new class to the existing
+// project) shows ALL its class names rather than just whichever the
+// active tab happens to be viewing. Returns ["Untitled"] for an empty
+// tree so callers always get at least one label.
+inline QStringList rootClassNames(const NodeTree& tree) {
+    QStringList out;
+    for (const auto& n : tree.nodes) {
+        if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+        QString name = !n.structTypeName.isEmpty() ? n.structTypeName : n.name;
+        if (name.isEmpty()) name = QStringLiteral("Untitled");
+        if (!out.contains(name)) out.append(name);
+    }
+    if (out.isEmpty()) out.append(QStringLiteral("Untitled"));
+    return out;
+}
+
 // ── Value History (ring buffer for heatmap) ──
 
 struct ValueHistory {

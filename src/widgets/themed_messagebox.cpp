@@ -64,22 +64,33 @@ void ThemedMessageBox::setDetailText(const QString& detail) {
     // caps at ~10 rows; the rest scroll.
     QStringList items = detail.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     auto* outer = static_cast<QVBoxLayout*>(layout());
-    if (items.size() > 6) {
+    if (items.size() > 5) {
         if (!m_detailList) {
             m_detailList = new QListWidget(this);
             m_detailList->setFocusPolicy(Qt::NoFocus);
             m_detailList->setSelectionMode(QAbstractItemView::NoSelection);
             m_detailList->setFrameShape(QFrame::NoFrame);
-            // ~10 rows visible, the rest scroll. Concrete pixel height
-            // is computed from the current font so density-changing
-            // themes still get the right window size.
+            // Pure read-only display — kill the affordances that imply
+            // interactivity. No hover cursor, no row-rollover paint,
+            // and the items themselves get NoItemFlags so Qt won't
+            // draw a focus ring or selection track.
+            m_detailList->viewport()->setCursor(Qt::ArrowCursor);
+            m_detailList->setMouseTracking(false);
+            // Cap visible height at ~5 rows. Beyond that the user
+            // scrolls. With 900 dirty class names you still get a
+            // compact dialog, not a screen-tall column.
             QFontMetrics fm(m_detailList->font());
             int rowH = fm.height() + 4;
-            m_detailList->setFixedHeight(rowH * 10 + 4);
+            m_detailList->setFixedHeight(rowH * 5 + 6);
+            m_detailList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            m_detailList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             outer->insertWidget(outer->count() - 1, m_detailList);
         }
         m_detailList->clear();
-        m_detailList->addItems(items);
+        for (const QString& it : items) {
+            auto* item = new QListWidgetItem(it, m_detailList);
+            item->setFlags(Qt::NoItemFlags);  // not selectable, not enabled
+        }
         if (m_detailLbl) m_detailLbl->setVisible(false);
     } else {
         if (!m_detailLbl) {
@@ -117,13 +128,16 @@ void ThemedMessageBox::applyTheme() {
     if (m_detailLbl)
         m_detailLbl->setStyleSheet(QStringLiteral("color: %1;").arg(t.textDim.name()));
     if (m_detailList) {
+        // No :hover rule — the list is purely informational; hover
+        // feedback would imply clickability the user shouldn't expect.
+        // :disabled rule keeps the text in textDim (Qt would otherwise
+        // grey out further on top of our NoItemFlags items).
         m_detailList->setStyleSheet(QStringLiteral(
             "QListWidget { background: %1; color: %2; border: 1px solid %3;"
             " border-radius: 0px; padding: 4px; }"
-            "QListWidget::item { padding: 2px 4px; }"
-            "QListWidget::item:hover { background: %4; }")
-            .arg(t.backgroundAlt.name(), t.textDim.name(),
-                 t.border.name(), t.hover.name()));
+            "QListWidget::item { padding: 2px 4px; color: %2; }"
+            "QListWidget::item:disabled { color: %2; }")
+            .arg(t.backgroundAlt.name(), t.textDim.name(), t.border.name()));
     }
 }
 

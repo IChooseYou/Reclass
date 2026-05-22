@@ -2666,6 +2666,13 @@ static QString rootName(const NodeTree& tree, uint64_t viewRootId = 0) {
     return QStringLiteral("Untitled");
 }
 
+QStringList MainWindow::collectDirtyDocLabels(const RcxDocument* doc) const {
+    if (!doc) return {};
+    if (!doc->filePath.isEmpty())
+        return { QFileInfo(doc->filePath).fileName() };
+    return rcx::rootClassNames(doc->tree);
+}
+
 QString MainWindow::tabTitle(const TabState& tab) const {
     // Source identity is carried by the left-side DockTabSourceIcon \u2014
     // no need to append the source's filename/process to the text,
@@ -4503,17 +4510,13 @@ void MainWindow::showShortcutsDialog() {
     // section header rows that span both columns.
     const auto& t = ThemeManager::instance().current();
 
-    QDialog dlg(this);
+    // ThemedDialog gives us the standard palette + theme-change signal
+    // wiring for free, instead of the ad-hoc QPalette setup this dialog
+    // used to do. Same approach as the unsaved-changes box and the
+    // Type Aliases dialog.
+    rcx::ThemedDialog dlg(this);
     dlg.setWindowTitle(QStringLiteral("Keyboard Shortcuts"));
     dlg.resize(560, 520);
-
-    {
-        QPalette pal = dlg.palette();
-        pal.setColor(QPalette::Window, t.background);
-        pal.setColor(QPalette::WindowText, t.text);
-        dlg.setPalette(pal);
-        dlg.setAutoFillBackground(true);
-    }
 
     QSettings settings("Reclass", "Reclass");
     QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
@@ -4608,14 +4611,8 @@ void MainWindow::showShortcutsDialog() {
     table->horizontalHeader()->setStretchLastSection(true);
     lay->addWidget(table);
 
-    auto* closeBtn = new QPushButton(QStringLiteral("Close"));
-    closeBtn->setCursor(Qt::PointingHandCursor);
-    closeBtn->setStyleSheet(QStringLiteral(
-        "QPushButton { background: %1; color: %2; border: 1px solid %3;"
-        "  border-radius: 4px; padding: 5px 16px; }"
-        "QPushButton:hover { background: %4; border-color: %5; }")
-        .arg(t.indCmdPill.name(), t.text.name(), t.border.name(),
-             t.button.name(), t.textFaint.name()));
+    auto* closeBtn = new rcx::DialogButton(QStringLiteral("Close"),
+        rcx::DialogButton::Primary, &dlg);
     connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
     lay->addWidget(closeBtn, 0, Qt::AlignRight);
 
@@ -8307,32 +8304,40 @@ void MainWindow::updateBorderColor(const QColor& color) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    // Collect unique dirty docs (multiple tabs can share a document).
+    // Collect unique dirty docs (multiple tabs CAN share a document —
+    // project_new() reuses the active doc and adds a new root struct, so
+    // UnnamedClass0 + UnnamedClass1 typically live in the *same* doc).
+    // For each dirty doc we collect ALL its root struct names — the
+    // earlier rev took only the active tab's view-root, which silently
+    // hid the other classes in a multi-class document.
     QSet<RcxDocument*> dirtyDocs;
     QStringList dirtyNames;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-        if (it->doc->modified && !dirtyDocs.contains(it->doc)) {
-            dirtyDocs.insert(it->doc);
-            QString name = rootName(it->doc->tree, it->ctrl->viewRootId());
-            if (!it->doc->filePath.isEmpty())
-                name = QFileInfo(it->doc->filePath).fileName();
-            if (!dirtyNames.contains(name))
-                dirtyNames.append(name);
+        if (!it->doc->modified || dirtyDocs.contains(it->doc)) continue;
+        dirtyDocs.insert(it->doc);
+        for (const QString& n : collectDirtyDocLabels(it->doc)) {
+            if (!dirtyNames.contains(n))
+                dirtyNames.append(n);
         }
     }
     if (dirtyDocs.isEmpty()) { event->accept(); return; }
 
-    // Two complete sentences, picked by count, instead of in-string
-    // pluralization. When there's exactly one dirty project the name
-    // sits in the body sentence itself — no need for a separate detail
-    // line that just repeats it. Many dirty projects: count in the body,
-    // names in a scrollable list below.
+    // Three wordings, picked by what's actually dirty:
+    //   • one doc, one class      → "<class> has unsaved changes."
+    //   • one doc, many classes   → "Unsaved changes:" + list of class names
+    //   • many docs               → "<count> projects have unsaved changes:"
+    //                               + list of doc labels
+    // In every case the headline matches the visible content — no more
+    // "1 project has unsaved changes" + only the first class name.
     QString text;
     QString detail;
-    if (dirtyDocs.size() == 1) {
+    if (dirtyDocs.size() == 1 && dirtyNames.size() == 1) {
         text = QStringLiteral("%1 has unsaved changes.")
                    .arg(dirtyNames.first());
-        // No detail — body says it all.
+    } else if (dirtyDocs.size() == 1) {
+        text = QStringLiteral("Unsaved changes in %1 classes:")
+                   .arg(dirtyNames.size());
+        detail = dirtyNames.join(QStringLiteral("\n"));
     } else {
         text = QStringLiteral("%1 projects have unsaved changes:")
                    .arg(dirtyDocs.size());

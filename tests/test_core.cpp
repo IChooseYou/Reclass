@@ -1213,6 +1213,79 @@ private slots:
         QVERIFY(rcx::isFuncPtr(rcx::NodeKind::FuncPtr64));
         QVERIFY(!rcx::isFuncPtr(rcx::NodeKind::Pointer64));
     }
+
+    // Regression: the unsaved-changes dialog used to only show the
+    // first root class of a multi-class document (project_new() reuses
+    // the active doc and adds a new root struct — so UnnamedClass0 and
+    // UnnamedClass1 end up in the same tree). rootClassNames must
+    // enumerate ALL root structs so the dialog can list them.
+    void testRootClassNames_multiClass() {
+        rcx::NodeTree tree;
+        rcx::Node a; a.kind = rcx::NodeKind::Struct;
+        a.name = "UnnamedClass0"; a.parentId = 0;
+        tree.addNode(a);
+        rcx::Node b; b.kind = rcx::NodeKind::Struct;
+        b.name = "UnnamedClass1"; b.parentId = 0;
+        tree.addNode(b);
+        // A nested struct under UnnamedClass0 — should NOT appear in
+        // the root list.
+        rcx::Node nested; nested.kind = rcx::NodeKind::Struct;
+        nested.name = "Nested"; nested.parentId = tree.nodes[0].id;
+        tree.addNode(nested);
+
+        auto names = rcx::rootClassNames(tree);
+        QCOMPARE(names.size(), 2);
+        QCOMPARE(names[0], QString("UnnamedClass0"));
+        QCOMPARE(names[1], QString("UnnamedClass1"));
+    }
+
+    void testRootClassNames_prefersStructTypeName() {
+        rcx::NodeTree tree;
+        rcx::Node a; a.kind = rcx::NodeKind::Struct;
+        a.name = "raw_name";
+        a.structTypeName = "MyStruct";  // typed C++ name wins
+        a.parentId = 0;
+        tree.addNode(a);
+
+        auto names = rcx::rootClassNames(tree);
+        QCOMPARE(names.size(), 1);
+        QCOMPARE(names[0], QString("MyStruct"));
+    }
+
+    void testRootClassNames_emptyTreeYieldsUntitled() {
+        rcx::NodeTree tree;
+        auto names = rcx::rootClassNames(tree);
+        QCOMPARE(names.size(), 1);
+        QCOMPARE(names[0], QString("Untitled"));
+    }
+
+    void testRootClassNames_dedupesByName() {
+        rcx::NodeTree tree;
+        rcx::Node a; a.kind = rcx::NodeKind::Struct;
+        a.name = "Foo"; a.parentId = 0;
+        tree.addNode(a);
+        rcx::Node b; b.kind = rcx::NodeKind::Struct;
+        b.name = "Foo"; b.parentId = 0;  // duplicate name
+        tree.addNode(b);
+
+        auto names = rcx::rootClassNames(tree);
+        QCOMPARE(names.size(), 1);
+    }
+
+    void testRootClassNames_skipsNonStructRoots() {
+        rcx::NodeTree tree;
+        // A bare-hex root (not a Struct) shouldn't show up.
+        rcx::Node lone; lone.kind = rcx::NodeKind::Hex64;
+        lone.name = "stray"; lone.parentId = 0;
+        tree.addNode(lone);
+        rcx::Node s; s.kind = rcx::NodeKind::Struct;
+        s.name = "Real"; s.parentId = 0;
+        tree.addNode(s);
+
+        auto names = rcx::rootClassNames(tree);
+        QCOMPARE(names.size(), 1);
+        QCOMPARE(names[0], QString("Real"));
+    }
 };
 
 QTEST_MAIN(TestCore)

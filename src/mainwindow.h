@@ -435,6 +435,12 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+
+private:
+    // Display labels for a single dirty document in the unsaved-changes
+    // dialog: file name when the doc is on disk, otherwise every root
+    // struct name in the tree. Lives next to closeEvent which uses it.
+    QStringList collectDirtyDocLabels(const RcxDocument* doc) const;
 };
 
 } // namespace rcx

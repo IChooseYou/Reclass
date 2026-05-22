@@ -6,18 +6,23 @@
 
 namespace rcx {
 
-// Unified push-button for use inside dialogs. Mirrors the visual
-// language of ScanButton (the existing best-in-class button in the
-// scanner panel) so that — should we ever decide to unify — the two
-// classes already match: 28 px fixed height, 14 px icons, hairline
-// border, optional 2 px accent stripe on top.
+// Unified push-button for use inside dialogs. All variants share a
+// 30 px fixed height + square corners + hairline-border, outline-only
+// resting state — the visual identity comes from text color and the
+// :default focus border, not from a filled accent. Earlier rev had
+// Primary filled in indHoverSpan (purple) which competed loudly with
+// Destructive's amber fill; both have been muted to outlines.
 //
 // Variants:
-//   Primary     — accent stripe in theme.indHoverSpan (the default
-//                 "go ahead" affordance: OK, Save, Apply, Open).
-//   Secondary   — no accent stripe (Cancel, Close, neutral toggles).
-//   Destructive — accent stripe in theme.indHeatHot, hover with red
-//                 tint (Delete, Discard, Unload — irreversible work).
+//   Primary     — text in theme.text, border in theme.borderFocused;
+//                 default-focus border flags it as the action target
+//                 (OK / Save / Apply / Open).
+//   Secondary   — text in theme.textDim, border in theme.border. The
+//                 "back out" affordance (Cancel / Close / neutral
+//                 toggles).
+//   Destructive — text + border in theme.markerPtr (the conventional
+//                 warning red, not amber). Delete / Discard / Unload —
+//                 anything irreversible.
 //
 // Theme-aware: subscribes to ThemeManager::themeChanged and
 // re-applies its stylesheet automatically. Callers don't need to
