@@ -259,10 +259,15 @@ public:
                           theme.textDim);
             }
 
-            // Architecture badge
+            // Architecture badge — x64 in syntaxKeyword (blue), other
+            // arches (x86 / arm etc.) in indHoverSpan (purple). Earlier
+            // rev used QColor(140,100,180) hardcoded which didn't react
+            // to non-VS themes.
             if (!e.arch.isEmpty()) {
                 QColor ac = (e.arch == QStringLiteral("x64"))
-                    ? theme.syntaxKeyword : QColor(140, 100, 180);
+                    ? theme.syntaxKeyword
+                    : (theme.indHoverSpan.isValid() ? theme.indHoverSpan
+                                                    : QColor(140, 100, 180));
                 drawBadge(e.arch,
                           QColor(ac.red(), ac.green(), ac.blue(), 35),
                           ac);
