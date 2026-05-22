@@ -8360,10 +8360,13 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         if (!it->doc->modified || dirtyDocs.contains(it->doc)) continue;
         dirtyDocs.insert(it->doc);
-        for (const QString& n : collectDirtyDocLabels(it->doc)) {
-            if (!dirtyNames.contains(n))
-                dirtyNames.append(n);
-        }
+        // No cross-doc dedup of names — two unsaved projects with the
+        // default class name "UnnamedClass0" SHOULD show two entries so
+        // the user can see exactly how many are dirty. The
+        // dirtyDocs.contains(it->doc) guard above already handles the
+        // multi-tab-shares-one-doc case, which was the original dedup's
+        // real purpose.
+        dirtyNames.append(collectDirtyDocLabels(it->doc));
     }
     if (dirtyDocs.isEmpty()) { event->accept(); return; }
 
