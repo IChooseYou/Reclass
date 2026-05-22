@@ -2507,13 +2507,15 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         pane.fmtCombo->setStyleSheet(QStringLiteral(
             "QComboBox { background: %1; color: %2; border: 1px solid %3;"
             " padding: 1px 6px; font-family: '%6'; font-size: 9pt; }"
+            "QComboBox:focus { border-color: %7; }"
             "QComboBox::drop-down { border: none; width: 14px; }"
             "QComboBox::down-arrow { image: url(:/vsicons/chevron-down.svg);"
             " width: 10px; height: 10px; }"
             "QComboBox QAbstractItemView { background: %4; color: %2;"
             " selection-background-color: %5; border: 1px solid %3; }")
             .arg(ct.background.name(), ct.textMuted.name(), ct.border.name(),
-                 ct.backgroundAlt.name(), ct.hover.name(), ef));
+                 ct.backgroundAlt.name(), ct.hover.name(), ef,
+                 ct.borderFocused.name()));
 
         pane.fmtGear = new QToolButton;
         pane.fmtGear->setIcon(QIcon(":/vsicons/settings-gear.svg"));
@@ -4741,13 +4743,15 @@ void MainWindow::applyTheme(const Theme& theme) {
         QString comboStyle = QStringLiteral(
             "QComboBox { background: %1; color: %2; border: 1px solid %3;"
             " padding: 1px 6px; font-family: '%6'; font-size: 9pt; }"
+            "QComboBox:focus { border-color: %7; }"
             "QComboBox::drop-down { border: none; width: 14px; }"
             "QComboBox::down-arrow { image: url(:/vsicons/chevron-down.svg);"
             " width: 10px; height: 10px; }"
             "QComboBox QAbstractItemView { background: %4; color: %2;"
             " selection-background-color: %5; border: 1px solid %3; }")
             .arg(theme.background.name(), theme.textMuted.name(), theme.border.name(),
-                 theme.backgroundAlt.name(), theme.hover.name(), editorFont);
+                 theme.backgroundAlt.name(), theme.hover.name(), editorFont,
+                 theme.borderFocused.name());
         QString gearStyle = QStringLiteral(
             "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
             "QToolButton:hover { background: %4; }")

@@ -1951,6 +1951,7 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     // dotted focus rectangle inside the popup.
     QString comboStyle = QStringLiteral(
         "QComboBox { background: %1; color: %2; border: 1px solid %3; padding: 2px 4px 2px 4px; }"
+        "QComboBox:focus { border-color: %5; }"
         "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;"
         "  width: 16px; border-left: 1px solid %3; }"
         "QComboBox::down-arrow { image: url(:/vsicons/chevron-down.svg); width: 10px; height: 10px; }"
@@ -1964,7 +1965,8 @@ void ScannerPanel::applyTheme(const Theme& theme) {
         "QComboBox QAbstractItemView::item { padding: 4px 10px; }"
         "QComboBox QAbstractItemView::item:hover { background: %4; }")
         .arg(theme.background.name(), theme.text.name(),
-             theme.border.name(), theme.hover.name());
+             theme.border.name(), theme.hover.name(),
+             theme.borderFocused.name());
     m_modeCombo->setStyleSheet(comboStyle);
     m_typeCombo->setStyleSheet(comboStyle);
     m_fastScanCombo->setStyleSheet(comboStyle);
