@@ -18,6 +18,11 @@ void styleLabel(QLabel* lbl) {
     lbl->setStyleSheet(QStringLiteral("color: %1;").arg(t.text.name()));
 }
 
+// Focus border on input widgets always uses t.borderFocused — the
+// semantic token meant for this state. Earlier rev pulled t.indHoverSpan
+// here; the two happen to be identical in the VS theme but a custom
+// theme could keep them distinct, in which case the line-edit focus
+// ring would no longer agree with DialogButton's :focus colour.
 void styleLineEdit(QLineEdit* edit) {
     const auto& t = ThemeManager::instance().current();
     edit->setStyleSheet(QStringLiteral(
@@ -26,7 +31,7 @@ void styleLineEdit(QLineEdit* edit) {
         "QLineEdit:focus { border-color: %5; }")
         .arg(t.backgroundAlt.name(), t.text.name(),
              t.border.name(), t.selection.name(),
-             t.indHoverSpan.name()));
+             t.borderFocused.name()));
 }
 
 void styleSpinBox(QSpinBox* sb) {
@@ -36,7 +41,7 @@ void styleSpinBox(QSpinBox* sb) {
         " padding: 4px 6px; }"
         "QSpinBox:focus { border-color: %4; }")
         .arg(t.backgroundAlt.name(), t.text.name(),
-             t.border.name(), t.indHoverSpan.name()));
+             t.border.name(), t.borderFocused.name()));
 }
 
 void styleCombo(QComboBox* cb) {
@@ -49,7 +54,7 @@ void styleCombo(QComboBox* cb) {
         " selection-background-color: %4; }")
         .arg(t.backgroundAlt.name(), t.text.name(),
              t.border.name(), t.selected.name(),
-             t.indHoverSpan.name()));
+             t.borderFocused.name()));
 }
 
 // Build the bottom button row for the input dialogs. Returns the

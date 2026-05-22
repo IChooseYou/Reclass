@@ -1590,10 +1590,14 @@ void ScannerPanel::populateTable(bool showPrevious) {
             }
             auto* prevItem = new QTableWidgetItem(prevText);
             prevItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+            // Delta direction colors — pull from theme so a switch picks
+            // up the right hue (was hardcoded #7BC97B / #E07B7B which
+            // looked fine in dark VS but ignored every other theme).
+            const auto& dt = ThemeManager::instance().current();
             if (delta.direction > 0)
-                prevItem->setForeground(QColor("#7BC97B"));
+                prevItem->setForeground(dt.indDataChanged);
             else if (delta.direction < 0)
-                prevItem->setForeground(QColor("#E07B7B"));
+                prevItem->setForeground(dt.markerPtr);
             m_resultTable->setItem(i, 2, prevItem);
         }
 

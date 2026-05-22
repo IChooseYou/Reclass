@@ -54,7 +54,6 @@
 #include "workspace_model.h"
 #include <QTableWidget>
 #include <QHeaderView>
-#include <QDialogButtonBox>
 #include <QVBoxLayout>
 #include <QDialog>
 #include <QProgressDialog>
@@ -91,7 +90,13 @@
 #include <cstdio>
 
 static void setDarkTitleBar(QWidget* widget) {
-    // Requires Windows 10 1809+ (build 17763)
+    // One-bit "please use the dark chrome" hint to DWM. Nothing more.
+    // We deliberately don't call DWMWA_CAPTION_COLOR / DWMWA_TEXT_COLOR
+    // — forcing explicit RGB into the Win32 caption fought with the
+    // OS's own focus/accent painting and produced muddy results
+    // ("gross orange" against our dark palette). Match what
+    // QMessageBox gets: immersive dark mode hint, OS picks the paint.
+    // Requires Windows 10 1809+ (build 17763).
     auto hwnd = reinterpret_cast<HWND>(widget->winId());
     BOOL dark = TRUE;
     // Attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (build 18985+), 19 for older
@@ -6276,20 +6281,34 @@ void MainWindow::showFindReferences(const QString& targetTypeName,
                                      uint64_t targetStructId) {
     auto hits = findReferences(targetTypeName, targetStructId);
 
-    QDialog dlg(this);
+    // ThemedDialog + DialogButton — was a raw QDialog + QDialogButtonBox
+    // which inherited Qt's default (light) palette and OS-themed buttons,
+    // out of style with every other dialog in the app.
+    const auto& t = ThemeManager::instance().current();
+    rcx::ThemedDialog dlg(this);
     dlg.setWindowTitle(QStringLiteral("References to %1")
                        .arg(targetTypeName.isEmpty()
                             ? QStringLiteral("(unnamed)") : targetTypeName));
     dlg.resize(560, 400);
     auto* layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
 
     auto* header = new QLabel(QStringLiteral("%1 reference%2")
                                .arg(hits.size())
                                .arg(hits.size() == 1 ? "" : "s"), &dlg);
+    header->setStyleSheet(QStringLiteral("color: %1;").arg(t.textDim.name()));
     layout->addWidget(header);
 
     auto* list = new QListWidget(&dlg);
-    list->setAlternatingRowColors(true);
+    list->setAlternatingRowColors(false);  // theme palette handles row contrast
+    list->setStyleSheet(QStringLiteral(
+        "QListWidget { background: %1; color: %2; border: 1px solid %3; }"
+        "QListWidget::item { padding: 3px 6px; }"
+        "QListWidget::item:hover { background: %4; }"
+        "QListWidget::item:selected { background: %5; color: %6; }")
+        .arg(t.background.name(), t.text.name(), t.border.name(),
+             t.hover.name(), t.selected.name(), t.text.name()));
     for (const auto& h : hits) {
         QString text = QStringLiteral("%1 · %2.%3  (+0x%4)")
             .arg(h.ownerDock ? h.ownerDock->windowTitle() : QStringLiteral("?"),
@@ -6302,7 +6321,7 @@ void MainWindow::showFindReferences(const QString& targetTypeName,
         item->setData(Qt::UserRole + 1, QString::number(h.nodeId));
         list->addItem(item);
     }
-    layout->addWidget(list);
+    layout->addWidget(list, 1);
 
     // Double-click → raise that dock, scroll to the node.
     connect(list, &QListWidget::itemActivated, this,
@@ -6319,9 +6338,15 @@ void MainWindow::showFindReferences(const QString& targetTypeName,
         dlg.accept();
     });
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    layout->addWidget(buttons);
+    auto* closeBtn = new rcx::DialogButton(QStringLiteral("Close"),
+        rcx::DialogButton::Primary, &dlg);
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    auto* btnRow = new QHBoxLayout;
+    btnRow->setContentsMargins(0, 0, 0, 0);
+    btnRow->addStretch();
+    btnRow->addWidget(closeBtn);
+    layout->addLayout(btnRow);
+    closeBtn->setDefault(true);
 
     dlg.exec();
 }

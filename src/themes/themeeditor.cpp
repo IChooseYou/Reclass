@@ -14,9 +14,15 @@ namespace rcx {
 
 static QLabel* makeSectionLabel(const QString& text) {
     auto* lbl = new QLabel(text);
+    // Pulled from theme so the section dividers in the theme editor
+    // itself re-tint when the user previews a different theme. Earlier
+    // rev had #888 / #444 hardcoded, which looked OK in dark VS but
+    // didn't react to theme switches.
+    const auto& t = ThemeManager::instance().current();
     lbl->setStyleSheet(QStringLiteral(
-        "font-weight: bold; font-size: 11px; color: #888;"
-        "padding: 6px 0 2px 0; border-bottom: 1px solid #444;"));
+        "font-weight: bold; font-size: 11px; color: %1;"
+        "padding: 6px 0 2px 0; border-bottom: 1px solid %2;")
+        .arg(t.textMuted.name(), t.border.name()));
     return lbl;
 }
 
@@ -177,9 +183,12 @@ void ThemeEditor::updateSwatch(int idx) {
     auto& s = m_swatches[idx];
     QColor c = m_theme.*s.field;
 
+    // Swatch outline pulled from theme — was hardcoded #555 which
+    // disappeared against pale themes' backgroundAlt.
+    const auto& t = ThemeManager::instance().current();
     s.swatchBtn->setStyleSheet(QStringLiteral(
-        "QPushButton { background: %1; border: 1px solid #555; border-radius: 2px; }")
-        .arg(c.name()));
+        "QPushButton { background: %1; border: 1px solid %2; border-radius: 2px; }")
+        .arg(c.name(), t.border.name()));
     s.hexLabel->setText(c.name());
 }
 

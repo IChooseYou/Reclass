@@ -207,11 +207,14 @@ public:
         }
         p->setFont(baseFont);
 
-        // Stale suffix
+        // Stale suffix — process exited / file vanished. Pull from theme
+        // so the warning hue picks up theme switches; was hardcoded
+        // QColor(200,80,80) which never reacted to non-VS themes.
         if (e.isStale) {
             x += 6;
             p->setFont(smallFont);
-            p->setPen(QColor(200, 80, 80));
+            p->setPen(theme.markerPtr.isValid() ? theme.markerPtr
+                                                : QColor(200, 80, 80));
             p->drawText(x, row1Y, QStringLiteral("(exited)"));
             p->setFont(baseFont);
         }

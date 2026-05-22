@@ -116,6 +116,7 @@ public:
         m_smallFont = f;
         m_smallFont.setPointSize(qMax(7, f.pointSize() - 2));
         m_sfm = QFontMetrics(m_smallFont);
+        recomputeLayout();
         updateCachedSizeHint();
     }
     void setLoading(bool v) { m_isLoading = v; }
@@ -131,12 +132,35 @@ public:
         m_hasCurrent = hasCurrent;
     }
 
-    // Column layout: [2px accent | 4px pad | icon | 4px | name ... | 6 | bar 32px | 6 | size 38px | 6]
-    static constexpr int kBarW  = 32;
-    static constexpr int kMaxSz = 64;
-    static constexpr int kSzCol = 38;
-    static constexpr int kAccent = 2;
-    static constexpr int kPadL  = 4;
+    // Column layout, font-scaled. Earlier rev had these as static constexpr
+    // — fine at the default 10 pt font, but at high zoom the left side grew
+    // (icon + name + composite suffix all use fm.height() / fm.advance) while
+    // these stayed fixed at their 540-px-popup baseline. Result: names elided
+    // into the bar/size text on the right. Deriving from m_fm.height() means
+    // every pixel constant scales in lockstep with the font.
+    int m_barW   = 32;   // size-bar width
+    int m_maxSz  = 64;   // size-bar normalization ceiling (logical bytes)
+    int m_szCol  = 38;   // size-text column width
+    int m_accent = 2;    // left accent stripe width
+    int m_padL   = 4;    // left inset before icon
+    int m_pad    = 4;    // tight gap (icon ↔ name)
+    int m_gap    = 6;    // loose gap (between right-side columns: bar / size / pad)
+    void recomputeLayout() {
+        const int h = m_fm.height();
+        // Scale linearly off the default 10 pt JetBrains Mono row
+        // (h≈14). At zoom 0 every value here equals its old constant;
+        // at higher zoom each grows proportionally, keeping the popup's
+        // visual rhythm consistent instead of letting the font outrun
+        // the layout.
+        m_accent = qMax(2, h * 2 / 14);
+        m_padL   = qMax(4, h * 4 / 14);
+        m_pad    = qMax(4, h * 4 / 14);
+        m_gap    = qMax(6, h * 6 / 14);
+        m_barW   = qMax(32, h * 32 / 14);
+        m_szCol  = m_sfm.horizontalAdvance(QStringLiteral("9999B")) + 4;
+        // m_maxSz is a logical normalization value, not a pixel; keep at 64
+        // so the bar still represents 0..64 bytes regardless of zoom.
+    }
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override {
@@ -173,19 +197,19 @@ public:
         // ── Background ──
         if (isSel) {
             painter->fillRect(r, t.selected);
-            painter->fillRect(r.x(), y, kAccent, h, groupCol);
+            painter->fillRect(r.x(), y, m_accent, h, groupCol);
         } else if (isHov && !isSection && !isDisabled) {
             painter->fillRect(r, t.hover);
         }
 
         // ── Section header: pip + left-aligned text ──
         if (isSection) {
-            const int px = r.x() + kAccent + kPadL + 1;
-            const int pipSz = 4;
+            const int px = r.x() + m_accent + m_padL + 1;
+            const int pipSz = qMax(4, m_fm.height() / 3);
             painter->fillRect(px, y + (h - pipSz) / 2, pipSz, pipSz, groupCol);
             painter->setFont(m_smallFont);
             painter->setPen(t.textFaint);
-            const int tx = px + pipSz + 4;
+            const int tx = px + pipSz + m_pad;
             painter->drawText(tx, y + (h + m_sfm.ascent() - m_sfm.descent()) / 2,
                               index.data().toString());
             painter->restore();
@@ -193,8 +217,8 @@ public:
         }
 
         // ── Columns ──
-        int x = r.x() + kAccent + kPadL;
-        const int rightW = 6 + kBarW + 6 + kSzCol + 6;  // gap + bar + gap + size + pad
+        int x = r.x() + m_accent + m_padL;
+        const int rightW = m_gap + m_barW + m_gap + m_szCol + m_gap;
         const int nameEnd = r.right() - rightW;
 
         // ── Icon ── tinted with the row's group color so a "Hex" entry
@@ -221,7 +245,7 @@ public:
             painter->drawPixmap(x, iy, pm);
             painter->setOpacity(1.0);
         }
-        x += iconSz + 4;
+        x += iconSz + m_pad;
 
         // ── Name: baseline-aligned for pixel-perfect text ──
         const QColor nameColor = isDisabled ? t.textMuted
@@ -291,22 +315,23 @@ public:
                 ? QStringLiteral("%1B").arg(entry->sizeBytes)
                 : (isDyn ? QStringLiteral("dyn") : QString());
             const int szTextW = szText.isEmpty() ? 0 : m_sfm.horizontalAdvance(szText);
-            const int szTextX = r.right() - 6 - szTextW;  // right-aligned in right pad
+            const int szTextX = r.right() - m_gap - szTextW;  // right-aligned in right pad
 
             // Size bar: positioned to the left of size text
-            const int barX = szTextX - 6 - kBarW;  // gap between bar and text
-            const int barH = 6;
+            const int barX = szTextX - m_gap - m_barW;
+            const int barH = qMax(4, m_fm.height() / 3);
             const int barY = y + (h - barH) / 2;
 
-            painter->fillRect(barX, barY, kBarW, barH, t.surface);
+            painter->fillRect(barX, barY, m_barW, barH, t.surface);
             if (entry->sizeBytes > 0) {
-                const int fillW = qBound(1, entry->sizeBytes * kBarW / kMaxSz, kBarW);
+                const int fillW = qBound(1, entry->sizeBytes * m_barW / m_maxSz, m_barW);
                 QColor fc = groupCol;
                 fc.setAlpha(isSel ? 200 : 140);
                 painter->fillRect(barX, barY, fillW, barH, fc);
             } else if (isDyn) {
-                for (int dx = 0; dx < kBarW; dx += 4)
-                    painter->fillRect(barX + dx, barY, 2, barH, t.border);
+                const int stripe = qMax(2, m_fm.height() / 6);
+                for (int dx = 0; dx < m_barW; dx += stripe * 2)
+                    painter->fillRect(barX + dx, barY, stripe, barH, t.border);
             }
 
             // Draw size text
@@ -891,10 +916,15 @@ void TypeSelectorPopup::popupLoading(const QPoint& globalPos) {
     m_titleLabel->clear();
     if (m_statusLabel) m_statusLabel->clear();
 
-    // Default popup size
+    // Default popup size — scales with the current font so high zoom
+    // produces a proportionally wider popup. 540 px = 54 chars of 'M' at
+    // the default 10 pt JetBrains Mono, so the constant `* 54` keeps the
+    // baseline identical at zoom 0 and grows it linearly when the user
+    // Ctrl+scrolls.
     QFontMetrics fm(m_font);
+    const int charW = qMax(6, fm.horizontalAdvance(QStringLiteral("M")));
     int rowH = fm.height() + 6;
-    int popupW = 540;
+    int popupW = charW * 54;
     int popupH = qMax(400, rowH * 14 + rowH * 2 + 20);
 
     QScreen* screen = QApplication::screenAt(globalPos);
@@ -1147,11 +1177,17 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
 
 void TypeSelectorPopup::popup(const QPoint& globalPos) {
     QFontMetrics fm(m_font);
-    constexpr int kMaxPopupW = 540;
+    // Popup width scales with the font. The earlier hard 540-px cap was the
+    // right size at the default 10 pt font but it never grew when the user
+    // zoomed in; names elided into the size bar / size text on the right.
+    // The new cap is `charW * 54` — equal to ~540 px at default zoom and
+    // proportionally larger at higher zoom levels.
+    const int charW = qMax(6, fm.horizontalAdvance(QStringLiteral("M")));
+    const int maxPopupW = charW * 54;
     int iconColW = fm.height() + 6;
     int estMaxW = iconColW + fm.horizontalAdvance(QChar('W')) * m_cachedMaxNameLen + 16;
     int maxTextW = qMax(fm.horizontalAdvance(QStringLiteral("Choose element type        ")), estMaxW);
-    int popupW = qBound(460, maxTextW + 24, kMaxPopupW);
+    int popupW = qBound(charW * 46, maxTextW + 24, maxPopupW);
     int rowH = fm.height() + 6;
     int headerH = rowH * 2 + 10;
     int footerH = rowH + 6;

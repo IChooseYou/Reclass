@@ -191,10 +191,15 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
             btn->setStyleSheet(menuBtnStyle);
     }
 
-    // Close button: themed red hover
+    // Close button: themed red hover. Uses markerPtr (the conventional
+    // warning red, same hue every desktop OS paints on the X). Earlier
+    // rev used indHeatHot which is the AMBER heatmap token meant for
+    // "this value changes frequently" — wrong semantic for a destructive
+    // close affordance and visibly orange against the dark chrome.
+    QColor closeWarn = theme.markerPtr.isValid() ? theme.markerPtr : theme.indHeatHot;
     m_btnClose->setStyleSheet(QStringLiteral(
         "QToolButton { background: transparent; border: none; }"
-        "QToolButton:hover { background: %1; }").arg(theme.indHeatHot.name()));
+        "QToolButton:hover { background: %1; }").arg(closeWarn.name()));
 
     update();
 }

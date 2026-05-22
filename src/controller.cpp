@@ -13,6 +13,7 @@
 #include "themes/thememanager.h"
 #include "widgets/themed_messagebox.h"
 #include "widgets/themed_inputdialog.h"
+#include "widgets/dialog_button.h"
 #include "widgets/enum_picker_popup.h"
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
@@ -30,7 +31,6 @@
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QDialogButtonBox>
 #include <QPushButton>
 #include <QClipboard>
 #include <QApplication>
@@ -83,7 +83,10 @@ static QString elideLeft(const QString& s, int max) {
     return QStringLiteral("\u2026") + s.right(max - 1);
 }
 
-// Themed comment input dialog matching the editor style
+// Themed comment input dialog matching the editor style. ThemedDialog +
+// DialogButton — was a raw QDialog with a QDialogButtonBox styled inline
+// (border-radius 3px, font-size 11px), out of sync with the rest of the
+// app's dialog language.
 static QString showCommentDialog(QWidget* parent, const QString& title,
                                  const QString& existing, bool* ok) {
     *ok = false;
@@ -92,17 +95,9 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
     QFont editorFont(settings.value("font", "JetBrains Mono").toString(), 12);
     editorFont.setFixedPitch(true);
 
-    QDialog dlg(parent);
+    rcx::ThemedDialog dlg(parent);
     dlg.setWindowTitle(title);
     dlg.setMinimumWidth(380);
-
-    QPalette pal = dlg.palette();
-    pal.setColor(QPalette::Window, theme.background);
-    pal.setColor(QPalette::WindowText, theme.text);
-    pal.setColor(QPalette::Base, theme.backgroundAlt);
-    pal.setColor(QPalette::Text, theme.text);
-    dlg.setPalette(pal);
-    dlg.setAutoFillBackground(true);
 
     auto* layout = new QVBoxLayout(&dlg);
     layout->setContentsMargins(16, 12, 16, 12);
@@ -119,25 +114,22 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
     input->selectAll();
     input->setStyleSheet(QStringLiteral(
         "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
-        " padding: 6px 8px; selection-background-color: %4; }")
+        " padding: 6px 8px; selection-background-color: %4; }"
+        "QLineEdit:focus { border-color: %5; }")
         .arg(theme.backgroundAlt.name(), theme.text.name(),
-             theme.border.name(), theme.selected.name()));
+             theme.border.name(), theme.selection.name(),
+             theme.borderFocused.name()));
     layout->addWidget(input);
 
-    auto* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Save"));
-    QString btnStyle = QStringLiteral(
-        "QPushButton { background: %1; color: %2; border: 1px solid %3;"
-        " padding: 4px 16px; border-radius: 3px; font-family: '%5'; font-size: 11px; }"
-        "QPushButton:hover { background: %4; }")
-        .arg(theme.background.name(), theme.text.name(), theme.border.name(),
-             theme.hover.name(), editorFont.family());
-    buttons->setStyleSheet(btnStyle);
-    layout->addWidget(buttons);
-
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto* cancel = new rcx::DialogButton(QObject::tr("Cancel"),
+        rcx::DialogButton::Secondary, &dlg);
+    auto* save = new rcx::DialogButton(QObject::tr("Save"),
+        rcx::DialogButton::Primary, &dlg);
+    QObject::connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    QObject::connect(save,   &QPushButton::clicked, &dlg, &QDialog::accept);
+    QObject::connect(input,  &QLineEdit::returnPressed, &dlg, &QDialog::accept);
+    layout->addLayout(rcx::ThemedDialog::makeButtonRow({cancel, save}));
+    save->setDefault(true);
 
     input->setFocus();
     if (dlg.exec() == QDialog::Accepted) {
