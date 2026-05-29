@@ -48,7 +48,8 @@ public:
 
 signals:
     void openProject();
-    void newClass();
+    void newClass();         // user explicitly chose the New Class card
+    void dismissed();        // Esc or outside-click — no specific action chosen
     void importSource();
     void importXml();
     void importPdb();
@@ -128,12 +129,12 @@ protected:
 
     void resizeEvent(QResizeEvent* e) override { QWidget::resizeEvent(e); update(); }
     void leaveEvent(QEvent*) override { m_hz = HZ_None; m_hi = -1; setCursor(Qt::ArrowCursor); update(); }
-    // Escape dismisses the splash AND creates a new class — same as clicking
-    // outside or clicking the "New Class" card. User has no patience for
-    // landing on a blank window; always drop them somewhere usable.
+    // Esc just dismisses the splash. MainWindow decides whether the user
+    // also needs a fresh class (true at app startup with no tabs; not
+    // true mid-session where existing tabs are the landing).
     void keyPressEvent(QKeyEvent* e) override {
         if (e->key() == Qt::Key_Escape) {
-            emit newClass();
+            emit dismissed();
             return;
         }
         QDialog::keyPressEvent(e);
@@ -141,10 +142,9 @@ protected:
 
     // Install a qApp-level event filter while visible so we can catch clicks
     // outside the splash's geometry — modal QDialogs otherwise block those
-    // events from reaching anyone. Click-outside behaves like the "New Class"
-    // card: the splash dismisses and a new class is created. Matches the
-    // "I want to click out of things easily" UX expectation of a welcome
-    // screen (VS Code, Rider, etc. all do this).
+    // events from reaching anyone. Outside-click is treated as a dismiss
+    // request (same as Esc); MainWindow chooses whether to also create a
+    // landing class based on whether the session already has tabs.
     bool event(QEvent* e) override {
         if (e->type() == QEvent::Show)
             QCoreApplication::instance()->installEventFilter(this);
@@ -159,9 +159,7 @@ protected:
             QPoint global = me->globalPosition().toPoint();
             QRect myRect(mapToGlobal(QPoint(0, 0)), size());
             if (!myRect.contains(global)) {
-                // Outside click → dismiss + new class. newClass() is already
-                // wired in MainWindow to close the splash and create a class.
-                emit newClass();
+                emit dismissed();
                 return true;  // consume so the underlying widget doesn't act
             }
         }

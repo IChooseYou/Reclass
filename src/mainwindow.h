@@ -80,6 +80,9 @@ private slots:
     void importReclassXml();
     void importPdb();
     void showTypeAliasesDialog();
+    void showValidateDialog();
+    void showFindFieldDialog();
+    void autosaveAllModifiedDocs();
     void editTheme();
     void showOptionsDialog();
     void showOptionsDialog(int initialPage);
@@ -114,7 +117,8 @@ public:
     ScannerPanel* scannerPanel() const { return m_scannerPanel; }
 
     // Project Lifecycle API
-    QDockWidget* project_new(const QString& classKeyword = QString());
+    QDockWidget* project_new(const QString& classKeyword = QString(),
+                             bool forceFreshDoc = false);
     QDockWidget* project_open(const QString& path = {});
     bool project_save(QDockWidget* dock = nullptr, bool saveAs = false);
     void project_close(QDockWidget* dock = nullptr);
@@ -180,6 +184,7 @@ private:
     QAction*        m_actPresentationMode = nullptr;
     QMenu*          m_sourceMenu = nullptr;
     QMenu*          m_recentFilesMenu = nullptr;
+    QTimer*         m_autosaveTimer   = nullptr;
 
     struct SplitPane {
         QTabWidget*    tabWidget = nullptr;

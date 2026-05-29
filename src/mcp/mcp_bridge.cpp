@@ -923,6 +923,97 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // analysis.find_overlaps
+    tools.append(QJsonObject{
+        {"name", "analysis.find_overlaps"},
+        {"description", "Detect sibling-overlap bugs in the active tree: pairs of non-static, "
+                        "non-union sibling fields whose [offset, offset+size) byte ranges intersect. "
+                        "This is the most common bug introduced by manual offset edits. "
+                        "Returns pairs as {parentId, parentName, aId, aName, aOffset, aSize, bId, bName, bOffset, bSize}."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }}
+        }}
+    });
+
+    // analysis.tree_summary
+    tools.append(QJsonObject{
+        {"name", "analysis.tree_summary"},
+        {"description", "One-shot health snapshot of the active tree: total nodes, top-level "
+                        "classes (parentId=0 Struct/Class), maximum depth, total bytes (sum of "
+                        "top-level class spans), and overlap count from findOverlaps(). Faster "
+                        "than enumerating every node via separate tools."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }}
+        }}
+    });
+
+    // analysis.field_path
+    tools.append(QJsonObject{
+        {"name", "analysis.field_path"},
+        {"description", "Bidirectional path/id resolver. Pass nodeId to get the dot-separated "
+                        "path from the root class (e.g. \"Player.Stats.Health\"); pass path "
+                        "to get back the node id. Exactly one of nodeId / path is required."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"nodeId", QJsonObject{{"type", "string"},
+                    {"description", "Node id as a decimal or hex string. Returns {path}."}}},
+                {"path",   QJsonObject{{"type", "string"},
+                    {"description", "Dot-path like \"Player.Stats.Health\". Returns {nodeId}. "
+                                    "Matching is exact, case-sensitive."}}},
+                {"separator", QJsonObject{{"type", "string"},
+                    {"description", "Path separator character. Default: \".\""}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }}
+        }}
+    });
+
+    // ui.byte_selection
+    tools.append(QJsonObject{
+        {"name", "ui.byte_selection"},
+        {"description", "Return the active byte selection on the active editor pane: "
+                        "{lo, hi, size} as hex address strings, or {active:false} if no "
+                        "selection is active. Useful for AI agents that want to know which "
+                        "byte range the user is currently inspecting (e.g. before suggesting "
+                        "an interpretation, copying bytes, or referencing the range in chat)."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }}
+        }}
+    });
+
+    // ui.set_byte_selection
+    tools.append(QJsonObject{
+        {"name", "ui.set_byte_selection"},
+        {"description", "Set the active editor's byte selection to [lo, hi) so the user "
+                        "sees the same range you do. Pass lo and hi as hex address strings "
+                        "(0x prefix accepted) or decimals. Omit both lo and hi to clear "
+                        "the selection. Half-open: hi is exclusive, must be > lo."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"lo", QJsonObject{{"type", "string"},
+                    {"description", "Inclusive start address (decimal or 0x-hex)."}}},
+                {"hi", QJsonObject{{"type", "string"},
+                    {"description", "Exclusive end address (decimal or 0x-hex)."}}},
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}}
+            }}
+        }}
+    });
+
     // ui.inspect
     tools.append(QJsonObject{
         {"name", "ui.inspect"},
@@ -1016,7 +1107,12 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "analysis.infer_types") result = toolAnalysisInferTypes(args);
     else if (toolName == "analysis.import_header") result = toolAnalysisImportHeader(args);
     else if (toolName == "analysis.pointer_chain") result = toolAnalysisPointerChain(args);
-    else if (toolName == "ui.inspect")    result = toolUiInspect(args);
+    else if (toolName == "analysis.find_overlaps") result = toolAnalysisFindOverlaps(args);
+    else if (toolName == "analysis.field_path")    result = toolAnalysisFieldPath(args);
+    else if (toolName == "analysis.tree_summary")  result = toolAnalysisTreeSummary(args);
+    else if (toolName == "ui.inspect")          result = toolUiInspect(args);
+    else if (toolName == "ui.byte_selection")     result = toolUiByteSelection(args);
+    else if (toolName == "ui.set_byte_selection") result = toolUiSetByteSelection(args);
     else if (toolName == "theme.get")     result = toolThemeGet(args);
     else if (toolName == "theme.set")     result = toolThemeSet(args);
     else if (toolName == "theme.save")    result = toolThemeSave(args);
@@ -2945,6 +3041,218 @@ QJsonObject McpBridge::toolAnalysisPointerChain(const QJsonObject& args) {
     }
 
     return makeTextResult(output);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: analysis.find_overlaps — detect sibling-overlap bugs
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolAnalysisFindOverlaps(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+    const auto& tree = tab->doc->tree;
+    auto pairs = tree.findOverlaps();
+
+    QJsonArray jsonPairs;
+    auto fieldSize = [&](const Node& n) -> int {
+        if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+            return tree.structSpan(n.id);
+        return n.byteSize();
+    };
+    for (const auto& p : pairs) {
+        int ai = tree.indexOfId(p.aId);
+        int bi = tree.indexOfId(p.bId);
+        int parentIdx = tree.indexOfId(p.parentId);
+        if (ai < 0 || bi < 0) continue;
+        const Node& a = tree.nodes[ai];
+        const Node& b = tree.nodes[bi];
+        QJsonObject o;
+        o["parentId"]   = QString::number(p.parentId);
+        if (parentIdx >= 0) {
+            const Node& pn = tree.nodes[parentIdx];
+            o["parentName"] = pn.structTypeName.isEmpty() ? pn.name : pn.structTypeName;
+        }
+        o["aId"]      = QString::number(p.aId);
+        o["aName"]    = a.name;
+        o["aOffset"]  = a.offset;
+        o["aSize"]    = fieldSize(a);
+        o["bId"]      = QString::number(p.bId);
+        o["bName"]    = b.name;
+        o["bOffset"]  = b.offset;
+        o["bSize"]    = fieldSize(b);
+        jsonPairs.append(o);
+    }
+
+    QJsonObject result;
+    result["count"] = pairs.size();
+    result["overlaps"] = jsonPairs;
+    // Human-readable summary lands in the text channel so the agent can
+    // log a single line; the structured array goes through metadata for
+    // programmatic use. makeTextResult/JsonResult helpers don't compose
+    // here so we build the response manually.
+    QString summary;
+    if (pairs.isEmpty()) summary = QStringLiteral("No sibling overlaps detected.");
+    else summary = QStringLiteral("%1 sibling overlap(s) detected.").arg(pairs.size());
+    QJsonObject content;
+    content["type"] = "text";
+    content["text"] = summary + "\n" +
+        QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented));
+    return QJsonObject{{"content", QJsonArray{content}}};
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: analysis.tree_summary — one-shot tree health snapshot
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolAnalysisTreeSummary(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+    const auto& tree = tab->doc->tree;
+
+    int totalNodes = tree.nodes.size();
+    int topLevelClasses = 0;
+    int totalBytes = 0;
+    int maxDepth = 0;
+    for (int i = 0; i < tree.nodes.size(); ++i) {
+        const Node& n = tree.nodes[i];
+        if (n.parentId == 0 && n.kind == NodeKind::Struct) {
+            ++topLevelClasses;
+            totalBytes += tree.structSpan(n.id);
+        }
+        int d = tree.depthOf(i);
+        if (d > maxDepth) maxDepth = d;
+    }
+    int overlapCount = tree.findOverlaps().size();
+
+    QJsonObject summary;
+    summary["totalNodes"]      = totalNodes;
+    summary["topLevelClasses"] = topLevelClasses;
+    summary["totalBytes"]      = totalBytes;
+    summary["maxDepth"]        = maxDepth;
+    summary["overlapCount"]    = overlapCount;
+
+    QString text = QStringLiteral(
+        "nodes: %1\nclasses: %2\nbytes: %3\nmaxDepth: %4\noverlaps: %5")
+        .arg(totalNodes).arg(topLevelClasses).arg(totalBytes)
+        .arg(maxDepth).arg(overlapCount);
+    QJsonObject content;
+    content["type"] = "text";
+    content["text"] = text;
+    return QJsonObject{{"content", QJsonArray{content}}};
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: analysis.field_path — resolve node id to dot path
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolAnalysisFieldPath(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    QString idStr = args.value("nodeId").toString();
+    QString pathArg = args.value("path").toString();
+    if (idStr.isEmpty() && pathArg.isEmpty())
+        return makeTextResult("Provide exactly one of nodeId or path", true);
+    if (!idStr.isEmpty() && !pathArg.isEmpty())
+        return makeTextResult("Provide exactly one of nodeId or path, not both", true);
+
+    QString sepStr = args.value("separator").toString();
+    QChar sep = sepStr.isEmpty() ? QChar('.') : sepStr.at(0);
+
+    if (!idStr.isEmpty()) {
+        bool ok = false;
+        uint64_t nodeId = idStr.startsWith("0x", Qt::CaseInsensitive)
+            ? idStr.mid(2).toULongLong(&ok, 16)
+            : idStr.toULongLong(&ok);
+        if (!ok) return makeTextResult("nodeId must be a numeric (decimal or 0x-hex) string", true);
+        QString path = tab->doc->tree.fieldPath(nodeId, sep);
+        QJsonObject content;
+        content["type"] = "text";
+        content["text"] = path.isEmpty()
+            ? QStringLiteral("(no path — unknown node id %1)").arg(idStr)
+            : path;
+        return QJsonObject{{"content", QJsonArray{content}}};
+    }
+
+    uint64_t resolved = tab->doc->tree.nodeIdForPath(pathArg, sep);
+    QJsonObject content;
+    content["type"] = "text";
+    content["text"] = resolved == 0
+        ? QStringLiteral("(no match for path %1)").arg(pathArg)
+        : QString::number(resolved);
+    return QJsonObject{{"content", QJsonArray{content}}};
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: ui.byte_selection — read the active byte selection
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolUiByteSelection(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    // Walk panes; the active pane's editor owns the live byte selection.
+    // McpBridge is a friend of MainWindow so the private pane layout is
+    // accessible without a new public accessor.
+    if (tab->panes.isEmpty() || tab->activePaneIdx >= tab->panes.size()) {
+        return makeTextResult("No active editor pane", true);
+    }
+    RcxEditor* ed = tab->panes[tab->activePaneIdx].editor;
+    if (!ed) return makeTextResult("No active editor pane", true);
+
+    auto sel = ed->byteSelection();
+    QJsonObject content;
+    content["type"] = "text";
+    if (!sel.has_value()) {
+        content["text"] = QStringLiteral("(no active byte selection)");
+        return QJsonObject{{"content", QJsonArray{content}}};
+    }
+    auto [lo, hi] = *sel;
+    content["text"] = QStringLiteral("lo=0x%1 hi=0x%2 size=%3")
+        .arg(lo, 0, 16).arg(hi, 0, 16).arg(hi - lo);
+    return QJsonObject{{"content", QJsonArray{content}}};
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOL: ui.set_byte_selection — set or clear the byte selection
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolUiSetByteSelection(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+    if (tab->panes.isEmpty() || tab->activePaneIdx >= tab->panes.size()) {
+        return makeTextResult("No active editor pane", true);
+    }
+    RcxEditor* ed = tab->panes[tab->activePaneIdx].editor;
+    if (!ed) return makeTextResult("No active editor pane", true);
+
+    QString loStr = args.value("lo").toString();
+    QString hiStr = args.value("hi").toString();
+
+    // Omitting both → clear the selection.
+    if (loStr.isEmpty() && hiStr.isEmpty()) {
+        ed->clearByteSelection();
+        return makeTextResult("Selection cleared.");
+    }
+    if (loStr.isEmpty() || hiStr.isEmpty())
+        return makeTextResult("Provide both lo and hi (or neither to clear)", true);
+
+    auto parse = [](const QString& s, bool* ok) -> uint64_t {
+        return s.startsWith("0x", Qt::CaseInsensitive)
+            ? s.mid(2).toULongLong(ok, 16)
+            : s.toULongLong(ok);
+    };
+    bool ok = false;
+    uint64_t lo = parse(loStr, &ok);
+    if (!ok) return makeTextResult("lo must be numeric (decimal or 0x-hex)", true);
+    uint64_t hi = parse(hiStr, &ok);
+    if (!ok) return makeTextResult("hi must be numeric (decimal or 0x-hex)", true);
+
+    if (!ed->setByteSelection(lo, hi))
+        return makeTextResult("hi must be greater than lo", true);
+
+    return makeTextResult(QStringLiteral("Selection set to [0x%1, 0x%2) (%3 bytes)")
+        .arg(lo, 0, 16).arg(hi, 0, 16).arg(hi - lo));
 }
 
 // ════════════════════════════════════════════════════════════════════

@@ -7,6 +7,7 @@
     </qresource>
     <qresource prefix="/fonts">
         <file alias="JetBrainsMono.ttf">fonts/JetBrainsMono.ttf</file>
+        <file alias="IBMPlexMono.ttf">fonts/IBMPlexMono.ttf</file>
     </qresource>
     <qresource prefix="/vsicons">
         <file alias="file.svg">vsicons/file.svg</file>

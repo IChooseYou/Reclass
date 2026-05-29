@@ -9,6 +9,7 @@
 #include <QVariantAnimation>
 #include <functional>
 #include <memory>
+#include <optional>
 
 class QLabel;
 class QLineEdit;
@@ -59,6 +60,32 @@ public:
 
     // ── Multi-selection ──
     QSet<int> selectedNodeIndices() const;
+
+    // ── Byte selection accessor (for controller-side I/O) ──
+    // Returns the half-open [start, end) absolute address range of the
+    // currently selected hex bytes, or nullopt if no selection. The
+    // controller uses this to read/write bytes on the active provider
+    // when handling byteCopyHexRequested / bytePasteHexRequested /
+    // byteZeroFillRequested.
+    std::optional<QPair<uint64_t, uint64_t>> byteSelection() const {
+        return m_byteSel;
+    }
+    void clearByteSelection() {
+        if (!m_byteSel) return;
+        m_byteSel.reset();
+        applyByteSelectionOverlay();
+    }
+    // Programmatic setter — used by MCP (ui.set_byte_selection) and by
+    // tests that want to skip the mouse-drag dance. Enforces the
+    // half-open lo < hi invariant; rejects empty/inverted ranges.
+    // Returns true on accept. Address-based, so the range survives the
+    // next refresh tick the same way mouse-drag selections do.
+    bool setByteSelection(uint64_t lo, uint64_t hi) {
+        if (hi <= lo) return false;
+        m_byteSel = QPair<uint64_t, uint64_t>{lo, hi};
+        applyByteSelectionOverlay();
+        return true;
+    }
 
     // ── Inline editing ──
     bool isEditing() const { return m_editState.active; }
@@ -154,6 +181,42 @@ signals:
     // a NEW tab (sharing the same document). Controller resolves and asks
     // MainWindow to spawn the tab.
     void openTypeInNewTabRequested(int nodeIdx);
+    // ── Byte-selection actions ──
+    // Fired when the user invokes Ctrl+C / Ctrl+V / Delete with an active
+    // hex byte selection (`m_byteSel`). Controller reads the selection
+    // range from RcxEditor::byteSelection() and handles the I/O. Enter is
+    // handled in-editor (it just enters hex-overwrite mode on the byte
+    // range); only the three I/O actions need a controller round-trip.
+    void byteCopyHexRequested();
+    void bytePasteHexRequested();
+    void byteZeroFillRequested();
+    // Alternate copy formats — request the controller to lay out the
+    // selected bytes as a C array literal "{0xDE, 0xAD, ...}" or a
+    // Python bytes literal "b'\xde\xad...'" and copy that to the
+    // clipboard. Fired from the byte-selection context menu.
+    void byteCopyAsCArrayRequested();
+    void byteCopyAsPythonRequested();
+    // Save the selected bytes as a raw binary file. Controller opens a
+    // QFileDialog and writes the bytes; the slot factor is split into
+    // a testable static helper (see RcxController::writeBytesToFile).
+    void byteSaveAsFileRequested();
+    // Extract the selected byte range into a new root class. Controller
+    // splits any partially-overlapped hex siblings (left/right pads),
+    // creates a new struct populated with greedy hex packing covering
+    // the selection's bytes, and inserts an embedded Struct field at
+    // the selection start. Refused if the selection crosses parents
+    // or non-hex fields.
+    void byteBreakIntoClassRequested(uint64_t lo, uint64_t hi);
+    // Fired by commitInlineEdit when the user accepts a byte-range
+    // hex-overwrite edit (Enter inside a hex-byte selection). Carries
+    // the absolute address + raw bytes parsed from the edited hex
+    // digits. Controller pushes a cmd::WriteBytes — bypassing the
+    // node-level setNodeValue path which expects a full-row hex value.
+    void byteRangeCommitRequested(uint64_t addr, QByteArray bytes);
+    // One-line status hint emitted by RcxEditor when a byte-selection
+    // operation is rejected (e.g. Enter on a cross-row selection).
+    // Routed to the status bar by MainWindow.
+    void statusHintRequested(QString text);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
@@ -210,6 +273,26 @@ private:
     QPoint m_dragStartPos;        // viewport coords at press
     Qt::KeyboardModifiers m_dragInitMods = Qt::NoModifier;
 
+    // ── Byte selection (hex preview rows only) ──
+    // Half-open absolute address range of currently selected hex bytes.
+    // nullopt = nothing selected. Address-based so the selection survives
+    // refresh and tab-switch, and naturally extends across multiple hex
+    // rows (each line maps to a different LineMeta::offsetAddr).
+    //
+    // Anchor + dragging flag drive the upgrade from row-drag to byte-drag:
+    // press on a hex byte arms the anchor; once the mouse moves past the
+    // 8-px threshold the upgrade fires, m_dragging clears, and byte-drag
+    // takes over. Single click without movement falls through to the
+    // existing row-click path so muscle memory ("click row → select")
+    // is preserved.
+    std::optional<QPair<uint64_t, uint64_t>> m_byteSel;
+    // Anchor address for an armed byte drag. nullopt = not armed. We
+    // use optional rather than a 0 sentinel because the legitimate
+    // byte at virtual address 0 (kernel paging tabs etc.) is a real
+    // selection target.
+    std::optional<uint64_t> m_byteSelAnchor;
+    bool     m_byteSelDragging = false;
+
     // ── Deferred click (protects multi-select on double-click) ──
     uint64_t m_pendingClickNodeId = 0;
     int      m_pendingClickLine = -1;
@@ -242,6 +325,29 @@ private:
         // whitespace begin trimmed away. End restores them so the line ends
         // up byte-identical to its pre-begin shape.
         int        padRestoreSpaces = 0;
+        // Byte-range hex overwrite (set by beginByteEdit). When true,
+        // commitInlineEdit parses the edited hex digits as raw bytes
+        // and emits byteRangeCommitRequested(addr, bytes) instead of
+        // routing through inlineEditCommitted → setNodeValue, which
+        // expects a full-row hex value and would write the wrong
+        // number of bytes for a narrowed selection.
+        bool       byteRange         = false;
+        uint64_t   byteRangeAddr     = 0;
+        int        byteRangeLen      = 0;
+        // Multi-row byte-edit segments. One entry per hex preview row
+        // the selection covers. spanStart/spanEnd track the hex column
+        // range on that row; byteCount is how many bytes that row
+        // contributes to the overall selection. Cursor crossing a
+        // segment boundary auto-jumps to the adjacent segment via
+        // advanceToByteSegment().
+        struct ByteEditSegment {
+            int line       = -1;
+            int spanStart  = 0;   // col in line text where this row's hex starts
+            int spanEnd    = 0;   // col one past the last hex digit
+            int byteCount  = 0;   // bytes in this segment (= (spanEnd-spanStart+1)/3)
+        };
+        QVector<ByteEditSegment> byteSegments;
+        int                      byteSegIdx = 0;
     };
     InlineEditState m_editState;
     QStringList m_staticCompletions;  // autocomplete words for StaticExpr editing
@@ -388,6 +494,58 @@ private:
     void fillIndicatorCols(int indic, int line, int colA, int colB);
     bool resolvedSpanFor(int line, EditTarget t, NormalizedSpan& out,
                          QString* lineTextOut = nullptr) const;
+
+    // ── Byte selection helpers ──
+    // byteAddrAt: returns the absolute byte address if (line, col) lands
+    //   inside a hex preview row's value column, else nullopt. Each byte
+    //   occupies 3 chars ("XX ") in the value column. Optional (rather
+    //   than a 0 sentinel) so a struct based at virtual address 0 —
+    //   common in kernel-paging tabs that view physical memory — can
+    //   still arm a byte drag at offset 0.
+    // applyByteSelectionOverlay: clears IND_BYTE_SEL across the doc, then
+    //   walks m_meta and paints the intersection of m_byteSel with each
+    //   hex preview row.
+    // updateByteSelStatus: builds a one-line summary of the current
+    //   selection (address, size, LE/BE interp, byte preview for
+    //   odd sizes) and emits statusHintRequested so it lands in the
+    //   app status bar. Tail-called from applyByteSelectionOverlay
+    //   so the visual + status text stay in sync.
+    // beginByteEdit: enters hex-overwrite inline edit on the byte range
+    //   when the selection sits inside a single hex row. Cross-row
+    //   selections are refused with a statusHint.
+    // extendByteSelection: grows (positive delta) or shrinks (negative
+    //   delta) the active byte selection's high edge by |delta| bytes.
+    //   `lo` (anchor) never moves — positive Shift+Right grows `hi`,
+    //   negative Shift+Left shrinks `hi` back toward the anchor,
+    //   clamped at lo+1 (≥1 byte). No-op when no selection.
+    // selectAllHexBytes: Ctrl+A handler. Sets m_byteSel to cover every
+    //   byte of every hex preview row in the current m_meta — i.e.
+    //   "select all hex bytes in the visible document". Address-based,
+    //   so a non-contiguous set of hex rows still gets a single
+    //   half-open range covering the union; the paint pass naturally
+    //   skips non-hex rows in between.
+    std::optional<uint64_t> byteAddrAt(int line, int col) const;
+    void applyByteSelectionOverlay();
+    void updateByteSelStatus();
+    void beginByteEdit();
+    void extendByteSelection(int dByte);
+    // snapByteSelectionToRow: row-aware Shift+Down/Up for byte selection.
+    //   dir = +1 → Shift+Down: jump `hi` to end of current hex row, then
+    //              end of next hex preview row. Stops at first non-hex
+    //              row in the layout.
+    //   dir = -1 → Shift+Up:   shrink `hi` back to start of current row,
+    //              then end of prior hex preview row. Always keeps the
+    //              selection ≥ 1 byte (clamps at `lo + 1`).
+    //   The `lo` anchor never moves, same convention as extendByteSelection.
+    void snapByteSelectionToRow(int dir);
+    void selectAllHexBytes();
+    // advanceToByteSegment: when the cursor reaches the boundary of
+    // the current byte-edit segment (right edge → next, left edge →
+    // previous), swap m_editState to the adjacent segment's spans and
+    // place the Scintilla cursor at its first/last byte. Returns true
+    // when the jump happened. Used by handleHexEditKey to make
+    // multi-row byte edits feel like one continuous input stream.
+    bool advanceToByteSegment(int delta);
 };
 
 } // namespace rcx

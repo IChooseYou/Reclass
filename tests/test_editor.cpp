@@ -1642,6 +1642,13 @@ private slots:
 
         int hoverCol = (vs.start + vs.end) / 2;  // middle of value span
         QPoint vp = colToViewport(m_editor->scintilla(), ptrLine, hoverCol);
+        // Reactivate the editor — a previous test that popped its own
+        // top-level window (QMenu screen-capture, etc.) leaves m_editor
+        // not-the-active-window, and the hover dwell guard treats
+        // !isActive as "user moved focus away" and refuses to show.
+        m_editor->raise();
+        m_editor->activateWindow();
+        QApplication::processEvents();
         sendMouseMove(m_editor->scintilla()->viewport(), vp);
         // Preview popups dwell for 700ms before showing. QTRY_VERIFY
         // polls until the condition holds or 2s elapses — much more

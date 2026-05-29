@@ -12,7 +12,7 @@
     "textFaint": "#464646",
     "hover": "#282828",
     "selected": "#262626",
-    "selection": "#21213A",
+    "selection": "#3a2a3a",
     "syntaxKeyword": "#AA9565",
     "syntaxNumber": "#AAA98C",
     "syntaxString": "#C0825A",

@@ -126,6 +126,88 @@ struct ClipboardCodec {
         return r;
     }
 
+    // Parse a clipboard hex string into raw bytes.
+    //
+    // The contract: tokenize on any non-hex character, treat each token
+    // as a hex number, and concatenate left-to-right. Numbers are
+    // left-padded with `0` to an even nibble count so a stand-alone
+    // odd-length token like "A" yields one byte 0x0A (not 0xA0).
+    //
+    // Accepts every common encoding of a hex byte stream:
+    //   "DE AD BE EF"        →  DE AD BE EF
+    //   "DEADBEEF"           →  DE AD BE EF
+    //   "0xDEADBEEF"         →  DE AD BE EF
+    //   "{0xDE, 0xAD, 0xBE}" →  DE AD BE
+    //   "DE,AD"              →  DE AD
+    //   "1 2 3"              →  01 02 03   (per-token left-pad)
+    //   "0x100"              →  01 00      (token "100" left-padded to "0100")
+    //
+    // On a malformed token the parser returns an empty array and writes
+    // a one-line reason into *err. Empty clipboard / no hex digits also
+    // returns empty (with err = "No hex data").
+    static QByteArray parseLenientHex(const QString& src, QString* err = nullptr) {
+        QByteArray out;
+        out.reserve(src.size() / 2);
+        QString tok;
+        auto isHex = [](QChar c) {
+            return c.isDigit()
+                || (c >= QChar('a') && c <= QChar('f'))
+                || (c >= QChar('A') && c <= QChar('F'));
+        };
+        auto flush = [&]() -> bool {
+            if (tok.isEmpty()) return true;
+            // Strip optional 0x/0X prefix on the token (not mid-token).
+            if (tok.size() > 2 && tok[0] == QChar('0')
+                && (tok[1] == QChar('x') || tok[1] == QChar('X')))
+                tok.remove(0, 2);
+            // The 'x' itself is not a hex digit — any token that still
+            // contains it after prefix-strip is malformed.
+            for (QChar c : tok) {
+                if (!isHex(c)) {
+                    if (err) *err = QStringLiteral("Invalid hex digit '%1'").arg(c);
+                    return false;
+                }
+            }
+            // Left-pad to even so a bare "A" yields 0x0A, not 0xA0.
+            if (tok.size() & 1) tok.prepend(QChar('0'));
+            for (int i = 0; i + 1 < tok.size(); i += 2) {
+                bool ok = false;
+                uint8_t b = (uint8_t)tok.mid(i, 2).toUInt(&ok, 16);
+                if (!ok) {
+                    if (err) *err = QStringLiteral("Parse failed");
+                    return false;
+                }
+                out.append((char)b);
+            }
+            tok.clear();
+            return true;
+        };
+        for (int i = 0; i < src.size(); ++i) {
+            QChar c = src[i];
+            // Token grows on hex digit OR the literal 'x'/'X' immediately
+            // after a leading '0' (so "0x" stays in the token to be stripped
+            // by flush()). Anything else flushes.
+            if (isHex(c)) { tok += c; continue; }
+            if ((c == QChar('x') || c == QChar('X'))
+                && tok.size() == 1 && tok[0] == QChar('0')) {
+                tok += c; continue;
+            }
+            // Stray letter (including a mid-token x/X) is malformed —
+            // refuse the whole paste rather than silently dropping the
+            // invalid run and parsing whatever survives.
+            if (c.isLetter()) {
+                if (err) *err = QStringLiteral("Invalid hex digit '%1'").arg(c);
+                return {};
+            }
+            // Whitespace, punctuation, control characters → separator.
+            if (!flush()) return {};
+        }
+        if (!flush()) return {};
+        if (out.isEmpty() && err && err->isEmpty())
+            *err = QStringLiteral("No hex data");
+        return out;
+    }
+
     // Human-readable dump used for plain-text clipboard + external pastes.
     static QString plainDump(const NodeTree& tree,
                              const QVector<uint64_t>& rootIds)

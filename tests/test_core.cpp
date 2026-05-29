@@ -1286,6 +1286,283 @@ private slots:
         QCOMPARE(names.size(), 1);
         QCOMPARE(names[0], QString("Real"));
     }
+
+    // ── findOverlaps ──────────────────────────────────────────────
+    // Helper: build a struct with `kinds` at `offsets`. Returns the
+    // child node ids in declaration order so tests can assert which
+    // pairs the overlap detector finds.
+    static QVector<uint64_t> buildStructWithFields(
+        rcx::NodeTree& tree, const QVector<QPair<int, rcx::NodeKind>>& fields)
+    {
+        rcx::Node r; r.kind = rcx::NodeKind::Struct;
+        r.name = "S"; r.parentId = 0;
+        int ri = tree.addNode(r);
+        uint64_t rootId = tree.nodes[ri].id;
+        QVector<uint64_t> ids;
+        int i = 0;
+        for (const auto& [off, k] : fields) {
+            rcx::Node n;
+            n.kind = k;
+            n.name = QStringLiteral("f%1").arg(i++);
+            n.parentId = rootId;
+            n.offset = off;
+            int ni = tree.addNode(n);
+            ids.append(tree.nodes[ni].id);
+        }
+        return ids;
+    }
+
+    void testFindOverlaps_cleanLayout() {
+        rcx::NodeTree tree;
+        buildStructWithFields(tree, {
+            {0,  rcx::NodeKind::UInt32},  // [0, 4)
+            {4,  rcx::NodeKind::UInt32},  // [4, 8)
+            {8,  rcx::NodeKind::UInt64},  // [8, 16)
+        });
+        QVERIFY(tree.findOverlaps().isEmpty());
+    }
+
+    void testFindOverlaps_twoFieldsAtSameOffset() {
+        rcx::NodeTree tree;
+        auto ids = buildStructWithFields(tree, {
+            {0, rcx::NodeKind::UInt32},   // [0, 4)
+            {0, rcx::NodeKind::UInt32},   // [0, 4) — same range
+        });
+        auto overlaps = tree.findOverlaps();
+        QCOMPARE(overlaps.size(), 1);
+        QCOMPARE(overlaps[0].aId, ids[0]);
+        QCOMPARE(overlaps[0].bId, ids[1]);
+    }
+
+    void testFindOverlaps_partialOverlap() {
+        rcx::NodeTree tree;
+        auto ids = buildStructWithFields(tree, {
+            {0, rcx::NodeKind::UInt32},   // [0, 4)
+            {2, rcx::NodeKind::UInt32},   // [2, 6) — straddles boundary
+        });
+        auto overlaps = tree.findOverlaps();
+        QCOMPARE(overlaps.size(), 1);
+        QCOMPARE(overlaps[0].aId, ids[0]);
+        QCOMPARE(overlaps[0].bId, ids[1]);
+    }
+
+    void testFindOverlaps_oneFieldEntirelyContained() {
+        rcx::NodeTree tree;
+        auto ids = buildStructWithFields(tree, {
+            {0, rcx::NodeKind::UInt64},   // [0, 8) — big one
+            {2, rcx::NodeKind::UInt8},    // [2, 3) — inside the big one
+        });
+        auto overlaps = tree.findOverlaps();
+        QCOMPARE(overlaps.size(), 1);
+        QCOMPARE(overlaps[0].aId, ids[0]);
+        QCOMPARE(overlaps[0].bId, ids[1]);
+    }
+
+    void testFindOverlaps_adjacentFieldsAreClean() {
+        rcx::NodeTree tree;
+        buildStructWithFields(tree, {
+            {0, rcx::NodeKind::UInt8},    // [0, 1)
+            {1, rcx::NodeKind::UInt8},    // [1, 2) — touches but no overlap
+        });
+        QVERIFY(tree.findOverlaps().isEmpty());
+    }
+
+    void testFindOverlaps_unionChildrenIgnored() {
+        // Union deliberately overlaps its children; findOverlaps must
+        // recognise this and report no issues.
+        rcx::NodeTree tree;
+        rcx::Node u; u.kind = rcx::NodeKind::Struct;
+        u.classKeyword = "union";
+        u.name = "U"; u.parentId = 0;
+        int ui = tree.addNode(u);
+        uint64_t uid = tree.nodes[ui].id;
+        for (int i = 0; i < 3; ++i) {
+            rcx::Node n; n.kind = rcx::NodeKind::UInt32;
+            n.name = QStringLiteral("v%1").arg(i);
+            n.parentId = uid; n.offset = 0;
+            tree.addNode(n);
+        }
+        QVERIFY(tree.findOverlaps().isEmpty());
+    }
+
+    void testFindOverlaps_staticFieldsIgnored() {
+        rcx::NodeTree tree;
+        rcx::Node r; r.kind = rcx::NodeKind::Struct;
+        r.name = "S"; r.parentId = 0;
+        int ri = tree.addNode(r);
+        uint64_t rid = tree.nodes[ri].id;
+        rcx::Node sf; sf.kind = rcx::NodeKind::Hex64;
+        sf.name = "static_thing"; sf.parentId = rid;
+        sf.offset = 0; sf.isStatic = true;
+        tree.addNode(sf);
+        rcx::Node f; f.kind = rcx::NodeKind::UInt32;
+        f.name = "real_field"; f.parentId = rid;
+        f.offset = 0;
+        tree.addNode(f);
+        // Real field's offset 0 overlaps with the static field's offset 0
+        // numerically — but static fields aren't sibling-bound, so the
+        // detector must skip them.
+        QVERIFY(tree.findOverlaps().isEmpty());
+    }
+
+    void testFindOverlaps_multiplePairsOneLongField() {
+        // One big field at [0,16) overlaps three smaller ones at 0, 4, 8.
+        // Detector must report all three pairs (UInt64 vs each smaller).
+        rcx::NodeTree tree;
+        auto ids = buildStructWithFields(tree, {
+            {0, rcx::NodeKind::UInt128},  // [0, 16) — covers the others
+            {0, rcx::NodeKind::UInt32},   // [0, 4)
+            {4, rcx::NodeKind::UInt32},   // [4, 8)
+            {8, rcx::NodeKind::UInt32},   // [8, 12)
+        });
+        auto overlaps = tree.findOverlaps();
+        QCOMPARE(overlaps.size(), 3);
+        // First field (UInt128) is at offset 0 → sorted first, paired
+        // against each of the others.
+        for (const auto& p : overlaps)
+            QCOMPARE(p.aId, ids[0]);
+    }
+
+    void testFindOverlaps_rootLevelStructsExcluded() {
+        // Root-level structs (parentId == 0) are independent classes,
+        // not siblings. Multiple root structs at offset 0 must NOT be
+        // reported as overlapping each other.
+        rcx::NodeTree tree;
+        rcx::Node a; a.kind = rcx::NodeKind::Struct;
+        a.name = "A"; a.parentId = 0;
+        tree.addNode(a);
+        rcx::Node b; b.kind = rcx::NodeKind::Struct;
+        b.name = "B"; b.parentId = 0;
+        tree.addNode(b);
+        QVERIFY(tree.findOverlaps().isEmpty());
+    }
+
+    void testFindOverlaps_independentParents() {
+        // Two sibling groups under different parents — overlap in one
+        // group must not affect the other.
+        rcx::NodeTree tree;
+        rcx::Node a; a.kind = rcx::NodeKind::Struct;
+        a.name = "A"; a.parentId = 0;
+        int ai = tree.addNode(a);
+        uint64_t aid = tree.nodes[ai].id;
+        rcx::Node b; b.kind = rcx::NodeKind::Struct;
+        b.name = "B"; b.parentId = 0;
+        int bi = tree.addNode(b);
+        uint64_t bid = tree.nodes[bi].id;
+
+        // A: overlap pair
+        auto mk = [&](uint64_t parent, int off, rcx::NodeKind k) {
+            rcx::Node n; n.kind = k; n.parentId = parent; n.offset = off;
+            n.name = "x";
+            return tree.nodes[tree.addNode(n)].id;
+        };
+        uint64_t a1 = mk(aid, 0, rcx::NodeKind::UInt32);  // [0,4)
+        uint64_t a2 = mk(aid, 2, rcx::NodeKind::UInt32);  // [2,6) — overlaps
+        mk(bid, 0, rcx::NodeKind::UInt32);                // clean
+        mk(bid, 4, rcx::NodeKind::UInt32);                // clean
+
+        auto overlaps = tree.findOverlaps();
+        QCOMPARE(overlaps.size(), 1);
+        QCOMPARE(overlaps[0].aId, a1);
+        QCOMPARE(overlaps[0].bId, a2);
+        QCOMPARE(overlaps[0].parentId, aid);
+    }
+
+    void testFieldPath_simple() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = ""; root.structTypeName = "Player";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node child;
+        child.kind = rcx::NodeKind::UInt32;
+        child.name = "Health";
+        child.parentId = rootId;
+        int ci = tree.addNode(child);
+        uint64_t childId = tree.nodes[ci].id;
+
+        QCOMPARE(tree.fieldPath(childId), QString("Player.Health"));
+        // The root itself returns just its top-level label.
+        QCOMPARE(tree.fieldPath(rootId), QString("Player"));
+    }
+
+    void testFieldPath_nested() {
+        rcx::NodeTree tree;
+        rcx::Node player; player.kind = rcx::NodeKind::Struct;
+        player.structTypeName = "Player"; player.parentId = 0;
+        int pi = tree.addNode(player);
+        uint64_t pId = tree.nodes[pi].id;
+
+        rcx::Node stats; stats.kind = rcx::NodeKind::Struct;
+        stats.name = "Stats"; stats.parentId = pId;
+        int si = tree.addNode(stats);
+        uint64_t sId = tree.nodes[si].id;
+
+        rcx::Node hp; hp.kind = rcx::NodeKind::Float;
+        hp.name = "Health"; hp.parentId = sId;
+        int hi = tree.addNode(hp);
+        uint64_t hId = tree.nodes[hi].id;
+
+        QCOMPARE(tree.fieldPath(hId), QString("Player.Stats.Health"));
+    }
+
+    void testFieldPath_unknownId() {
+        rcx::NodeTree tree;
+        // Nothing added — any id is unknown.
+        QCOMPARE(tree.fieldPath(0xDEADBEEF), QString());
+    }
+
+    void testNodeIdForPath_roundtrip() {
+        rcx::NodeTree tree;
+        rcx::Node player; player.kind = rcx::NodeKind::Struct;
+        player.structTypeName = "Player"; player.parentId = 0;
+        int pi = tree.addNode(player);
+        uint64_t pId = tree.nodes[pi].id;
+
+        rcx::Node stats; stats.kind = rcx::NodeKind::Struct;
+        stats.name = "Stats"; stats.parentId = pId;
+        int si = tree.addNode(stats);
+        uint64_t sId = tree.nodes[si].id;
+
+        rcx::Node hp; hp.kind = rcx::NodeKind::Float;
+        hp.name = "Health"; hp.parentId = sId;
+        int hi = tree.addNode(hp);
+        uint64_t hId = tree.nodes[hi].id;
+
+        // Forward → reverse → equality
+        QString path = tree.fieldPath(hId);
+        QCOMPARE(tree.nodeIdForPath(path), hId);
+        QCOMPARE(tree.nodeIdForPath("Player.Stats"), sId);
+        QCOMPARE(tree.nodeIdForPath("Player"), pId);
+    }
+
+    void testNodeIdForPath_misses() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.structTypeName = "Player"; root.parentId = 0;
+        tree.addNode(root);
+
+        QCOMPARE(tree.nodeIdForPath(""), (uint64_t)0);
+        QCOMPARE(tree.nodeIdForPath("Nope"), (uint64_t)0);
+        QCOMPARE(tree.nodeIdForPath("Player.Missing"), (uint64_t)0);
+    }
+
+    void testFieldPath_customSeparator() {
+        rcx::NodeTree tree;
+        rcx::Node a; a.kind = rcx::NodeKind::Struct;
+        a.structTypeName = "Pkt"; a.parentId = 0;
+        int ai = tree.addNode(a);
+        uint64_t aId = tree.nodes[ai].id;
+        rcx::Node b; b.kind = rcx::NodeKind::UInt16;
+        b.name = "len"; b.parentId = aId;
+        int bi = tree.addNode(b);
+
+        QCOMPARE(tree.fieldPath(tree.nodes[bi].id, QChar('/')),
+                 QString("Pkt/len"));
+    }
 };
 
 QTEST_MAIN(TestCore)

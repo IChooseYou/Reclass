@@ -1632,8 +1632,15 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 QString g = QString::fromLatin1(kGroupOrder[gi]);
                 auto& items = buckets[g];
                 if (items.isEmpty()) continue;
-                // Same-size-first sorting for the matching group
-                if (m_mode != TypePopupMode::Root && m_currentNodeSize > 0) {
+                // Same-size-first sorting for the matching group — except
+                // the Hex group, where the user reads it as a fixed size
+                // ladder (hex128 → hex64 → hex32 → hex16 → hex8). When the
+                // current node was an 8-byte hex64, "same-size first" put
+                // hex64 above hex128, which broke the size-descending
+                // expectation. Always sort Hex by size desc.
+                if (g == QStringLiteral("Hex")) {
+                    std::sort(items.begin(), items.end(), bySizeDesc);
+                } else if (m_mode != TypePopupMode::Root && m_currentNodeSize > 0) {
                     QVector<TypeEntry> sameSize, other;
                     for (const auto& p : items) {
                         if (p.sizeBytes == m_currentNodeSize) sameSize.append(p);

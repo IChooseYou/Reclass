@@ -36,6 +36,17 @@ public:
     QString                    dataPath;
     bool                       modified = false;
     QHash<NodeKind, QString>   typeAliases;
+
+    // Owned RW buffer for self-attached "New Class" projects. The
+    // processmemory provider reads/writes via the OS's RPM/WPM APIs
+    // which take absolute virtual addresses — pointing baseAddress at
+    // this buffer's data() means the user lands on guaranteed-writable
+    // memory in our own process. std::unique_ptr<uint8_t[]> rather
+    // than QByteArray to dodge the CoW pointer-stability hazard; size
+    // is fixed at allocation time. nullptr when the document has a
+    // real source attached (file / external process).
+    std::unique_ptr<uint8_t[]> m_ownedBuffer;
+    size_t                     m_ownedBufferSize = 0;
     // Saved-source entries deserialized from the .rcx file at load
     // time. Held as raw JSON until a controller attaches and lifts
     // them into its own QVector<SavedSourceEntry> — keeps RcxDocument
@@ -43,6 +54,12 @@ public:
     // png.rcx use this to ship a sibling sample binary that the
     // controller auto-attaches on first load.
     QJsonArray                 pendingSavedSources;
+    // Count of sibling-overlaps detected by tree.findOverlaps() during the
+    // most recent load(). Surfaced to the user via a controller statusHint
+    // post-load so it's actually visible (the per-pair details are also
+    // logged via qWarning for console post-mortem). Zero on clean trees /
+    // freshly-created docs.
+    int                        m_loadOverlapCount = 0;
 
     QString resolveTypeName(NodeKind kind) const {
         auto it = typeAliases.find(kind);
@@ -107,6 +124,12 @@ public:
     void insertNode(uint64_t parentId, int offset, NodeKind kind, const QString& name);
     void insertNodeAbove(int beforeIdx, NodeKind kind, const QString& name);
     void removeNode(int nodeIdx);
+    // Extract bytes [selLo, selHi) into a new root class, inserting an
+    // embedded Struct field at selLo in the original parent. Splits any
+    // partially-overlapped hex siblings into left / right hex pads.
+    // Refuses if the range crosses parents or non-hex / container
+    // siblings. Address-space inputs (not byte offsets).
+    void extractByteSelectionToNewClass(uint64_t selLo, uint64_t selHi);
     void toggleCollapse(int nodeIdx);
     void materializeRefChildren(int nodeIdx);
     void setNodeValue(int nodeIdx, int subLine, const QString& text,
@@ -129,6 +152,17 @@ public:
     void deleteRootStruct(uint64_t structId);
     void groupIntoUnion(const QSet<uint64_t>& nodeIds);
     void dissolveUnion(uint64_t unionId);
+
+    // Write a span of bytes from the active provider to a binary file
+    // at `path`. Returns true on success; on failure writes a one-line
+    // reason into *err. Used by the byte-selection "Save as binary
+    // file" action — split out as a public static so tests can drive
+    // it without going through a QFileDialog. Reads the bytes via the
+    // controller's active provider (snapshot wins over real when both
+    // are present, matching the copy paths).
+    bool writeSelectedBytesToFile(uint64_t addr, int n,
+                                  const QString& path,
+                                  QString* err = nullptr) const;
 
     // Applies a command variant. Returns false if the underlying operation
     // rejected the change (e.g. provider write failed). Callers — primarily
@@ -179,7 +213,14 @@ public:
 
     // MCP bridge accessors
     void setSuppressRefresh(bool v) { m_suppressRefresh = v; }
-    void attachViaPlugin(const QString& providerIdentifier, const QString& target);
+    // Attach a provider via plugin. When `registerAsSavedSource` is true
+    // (default: false), also push the attach onto the saved-sources list
+    // so it appears in the source-picker dropdown — useful for the
+    // self-attached "New Class" flow where the user expects the chosen
+    // source to be discoverable. MCP / requestOpenProviderTab callers
+    // leave it false to keep the saved-source list as a UI-owned thing.
+    void attachViaPlugin(const QString& providerIdentifier, const QString& target,
+                         bool registerAsSavedSource = false);
     const QVector<SavedSourceEntry>& savedSources() const { return m_savedSources; }
     int activeSourceIndex() const { return m_activeSourceIdx; }
     void switchSource(int idx) { switchToSavedSource(idx); }

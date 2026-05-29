@@ -94,6 +94,11 @@ private:
     QJsonObject toolAnalysisInferTypes(const QJsonObject& args);
     QJsonObject toolAnalysisImportHeader(const QJsonObject& args);
     QJsonObject toolAnalysisPointerChain(const QJsonObject& args);
+    QJsonObject toolAnalysisFindOverlaps(const QJsonObject& args);
+    QJsonObject toolAnalysisFieldPath(const QJsonObject& args);
+    QJsonObject toolAnalysisTreeSummary(const QJsonObject& args);
+    QJsonObject toolUiByteSelection(const QJsonObject& args);
+    QJsonObject toolUiSetByteSelection(const QJsonObject& args);
 
     // UI inspection + theme tools
     QJsonObject toolUiInspect(const QJsonObject& args);

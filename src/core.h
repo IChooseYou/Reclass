@@ -515,6 +515,82 @@ struct NodeTree {
         return r;
     }
 
+    // Sibling overlap detection. Returns pairs of (nodeId, nodeId) where
+    // two non-static, non-union siblings have intersecting [offset,
+    // offset+span) ranges. The order within a pair is deterministic:
+    // the lower-offset node first, then the offender. Unions are
+    // excluded because their children DELIBERATELY overlap at offset 0;
+    // static fields are excluded because their absolute-address
+    // computation makes them sibling-independent. Bitfield containers
+    // count their declared elementKind size, not the sum of bit widths.
+    //
+    // This isn't run by validate() because there's no safe auto-repair:
+    // the user has to choose which field to keep / shrink. Surfacing
+    // the result is the editor's job (margin warning glyph, follow-up).
+    struct OverlapPair {
+        uint64_t aId;       // lower-offset sibling
+        uint64_t bId;       // overlapping sibling
+        uint64_t parentId;  // common parent
+    };
+    QVector<OverlapPair> findOverlaps() const {
+        QVector<OverlapPair> out;
+        if (nodes.isEmpty()) return out;
+
+        // Build child map once. childrenOf() lazily fills m_childCache;
+        // we want the same data without the mutable cache side effect
+        // (this is a const method).
+        QHash<uint64_t, QVector<int>> childMap;
+        for (int i = 0; i < nodes.size(); ++i)
+            childMap[nodes[i].parentId].append(i);
+
+        for (auto it = childMap.constBegin(); it != childMap.constEnd(); ++it) {
+            uint64_t parentId = it.key();
+            // Root-level structs (parentId == 0) aren't real siblings —
+            // they're independent top-level classes that happen to share
+            // the synthetic "0" parent. Their offsets are arbitrary and
+            // reporting them as overlapping would be noise.
+            if (parentId == 0) continue;
+            // Skip union containers entirely — overlapping children at
+            // offset 0 is the whole point of unions.
+            int pi = indexOfId(parentId);
+            if (pi >= 0 && nodes[pi].isUnion()) continue;
+
+            // Collect non-static siblings with their [start, end) range.
+            // Sort by start so a single forward pass catches every overlap.
+            struct Range { int idx; int64_t start; int64_t end; };
+            QVector<Range> ranges;
+            ranges.reserve(it.value().size());
+            for (int ci : it.value()) {
+                const Node& n = nodes[ci];
+                if (n.isStatic) continue;
+                int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                    ? structSpan(n.id) : n.byteSize();
+                // Zero-sized nodes (unfinished containers etc.) can't
+                // overlap with anything; treat them as points and skip.
+                if (sz <= 0) continue;
+                ranges.push_back({ci, (int64_t)n.offset, (int64_t)n.offset + sz});
+            }
+            std::sort(ranges.begin(), ranges.end(),
+                [](const Range& a, const Range& b) { return a.start < b.start; });
+
+            // Walk forward — for each range, every later range whose
+            // start < this end is an overlap. We track the maximum end
+            // seen so far so a long range that swallows several shorter
+            // ones still reports each pair.
+            for (int i = 0; i + 1 < ranges.size(); ++i) {
+                for (int j = i + 1; j < ranges.size(); ++j) {
+                    if (ranges[j].start >= ranges[i].end) break;
+                    OverlapPair p;
+                    p.aId = nodes[ranges[i].idx].id;
+                    p.bId = nodes[ranges[j].idx].id;
+                    p.parentId = parentId;
+                    out.append(p);
+                }
+            }
+        }
+        return out;
+    }
+
     int indexOfId(uint64_t id) const {
         if (m_idCache.isEmpty() && !nodes.isEmpty()) {
             for (int i = 0; i < nodes.size(); i++)
@@ -529,6 +605,66 @@ struct NodeTree {
                 m_childCache[nodes[i].parentId].append(i);
         }
         return m_childCache.value(parentId);
+    }
+
+    // Inverse of fieldPath: resolve a dot-path back to a node id. Returns 0
+    // on miss. First segment must match a top-level struct's structTypeName
+    // or name; subsequent segments match children by name. Matching is
+    // exact (case-sensitive). Empty paths and unknown segments return 0
+    // without partial matches — callers can decide whether to retry.
+    uint64_t nodeIdForPath(const QString& path,
+                           QChar sep = QLatin1Char('.')) const {
+        if (path.isEmpty() || nodes.isEmpty()) return 0;
+        QStringList segs = path.split(sep, Qt::SkipEmptyParts);
+        if (segs.isEmpty()) return 0;
+
+        // First segment matches a top-level struct (parentId == 0).
+        int cur = -1;
+        for (int i = 0; i < nodes.size(); ++i) {
+            if (nodes[i].parentId != 0) continue;
+            const Node& n = nodes[i];
+            if (n.structTypeName == segs[0] || n.name == segs[0]) {
+                cur = i;
+                break;
+            }
+        }
+        if (cur < 0) return 0;
+
+        // Remaining segments — walk children by exact name match.
+        for (int s = 1; s < segs.size(); ++s) {
+            uint64_t parentId = nodes[cur].id;
+            int next = -1;
+            for (int i = 0; i < nodes.size(); ++i) {
+                if (nodes[i].parentId != parentId) continue;
+                if (nodes[i].name == segs[s]) { next = i; break; }
+            }
+            if (next < 0) return 0;
+            cur = next;
+        }
+        return nodes[cur].id;
+    }
+
+    // Dot-separated path from root struct to this node:
+    // "Player.Stats.Health". Used by Copy Path and by external tooling
+    // (MCP) to identify a node textually. Walks parentId chain; bails on
+    // cycles or missing nodes with a best-effort prefix. The top-level
+    // class is included if it has a structTypeName, omitted otherwise so
+    // an anonymous root doesn't produce a leading dot.
+    QString fieldPath(uint64_t id, QChar sep = QLatin1Char('.')) const {
+        QStringList parts;
+        QSet<uint64_t> seen;
+        uint64_t cur = id;
+        while (cur != 0 && !seen.contains(cur)) {
+            seen.insert(cur);
+            int idx = indexOfId(cur);
+            if (idx < 0) break;
+            const Node& n = nodes[idx];
+            QString label = !n.name.isEmpty() ? n.name : n.structTypeName;
+            if (label.isEmpty() && n.parentId != 0) label = QStringLiteral("?");
+            if (!label.isEmpty()) parts.prepend(label);
+            cur = n.parentId;
+        }
+        return parts.join(sep);
     }
 
     // Collect node + all descendants (iterative, cycle-safe)

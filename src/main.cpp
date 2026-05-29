@@ -68,6 +68,7 @@
 #include <QWindow>
 #include <QMouseEvent>
 #include <QScrollBar>
+#include <QShortcut>
 #include "themes/thememanager.h"
 #include "themes/themeeditor.h"
 #include "optionsdialog.h"
@@ -657,7 +658,17 @@ public:
                     // Sentinel "+" tab — draw add icon instead of text
                     QString tabText = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
                     if (tabText == QStringLiteral("\u200B")) {
-                        QColor fg = tab->palette.color(QPalette::WindowText);
+                        // + tab: dim at rest, accent on hover. Subordinate
+                        // visual weight relative to the per-tab \u00D7 close
+                        // button \u2014 earlier rev used full WindowText so the
+                        // + competed equally with the \u00D7 (same chroma, same
+                        // weight). Disabled.WindowText = theme.textMuted in
+                        // the app palette; Link = theme.indHoverSpan accent.
+                        bool hov = tab->state & State_MouseOver;
+                        QColor fg = hov
+                            ? tab->palette.color(QPalette::Link)
+                            : tab->palette.color(QPalette::Disabled,
+                                                 QPalette::WindowText);
                         // Center in content area: below 2px accent zone, above 1px bottom border
                         int cx = tab->rect.left() + tab->rect.width() / 2;
                         int cy = tab->rect.top() + 2 + (tab->rect.height() - 3) / 2;
@@ -991,6 +1002,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     }
     { PROFILE_SCOPE("MainWindow::createStatusBar");     createStatusBar();     }
 
+    // Autosave timer — writes a shadow copy of every modified doc that has
+    // a known filePath, so a crash mid-edit doesn't lose work. Untitled docs
+    // are skipped here; a full implementation will need an app-config dir
+    // and a restore prompt on startup.
+    m_autosaveTimer = new QTimer(this);
+    m_autosaveTimer->setInterval(60 * 1000);
+    connect(m_autosaveTimer, &QTimer::timeout, this,
+            &MainWindow::autosaveAllModifiedDocs);
+    m_autosaveTimer->start();
+
     // Eliminate gap between central widget and status bar
     if (auto* ml = layout()) {
         ml->setSpacing(0);
@@ -1151,6 +1172,8 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(file, "&Open...", QKeySequence::Open, makeIcon(":/vsicons/folder-opened.svg"), this, &MainWindow::openFile);
     m_recentFilesMenu = file->addMenu("Recent &Files");
     updateRecentFilesMenu();
+    Qt5Qt6AddAction(file, "&Welcome Screen", QKeySequence::UnknownKey,
+                    makeIcon(":/vsicons/home.svg"), this, &MainWindow::showStartPage);
     file->addSeparator();
     Qt5Qt6AddAction(file, "&Save", QKeySequence::Save, makeIcon(":/vsicons/save.svg"), this, &MainWindow::saveFile);
     Qt5Qt6AddAction(file, "Save &As...", QKeySequence::SaveAs, makeIcon(":/vsicons/save-as.svg"), this, &MainWindow::saveFileAs);
@@ -1237,6 +1260,10 @@ void MainWindow::createMenus() {
     auto* edit = m_menuBar->addMenu("&Edit");
     Qt5Qt6AddAction(edit, "&Undo", QKeySequence::Undo, makeIcon(":/vsicons/arrow-left.svg"), this, &MainWindow::undo);
     Qt5Qt6AddAction(edit, "&Redo", QKeySequence::Redo, makeIcon(":/vsicons/arrow-right.svg"), this, &MainWindow::redo);
+    edit->addSeparator();
+    Qt5Qt6AddAction(edit, "&Find Field...", QKeySequence::Find,
+                    makeIcon(":/vsicons/search.svg"), this,
+                    &MainWindow::showFindFieldDialog);
     edit->addSeparator();
     Qt5Qt6AddAction(edit, "Add &Bookmark...", QKeySequence(Qt::CTRL | Qt::Key_B), QIcon(),
                     this, &MainWindow::promptAddBookmark);
@@ -1355,13 +1382,18 @@ void MainWindow::createMenus() {
     auto* actJetBrains = fontMenu->addAction("JetBrains Mono");
     actJetBrains->setCheckable(true);
     actJetBrains->setActionGroup(fontGroup);
+    auto* actIbmPlex = fontMenu->addAction("IBM Plex Mono");
+    actIbmPlex->setCheckable(true);
+    actIbmPlex->setActionGroup(fontGroup);
     // Load saved preference
     QSettings settings("Reclass", "Reclass");
     QString savedFont = settings.value("font", "JetBrains Mono").toString();
-    if (savedFont == "JetBrains Mono") actJetBrains->setChecked(true);
-    else actConsolas->setChecked(true);
+    if      (savedFont == "JetBrains Mono")  actJetBrains->setChecked(true);
+    else if (savedFont == "IBM Plex Mono")   actIbmPlex->setChecked(true);
+    else                                      actConsolas->setChecked(true);
     connect(actConsolas, &QAction::triggered, this, [this]() { setEditorFont("Consolas"); });
     connect(actJetBrains, &QAction::triggered, this, [this]() { setEditorFont("JetBrains Mono"); });
+    connect(actIbmPlex, &QAction::triggered, this, [this]() { setEditorFont("IBM Plex Mono"); });
 
     // Theme submenu
     auto* themeMenu = view->addMenu("&Theme");
@@ -1504,11 +1536,11 @@ void MainWindow::createMenus() {
     }
 
     view->addSeparator();
-    Qt5Qt6AddAction(view, "&Split Editor",
+    Qt5Qt6AddAction(view, "Split View &Below",
                     QKeySequence(Qt::CTRL | Qt::Key_Backslash),
                     makeIcon(":/vsicons/split-vertical.svg"), this,
                     &MainWindow::splitView);
-    Qt5Qt6AddAction(view, "&Unsplit Editor",
+    Qt5Qt6AddAction(view, "&Unsplit View",
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Backslash),
                     QIcon(), this, &MainWindow::unsplitView);
     view->addSeparator();
@@ -1634,6 +1666,10 @@ void MainWindow::createMenus() {
         showRttiBrowser(val);
     });
     Qt5Qt6AddAction(tools, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
+    Qt5Qt6AddAction(tools, "&Validate Project...",
+                    QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_V),
+                    makeIcon(":/vsicons/warning.svg"), this,
+                    &MainWindow::showValidateDialog);
     Qt5Qt6AddAction(tools, "&Performance Profiler...",
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F),
                     QIcon(), this, &MainWindow::showProfilerDialog);
@@ -1862,7 +1898,24 @@ public:
     QColor colBright;   // highlight sweep
     QColor colSep;      // vertical separator between sections
 
+    // Optional click handler — installed by createStatusBar to launch the
+    // Goto Address dialog when the user clicks the location segment.
+    // std::function instead of a Qt signal because the class is defined
+    // inline in main.cpp (no Q_OBJECT, no MOC pass on inline-defined
+    // classes) — the callback contract is the simplest plumbing that
+    // doesn't require restructuring the file.
+    std::function<void()> onClicked;
+
 protected:
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton && onClicked) {
+            onClicked();
+            e->accept();
+            return;
+        }
+        QWidget::mousePressEvent(e);
+    }
+
     void paintEvent(QPaintEvent*) override {
         if (m_text.isEmpty()) return;
         QPainter p(this);
@@ -2008,6 +2061,12 @@ void MainWindow::createStatusBar() {
     m_statusLabel->setText("");
     m_statusLabel->setContentsMargins(0, 0, 0, 0);
     m_statusLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    // Click anywhere on the status text to open Goto Address — the
+    // location segment (path / +0xNN / class size) is already showing
+    // there, so click-to-jump is the natural affordance even without a
+    // dedicated standalone button.
+    m_statusLabel->setCursor(Qt::PointingHandCursor);
+    m_statusLabel->onClicked = [this]() { showGotoAddressDialog(); };
 
     // View toggle is now per-pane via QTabWidget tab bar (Reclass / Code tabs)
     sb->tabRow = nullptr;
@@ -2572,6 +2631,33 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
     pane.tabWidget->setCurrentIndex(0);
     pane.viewMode = VM_Reclass;
+
+    // Right-click on the Reclass/Code/Debug tab bar → quick split/unsplit
+    // and tab switching. The split offers go through the same splitView
+    // path as Ctrl+\, so the splitter flips to vertical (south stack) and
+    // a new pane appends below.
+    {
+        QTabBar* tabBar = pane.tabWidget->tabBar();
+        tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
+        QTabWidget* tw = pane.tabWidget;
+        connect(tabBar, &QWidget::customContextMenuRequested, this,
+                [this, tw, tabBar](const QPoint& pos) {
+            QMenu menu;
+            int tabIdx = tabBar->tabAt(pos);
+            if (tabIdx >= 0 && tabIdx != tw->currentIndex()) {
+                menu.addAction(QStringLiteral("Open '%1'").arg(tw->tabText(tabIdx)),
+                    [tw, tabIdx]() { tw->setCurrentIndex(tabIdx); });
+                menu.addSeparator();
+            }
+            menu.addAction(QStringLiteral("Split View &Below"),
+                this, &MainWindow::splitView);
+            if (auto* t = activeTab(); t && t->panes.size() > 1) {
+                menu.addAction(QStringLiteral("&Unsplit View"),
+                    this, &MainWindow::unsplitView);
+            }
+            menu.exec(tabBar->mapToGlobal(pos));
+        });
+    }
 
     // Add to splitter
     tab.splitter->addWidget(pane.tabWidget);
@@ -4048,15 +4134,15 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::newClass() {
-    project_new(QStringLiteral("class"));
+    project_new(QStringLiteral("class"), /*forceFreshDoc=*/true);
 }
 
 void MainWindow::newStruct() {
-    project_new();
+    project_new(QString(),                /*forceFreshDoc=*/true);
 }
 
 void MainWindow::newEnum() {
-    project_new(QStringLiteral("enum"));
+    project_new(QStringLiteral("enum"),   /*forceFreshDoc=*/true);
 }
 
 // Returns the RcxEditor root struct id so the caller can pin viewRootId.
@@ -4367,6 +4453,13 @@ void MainWindow::duplicateNodeAction() {
 void MainWindow::splitView() {
     auto* tab = activeTab();
     if (!tab) return;
+    // Split south (Reclass on top, Code below). The splitter is created
+    // Qt::Horizontal in createTab so the workspace dock layout has a
+    // natural left-right metaphor; for in-tab pane splits the user
+    // wants stacked vertically so they can read full-width rows of
+    // both views at once.
+    if (tab->splitter)
+        tab->splitter->setOrientation(Qt::Vertical);
     tab->panes.append(createSplitPane(*tab));
 }
 
@@ -4496,10 +4589,10 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
 void MainWindow::about() {
     ThemedDialog dlg(this);
     dlg.setWindowTitle(QStringLiteral("About Reclass"));
-    dlg.setFixedSize(280, 140);
+    dlg.setFixedSize(420, 420);
     auto* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(20, 16, 20, 16);
-    lay->setSpacing(12);
+    lay->setSpacing(10);
 
     const auto& t = ThemeManager::instance().current();
     auto* buildLabel = new QLabel(
@@ -4508,6 +4601,49 @@ void MainWindow::about() {
             .arg(t.textDim.name()));
     buildLabel->setAlignment(Qt::AlignCenter);
     lay->addWidget(buildLabel);
+
+    // Acknowledgments — third-party open source projects Reclass ships
+    // or links against. Linked names go to upstream; license names sit
+    // next to each entry so users can verify compatibility at a glance.
+    auto* ackTitle = new QLabel(
+        QStringLiteral("<span style='color:%1;font-size:11px;font-weight:600;'>"
+                       "Open Source Acknowledgments</span>")
+            .arg(t.text.name()));
+    ackTitle->setAlignment(Qt::AlignCenter);
+    lay->addWidget(ackTitle);
+
+    auto* ack = new QLabel;
+    ack->setTextFormat(Qt::RichText);
+    ack->setOpenExternalLinks(true);
+    ack->setWordWrap(true);
+    ack->setText(QStringLiteral(
+        "<div style='color:%1;font-size:11px;line-height:140%%;'>"
+        "<p>Reclass uses the following open-source software. Many thanks "
+        "to their authors and maintainers.</p>"
+        "<ul style='margin-left:14px;padding-left:0;'>"
+        "<li><a href='https://www.qt.io/' style='color:%2;'>Qt</a> "
+        "— LGPL v3 (dynamically linked)</li>"
+        "<li><a href='https://www.riverbankcomputing.com/software/qscintilla/'"
+        " style='color:%2;'>QScintilla</a> — GPL v3 / commercial</li>"
+        "<li><a href='https://github.com/MicrosoftDocs/cpp-docs' "
+        "style='color:%2;'>raw_pdb</a> — BSD 2-Clause "
+        "(Microsoft PDB parser fork)</li>"
+        "<li><a href='https://github.com/aengelke/fadec' style='color:%2;'>"
+        "fadec</a> — BSD 2-Clause (x86 decoder)</li>"
+        "<li><a href='https://github.com/JetBrains/JetBrainsMono' "
+        "style='color:%2;'>JetBrains Mono</a> — SIL Open Font License 1.1</li>"
+        "<li><a href='https://github.com/IBM/plex' style='color:%2;'>"
+        "IBM Plex Mono</a> — SIL Open Font License 1.1</li>"
+        "</ul>"
+        "<p style='color:%3;font-size:10px;'>Full license texts are "
+        "redistributed alongside the binaries in the project's "
+        "<code>third_party/</code> and <code>src/fonts/</code> "
+        "directories.</p>"
+        "</div>")
+        .arg(t.text.name(), t.borderFocused.name(), t.textDim.name()));
+    lay->addWidget(ack);
+
+    lay->addStretch();
 
     auto* ghBtn = new DialogButton(QStringLiteral("Open GitHub"),
         DialogButton::Primary, &dlg);
@@ -4540,6 +4676,20 @@ void MainWindow::showShortcutsDialog() {
     lay->setContentsMargins(12, 12, 12, 12);
     lay->setSpacing(8);
 
+    // Filter box — type to narrow the list to matching key OR description.
+    // Section headers stay visible whenever any of their rows survive the
+    // filter, so the result reads as "the same dialog with fewer rows" not
+    // an unrelated list view.
+    auto* filterEdit = new QLineEdit(&dlg);
+    filterEdit->setPlaceholderText(QStringLiteral("Filter shortcuts…"));
+    filterEdit->setClearButtonEnabled(true);
+    filterEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3; padding: 4px 6px; }"
+        "QLineEdit:focus { border: 1px solid %4; }")
+        .arg(t.background.name(), t.text.name(), t.border.name(),
+             t.borderFocused.name()));
+    lay->addWidget(filterEdit);
+
     auto* table = new QTableWidget(&dlg);
     table->setColumnCount(2);
     table->horizontalHeader()->setVisible(false);
@@ -4561,7 +4711,7 @@ void MainWindow::showShortcutsDialog() {
         {QStringLiteral("↑ / ↓"),     QStringLiteral("Previous / next field (↓ at end adds a new field)")},
         {QStringLiteral("PgUp / PgDn"),         QStringLiteral("Jump by visible lines")},
         {QStringLiteral("Home / End"),          QStringLiteral("Line start / line end")},
-        {QStringLiteral("Ctrl+F"),              QStringLiteral("Find")},
+        {QStringLiteral("Ctrl+F"),              QStringLiteral("Find field by name across open docs")},
         {QStringLiteral("F12"),                 QStringLiteral("Go to definition")},
         {QStringLiteral("Ctrl+Click"),          QStringLiteral("Open type in new tab")},
 
@@ -4585,16 +4735,33 @@ void MainWindow::showShortcutsDialog() {
         {QStringLiteral("← / →"),     QStringLiteral("Cycle through same-size type variants")},
         {QStringLiteral("T"),                   QStringLiteral("Open type picker")},
 
+        {QStringLiteral("Byte selection"),     {}, true},
+        {QStringLiteral("Drag on hex bytes"),    QStringLiteral("Select a range of bytes (8 px threshold upgrades from row-drag)")},
+        {QStringLiteral("Shift+Click on hex byte"), QStringLiteral("Extend existing byte selection to clicked byte")},
+        {QStringLiteral("Ctrl+A on hex row"),    QStringLiteral("Select all hex bytes in document")},
+        {QStringLiteral("Shift+← / →"),       QStringLiteral("Extend selection by one byte (clamps at doc end)")},
+        {QStringLiteral("Shift+↓ / ↑"),         QStringLiteral("Snap selection to next / previous hex row boundary")},
+        {QStringLiteral("Shift+End / Home"),     QStringLiteral("Extend to last hex byte / collapse to anchor")},
+        {QStringLiteral("Ctrl+C"),               QStringLiteral("Copy as hex string (e.g. \"DE AD BE EF\")")},
+        {QStringLiteral("Ctrl+Shift+C"),         QStringLiteral("Copy selection range (\"0xLO..0xHI (N bytes)\")")},
+        {QStringLiteral("Right-click"),          QStringLiteral("Copy as C array / Python bytes / save as file / paste / zero-fill / edit")},
+        {QStringLiteral("Ctrl+V"),               QStringLiteral("Paste hex (parses \"DE AD\", \"0xDEAD\", \"{0xDE,0xAD}\")")},
+        {QStringLiteral("Enter"),                QStringLiteral("Edit selected bytes in hex-overwrite mode")},
+        {QStringLiteral("Delete / Backspace"),   QStringLiteral("Zero-fill selection")},
+        {QStringLiteral("Esc"),                  QStringLiteral("Clear byte selection (first Esc), then node selection")},
+
         {QStringLiteral("Bookmarks & Window"), {}, true},
         {QStringLiteral("Ctrl+B"),              QStringLiteral("Add bookmark...")},
         {QStringLiteral("Ctrl+Alt+B"),          QStringLiteral("Quick bookmark here")},
-        {QStringLiteral("Ctrl+\\"),             QStringLiteral("Split editor")},
-        {QStringLiteral("Ctrl+Shift+\\"),       QStringLiteral("Unsplit editor")},
+        {QStringLiteral("Ctrl+\\"),             QStringLiteral("Split view below (Reclass / Code side-by-side)")},
+        {QStringLiteral("Ctrl+Shift+\\"),       QStringLiteral("Unsplit view")},
         {QStringLiteral("Ctrl+Shift+[ / ]"),    QStringLiteral("Collapse all / expand all")},
         {QStringLiteral("F5"),                  QStringLiteral("Refresh")},
         {QStringLiteral("Ctrl+G"),              QStringLiteral("Go to offset...")},
+        {QStringLiteral("Ctrl+K"),              QStringLiteral("Command palette")},
+        {QStringLiteral("Ctrl+Shift+V"),        QStringLiteral("Validate project (find sibling overlaps)")},
         {QStringLiteral("Ctrl+Shift+P"),        QStringLiteral("Presentation mode")},
-        {QStringLiteral("Esc"),                 QStringLiteral("Clear selection")},
+        {QStringLiteral("F1"),                  QStringLiteral("This dialog")},
     };
 
     table->setRowCount(rows.size());
@@ -4624,6 +4791,41 @@ void MainWindow::showShortcutsDialog() {
     table->setColumnWidth(0, 200);
     table->horizontalHeader()->setStretchLastSection(true);
     lay->addWidget(table);
+
+    // Live filter — hide any non-header row that doesn't substring-match
+    // (case-insensitive) the query in either column. Headers stay hidden
+    // until at least one body row beneath them is visible.
+    auto applyFilter = [table, &rows](const QString& q) {
+        QString needle = q.trimmed().toLower();
+        if (needle.isEmpty()) {
+            for (int i = 0; i < rows.size(); ++i) table->setRowHidden(i, false);
+            return;
+        }
+        QVector<bool> visible(rows.size(), false);
+        for (int i = 0; i < rows.size(); ++i) {
+            if (rows[i].header) continue;
+            bool m = rows[i].key.toLower().contains(needle)
+                  || rows[i].desc.toLower().contains(needle);
+            visible[i] = m;
+        }
+        // Walk through and reveal headers whose section has any visible
+        // body row. Section ends at the next header or the table end.
+        int curHeader = -1;
+        bool sectionHasMatch = false;
+        for (int i = 0; i < rows.size(); ++i) {
+            if (rows[i].header) {
+                if (curHeader >= 0) visible[curHeader] = sectionHasMatch;
+                curHeader = i;
+                sectionHasMatch = false;
+            } else if (visible[i]) {
+                sectionHasMatch = true;
+            }
+        }
+        if (curHeader >= 0) visible[curHeader] = sectionHasMatch;
+        for (int i = 0; i < rows.size(); ++i)
+            table->setRowHidden(i, !visible[i]);
+    };
+    QObject::connect(filterEdit, &QLineEdit::textChanged, &dlg, applyFilter);
 
     auto* closeBtn = new rcx::DialogButton(QStringLiteral("Close"),
         rcx::DialogButton::Primary, &dlg);
@@ -6055,11 +6257,17 @@ void MainWindow::showTypeAliasesDialog() {
 
 // ── Project Lifecycle API ──
 
-QDockWidget* MainWindow::project_new(const QString& classKeyword) {
-    // If an active document exists, add the new struct to it and open in a new tab
-    // sharing the same document (so all structs live in one project).
+QDockWidget* MainWindow::project_new(const QString& classKeyword,
+                                      bool forceFreshDoc) {
+    // If an active document exists AND the caller didn't force fresh,
+    // add the new struct to it and open in a new tab sharing the same
+    // document (so all structs live in one project). File → New Class
+    // and friends pass forceFreshDoc=true so each menu invocation
+    // creates its own project with its own buffer — the user expects
+    // a fresh sandbox, not a tab that silently shares the previous
+    // project's base address and provider.
     auto* existingCtrl = activeController();
-    if (existingCtrl) {
+    if (existingCtrl && !forceFreshDoc) {
         auto* doc = existingCtrl->document();
         buildEmptyStruct(doc->tree, classKeyword);
 
@@ -6092,6 +6300,53 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
     // No active document — create a fresh one
     auto* doc = new RcxDocument(this);
 
+#ifdef Q_OS_WIN
+    // Self-attach: allocate a 64 KB RW buffer in our own process and
+    // point baseAddress at it. The processmemory provider then reads
+    // and writes against our own PID via RPM/WPM — every byte the user
+    // sees is guaranteed writable. No source picker, no 0x00400000
+    // placeholder, no "page invalid" landing experience for beginners.
+    constexpr size_t kBufSize = 64 * 1024;
+    doc->m_ownedBuffer = std::unique_ptr<uint8_t[]>(new uint8_t[kBufSize]());
+    doc->m_ownedBufferSize = kBufSize;
+    // (Zero-init is handled by the value-init `new uint8_t[N]()` above.)
+    doc->tree.baseAddress = reinterpret_cast<uint64_t>(doc->m_ownedBuffer.get());
+
+    buildEmptyStruct(doc->tree, classKeyword);
+
+    auto* dock = createTab(doc);
+
+    // Attach via processmemory if available — mirror selfTest's guard
+    // so a missing plugin DLL doesn't pop a "Provider Unavailable"
+    // dialog on every New Class.
+    if (ProviderRegistry::instance().findProvider(QStringLiteral("processmemory"))) {
+        auto& tab = m_tabs[dock];
+        DWORD pid = GetCurrentProcessId();
+        QString target = QString("%1:Reclass.exe").arg(pid);
+        // registerAsSavedSource=true so the source-picker dropdown
+        // surfaces "Reclass.exe" as an entry. Without this the user
+        // would see an active source label but an empty dropdown,
+        // breaking discoverability when they want to switch back.
+        tab.ctrl->attachViaPlugin(QStringLiteral("processmemory"), target,
+                                  /*registerAsSavedSource=*/true);
+        // Re-pin baseAddress — attachViaPlugin re-evaluates any saved
+        // formula and may overwrite it. The buffer's address is what
+        // we actually want to view. Same dance selfTest does (main.cpp
+        // around line 4280).
+        doc->tree.baseAddress = reinterpret_cast<uint64_t>(doc->m_ownedBuffer.get());
+        doc->tree.baseAddressFormula.clear();
+        tab.ctrl->refresh();
+    }
+    // NOTE: do NOT call setReadOnlyOverride here. The buffer is ours
+    // to write into — that's the entire point of this branch. The
+    // override that selfTest sets is for the live RcxEditor object
+    // where stomping bytes can crash Qt's virtual dispatch; this
+    // scenario is completely different.
+#else
+    // Non-Windows: processmemory plugin is Windows-only today. Fall
+    // back to the legacy 256-byte zero buffer at a fake base. Once
+    // Linux/macOS get a processmemory equivalent, this branch can
+    // adopt the same self-attach behaviour.
     QByteArray data(256, '\0');
     doc->loadData(data);
     doc->tree.baseAddress = 0x00400000;
@@ -6099,6 +6354,7 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword) {
     buildEmptyStruct(doc->tree, classKeyword);
 
     auto* dock = createTab(doc);
+#endif
 
     // Workspace stays hidden until the user opens it via View menu.
     // The dock's visibilityChanged handler in createWorkspaceDock
@@ -6120,6 +6376,40 @@ QDockWidget* MainWindow::project_open(const QString& path) {
             "Reclass (*.rcx)"
             ";;All (*)");
         if (filePath.isEmpty()) return nullptr;
+    }
+
+    // Recovery: if a fresher .autosave shadow exists next to the target,
+    // ask whether to restore. We delete the .autosave file in either case
+    // — if the user declines, the next normal save sequence will reclaim
+    // the slot anyway, and keeping a stale shadow would re-trigger the
+    // prompt forever.
+    //
+    // restoredFromAutosave preserves the original target path so a
+    // subsequent Ctrl+S writes back to foo.rcx, NOT foo.rcx.autosave.
+    // Without this fixup `doc->filePath` would carry the .autosave
+    // path forward and Save would never restore the user's real file.
+    QString originalPath;
+    {
+        QString shadow = filePath + QStringLiteral(".autosave");
+        QFileInfo origInfo(filePath);
+        QFileInfo shadowInfo(shadow);
+        if (shadowInfo.exists() && shadowInfo.isFile()
+            && shadowInfo.lastModified() > origInfo.lastModified()) {
+            bool restore = ThemedMessageBox::confirm(this,
+                QStringLiteral("Restore Autosave?"),
+                QStringLiteral("A more recent autosave exists for this file "
+                               "(saved %1, original %2). Open the autosave instead?")
+                    .arg(QLocale().toString(shadowInfo.lastModified(), QLocale::ShortFormat))
+                    .arg(QLocale().toString(origInfo.lastModified(), QLocale::ShortFormat)),
+                QStringLiteral("Restore"),
+                QStringLiteral("Open original"));
+            if (restore) {
+                originalPath = filePath;
+                filePath = shadow;
+            } else {
+                QFile::remove(shadow);
+            }
+        }
     }
 
     // Detect if this is an XML-based ReClass file by checking first bytes
@@ -6177,6 +6467,17 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         return nullptr;
     }
 
+    // If we loaded from a .autosave shadow, point doc->filePath back at
+    // the real file so a subsequent Save writes to foo.rcx, not the
+    // shadow. Mark the doc modified so the user gets the usual unsaved-
+    // changes prompt on close — the autosave content was an in-flight
+    // edit, not a committed state.
+    if (!originalPath.isEmpty()) {
+        doc->filePath = originalPath;
+        doc->modified = true;
+        filePath = originalPath;  // local var so addRecentFile + status use the real path
+    }
+
     int nodeCount = doc->tree.nodes.size();
     if (nodeCount > 5000) {
         updateProgress(0, QStringLiteral("Composing %1 nodes...").arg(nodeCount));
@@ -6196,8 +6497,18 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     int classCount = 0;
     for (const auto& n : doc->tree.nodes)
         if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
-    setAppStatus(QStringLiteral("Loaded %1 (%2 classes, %3 nodes)")
-        .arg(QFileInfo(filePath).fileName()).arg(classCount).arg(nodeCount));
+    QString loadedMsg = QStringLiteral("Loaded %1 (%2 classes, %3 nodes)")
+        .arg(QFileInfo(filePath).fileName()).arg(classCount).arg(nodeCount);
+    if (doc->m_loadOverlapCount > 0) {
+        // Tools → Validate Project (Ctrl+Shift+V) opens the dialog that
+        // enumerates each pair — the load path only owns the summary.
+        setAppStatus(loadedMsg,
+            QStringLiteral(" — %1 sibling overlap%2 (Ctrl+Shift+V to review)")
+                .arg(doc->m_loadOverlapCount)
+                .arg(doc->m_loadOverlapCount == 1 ? "" : "s"));
+    } else {
+        setAppStatus(loadedMsg);
+    }
     endProgress();
 
     return dock;
@@ -6208,16 +6519,23 @@ bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
     if (!dock || !m_tabs.contains(dock)) return false;
     auto& tab = m_tabs[dock];
 
+    QString savedPath;
     if (saveAs || tab.doc->filePath.isEmpty()) {
         QString path = QFileDialog::getSaveFileName(this,
             "Save Definition", {}, "Reclass (*.rcx);;JSON (*.json)");
         if (path.isEmpty()) return false;
         tab.doc->save(path);
         addRecentFile(path);
+        savedPath = path;
     } else {
         tab.doc->save(tab.doc->filePath);
         addRecentFile(tab.doc->filePath);
+        savedPath = tab.doc->filePath;
     }
+    // Drop the autosave shadow on a real save — the user's explicit save
+    // is the authoritative version, no need to keep the recovery copy.
+    if (!savedPath.isEmpty())
+        QFile::remove(savedPath + QStringLiteral(".autosave"));
     updateWindowTitle();
     rebuildWorkspaceModel();
     return true;
@@ -6281,6 +6599,283 @@ MainWindow::findReferences(const QString& targetTypeName,
         }
     }
     return hits;
+}
+
+void MainWindow::showValidateDialog() {
+    // Walks every open document's tree and reports sibling overlaps —
+    // the most common bug a user introduces by editing offsets manually.
+    // (NodeTree::validate's orphans/cycles/duplicates auto-repair on
+    // load, so they don't need a dialog.) Pulls overlaps from EVERY
+    // open doc, not just the active tab, so a multi-doc project gets
+    // one consolidated review surface.
+    struct OverlapRow {
+        QDockWidget* dock;
+        QString docTitle;
+        QString parentName;
+        QString aName;
+        QString bName;
+        int     aOffset;
+        int     aSize;
+        int     bOffset;
+        int     bSize;
+        uint64_t aId;
+    };
+    QVector<OverlapRow> rows;
+    QSet<RcxDocument*> seen;
+    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it) {
+        RcxDocument* doc = it.value().doc;
+        if (seen.contains(doc)) continue;
+        seen.insert(doc);
+        const auto& tree = doc->tree;
+        auto pairs = tree.findOverlaps();
+        if (pairs.isEmpty()) continue;
+        auto fieldSize = [&](const Node& n) {
+            return (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                ? tree.structSpan(n.id) : n.byteSize();
+        };
+        for (const auto& p : pairs) {
+            int ai = tree.indexOfId(p.aId);
+            int bi = tree.indexOfId(p.bId);
+            int pi = tree.indexOfId(p.parentId);
+            if (ai < 0 || bi < 0) continue;
+            OverlapRow row;
+            row.dock = it.key();
+            row.docTitle = it.key() ? it.key()->windowTitle() : QStringLiteral("?");
+            if (pi >= 0) {
+                const Node& pn = tree.nodes[pi];
+                row.parentName = pn.structTypeName.isEmpty() ? pn.name : pn.structTypeName;
+            }
+            const Node& a = tree.nodes[ai];
+            const Node& b = tree.nodes[bi];
+            row.aName = a.name;  row.aOffset = a.offset;  row.aSize = fieldSize(a);
+            row.bName = b.name;  row.bOffset = b.offset;  row.bSize = fieldSize(b);
+            row.aId = p.aId;
+            rows.append(row);
+        }
+    }
+
+    const auto& t = ThemeManager::instance().current();
+    rcx::ThemedDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Validate Project"));
+    dlg.resize(620, 420);
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    auto* header = new QLabel(rows.isEmpty()
+        ? QStringLiteral("No sibling overlaps detected.")
+        : QStringLiteral("%1 sibling overlap%2 across %3 document%4")
+              .arg(rows.size()).arg(rows.size() == 1 ? "" : "s")
+              .arg(seen.size()).arg(seen.size() == 1 ? "" : "s"), &dlg);
+    header->setStyleSheet(QStringLiteral("color: %1;")
+        .arg(rows.isEmpty() ? t.indHintGreen.name() : t.textDim.name()));
+    layout->addWidget(header);
+
+    auto* list = new QListWidget(&dlg);
+    list->setAlternatingRowColors(false);
+    QSettings settings("Reclass", "Reclass");
+    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
+    monoFont.setFixedPitch(true);
+    list->setFont(monoFont);
+    list->setStyleSheet(QStringLiteral(
+        "QListWidget { background: %1; color: %2; border: 1px solid %3; }"
+        "QListWidget::item { padding: 4px 8px; }"
+        "QListWidget::item:hover { background: %4; }"
+        "QListWidget::item:selected { background: %5; color: %6; }")
+        .arg(t.background.name(), t.text.name(), t.border.name(),
+             t.hover.name(), t.selected.name(), t.text.name()));
+    for (const auto& r : rows) {
+        QString text = QStringLiteral("%1 · %2  ↔  %3 @ +0x%4 (size %5)  vs  "
+                                       "%6 @ +0x%7 (size %8)")
+            .arg(r.docTitle)
+            .arg(r.parentName.isEmpty() ? QStringLiteral("(root)") : r.parentName)
+            .arg(r.aName)
+            .arg(r.aOffset, 0, 16)
+            .arg(r.aSize)
+            .arg(r.bName)
+            .arg(r.bOffset, 0, 16)
+            .arg(r.bSize);
+        auto* item = new QListWidgetItem(text);
+        item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(
+            reinterpret_cast<quintptr>(r.dock)));
+        item->setData(Qt::UserRole + 1, QString::number(r.aId));
+        list->addItem(item);
+    }
+    layout->addWidget(list, 1);
+
+    // Double-click → raise dock, scroll to the first offending field.
+    connect(list, &QListWidget::itemActivated, this,
+            [this, &dlg](QListWidgetItem* item) {
+        if (!item) return;
+        auto* dock = reinterpret_cast<QDockWidget*>(
+            item->data(Qt::UserRole).value<quintptr>());
+        uint64_t nodeId = item->data(Qt::UserRole + 1).toString().toULongLong();
+        if (!dock || !m_tabs.contains(dock)) return;
+        dock->raise();
+        dock->show();
+        m_activeDocDock = dock;
+        m_tabs[dock].ctrl->scrollToNodeId(nodeId);
+        dlg.accept();
+    });
+
+    auto* closeBtn = new rcx::DialogButton(QStringLiteral("Close"),
+        rcx::DialogButton::Primary, &dlg);
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    auto* btnRow = new QHBoxLayout;
+    btnRow->setContentsMargins(0, 0, 0, 0);
+    btnRow->addStretch();
+    btnRow->addWidget(closeBtn);
+    layout->addLayout(btnRow);
+    closeBtn->setDefault(true);
+    dlg.exec();
+}
+
+void MainWindow::showFindFieldDialog() {
+    // Quick navigation: type a substring, see matching fields from every open
+    // doc, Enter / double-click jumps to the field. Cheap O(N·M) scan because
+    // even 100 docs × 10k fields is 1M strings — fast enough to refilter on
+    // every keystroke without async work.
+    struct Hit {
+        QDockWidget* dock;
+        QString      docTitle;
+        QString      path;         // dot-path including container ancestry
+        QString      typeName;
+        int          offset;
+        uint64_t     nodeId;
+    };
+    QVector<Hit> all;
+    QSet<RcxDocument*> seen;
+    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it) {
+        RcxDocument* doc = it.value().doc;
+        if (seen.contains(doc)) continue;
+        seen.insert(doc);
+        const auto& tree = doc->tree;
+        for (int i = 0; i < tree.nodes.size(); ++i) {
+            const Node& n = tree.nodes[i];
+            // Skip the synthetic root structs themselves — they show up
+            // as their named children's path prefix anyway.
+            if (n.parentId == 0) continue;
+            // Anonymous fields are useless to navigate to via name search.
+            if (n.name.isEmpty()) continue;
+            Hit h;
+            h.dock     = it.key();
+            h.docTitle = it.key() ? it.key()->windowTitle() : QStringLiteral("?");
+            h.path     = tree.fieldPath(n.id);
+            h.typeName = doc->resolveTypeName(n.kind);
+            h.offset   = n.offset;
+            h.nodeId   = n.id;
+            all.append(h);
+        }
+    }
+
+    const auto& t = ThemeManager::instance().current();
+    rcx::ThemedDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Find Field"));
+    dlg.resize(620, 480);
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    // Last query — sticky across Find Field invocations within the session.
+    // Reopening Ctrl+F right after closing pre-fills the previous filter
+    // with selectAll so a single keystroke either continues the search or
+    // overwrites cleanly. Function-local static is intentional: this state
+    // is scoped to this dialog and shouldn't outlive a process restart.
+    static QString s_lastQuery;
+
+    auto* search = new QLineEdit(&dlg);
+    search->setPlaceholderText(QStringLiteral("Type to filter %1 field%2…")
+        .arg(all.size()).arg(all.size() == 1 ? "" : "s"));
+    search->setClearButtonEnabled(true);
+    if (!s_lastQuery.isEmpty()) {
+        search->setText(s_lastQuery);
+        search->selectAll();
+    }
+    search->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: 1px solid %3; padding: 6px 8px; }"
+        "QLineEdit:focus { border: 1px solid %4; }")
+        .arg(t.background.name(), t.text.name(), t.border.name(),
+             t.borderFocused.name()));
+    layout->addWidget(search);
+
+    QSettings settings("Reclass", "Reclass");
+    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
+    monoFont.setFixedPitch(true);
+
+    auto* list = new QListWidget(&dlg);
+    list->setAlternatingRowColors(false);
+    list->setFont(monoFont);
+    list->setStyleSheet(QStringLiteral(
+        "QListWidget { background: %1; color: %2; border: 1px solid %3; }"
+        "QListWidget::item { padding: 4px 8px; }"
+        "QListWidget::item:hover { background: %4; }"
+        "QListWidget::item:selected { background: %5; color: %6; }")
+        .arg(t.background.name(), t.text.name(), t.border.name(),
+             t.hover.name(), t.selected.name(), t.text.name()));
+    layout->addWidget(list, 1);
+
+    auto refill = [list, &all, &t](const QString& q) {
+        list->clear();
+        QString needle = q.trimmed().toLower();
+        int shown = 0;
+        for (const auto& h : all) {
+            if (!needle.isEmpty() && !h.path.toLower().contains(needle)) continue;
+            QString text = QStringLiteral("%1  %2  +0x%3  [%4]")
+                .arg(h.path, -38, QChar(' '))
+                .arg(h.typeName, -14, QChar(' '))
+                .arg(h.offset, 0, 16)
+                .arg(h.docTitle);
+            auto* item = new QListWidgetItem(text);
+            item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(
+                reinterpret_cast<quintptr>(h.dock)));
+            item->setData(Qt::UserRole + 1, QString::number(h.nodeId));
+            list->addItem(item);
+            if (++shown >= 500) break;  // Cap to avoid pathological repaint cost.
+        }
+        if (list->count() > 0) list->setCurrentRow(0);
+    };
+    refill(search->text());
+
+    QObject::connect(search, &QLineEdit::textChanged, &dlg, refill);
+
+    // Enter in the search box activates the current row. Down/Up are handled
+    // by the dialog-level shortcuts below so the user can drive the whole
+    // dialog from the keyboard without ever leaving the line edit.
+    QObject::connect(search, &QLineEdit::returnPressed, &dlg, [list, &dlg]() {
+        QListWidgetItem* item = list->currentItem();
+        if (item) emit list->itemActivated(item);
+        else dlg.reject();
+    });
+    auto moveSel = [list](int delta) {
+        int r = list->currentRow() + delta;
+        if (r < 0) r = 0;
+        if (r >= list->count()) r = list->count() - 1;
+        if (r >= 0) list->setCurrentRow(r);
+    };
+    auto* sDown = new QShortcut(QKeySequence(Qt::Key_Down), &dlg);
+    QObject::connect(sDown, &QShortcut::activated, &dlg,
+                     [moveSel]() { moveSel(+1); });
+    auto* sUp = new QShortcut(QKeySequence(Qt::Key_Up), &dlg);
+    QObject::connect(sUp, &QShortcut::activated, &dlg,
+                     [moveSel]() { moveSel(-1); });
+
+    auto activate = [this, &dlg](QListWidgetItem* item) {
+        if (!item) return;
+        auto* dock = reinterpret_cast<QDockWidget*>(
+            item->data(Qt::UserRole).value<quintptr>());
+        uint64_t nodeId = item->data(Qt::UserRole + 1).toString().toULongLong();
+        if (!dock || !m_tabs.contains(dock)) return;
+        dock->raise();
+        dock->show();
+        m_activeDocDock = dock;
+        m_tabs[dock].ctrl->scrollToNodeId(nodeId);
+        dlg.accept();
+    };
+    connect(list, &QListWidget::itemActivated, this, activate);
+
+    search->setFocus();
+    dlg.exec();
+    s_lastQuery = search->text();
 }
 
 void MainWindow::showFindReferences(const QString& targetTypeName,
@@ -8129,6 +8724,26 @@ int MainWindow::loadDockSize(QDockWidget* dock, int fallback) const {
                    fallback).toInt();
 }
 
+void MainWindow::autosaveAllModifiedDocs() {
+    // Walk every open doc once (multiple tabs can share a doc — dedup) and
+    // shadow-save any that have unsaved changes AND a known filePath. We
+    // do NOT clear doc->modified — this is a recovery snapshot, not a real
+    // save. A real saveFile / saveFileAs removes the .autosave file.
+    QSet<RcxDocument*> seen;
+    int wrote = 0;
+    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it) {
+        RcxDocument* doc = it.value().doc;
+        if (seen.contains(doc)) continue;
+        seen.insert(doc);
+        if (!doc->modified) continue;
+        if (doc->filePath.isEmpty()) continue;
+        if (doc->save(doc->filePath + QStringLiteral(".autosave")))
+            ++wrote;
+    }
+    if (wrote > 0)
+        qInfo().nospace() << "[autosave] wrote " << wrote << " shadow copy(ies)";
+}
+
 void MainWindow::addRecentFile(const QString& path) {
     if (path.isEmpty()) return;
     QString absPath = QFileInfo(path).absoluteFilePath();
@@ -8163,6 +8778,13 @@ void MainWindow::updateRecentFilesMenu() {
     if (added == 0) {
         auto* empty = m_recentFilesMenu->addAction(QStringLiteral("(empty)"));
         empty->setEnabled(false);
+    } else {
+        m_recentFilesMenu->addSeparator();
+        m_recentFilesMenu->addAction(QStringLiteral("&Clear Recent"), this, [this]() {
+            QSettings s("Reclass", "Reclass");
+            s.remove("recentFiles");
+            updateRecentFilesMenu();
+        });
     }
 }
 
@@ -8761,13 +9383,15 @@ MainWindow::InspectionResult MainWindow::inspectAt(QWidget* widget, QPoint local
 void MainWindow::showStartPage() {
     if (m_startPage) return;
 
-    // Preload a new class behind the splash. Dismissing the splash — via
-    // outside-click, Esc, or the "New Class" card — just hides it and reveals
-    // the preloaded class instantly, no "blank window" flash. The other
-    // cards (Open, Import*, recent files, Tutorial) auto-replace the
-    // preloaded tab when their action succeeds (closeAllDocDocks runs inside
+    // Preload a new class behind the splash so dismissing without a card
+    // choice lands on something rather than a blank window. Only fires
+    // when no tabs exist (the app-startup path); mid-session File →
+    // Welcome leaves existing tabs untouched. The other cards (Open,
+    // Import*, recent files, Tutorial) auto-replace the preloaded tab
+    // when their action succeeds (closeAllDocDocks runs inside
     // project_open / the import_* paths).
-    if (m_tabs.isEmpty())
+    const bool preloadedNewClass = m_tabs.isEmpty();
+    if (preloadedNewClass)
         newClass();
 
     m_startPage = new StartPageWidget(this);
@@ -8778,10 +9402,21 @@ void MainWindow::showStartPage() {
              qBound(560, int(height() * 0.85), height() - 20));
     m_startPage->setFixedSize(sz);
 
-    // Wire start page signals. All "dismiss-only" paths (newClass card, Esc,
-    // outside-click) just hide the splash — preloaded class is the landing.
-    connect(m_startPage, &StartPageWidget::newClass, this, [this]() {
+    // Explicit "New Class" card: if the preload already provided a fresh
+    // class (startup path), just dismiss and the user lands on it. If no
+    // preload happened (mid-session Welcome over existing tabs), create
+    // one so the click actually produces a class.
+    connect(m_startPage, &StartPageWidget::newClass, this,
+            [this, preloadedNewClass]() {
         dismissStartPage();
+        if (!preloadedNewClass) newClass();
+    });
+    // Esc or outside-click — dismiss only. If the session has no tabs
+    // at dismiss time, create one so they don't land on a blank window.
+    connect(m_startPage, &StartPageWidget::dismissed, this, [this]() {
+        dismissStartPage();
+        if (m_tabs.isEmpty())
+            newClass();
     });
     connect(m_startPage, &StartPageWidget::openProject, this, [this]() {
         dismissStartPage();
@@ -8879,6 +9514,8 @@ int main(int argc, char* argv[]) {
     // Load embedded fonts
     if (QFontDatabase::addApplicationFont(":/fonts/JetBrainsMono.ttf") == -1)
         qWarning("Failed to load embedded JetBrains Mono font");
+    if (QFontDatabase::addApplicationFont(":/fonts/IBMPlexMono.ttf") == -1)
+        qWarning("Failed to load embedded IBM Plex Mono font");
     // Apply saved font preference before creating any editors
     {
         QSettings settings("Reclass", "Reclass");

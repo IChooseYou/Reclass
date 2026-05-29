@@ -107,10 +107,22 @@ public:
 
     // `anchor`: global screen point where the arrow tip touches.
     // Typically the center-bottom of the hovered span.
-    void showAt(const QPoint& anchor) {
+    //
+    // `preferAbove`: when true, force the tooltip body to render ABOVE
+    // the anchor (arrow points downward into the anchor) whenever there
+    // is room above. Falls back to below if the top of the screen is
+    // hit. When false (default), the legacy behaviour applies — body
+    // below if it fits, else above. Used by the byte-selection tooltip
+    // so it pops upward off the selected row (anchored at the top of
+    // the line) and doesn't cover other hex rows below.
+    void showAt(const QPoint& anchor, bool preferAbove = false) {
         QRect scr = screenAt(anchor);
         int w = m_bw, h = m_bh + kArrowH;
-        m_up = (anchor.y() + h <= scr.bottom());
+        if (preferAbove) {
+            m_up = (anchor.y() - h < scr.top());  // flip down only if no room above
+        } else {
+            m_up = (anchor.y() + h <= scr.bottom());
+        }
         int x = qBound(scr.left() + 2, anchor.x() - w / 2, scr.right() - w - 2);
         int y = m_up ? anchor.y() : anchor.y() - h;
         m_ax = qBound(kRadius + kArrowW/2 + 1, anchor.x() - x,
@@ -178,36 +190,52 @@ protected:
         if (!m_richLines.isEmpty()) {
             QFont boldBody = m_font; boldBody.setBold(true);
             QFont keyFont = m_font;
-            keyFont.setPointSizeF(m_font.pointSizeF() * 0.80);
+            // Keycap label sits at 70% of body font — smaller than the
+            // value text it sits next to. The previous 80% looked
+            // chunky against compact body interps.
+            keyFont.setPointSizeF(m_font.pointSizeF() * 0.70);
             QFontMetrics kfm(keyFont);
-            // Compute line height: max of text height and keycap height
-            int keyH = kfm.height() + 10;  // generous inner padding
-            int lineH = qMax((int)bf.lineSpacing(), keyH + 4);
+            // Tight inner padding: +4 px (was +10). Outer +2 around
+            // the cap is implicit from the line-height max() below.
+            int keyH = kfm.height() + 4;
+            int keyRowH = qMax((int)bf.lineSpacing(), keyH + 2);
+            int textRowH = bf.lineSpacing();
             for (int li = 0; li < m_richLines.size(); li++) {
+                // Per-line height — text-only rows stay compact; rows
+                // that contain a keycap span use the taller keyRowH.
+                // Lets us stack 4 keycap rows + a text interp row
+                // without blowing every line up to keycap height.
+                bool lineHasKey = false;
+                for (const auto& s : m_richLines[li])
+                    if (s.keyCap) { lineHasKey = true; break; }
+                int lineH = lineHasKey ? keyRowH : textRowH;
                 qreal cx = kPad;
                 for (const auto& span : m_richLines[li]) {
                     QColor col = span.color.isValid() ? span.color : m_bodyCol;
                     if (span.keyCap) {
-                        // Draw keyboard key: rounded rect with centered symbol
-                        int tw = kfm.horizontalAdvance(span.text);
-                        int kw = qMax(tw + 14, keyH);  // generous horizontal padding, min square
+                        // Draw keyboard key: rounded rect with centered symbol.
+                        // Width is uniform across the tooltip (m_maxKeyW set
+                        // by recalc) so a column of caps lines up and the
+                        // action labels that follow start at the same x.
+                        int kw = m_maxKeyW > 0 ? m_maxKeyW
+                                               : qMax(kfm.horizontalAdvance(span.text) + 8, keyH);
                         qreal ky = cy + (lineH - keyH) / 2.0;
                         QRectF kr(cx, ky, kw, keyH);
                         // Subtle fill for the key face
                         QColor keyBg = m_bg.lighter(130);
-                        p.setPen(QPen(col.darker(120), 1.2));
+                        p.setPen(QPen(col.darker(120), 1.0));
                         p.setBrush(keyBg);
-                        p.drawRoundedRect(kr, 4, 4);
+                        p.drawRoundedRect(kr, 3, 3);
                         // Key label
                         p.setFont(keyFont);
                         p.setPen(col);
                         p.drawText(kr, Qt::AlignCenter, span.text);
-                        cx += kw + 6;  // gap after key
+                        cx += kw + 4;  // gap after key
                     } else {
                         p.setFont(span.bold ? boldBody : m_font);
                         p.setPen(col);
                         QFontMetrics sfm(span.bold ? boldBody : m_font);
-                        // Vertically center text in the expanded line
+                        // Vertically center text in the line
                         qreal textY = cy + (lineH - sfm.height()) / 2.0 + sfm.ascent();
                         p.drawText(QPointF(cx, textY), span.text);
                         cx += sfm.horizontalAdvance(span.text);
@@ -236,34 +264,49 @@ private:
     void recalc() {
         QFontMetrics tf(m_bold), bf(m_font);
         QFont keyFont = m_font;
-        keyFont.setPointSizeF(m_font.pointSizeF() * 0.80);
+        // Keep these in sync with the draw path above (0.70 scale,
+        // +4 inner padding). Changes here without matching draw-side
+        // changes will mis-size the tooltip rectangle.
+        keyFont.setPointSizeF(m_font.pointSizeF() * 0.70);
         QFontMetrics kfm(keyFont);
-        int keyH = kfm.height() + 10;
-        bool hasKeyCaps = false;
+        int keyH = kfm.height() + 4;
+        int keyRowH = qMax((int)bf.lineSpacing(), keyH + 2);
+        int textRowH = bf.lineSpacing();
         int maxW = m_title.isEmpty() ? 0 : tf.horizontalAdvance(m_title);
+        int totalLinesH = 0;
+        // Pass 1: find the widest keycap. Every keycap in the
+        // tooltip then renders at this width so columns line up.
+        m_maxKeyW = 0;
+        for (const auto& rl : m_richLines) {
+            for (const auto& s : rl) {
+                if (!s.keyCap) continue;
+                int tw = kfm.horizontalAdvance(s.text);
+                m_maxKeyW = qMax(m_maxKeyW, qMax(tw + 8, keyH));
+            }
+        }
         if (!m_richLines.isEmpty()) {
             for (const auto& rl : m_richLines) {
                 int lineW = 0;
+                bool lineHasKey = false;
                 for (const auto& s : rl) {
                     if (s.keyCap) {
-                        hasKeyCaps = true;
-                        int tw = kfm.horizontalAdvance(s.text);
-                        lineW += qMax(tw + 14, keyH) + 6;
+                        lineHasKey = true;
+                        lineW += m_maxKeyW + 4;
                     } else {
                         QFontMetrics sfm(s.bold ? tf : bf);
                         lineW += sfm.horizontalAdvance(s.text);
                     }
                 }
                 maxW = qMax(maxW, lineW);
+                totalLinesH += lineHasKey ? keyRowH : textRowH;
             }
         } else {
             for (const auto& l : m_lines) maxW = qMax(maxW, bf.horizontalAdvance(l));
+            totalLinesH = m_lines.size() * textRowH;
         }
-        int lineCount = m_richLines.isEmpty() ? m_lines.size() : m_richLines.size();
-        int lineH = hasKeyCaps ? qMax((int)bf.lineSpacing(), keyH + 4) : bf.lineSpacing();
         m_bw = qMin(maxW + 2 * kPad, kMaxW);
         m_bh = kPad + (m_title.isEmpty() ? 0 : tf.height() + kGap + 1 + kGap)
-             + lineCount * lineH + kPad;
+             + totalLinesH + kPad;
     }
 
     QString m_title, m_body;
@@ -274,6 +317,11 @@ private:
     QColor m_titleCol{220, 220, 220}, m_bodyCol{180, 180, 180}, m_sepCol{60, 60, 60};
     bool m_up = true;
     int m_ax = 0, m_bw = 0, m_bh = 0;
+    // Widest keycap across all rich lines, computed by recalc() and
+    // applied to every keycap by the draw path so columns of caps
+    // (Ctrl+C / Ctrl+V / Del / Enter) line up and the action labels
+    // that follow them start at the same x position.
+    int m_maxKeyW = 0;
 };
 
 // Shared process-wide tooltip. The global QEvent::ToolTip bridge (set up

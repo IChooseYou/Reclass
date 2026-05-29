@@ -245,6 +245,29 @@ bool RcxDocument::load(const QString& path) {
         auto vr = tree.validate(/*repair=*/true);
         if (!vr.clean())
             qWarning() << "[load] tree validation:" << path << vr.summary();
+        // Overlap detection — non-repairable (the user has to choose
+        // which field to shrink), so we log a warning per pair so the
+        // issue is visible in the console + future margin-warning pass.
+        auto overlaps = tree.findOverlaps();
+        m_loadOverlapCount = overlaps.size();
+        if (!overlaps.isEmpty()) {
+            qWarning().nospace() << "[load] " << path
+                << ": " << overlaps.size()
+                << " sibling overlap(s) detected — manual review required";
+            for (int i = 0; i < qMin(overlaps.size(), 5); ++i) {
+                int ai = tree.indexOfId(overlaps[i].aId);
+                int bi = tree.indexOfId(overlaps[i].bId);
+                if (ai < 0 || bi < 0) continue;
+                qWarning().noquote() << "  ├ overlap:"
+                    << tree.nodes[ai].name
+                    << QStringLiteral("@+0x%1").arg(tree.nodes[ai].offset, 0, 16)
+                    << "vs" << tree.nodes[bi].name
+                    << QStringLiteral("@+0x%1").arg(tree.nodes[bi].offset, 0, 16);
+            }
+            if (overlaps.size() > 5)
+                qWarning().noquote() << "  └ ... (+"
+                    << (overlaps.size() - 5) << "more)";
+        }
     }
 
     // Load type aliases
@@ -654,6 +677,238 @@ void RcxController::connectEditor(RcxEditor* editor) {
                                             : QStringLiteral("at end")));
     });
 
+    // ── Byte-selection actions ──
+    // The editor handles the keyboard event + dispatches one of these
+    // signals when the user has a hex byte selection (m_byteSel) and
+    // presses Ctrl+C / Ctrl+V / Del. The controller does the I/O:
+    // reads via the active provider's snapshot (so values match what
+    // the user sees), writes via cmd::WriteBytes for undoability.
+
+    // Hex-string helper used by both copy + paste. Format matches the
+    // hex-row preview: uppercase, space-separated 2-digit pairs.
+    auto byteRangeFromEditor = [editor]() -> std::optional<QPair<uint64_t,uint64_t>> {
+        return editor->byteSelection();
+    };
+
+    connect(editor, &RcxEditor::byteCopyHexRequested, this,
+            [this, byteRangeFromEditor]() {
+        auto range = byteRangeFromEditor();
+        if (!range || !m_doc->provider) return;
+        uint64_t lo = range->first;
+        int n = static_cast<int>(range->second - range->first);
+        if (n <= 0 || n > 65536) return;
+        const Provider* prov = m_snapshotProv
+            ? static_cast<const Provider*>(m_snapshotProv.get())
+            : m_doc->provider.get();
+        QByteArray data = prov->isReadable(lo, n) ? prov->readBytes(lo, n)
+                                                  : QByteArray();
+        if (data.size() < n) {
+            emit statusHint(QStringLiteral("Couldn't read %1 bytes at 0x%2")
+                .arg(n).arg(lo, 0, 16));
+            return;
+        }
+        QString hex;
+        hex.reserve(n * 3);
+        for (int i = 0; i < n; ++i) {
+            if (i > 0) hex += QLatin1Char(' ');
+            hex += QStringLiteral("%1")
+                .arg((uint8_t)data[i], 2, 16, QChar('0')).toUpper();
+        }
+        QApplication::clipboard()->setText(hex);
+        emit statusHint(QStringLiteral("Copied %1 byte%2 as hex")
+            .arg(n).arg(n == 1 ? "" : "s"));
+    });
+
+    // Copy-as-C-array / copy-as-Python: same read path as plain hex
+    // copy, different formatter. Both factored out so they're easy to
+    // smoke-test through the existing test_byte_selection_controller.
+    auto readSelectionBytes = [this, byteRangeFromEditor]() -> QByteArray {
+        auto range = byteRangeFromEditor();
+        if (!range || !m_doc->provider) return {};
+        uint64_t lo = range->first;
+        int n = static_cast<int>(range->second - range->first);
+        if (n <= 0 || n > 65536) return {};
+        const Provider* prov = m_snapshotProv
+            ? static_cast<const Provider*>(m_snapshotProv.get())
+            : m_doc->provider.get();
+        if (!prov->isReadable(lo, n)) {
+            emit statusHint(QStringLiteral("Couldn't read %1 bytes at 0x%2")
+                .arg(n).arg(lo, 0, 16));
+            return {};
+        }
+        return prov->readBytes(lo, n);
+    };
+
+    connect(editor, &RcxEditor::byteCopyAsCArrayRequested, this,
+            [this, readSelectionBytes]() {
+        QByteArray data = readSelectionBytes();
+        if (data.isEmpty()) return;
+        // Format as `{0xDE, 0xAD, 0xBE, 0xEF}` — direct paste into a
+        // C/C++ array initializer. Linewrap at 16 bytes/row so long
+        // selections don't produce one absurdly wide line.
+        QString out;
+        out.reserve(data.size() * 7);
+        out += QLatin1Char('{');
+        for (int i = 0; i < data.size(); ++i) {
+            if (i > 0) out += QLatin1Char(',');
+            if (i > 0 && (i % 16) == 0) out += QLatin1Char('\n');
+            else if (i > 0)              out += QLatin1Char(' ');
+            // Build the hex digits separately so .toUpper() doesn't
+            // touch the literal `0x` prefix (which must stay lowercase
+            // for C/C++ to parse). Without this, the output became
+            // "0X1A" which is technically still legal C++ but reads
+            // wrong to most eyes.
+            QString digits = QStringLiteral("%1")
+                .arg((uint8_t)data[i], 2, 16, QChar('0')).toUpper();
+            out += QStringLiteral("0x") + digits;
+        }
+        out += QLatin1Char('}');
+        QApplication::clipboard()->setText(out);
+        emit statusHint(QStringLiteral("Copied %1 byte%2 as C array")
+            .arg(data.size()).arg(data.size() == 1 ? "" : "s"));
+    });
+
+    connect(editor, &RcxEditor::byteSaveAsFileRequested, this,
+            [this, byteRangeFromEditor]() {
+        auto range = byteRangeFromEditor();
+        if (!range) return;
+        uint64_t lo = range->first;
+        int n = static_cast<int>(range->second - range->first);
+        if (n <= 0 || n > (1 << 27)) {  // 128 MB sanity cap
+            emit statusHint(QStringLiteral("Selection too large to save"));
+            return;
+        }
+        QString defaultName = QStringLiteral("bytes_%1_%2.bin")
+            .arg(lo, 0, 16).arg(n);
+        QString path = QFileDialog::getSaveFileName(
+            qobject_cast<QWidget*>(parent()),
+            QStringLiteral("Save Bytes"),
+            defaultName,
+            QStringLiteral("Binary (*.bin);;All Files (*)"));
+        if (path.isEmpty()) return;
+        QString err;
+        if (writeSelectedBytesToFile(lo, n, path, &err)) {
+            emit statusHint(QStringLiteral("Saved %1 byte%2 to %3")
+                .arg(n).arg(n == 1 ? "" : "s")
+                .arg(QFileInfo(path).fileName()));
+        } else {
+            emit statusHint(err.isEmpty()
+                ? QStringLiteral("Save failed") : err);
+        }
+    });
+
+    connect(editor, &RcxEditor::byteCopyAsPythonRequested, this,
+            [this, readSelectionBytes]() {
+        QByteArray data = readSelectionBytes();
+        if (data.isEmpty()) return;
+        // Format as Python bytes literal `b'\xde\xad\xbe\xef'`. Lowercase
+        // hex digits because Python's repr(bytes(...)) uses lowercase —
+        // copy-pasteability into a REPL is the use case.
+        QString out;
+        out.reserve(4 + data.size() * 4);
+        out += QStringLiteral("b'");
+        for (int i = 0; i < data.size(); ++i) {
+            out += QStringLiteral("\\x%1")
+                .arg((uint8_t)data[i], 2, 16, QChar('0'));
+        }
+        out += QLatin1Char('\'');
+        QApplication::clipboard()->setText(out);
+        emit statusHint(QStringLiteral("Copied %1 byte%2 as Python bytes")
+            .arg(data.size()).arg(data.size() == 1 ? "" : "s"));
+    });
+
+    connect(editor, &RcxEditor::bytePasteHexRequested, this,
+            [this, byteRangeFromEditor]() {
+        auto range = byteRangeFromEditor();
+        if (!range || !m_doc->provider) return;
+        if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
+            emit statusHint(QStringLiteral("Target is read-only"));
+            return;
+        }
+        uint64_t lo = range->first;
+        int n = static_cast<int>(range->second - range->first);
+        if (n <= 0 || n > 65536) return;
+
+        // Parse via ClipboardCodec::parseLenientHex so the per-token
+        // left-pad + 0x prefix handling are testable in isolation. See
+        // tests/test_lenient_hex.cpp for the cases that drive the
+        // implementation.
+        QString parseErr;
+        QByteArray bytes = ClipboardCodec::parseLenientHex(
+            QApplication::clipboard()->text(), &parseErr);
+        if (bytes.isEmpty()) {
+            emit statusHint(parseErr.isEmpty()
+                ? QStringLiteral("Clipboard isn't valid hex")
+                : QStringLiteral("Clipboard: ") + parseErr);
+            return;
+        }
+        // Clamp to the selection length: truncate longer, zero-pad shorter.
+        QByteArray write(n, '\0');
+        int copyN = qMin(bytes.size(), n);
+        memcpy(write.data(), bytes.constData(), copyN);
+
+        QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
+            ? m_doc->provider->readBytes(lo, n)
+            : QByteArray(n, '\0');
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::WriteBytes{lo, oldBytes, write}));
+        emit statusHint(QStringLiteral("Pasted %1 byte%2 at 0x%3")
+            .arg(n).arg(n == 1 ? "" : "s").arg(lo, 0, 16));
+    });
+
+    connect(editor, &RcxEditor::byteZeroFillRequested, this,
+            [this, byteRangeFromEditor]() {
+        auto range = byteRangeFromEditor();
+        if (!range || !m_doc->provider) return;
+        if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
+            emit statusHint(QStringLiteral("Target is read-only"));
+            return;
+        }
+        uint64_t lo = range->first;
+        int n = static_cast<int>(range->second - range->first);
+        if (n <= 0 || n > 65536) return;
+        QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
+            ? m_doc->provider->readBytes(lo, n)
+            : QByteArray(n, '\0');
+        QByteArray zeros(n, '\0');
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::WriteBytes{lo, oldBytes, zeros}));
+        emit statusHint(QStringLiteral("Zero-filled %1 byte%2 at 0x%3")
+            .arg(n).arg(n == 1 ? "" : "s").arg(lo, 0, 16));
+    });
+
+    connect(editor, &RcxEditor::byteBreakIntoClassRequested, this,
+            [this](uint64_t lo, uint64_t hi) {
+        extractByteSelectionToNewClass(lo, hi);
+    });
+
+    // Byte-range Enter commit. beginByteEdit narrowed the inline edit
+    // to a byte range; commitInlineEdit emitted this with the parsed
+    // raw bytes. We push WriteBytes directly — bypassing setNodeValue
+    // which expects a full-row hex value.
+    connect(editor, &RcxEditor::byteRangeCommitRequested, this,
+            [this](uint64_t addr, QByteArray bytes) {
+        if (!m_doc->provider) return;
+        if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
+            emit statusHint(QStringLiteral("Target is read-only"));
+            return;
+        }
+        int n = bytes.size();
+        if (n <= 0) return;
+        QByteArray oldBytes = m_doc->provider->isReadable(addr, n)
+            ? m_doc->provider->readBytes(addr, n)
+            : QByteArray(n, '\0');
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::WriteBytes{addr, oldBytes, bytes}));
+        emit statusHint(QStringLiteral("Wrote %1 byte%2 at 0x%3")
+            .arg(n).arg(n == 1 ? "" : "s").arg(addr, 0, 16));
+    });
+
+    // Editor status-hint forwarder — used by beginByteEdit when it
+    // refuses a cross-row selection.
+    connect(editor, &RcxEditor::statusHintRequested, this,
+            [this](const QString& text) { emit statusHint(text); });
+
     // Quick type change (Space, 1-5, P, F, S, U keys)
     connect(editor, &RcxEditor::quickTypeChangeRequested,
             this, [this](int nodeIdx, NodeKind targetKind) {
@@ -1038,9 +1293,13 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 ? m_doc->tree.structSpan(sib.id) : sib.byteSize();
             slotOffset = qMax(slotOffset, sib.offset + sz);
         }
-        int align = alignmentFor(NodeKind::Hex64);
+        // Footer "+1" pill literally means +1 byte — the label drove
+        // user expectations. Previous version appended a Hex64 (+8) which
+        // surprised everyone. For grow-by-multiple-bytes use the +10h /
+        // +100h / +1000h pills which call appendBytesRequested instead.
+        int align = alignmentFor(NodeKind::Hex8);
         Node n;
-        n.kind     = NodeKind::Hex64;
+        n.kind     = NodeKind::Hex8;
         n.parentId = targetId;
         n.offset   = (slotOffset + align - 1) / align * align;
         n.name     = QStringLiteral("field_%1").arg(n.offset, 4, 16, QChar('0'));
@@ -1845,17 +2104,29 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Change type"));
 
+        // Capture the rename condition BEFORE the ChangeKind push — push()
+        // synchronously executes the command (via RcxCommand::redo) which
+        // mutates node.kind in place. Reading node.kind after the push
+        // returns the NEW kind, so the same-row check on isHexNode(node.kind)
+        // would always be false and the Rename never fired. That's why the
+        // first int32 in a hex64 → int32×2 split ended up with an empty
+        // name while the second (created on the same-size path below)
+        // correctly got "field_<offset>".
+        const QString origName = node.name;
+        const int     origOffset = node.offset;
+        const bool    needsRename = isHexNode(node.kind) && !isHexNode(newKind);
+
         // Push type change with no offset adjustments
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeKind{node.id, node.kind, newKind, {}}));
 
         // Hex nodes don't display names (ASCII preview instead), so the stored
         // name may be empty or stale.  Give it a sensible default.
-        if (isHexNode(node.kind) && !isHexNode(newKind)) {
+        if (needsRename) {
             QString autoName = QStringLiteral("field_%1")
-                .arg(node.offset, 4, 16, QChar('0'));
+                .arg(origOffset, 4, 16, QChar('0'));
             m_doc->undoStack.push(new RcxCommand(this,
-                cmd::Rename{node.id, node.name, autoName}));
+                cmd::Rename{node.id, origName, autoName}));
         }
 
         // Insert hex nodes to fill the gap.
@@ -1919,6 +2190,265 @@ void RcxController::renameNode(int nodeIdx, const QString& newName) {
     auto& node = m_doc->tree.nodes[nodeIdx];
     m_doc->undoStack.push(new RcxCommand(this,
         cmd::Rename{node.id, node.name, newName}));
+}
+
+// Extract bytes [selLo, selHi) into a new root class and embed it in
+// the original parent. Works against absolute addresses (the same units
+// m_byteSel uses); converts to offsets via the parent struct's base.
+//
+// Fully-contained typed fields (Pointer/Int/Float/etc.) are *preserved*
+// in the new class — only the hex-preview rows the user dragged across
+// get repacked. Selection that partially overlaps a typed field is
+// still refused since splitting a typed field's bytes makes no sense.
+// Container siblings (Struct/Array) are refused on any intersection
+// because cloning their child subtree isn't implemented.
+void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selHi) {
+    if (selHi <= selLo) {
+        emit statusHint(QStringLiteral("No bytes selected"));
+        return;
+    }
+
+    auto& tree = m_doc->tree;
+    const uint64_t base = tree.baseAddress;
+    if (selLo < base) {
+        emit statusHint(QStringLiteral("Selection starts before base address"));
+        return;
+    }
+    const int relLo = static_cast<int>(selLo - base);
+    const int relHi = static_cast<int>(selHi - base);
+
+    // Restrict consideration to nodes whose ancestor chain leads to
+    // the viewed root struct. Without this, OTHER root structs in the
+    // tree (vtables, enums — anything at parentId == 0 that isn't the
+    // viewed root) contribute their leaves to the intersection scan
+    // because their offsets numerically overlap with the selection's
+    // [relLo, relHi) range — even though they live in completely
+    // different address spaces. The previous version picked up a
+    // VTable's FuncPtr64 children for any selection on the tutorial
+    // and falsely refused with "cross-parent".
+    const uint64_t viewRoot = m_viewRootId;
+    auto isInView = [&tree, viewRoot](uint64_t nodeId) -> bool {
+        if (!viewRoot) return true;  // no constraint when no view root
+        uint64_t id = nodeId;
+        while (id != 0) {
+            if (id == viewRoot) return true;
+            int idx = tree.indexOfId(id);
+            if (idx < 0) return false;
+            id = tree.nodes[idx].parentId;
+        }
+        return false;
+    };
+
+    // Pass 1: determine the single parent struct from the first
+    // intersected LEAF child. Containers (Struct / Array) are skipped
+    // here because their span includes their children — picking them
+    // up would conflate "the root struct intersects" with "any of its
+    // children intersect" and falsely refuse with cross-parent. Pass 2
+    // re-checks container-vs-selection intersection explicitly.
+    uint64_t parentId = 0;
+    bool parentSet = false;
+    auto nodeSize = [&tree](const Node& n) {
+        return (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+            ? tree.structSpan(n.id) : n.byteSize();
+    };
+    for (int i = 0; i < tree.nodes.size(); ++i) {
+        const Node& n = tree.nodes[i];
+        if (n.isStatic) continue;
+        if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array) continue;
+        if (!isInView(n.id)) continue;
+        int sz = nodeSize(n);
+        if (sz <= 0) continue;
+        int rowLo = n.offset, rowHi = rowLo + sz;
+        if (rowHi <= relLo || rowLo >= relHi) continue;
+        if (!parentSet) {
+            parentId = n.parentId;
+            parentSet = true;
+        } else if (n.parentId != parentId) {
+            emit statusHint(QStringLiteral("Selection crosses parent struct boundary"));
+            return;
+        }
+    }
+    if (!parentSet) {
+        emit statusHint(QStringLiteral("No fields in selection"));
+        return;
+    }
+
+    // Pass 2: collect intersected siblings of `parentId`, validate.
+    QVector<int> intersected;
+    for (int ci : tree.childrenOf(parentId)) {
+        const Node& sib = tree.nodes[ci];
+        if (sib.isStatic) continue;
+        int sz = nodeSize(sib);
+        if (sz <= 0) continue;
+        int rowLo = sib.offset, rowHi = rowLo + sz;
+        if (rowHi <= relLo || rowLo >= relHi) continue;
+        const bool fullyContained = (rowLo >= relLo && rowHi <= relHi);
+        if (sib.kind == NodeKind::Struct || sib.kind == NodeKind::Array) {
+            emit statusHint(QStringLiteral("Selection crosses a Struct/Array — refusing extract"));
+            return;
+        }
+        if (!fullyContained && !isHexPreview(sib.kind)) {
+            emit statusHint(QStringLiteral("Selection partially crosses a typed field — refusing"));
+            return;
+        }
+        intersected.append(ci);
+    }
+    if (intersected.isEmpty()) {
+        emit statusHint(QStringLiteral("No fields in selection"));
+        return;
+    }
+
+    // Sort by offset so affLo/affHi are well-defined.
+    std::sort(intersected.begin(), intersected.end(),
+              [&tree](int a, int b) {
+        return tree.nodes[a].offset < tree.nodes[b].offset;
+    });
+    const int affLo = tree.nodes[intersected.first()].offset;
+    const int affHi = tree.nodes[intersected.last()].offset
+                    + nodeSize(tree.nodes[intersected.last()]);
+    const int leftPadBytes  = relLo - affLo;
+    const int rightPadBytes = affHi - relHi;
+    const int extractSize   = relHi - relLo;
+    Q_ASSERT(leftPadBytes  >= 0);
+    Q_ASSERT(rightPadBytes >= 0);
+    Q_ASSERT(extractSize   >  0);
+
+    // Snapshot each intersected sibling's data so we can rebuild typed
+    // fields in the new class after removal.
+    struct Snapshot {
+        Node     node;             // full node copy
+        int      sz;
+        bool     fullyContained;
+    };
+    QVector<Snapshot> snaps;
+    snaps.reserve(intersected.size());
+    for (int idx : intersected) {
+        Snapshot s;
+        s.node = tree.nodes[idx];
+        s.sz   = nodeSize(s.node);
+        s.fullyContained = (s.node.offset >= relLo
+                            && s.node.offset + s.sz <= relHi);
+        snaps.append(s);
+    }
+
+    // Greedy hex packer — fills `nBytes` at consecutive offsets with
+    // the largest hex kind that fits (Hex64 → Hex8).
+    auto packGreedyHex = [this](uint64_t pid, int startOffset, int nBytes) {
+        int off = startOffset;
+        int rem = nBytes;
+        while (rem > 0) {
+            NodeKind k; int sz;
+            if      (rem >= 8) { k = NodeKind::Hex64; sz = 8; }
+            else if (rem >= 4) { k = NodeKind::Hex32; sz = 4; }
+            else if (rem >= 2) { k = NodeKind::Hex16; sz = 2; }
+            else               { k = NodeKind::Hex8;  sz = 1; }
+            insertNode(pid, off,  k,
+                       QString("field_%1").arg(off, 4, 16, QChar('0')));
+            off += sz;
+            rem -= sz;
+        }
+    };
+
+    // Dedup class name against existing root struct names.
+    QString typeName = QStringLiteral("ExtractedClass");
+    {
+        QSet<QString> existing;
+        for (const auto& nd : tree.nodes)
+            if (nd.kind == NodeKind::Struct && !nd.structTypeName.isEmpty())
+                existing.insert(nd.structTypeName);
+        int counter = 2;
+        QString baseName = typeName;
+        while (existing.contains(typeName))
+            typeName = QStringLiteral("%1_%2").arg(baseName).arg(counter++);
+    }
+
+    bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Extract to New Class"));
+
+    // 1. Create the new root struct.
+    Node root;
+    root.kind            = NodeKind::Struct;
+    root.structTypeName  = typeName;
+    root.name            = QStringLiteral("instance");
+    root.classKeyword    = QStringLiteral("class");
+    root.parentId        = 0;
+    root.offset          = 0;
+    root.id              = tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{root, {}}));
+
+    // 2. Populate the new class. Fully-contained snaps are re-inserted
+    //    preserving their kind / name / comment / refId at their
+    //    selection-relative offset. Gaps between them get filled with
+    //    greedy hex packing. (Names `slot` / `slots` collide with Qt's
+    //    `slots` macro inside QObject headers, so use `placement` here.)
+    {
+        struct Placement { int newOff; int sz; const Snapshot* s; };
+        QVector<Placement> placements;
+        for (const auto& sn : snaps) {
+            if (!sn.fullyContained) continue;
+            Placement p;
+            p.newOff = sn.node.offset - relLo;
+            p.sz     = sn.sz;
+            p.s      = &sn;
+            placements.append(p);
+        }
+        std::sort(placements.begin(), placements.end(),
+                  [](const Placement& a, const Placement& b) {
+                      return a.newOff < b.newOff;
+                  });
+
+        int cursor = 0;
+        for (const auto& p : placements) {
+            if (p.newOff > cursor)
+                packGreedyHex(root.id, cursor, p.newOff - cursor);
+            Node clone = p.s->node;
+            clone.parentId = root.id;
+            clone.offset   = p.newOff;
+            clone.id       = tree.reserveId();
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{clone, {}}));
+            cursor = p.newOff + p.sz;
+        }
+        if (cursor < extractSize)
+            packGreedyHex(root.id, cursor, extractSize - cursor);
+    }
+
+    // 3. Remove every intersected sibling from the original parent
+    //    (no offset shifts — the equal-size replacements below balance).
+    QVector<uint64_t> intersectedIds;
+    intersectedIds.reserve(intersected.size());
+    for (int idx : intersected)
+        intersectedIds.append(tree.nodes[idx].id);
+    for (int i = intersectedIds.size() - 1; i >= 0; --i) {
+        int curIdx = tree.indexOfId(intersectedIds[i]);
+        if (curIdx < 0) continue;
+        Node copy = tree.nodes[curIdx];
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::Remove{copy.id, {copy}, {}}));
+    }
+
+    // 4. Insert left pads + embedded struct + right pads at the
+    //    original offsets.
+    packGreedyHex(parentId, affLo, leftPadBytes);
+
+    Node embed;
+    embed.kind           = NodeKind::Struct;
+    embed.parentId       = parentId;
+    embed.offset         = relLo;
+    embed.structTypeName = typeName;
+    embed.name           = QStringLiteral("extracted");
+    embed.refId          = root.id;
+    embed.id             = tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{embed, {}}));
+
+    packGreedyHex(parentId, relHi, rightPadBytes);
+
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
+
+    emit statusHint(QStringLiteral("Extracted %1 byte%2 into %3")
+        .arg(extractSize).arg(extractSize == 1 ? "" : "s").arg(typeName));
 }
 
 void RcxController::insertNode(uint64_t parentId, int offset, NodeKind kind, const QString& name) {
@@ -2249,6 +2779,44 @@ void RcxController::materializeRefChildren(int nodeIdx) {
     m_doc->undoStack.endMacro();
     m_suppressRefresh = wasSuppressed;
     if (!m_suppressRefresh) refresh();
+}
+
+bool RcxController::writeSelectedBytesToFile(uint64_t addr, int n,
+                                              const QString& path,
+                                              QString* err) const {
+    if (n <= 0) {
+        if (err) *err = QStringLiteral("No bytes to save");
+        return false;
+    }
+    const Provider* prov = m_snapshotProv
+        ? static_cast<const Provider*>(m_snapshotProv.get())
+        : (m_doc->provider ? m_doc->provider.get() : nullptr);
+    if (!prov) {
+        if (err) *err = QStringLiteral("No active provider");
+        return false;
+    }
+    if (!prov->isReadable(addr, n)) {
+        if (err) *err = QStringLiteral("Couldn't read %1 bytes at 0x%2")
+            .arg(n).arg(addr, 0, 16);
+        return false;
+    }
+    QByteArray data = prov->readBytes(addr, n);
+    if (data.size() != n) {
+        if (err) *err = QStringLiteral("Short read: got %1 bytes, wanted %2")
+            .arg(data.size()).arg(n);
+        return false;
+    }
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (err) *err = QStringLiteral("Couldn't open %1 for writing: %2")
+            .arg(path).arg(out.errorString());
+        return false;
+    }
+    if (out.write(data) != data.size()) {
+        if (err) *err = QStringLiteral("Write failed: %1").arg(out.errorString());
+        return false;
+    }
+    return true;
 }
 
 bool RcxController::applyCommand(const Command& command, bool isUndo) {
@@ -3568,6 +4136,79 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             QApplication::clipboard()->setText(addrs.join('\n'));
         });
 
+        // Save selected nodes' raw bytes as a binary file (parallel to
+        // the byte-selection menu's same action). For multi-row, the
+        // saved blob is the concatenation of each selected node's bytes
+        // in ascending-offset order — non-contiguous rows pack tightly,
+        // gaps between them are dropped (the user picked specific rows;
+        // an unselected gap shouldn't bleed into the file).
+        menu.addAction(icon("save.svg"),
+                       QString("Save %1 nodes as binary file…").arg(count),
+                       [this, ids]() {
+            // Resolve node indices + absolute addr/size, then sort by offset.
+            struct Span { uint64_t addr; int sz; };
+            QVector<Span> spans;
+            for (uint64_t id : ids) {
+                int ni = m_doc->tree.indexOfId(id);
+                if (ni < 0) continue;
+                const Node& n = m_doc->tree.nodes[ni];
+                int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                    ? m_doc->tree.structSpan(n.id) : n.byteSize();
+                if (sz <= 0) continue;
+                int64_t off = m_doc->tree.computeOffset(ni);
+                if (off < 0) continue;
+                spans.append({m_doc->tree.baseAddress + uint64_t(off), sz});
+            }
+            if (spans.isEmpty()) {
+                emit statusHint(QStringLiteral("No readable bytes in selection"));
+                return;
+            }
+            std::sort(spans.begin(), spans.end(),
+                      [](const Span& a, const Span& b) { return a.addr < b.addr; });
+            int64_t total = 0;
+            for (const auto& s : spans) total += s.sz;
+            if (total > (1 << 27)) {  // 128 MB sanity cap
+                emit statusHint(QStringLiteral("Selection too large to save"));
+                return;
+            }
+            QString defaultName = QStringLiteral("nodes_%1_%2.bin")
+                .arg(spans.first().addr, 0, 16).arg(total);
+            QString path = QFileDialog::getSaveFileName(
+                qobject_cast<QWidget*>(parent()),
+                QStringLiteral("Save Selected Nodes"),
+                defaultName,
+                QStringLiteral("Binary (*.bin);;All Files (*)"));
+            if (path.isEmpty()) return;
+
+            const Provider* prov = m_snapshotProv
+                ? static_cast<const Provider*>(m_snapshotProv.get())
+                : (m_doc->provider ? m_doc->provider.get() : nullptr);
+            if (!prov) {
+                emit statusHint(QStringLiteral("No active provider"));
+                return;
+            }
+            QByteArray data;
+            data.reserve(int(total));
+            for (const auto& s : spans) {
+                if (prov->isReadable(s.addr, s.sz))
+                    data.append(prov->readBytes(s.addr, s.sz));
+                else
+                    data.append(QByteArray(s.sz, '\0'));  // unreadable → zero-fill
+            }
+            QFile out(path);
+            if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                emit statusHint(QStringLiteral("Couldn't open %1").arg(out.errorString()));
+                return;
+            }
+            if (out.write(data) != data.size()) {
+                emit statusHint(QStringLiteral("Write failed: %1").arg(out.errorString()));
+                return;
+            }
+            emit statusHint(QStringLiteral("Saved %1 byte%2 to %3")
+                .arg(data.size()).arg(data.size() == 1 ? "" : "s")
+                .arg(QFileInfo(path).fileName()));
+        });
+
         emit contextMenuAboutToShow(&menu, line);
         menu.exec(globalPos);
         return;
@@ -3652,6 +4293,15 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             });
             menu.addAction(icon("edit.svg"), "&Rename...", [this, editor, line]() {
                 editor->beginInlineEdit(EditTarget::Name, line);
+            });
+            menu.addAction(icon("clippy.svg"), "Copy &Path", [this, nodeId]() {
+                QString p = m_doc->tree.fieldPath(nodeId);
+                if (p.isEmpty()) {
+                    emit statusHint(QStringLiteral("Field has no path (unnamed)"));
+                    return;
+                }
+                QApplication::clipboard()->setText(p);
+                emit statusHint(QStringLiteral("Copied path: %1").arg(p));
             });
             menu.addSeparator();
             menu.addAction(icon("trash.svg"), "&Delete", [this, nodeId]() {
@@ -5444,7 +6094,8 @@ uint64_t RcxController::findOrCreateStructByName(const QString& typeName, int de
     return root.id;
 }
 
-void RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target) {
+void RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target,
+                                    bool registerAsSavedSource) {
     const auto* info = ProviderRegistry::instance().findProvider(providerIdentifier);
     if (!info || !info->plugin) {
         ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
@@ -5516,6 +6167,37 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
     }
 
     resetSnapshot();
+
+    // Optional: register the attach as a saved-source entry so the
+    // source-picker dropdown surfaces it. Mirrors what selectSource
+    // does on UI-initiated attaches — dedup on (kind, providerTarget)
+    // so a repeat attach of the same target reuses the existing slot
+    // instead of growing the list.
+    if (registerAsSavedSource) {
+        int existingIdx = -1;
+        for (int i = 0; i < m_savedSources.size(); ++i) {
+            if (m_savedSources[i].kind == providerIdentifier
+                && m_savedSources[i].providerTarget == target) {
+                existingIdx = i;
+                break;
+            }
+        }
+        if (existingIdx >= 0) {
+            m_activeSourceIdx = existingIdx;
+            m_savedSources[existingIdx].baseAddress = m_doc->tree.baseAddress;
+        } else {
+            SavedSourceEntry entry;
+            entry.kind             = providerIdentifier;
+            entry.displayName      = m_doc->provider ? m_doc->provider->name()
+                                                    : providerIdentifier;
+            entry.providerTarget   = target;
+            entry.baseAddress      = m_doc->tree.baseAddress;
+            m_savedSources.append(entry);
+            m_activeSourceIdx = m_savedSources.size() - 1;
+        }
+        pushSavedSourcesToEditors();
+    }
+
     emit m_doc->documentChanged();
     refresh();
 }

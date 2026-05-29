@@ -637,6 +637,36 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME test_controller COMMAND test_controller)
 
+        # ── New Class self-attach (doc-owned buffer + processmemory loopback) ──
+        add_executable(test_new_class_selfattach tests/test_new_class_selfattach.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
+        target_include_directories(test_new_class_selfattach PRIVATE src third_party/fadec)
+        target_link_libraries(test_new_class_selfattach PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+        if(WIN32)
+            target_link_libraries(test_new_class_selfattach PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_new_class_selfattach COMMAND test_new_class_selfattach)
+
+        # ── Byte-selection ↔ controller integration ──
+        add_executable(test_byte_selection_controller tests/test_byte_selection_controller.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
+        target_include_directories(test_byte_selection_controller PRIVATE src third_party/fadec)
+        target_link_libraries(test_byte_selection_controller PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+        if(WIN32)
+            target_link_libraries(test_byte_selection_controller PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_byte_selection_controller COMMAND test_byte_selection_controller)
+
         # ── Refresh speedups (memory-source-only optimizations) ──
         add_executable(test_refresh_speedups tests/test_refresh_speedups.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
@@ -690,6 +720,23 @@ if(BUILD_TESTING)
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)
         add_test(NAME test_editor COMMAND test_editor)
+
+        add_executable(test_byte_selection tests/test_byte_selection.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
+        src/rtti.cpp src/symbolstore.cpp
+        src/providerregistry.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
+        target_include_directories(test_byte_selection PRIVATE src third_party/fadec)
+        target_link_libraries(test_byte_selection PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+        add_test(NAME test_byte_selection COMMAND test_byte_selection)
+
+        # ── Lenient hex paste parser (clipboard.h, no GUI deps) ──
+        add_executable(test_lenient_hex tests/test_lenient_hex.cpp)
+        target_include_directories(test_lenient_hex PRIVATE src)
+        target_link_libraries(test_lenient_hex PRIVATE ${QT}::Core ${QT}::Test)
+        add_test(NAME test_lenient_hex COMMAND test_lenient_hex)
 
         add_executable(test_rendered_view tests/test_rendered_view.cpp
         src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)

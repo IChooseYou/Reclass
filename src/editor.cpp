@@ -6,6 +6,7 @@
 #include "widgets/hover_preview.h"
 #include <QDebug>
 #include <QSettings>
+#include <QtEndian>
 #include <QStackedWidget>
 #include <QPainter>
 #include <Qsci/qsciscintilla.h>
@@ -1063,6 +1064,32 @@ static constexpr int IND_CHIP_HOVER   = 23; // Lighter pill overlay on the chip 
 static constexpr int IND_CHIP_PRESSED = 24; // Darker pill overlay while the mouse button is held
                                             // down inside a clickable chip — the button-press
                                             // feedback that "your click is registering here".
+static constexpr int IND_TREE_CONN    = 25; // Tree-connector glyphs (├ │ └) tinted theme.textDim.
+                                            // Pulls the connector chars slightly down from the
+                                            // default theme.text foreground so the hierarchy is
+                                            // legible without competing for attention with the
+                                            // actual field type/name/value content.
+static constexpr int IND_EDIT_BOUNDS  = 27; // STRAIGHTBOX background fill on the byte ranges
+                                            // covered by an active byte-range inline edit. Tints
+                                            // the editable digits with a faded indHoverSpan so the
+                                            // user can see where the edit zone starts and stops
+                                            // (especially useful across rows, where the cursor
+                                            // jumps segment-to-segment). Painted by beginByteEdit,
+                                            // cleared by endInlineEdit. Distinct from IND_BYTE_SEL
+                                            // (TEXTFORE foreground) which is for the not-yet-
+                                            // editing selection state.
+static constexpr int IND_BYTE_SEL     = 26; // Foreground recolor (TEXTFORE) on hex bytes that
+                                            // are part of the drag-selection range. Uses
+                                            // theme.indHoverSpan — the link/hover accent every
+                                            // theme picks to mean "interactive/active text". The
+                                            // earlier attempt at theme.selection failed because
+                                            // that token is a background fill across every theme
+                                            // (low-luminance dark values designed to sit behind
+                                            // white-ish text); as a TEXTFORE it was invisible to
+                                            // muddy. Higher slot number than IND_HEAT_* /
+                                            // IND_HEX_DIM means selection wins over heat on
+                                            // overlapping bytes — selection is an explicit user
+                                            // action and should be the dominant visual signal.
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -1213,6 +1240,51 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     m_sci->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_sci, &QWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
+        // Right-click on active byte selection (and the click landed
+        // inside a hex preview row's value column) → byte-ops menu.
+        // Checked first so the per-byte actions take precedence over
+        // the node-level context menu when there's a live selection.
+        if (m_byteSel.has_value()) {
+            HitInfo bhi = hitTest(pos);
+            if (byteAddrAt(bhi.line, bhi.col).has_value()) {
+                QMenu menu;
+                auto* aBreak   = menu.addAction(QStringLiteral("Break into new class"));
+                menu.addSeparator();
+                auto* aCopyHex = menu.addAction(QStringLiteral("Copy as hex"));
+                aCopyHex->setShortcut(QKeySequence::Copy);
+                auto* aCopyC   = menu.addAction(QStringLiteral("Copy as C array"));
+                auto* aCopyPy  = menu.addAction(QStringLiteral("Copy as Python bytes"));
+                auto* aSave    = menu.addAction(QStringLiteral("Save as binary file…"));
+                menu.addSeparator();
+                auto* aPaste   = menu.addAction(QStringLiteral("Paste hex"));
+                aPaste->setShortcut(QKeySequence::Paste);
+                auto* aEdit    = menu.addAction(QStringLiteral("Edit hex…"));
+                auto* aZero    = menu.addAction(QStringLiteral("Zero-fill"));
+                aZero->setShortcut(QKeySequence::Delete);
+                menu.addSeparator();
+                auto* aClear   = menu.addAction(QStringLiteral("Clear selection"));
+                aClear->setShortcut(QKeySequence(Qt::Key_Escape));
+
+                QAction* chosen = menu.exec(m_sci->mapToGlobal(pos));
+                if (!chosen) return;
+                if      (chosen == aCopyHex) emit byteCopyHexRequested();
+                else if (chosen == aCopyC)   emit byteCopyAsCArrayRequested();
+                else if (chosen == aCopyPy)  emit byteCopyAsPythonRequested();
+                else if (chosen == aSave)    emit byteSaveAsFileRequested();
+                else if (chosen == aPaste)   emit bytePasteHexRequested();
+                else if (chosen == aEdit)    beginByteEdit();
+                else if (chosen == aZero)    emit byteZeroFillRequested();
+                else if (chosen == aBreak) {
+                    auto [lo, hi] = *m_byteSel;
+                    emit byteBreakIntoClassRequested(lo, hi);
+                }
+                else if (chosen == aClear)   {
+                    m_byteSel.reset();
+                    applyByteSelectionOverlay();
+                }
+                return;
+            }
+        }
         // Right-click on offset margin → show margin mode menu
         int margin0Width = (int)m_sci->SendScintilla(
             QsciScintillaBase::SCI_GETMARGINWIDTHN, 0UL, 0L);
@@ -1395,9 +1467,19 @@ void RcxEditor::setupScintilla() {
     m_sci->setTabWidth(2);
     m_sci->setIndentationsUseTabs(false);
 
-    // Line spacing for readability
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT, (long)4);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRADESCENT, (long)2);
+    // Line spacing for readability. Compact mode drops the extra ascent /
+    // descent to 1/0 so users with tall structs can fit more rows per
+    // screen at the cost of slightly tighter visual rhythm. QSettings
+    // key "compactRowSpacing" (View menu toggle in a follow-up) — defaults
+    // to false / standard spacing.
+    {
+        QSettings s("Reclass", "Reclass");
+        const bool compact = s.value("compactRowSpacing", false).toBool();
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT,
+                             (long)(compact ? 1 : 4));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRADESCENT,
+                             (long)(compact ? 0 : 2));
+    }
 
     // Disable native selection rendering — we use markers for selection
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELFORE, (long)0, (long)0);
@@ -1420,6 +1502,12 @@ void RcxEditor::setupScintilla() {
     // Hex node dim indicator — overrides text color
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HEX_DIM, 17 /*INDIC_TEXTFORE*/);
+
+    // Tree connector dim — same INDIC_TEXTFORE but at theme.textDim (not
+    // textFaint like IND_HEX_DIM) so the ├ │ └ glyphs are clearly
+    // legible while still receding behind the actual content.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_TREE_CONN, 17 /*INDIC_TEXTFORE*/);
 
     // Base address indicator — text color override on command row
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
@@ -1467,6 +1555,26 @@ void RcxEditor::setupScintilla() {
                          IND_CHIP_PRESSED, (long)200);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
                          IND_CHIP_PRESSED, (long)1);
+
+    // Hex byte selection. INDIC_TEXTFORE so the digits themselves take
+    // theme.selection colour — reads like selected text in a code
+    // editor. Lives at slot 26 (above IND_HEAT_HOT at 18 and
+    // IND_HEX_DIM at 9) so Scintilla picks our colour over heat /
+    // dim on bytes where both apply.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_BYTE_SEL, 17 /*INDIC_TEXTFORE*/);
+
+    // Edit-bounds background fill (active byte-range inline edit).
+    // STRAIGHTBOX at near-full alpha so the byte range visually reads
+    // as a "selected node row" background — matches the M_SELECTED
+    // marker's opaque fill at the line level. UNDER=1 paints behind
+    // text so typed digits sit cleanly on top.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_EDIT_BOUNDS, 8 /*INDIC_STRAIGHTBOX*/);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
+                         IND_EDIT_BOUNDS, (long)255);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
+                         IND_EDIT_BOUNDS, (long)1);
 
     // Heatmap indicators (cold / warm / hot)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
@@ -1627,6 +1735,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HEX_DIM, theme.textFaint);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_TREE_CONN, theme.textDim);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_BASE_ADDR, theme.text);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HOVER_SPAN, theme.indHoverSpan);
@@ -1666,6 +1776,21 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_CHIP_HOVER, theme.hover);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_CHIP_PRESSED, theme.selected);
+    // Hex byte selection — re-uses the link/hover accent. Every theme
+    // already vets this token for "interactive text foreground", so it
+    // pops against the editor bg in every shipped theme without needing
+    // a new field. theme.selection (originally tried here) is a
+    // background fill colour — invisible to muddy as a TEXTFORE in every
+    // dark theme.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_BYTE_SEL, theme.indHoverSpan);
+    // Edit-bounds background: theme.selected — the same neutral
+    // highlight used for selected-node row backgrounds (M_SELECTED
+    // marker). Keeps the edit zone visually subdued and consistent
+    // with the rest of the editor's "this is selected" language;
+    // avoids the loud accent that an indHoverSpan fill would produce.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_EDIT_BOUNDS, theme.selected);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_FIND, theme.borderFocused);
     // Lexer colors
@@ -1997,7 +2122,8 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         for (int ind : {IND_HEX_DIM, IND_BASE_ADDR, IND_HOVER_SPAN, IND_HEAT_COLD,
                         IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
                         IND_HEAT_HOT, IND_TYPE_HINT, IND_RTTI_HINT, IND_CHIP_BG,
-                        IND_CHIP_HOVER, IND_CHIP_PRESSED}) {
+                        IND_CHIP_HOVER, IND_CHIP_PRESSED, IND_TREE_CONN,
+                        IND_BYTE_SEL, IND_EDIT_BOUNDS}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
             m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
         }
@@ -2181,6 +2307,12 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             }
         }
     }
+
+    // Re-apply hex byte selection overlay (setText() / patch clears
+    // IND_BYTE_SEL same as the other indicators). Address-based, so a
+    // structural change that drops the selected rows naturally paints
+    // nothing — no cleanup needed.
+    applyByteSelectionOverlay();
 
     // Stash meta for the next frame's diff. Done last so any earlier code
     // that needs the previous-frame state has already consumed it.
@@ -2446,6 +2578,22 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta, int firstLine, in
         }
     }
 
+    // Tree-connector tint — apply IND_TREE_CONN (theme.textDim) over the
+    // prefix indent region of every nested line so ├ │ └ glyphs read
+    // slightly muted vs. the field type/name/value content. The range is
+    // [prefixWidth, prefixWidth + depth*kTreeIndent) — see LineGeometry
+    // in core.h for the column convention. CommandRow + flush-left
+    // footer lines have depth 0 here so they're skipped naturally.
+    for (int i = begin; i < end; i++) {
+        const LineMeta& lm = meta[i];
+        if (lm.depth <= 0) continue;
+        if (lm.lineKind == LineKind::CommandRow) continue;
+        LineGeometry g = LineGeometry::forLine(lm);
+        const int colA = g.prefixWidth;
+        const int colB = g.prefixWidth + g.indentWidth;
+        if (colB > colA)
+            fillIndicatorCols(IND_TREE_CONN, i, colA, colB);
+    }
 }
 
 void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
@@ -2601,6 +2749,475 @@ void RcxEditor::applyChipButtonOverlay() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE,
                          startByte, endByte - startByte);
+}
+
+// ── Byte selection (hex preview rows) ──
+//
+// byteAddrAt returns nullopt for anything that isn't an individual hex
+// byte in a hex preview row's value column. The hex value column is laid
+// out as "XX XX XX..." — 2 hex digits per byte plus a 1-char gap, so
+// (col - vs.start) / 3 maps a column to a byte index. valueSpanFor
+// (called by valueSpan) gives a 23-char span for hex rows specifically
+// (see core.h kColValue branch), which covers byte 0..7 at columns
+// 0..22 inclusive. Out-of-range clicks (past byte 7 of a Hex64, etc.)
+// short-circuit to nullopt and fall through to row-click handling.
+std::optional<uint64_t> RcxEditor::byteAddrAt(int line, int col) const {
+    if (line < 0 || line >= m_meta.size()) return std::nullopt;
+    const LineMeta& lm = m_meta[line];
+    if (lm.lineKind != LineKind::Field) return std::nullopt;
+    if (!isHexPreview(lm.nodeKind)) return std::nullopt;
+    QString lineText = getLineText(m_sci, line);
+    ColumnSpan vs = valueSpan(lm, lineText.size(),
+                              lm.effectiveTypeW, lm.effectiveNameW);
+    if (!vs.valid || col < vs.start) return std::nullopt;
+    int sz = sizeForKind(lm.nodeKind);
+    int byteIdx = (col - vs.start) / 3;
+    if (byteIdx < 0 || byteIdx >= sz) return std::nullopt;
+    return lm.offsetAddr + static_cast<uint64_t>(byteIdx);
+}
+
+void RcxEditor::applyByteSelectionOverlay() {
+    // Paint IND_BYTE_SEL across the digits of every selected byte on
+    // every hex preview row that overlaps m_byteSel. INDIC_TEXTFORE
+    // recolours character pixels; the inter-byte spaces have no
+    // pixels and stay visually unaffected, which is the desired
+    // outcome (selected bytes are coloured, gaps are not).
+    long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
+                         (long)IND_BYTE_SEL);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE,
+                         (long)0, docLen);
+
+    if (m_byteSel.has_value()) {
+        const uint64_t selLo = m_byteSel->first;
+        const uint64_t selHi = m_byteSel->second;
+        for (int i = 0; i < m_meta.size(); ++i) {
+            const LineMeta& lm = m_meta[i];
+            if (lm.lineKind != LineKind::Field) continue;
+            if (!isHexPreview(lm.nodeKind)) continue;
+            int sz = sizeForKind(lm.nodeKind);
+            uint64_t lineLo = lm.offsetAddr;
+            uint64_t lineHi = lineLo + static_cast<uint64_t>(sz);
+            if (selHi <= lineLo || selLo >= lineHi) continue;  // no overlap
+            QString lineText = getLineText(m_sci, i);
+            ColumnSpan vs = valueSpan(lm, lineText.size(),
+                                      lm.effectiveTypeW, lm.effectiveNameW);
+            if (!vs.valid) continue;
+            int firstByte = static_cast<int>(qMax(selLo, lineLo) - lineLo);
+            int lastByte  = static_cast<int>(qMin(selHi, lineHi) - lineLo);
+
+            // Paint IND_BYTE_SEL across the entire selected run on this
+            // row, including inter-byte spaces. INDIC_TEXTFORE only
+            // colours characters with pixels — the spaces stay
+            // visually unaffected but are bracketed by coloured
+            // digits, which reads as a contiguous selection.
+            int hiCol = vs.start + (lastByte - 1) * 3 + 2;
+            fillIndicatorCols(IND_BYTE_SEL, i, vs.start + firstByte * 3, hiCol);
+        }
+    }
+
+    // Tail-call so the status-bar line is rebuilt on every selection
+    // change AND on every refresh tick (the refresh path tail-calls
+    // applyByteSelectionOverlay). Memory-tracking interpretations
+    // ("i32=…") therefore update live without a separate timer.
+    updateByteSelStatus();
+}
+
+// Build a lowercase-0x, uppercase-digits hex literal — keeps the literal
+// `0x` prefix lowercase (which is the C / debugger convention) while
+// uppercasing the digits for readability. Replaces ".arg(...).toUpper()"
+// pattern which would render "0X1A2B" instead of "0x1A2B".
+static QString hexLiteral(qulonglong value, int digits) {
+    QString d = QStringLiteral("%1")
+        .arg(value, digits, 16, QChar('0')).toUpper();
+    return QStringLiteral("0x") + d;
+}
+
+void RcxEditor::updateByteSelStatus() {
+    // Empty selection → don't clobber whatever the status bar was
+    // showing (a "Copied N bytes" toast from the previous action,
+    // an MCP status, etc.). The next non-selection statusHint will
+    // overwrite naturally.
+    if (!m_byteSel.has_value()) return;
+
+    const auto [lo, hi] = *m_byteSel;
+    const int n = static_cast<int>(hi - lo);
+    if (n <= 0 || n > 65536) return;
+
+    QByteArray data(n, '\0');
+    if (m_disasmProvider && m_disasmProvider->isReadable(lo, n))
+        data = m_disasmProvider->readBytes(lo, n);
+    if (data.size() < n) data.append(QByteArray(n - data.size(), '\0'));
+
+    const bool canWrite = m_disasmProvider
+        && m_disasmProvider->isValid()
+        && m_disasmProvider->isWritable();
+
+    auto u = [&](int width) -> uint64_t {
+        uint64_t v = 0;
+        memcpy(&v, data.constData(), qMin<int>(width, data.size()));
+        return v;
+    };
+
+    QString text = QStringLiteral("%1 byte%2 @ ").arg(n).arg(n == 1 ? "" : "s")
+        + hexLiteral(lo, 0);
+    if (!canWrite) text += QStringLiteral("  (read-only)");
+
+    const QString sep = QStringLiteral("  ·  ");
+    if (n == 1) {
+        uint8_t b = (uint8_t)data[0];
+        text += sep + hexLiteral(b, 2);
+        text += sep + QString::number((int)(int8_t)b);
+        if (b >= 0x20 && b <= 0x7E)
+            text += sep + QStringLiteral("'%1'").arg(QChar(b));
+    } else if (n == 2) {
+        uint16_t v = (uint16_t)u(2);
+        uint16_t be = qbswap(v);
+        text += sep + hexLiteral(v, 4);
+        text += sep + QStringLiteral("i16=") + QString::number((int16_t)v);
+        text += sep + QStringLiteral("BE ") + hexLiteral(be, 4);
+        text += QStringLiteral(" i16=") + QString::number((int16_t)be);
+    } else if (n == 3) {
+        // 24-bit interpretations — common for RGB triples, int24
+        // fields, and the leading 3 bytes of a hash. Show the LE
+        // value as 0xBBGGRR (matches what the bytes encode if read as
+        // an int24 in memory order), the BE value, and a small RGB
+        // hex with channels in conventional R-G-B order. ASCII fires
+        // when all three bytes are printable.
+        uint8_t b0 = (uint8_t)data[0];
+        uint8_t b1 = (uint8_t)data[1];
+        uint8_t b2 = (uint8_t)data[2];
+        uint32_t leVal = uint32_t(b0) | (uint32_t(b1) << 8) | (uint32_t(b2) << 16);
+        uint32_t beVal = (uint32_t(b0) << 16) | (uint32_t(b1) << 8) | uint32_t(b2);
+        // Sign-extend the 24-bit LE/BE values for signed display
+        auto sext24 = [](uint32_t u) -> int32_t {
+            return (u & 0x800000u) ? int32_t(u | 0xFF000000u) : int32_t(u);
+        };
+        text += sep + hexLiteral(leVal, 6);
+        text += sep + QStringLiteral("i24=") + QString::number(sext24(leVal));
+        text += sep + QStringLiteral("BE ") + hexLiteral(beVal, 6);
+        text += QStringLiteral(" i24=") + QString::number(sext24(beVal));
+        // RGB triplet (R-G-B in display order, same as CSS #RRGGBB).
+        QString rgbDigits = QStringLiteral("%1")
+            .arg(beVal, 6, 16, QChar('0')).toUpper();
+        text += sep + QStringLiteral("rgb #") + rgbDigits;
+        if (b0 >= 0x20 && b0 <= 0x7E
+            && b1 >= 0x20 && b1 <= 0x7E
+            && b2 >= 0x20 && b2 <= 0x7E)
+            text += sep + QStringLiteral("\"%1%2%3\"")
+                .arg(QChar(b0)).arg(QChar(b1)).arg(QChar(b2));
+    } else if (n == 4) {
+        uint32_t v = (uint32_t)u(4);
+        uint32_t be = qbswap(v);
+        float f; memcpy(&f, data.constData(), 4);
+        float fBe; memcpy(&fBe, &be, 4);
+        text += sep + hexLiteral(v, 8);
+        text += sep + QStringLiteral("i32=") + QString::number((qint32)v);
+        text += sep + QStringLiteral("f32=") + fmt::fmtFloat(f);
+        text += sep + QStringLiteral("BE ") + hexLiteral(be, 8);
+        text += QStringLiteral(" i32=") + QString::number((qint32)be);
+        text += QStringLiteral(" f32=") + fmt::fmtFloat(fBe);
+    } else if (n == 8) {
+        uint64_t v = u(8);
+        uint64_t be = qbswap(v);
+        double d; memcpy(&d, data.constData(), 8);
+        double dBe; memcpy(&dBe, &be, 8);
+        text += sep + hexLiteral((qulonglong)v, 16);
+        text += sep + QStringLiteral("i64=") + QString::number((qint64)v);
+        text += sep + QStringLiteral("f64=") + fmt::fmtDouble(d);
+        text += sep + QStringLiteral("BE ") + hexLiteral((qulonglong)be, 16);
+        text += QStringLiteral(" i64=") + QString::number((qint64)be);
+        text += QStringLiteral(" f64=") + fmt::fmtDouble(dBe);
+    } else if (n >= 5 && n <= 7) {
+        // 5/6/7-byte interpretations — niche but useful for MAC
+        // addresses (6 bytes), 40-bit/48-bit/56-bit packed fields,
+        // and the leading prefix of larger hashes. Show LE/BE as
+        // up to 64-bit ints (top bytes are zero).
+        uint64_t leVal = 0;
+        memcpy(&leVal, data.constData(), n);
+        // BE = byte-reverse of n bytes, padded high.
+        uint64_t beVal = 0;
+        for (int i = 0; i < n; ++i)
+            beVal = (beVal << 8) | uint8_t(data[i]);
+        const int hexDigits = n * 2;
+        text += sep + hexLiteral((qulonglong)leVal, hexDigits);
+        text += sep + QStringLiteral("i%1=").arg(n * 8)
+            + QString::number((qulonglong)leVal);
+        text += sep + QStringLiteral("BE ") + hexLiteral((qulonglong)beVal, hexDigits);
+        if (n == 6) {
+            // MAC-address shortcut — 6 bytes are usually a MAC. Format
+            // each byte's 2-digit hex separately so `.toUpper()` only
+            // touches the digits, not the "mac " prefix.
+            auto byteHex = [](uint8_t b) {
+                return QStringLiteral("%1").arg(b, 2, 16, QChar('0')).toUpper();
+            };
+            text += sep + QStringLiteral("mac ")
+                + byteHex((uint8_t)data[0]) + QChar(':')
+                + byteHex((uint8_t)data[1]) + QChar(':')
+                + byteHex((uint8_t)data[2]) + QChar(':')
+                + byteHex((uint8_t)data[3]) + QChar(':')
+                + byteHex((uint8_t)data[4]) + QChar(':')
+                + byteHex((uint8_t)data[5]);
+        }
+    } else {
+        // Generic large selection (9+ bytes): preview the first 12.
+        const int previewLen = qMin(n, 12);
+        text += sep;
+        for (int i = 0; i < previewLen; ++i) {
+            if (i > 0) text += QLatin1Char(' ');
+            text += QStringLiteral("%1")
+                .arg((uint8_t)data[i], 2, 16, QChar('0')).toUpper();
+        }
+        if (n > previewLen) text += QStringLiteral(" …");
+    }
+
+    emit statusHintRequested(text);
+}
+
+void RcxEditor::beginByteEdit() {
+    if (!m_byteSel.has_value()) return;
+    const auto [lo, hi] = *m_byteSel;
+
+    // Build one segment per hex preview row the selection covers.
+    // Each segment carries the line + the [spanStart, spanEnd) column
+    // range that holds its bytes' hex digits. Multi-row works by
+    // hopping between segments as the cursor crosses row boundaries.
+    QVector<InlineEditState::ByteEditSegment> segs;
+    for (int i = 0; i < m_meta.size(); ++i) {
+        const LineMeta& lm = m_meta[i];
+        if (lm.lineKind != LineKind::Field) continue;
+        if (!isHexPreview(lm.nodeKind)) continue;
+        int sz = sizeForKind(lm.nodeKind);
+        uint64_t lineLo = lm.offsetAddr;
+        uint64_t lineHi = lineLo + static_cast<uint64_t>(sz);
+        if (hi <= lineLo || lo >= lineHi) continue;
+
+        int firstByte = static_cast<int>(qMax(lo, lineLo) - lineLo);
+        int lastByte  = static_cast<int>(qMin(hi, lineHi) - lineLo);
+        QString lineText = getLineText(m_sci, i);
+        ColumnSpan vs = valueSpan(lm, lineText.size(),
+                                  lm.effectiveTypeW, lm.effectiveNameW);
+        if (!vs.valid) continue;
+        InlineEditState::ByteEditSegment seg;
+        seg.line      = i;
+        seg.spanStart = vs.start + firstByte * 3;
+        // Drop the trailing inter-byte space when the segment doesn't
+        // reach the row's last byte; for row-tail segments the row
+        // simply ends at the last digit so there's no trailing space
+        // either way.
+        seg.spanEnd   = vs.start + lastByte  * 3 - 1;
+        if (seg.spanEnd < seg.spanStart) seg.spanEnd = seg.spanStart;
+        seg.byteCount = lastByte - firstByte;
+        segs.append(seg);
+    }
+    if (segs.isEmpty()) return;
+
+    // Drop the byte-sel visual + tooltip before entering inline edit
+    // mode. beginInlineEdit also clears m_byteSel internally, but we
+    // do it ahead so the IND_BYTE_SEL paint comes off the row before
+    // the edit-state visuals layer on.
+    m_byteSel.reset();
+    applyByteSelectionOverlay();
+
+    // Use the existing single-row inline edit machinery on the FIRST
+    // segment's line. It handles hex-overwrite setup, the comment-area
+    // padding, indicator hint colours, etc. We then narrow its span
+    // bounds to that segment's byte range and stash the full segment
+    // list for the cursor-jump logic in handleHexEditKey.
+    setHexEditPending(true);
+    if (!beginInlineEdit(EditTarget::Value, segs.first().line)) return;
+
+    const auto& s0 = segs.first();
+    QString lineText = getLineText(m_sci, s0.line);
+    int origLen = s0.spanEnd - s0.spanStart;
+    m_editState.spanStart = s0.spanStart;
+    m_editState.original  = lineText.mid(s0.spanStart, origLen);
+    m_editState.posStart  = m_sci->SendScintilla(
+        QsciScintillaBase::SCI_FINDCOLUMN,
+        (unsigned long)s0.line, (long)s0.spanStart);
+    m_editState.posEnd    = m_sci->SendScintilla(
+        QsciScintillaBase::SCI_FINDCOLUMN,
+        (unsigned long)s0.line, (long)s0.spanEnd);
+    m_editState.byteRange     = true;
+    m_editState.byteRangeAddr = lo;
+    m_editState.byteRangeLen  = static_cast<int>(hi - lo);
+    m_editState.byteSegments  = segs;
+    m_editState.byteSegIdx    = 0;
+    m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, m_editState.posStart);
+
+    // Background highlight over every segment — visible bounds for the
+    // edit zone. Stays painted across segment hops because the
+    // indicator is on the byte ranges themselves, not bound to the
+    // current cursor line. endInlineEdit clears it.
+    for (const auto& seg : segs)
+        fillIndicatorCols(IND_EDIT_BOUNDS, seg.line, seg.spanStart, seg.spanEnd);
+}
+
+bool RcxEditor::advanceToByteSegment(int delta) {
+    if (!m_editState.byteRange) return false;
+    int newIdx = m_editState.byteSegIdx + delta;
+    if (newIdx < 0 || newIdx >= m_editState.byteSegments.size()) return false;
+
+    m_editState.byteSegIdx = newIdx;
+    const auto& seg = m_editState.byteSegments[newIdx];
+    QString lineText = getLineText(m_sci, seg.line);
+    int origLen = seg.spanEnd - seg.spanStart;
+    // m_editState.line + linelenAfterReplace + padBytes/padPos all
+    // refer to the FIRST segment's line — the one beginInlineEdit
+    // padded with comment-area spaces. Keep them untouched as we jump
+    // segments; only the per-segment input bookkeeping moves with us.
+    // (Earlier rev updated m_editState.line here, which made
+    // endInlineEdit's padding strip run on the last-visited segment's
+    // row — chopping ~28 chars off an innocent hex preview row.)
+    // clampEditSelection's hex branch is multi-row aware and uses the
+    // cursor's actual line rather than m_editState.line for the pin,
+    // so leaving it on the first line doesn't drag the cursor back.
+    m_editState.spanStart = seg.spanStart;
+    m_editState.original  = lineText.mid(seg.spanStart, origLen);
+    m_editState.posStart  = m_sci->SendScintilla(
+        QsciScintillaBase::SCI_FINDCOLUMN,
+        (unsigned long)seg.line, (long)seg.spanStart);
+    m_editState.posEnd    = m_sci->SendScintilla(
+        QsciScintillaBase::SCI_FINDCOLUMN,
+        (unsigned long)seg.line, (long)seg.spanEnd);
+    int targetCol = (delta > 0) ? seg.spanStart : (seg.spanEnd - 1);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
+        posFromCol(m_sci, seg.line, targetCol));
+    return true;
+}
+
+void RcxEditor::extendByteSelection(int dByte) {
+    if (!m_byteSel.has_value() || dByte == 0) return;
+    auto [lo, hi] = *m_byteSel;
+    // The anchor (`lo`) is whatever the drag set — never moves under
+    // keyboard extension. Shift+Right grows the right edge; Shift+Left
+    // pulls it back in, clamped so the selection stays at least 1 byte.
+    if (dByte > 0) {
+        hi += static_cast<uint64_t>(dByte);
+        // Clamp to the highest hex byte's end address in the visible
+        // document so Shift+Right past the last byte stops at "end of
+        // selectable region" instead of silently growing into nowhere.
+        // Walks m_meta once — O(rows), trivial vs. the existing paint
+        // pass which already walks every row per selection change.
+        uint64_t docHi = 0;
+        bool anyHex = false;
+        for (const LineMeta& lm : m_meta) {
+            if (lm.lineKind != LineKind::Field) continue;
+            if (!isHexPreview(lm.nodeKind)) continue;
+            uint64_t lineHi = lm.offsetAddr
+                + static_cast<uint64_t>(sizeForKind(lm.nodeKind));
+            if (!anyHex || lineHi > docHi) { docHi = lineHi; anyHex = true; }
+        }
+        if (anyHex && hi > docHi) hi = docHi;
+    } else {
+        uint64_t shrink = static_cast<uint64_t>(-dByte);
+        hi = (hi > lo + shrink) ? (hi - shrink) : (lo + 1);
+    }
+    m_byteSel = QPair<uint64_t, uint64_t>{lo, hi};
+    applyByteSelectionOverlay();
+}
+
+void RcxEditor::snapByteSelectionToRow(int dir) {
+    if (!m_byteSel.has_value() || dir == 0) return;
+    auto [lo, hi] = *m_byteSel;
+
+    // Locate the hex preview row whose [offsetAddr, offsetAddr+size) range
+    // contains the last selected byte (hi - 1). Walk m_meta once. Bail out
+    // silently if the selection's tail isn't on any visible hex row — that
+    // typically means the layout has shifted under us and the next overlay
+    // pass will re-derive things.
+    auto rowRange = [](const LineMeta& lm) -> QPair<uint64_t, uint64_t> {
+        uint64_t start = lm.offsetAddr;
+        uint64_t end   = start + static_cast<uint64_t>(sizeForKind(lm.nodeKind));
+        return {start, end};
+    };
+    int curIdx = -1;
+    uint64_t lastByte = (hi > 0) ? (hi - 1) : 0;
+    for (int i = 0; i < m_meta.size(); ++i) {
+        const LineMeta& lm = m_meta[i];
+        if (lm.lineKind != LineKind::Field) continue;
+        if (!isHexPreview(lm.nodeKind)) continue;
+        auto [rs, re] = rowRange(lm);
+        if (lastByte >= rs && lastByte < re) { curIdx = i; break; }
+    }
+    if (curIdx < 0) return;
+
+    auto [curStart, curEnd] = rowRange(m_meta[curIdx]);
+
+    if (dir > 0) {
+        if (hi < curEnd) {
+            // First press from mid-row: snap to end of current row.
+            hi = curEnd;
+        } else {
+            // hi already at row end → walk forward to next field row. Stop
+            // at the first non-hex field (caller's invariant: this command
+            // only walks across contiguous hex preview rows).
+            for (int j = curIdx + 1; j < m_meta.size(); ++j) {
+                const LineMeta& lm = m_meta[j];
+                if (lm.lineKind != LineKind::Field) continue;
+                if (!isHexPreview(lm.nodeKind)) {
+                    // Non-hex boundary — stop. No-op for this press.
+                    return;
+                }
+                auto [rs, re] = rowRange(lm);
+                hi = re;
+                break;
+            }
+            // No following field row found → no-op.
+            if (hi == m_byteSel->second) return;
+        }
+    } else {
+        // dir < 0 → Shift+Up: shrink hi backwards.
+        if (hi > curStart + 1) {
+            // Mid-row or end-of-row → snap back to row start. Clamp so we
+            // never drop below 1 byte selected (lo + 1).
+            hi = (curStart > lo + 1) ? curStart : (lo + 1);
+        } else {
+            // Already at the "1 byte into row" minimum. Walk back to the
+            // previous hex preview field row's end.
+            for (int j = curIdx - 1; j >= 0; --j) {
+                const LineMeta& lm = m_meta[j];
+                if (lm.lineKind != LineKind::Field) continue;
+                if (!isHexPreview(lm.nodeKind)) {
+                    // Non-hex boundary on the way up — stop.
+                    return;
+                }
+                auto [rs, re] = rowRange(lm);
+                hi = (re > lo + 1) ? re : (lo + 1);
+                break;
+            }
+            if (hi == m_byteSel->second) return;
+        }
+    }
+
+    m_byteSel = QPair<uint64_t, uint64_t>{lo, hi};
+    applyByteSelectionOverlay();
+}
+
+void RcxEditor::selectAllHexBytes() {
+    // Scan m_meta, find the lowest + highest byte address among hex
+    // preview rows, and span the union as a single half-open range.
+    // Non-hex rows in the middle (continuations, headers, footers,
+    // non-hex fields) are skipped at PAINT time by the overlay's
+    // line-intersection check — the selection address range simply
+    // doesn't intersect those rows, so they remain unhighlighted.
+    uint64_t lo = UINT64_MAX, hi = 0;
+    bool any = false;
+    for (const LineMeta& lm : m_meta) {
+        if (lm.lineKind != LineKind::Field) continue;
+        if (!isHexPreview(lm.nodeKind)) continue;
+        int sz = sizeForKind(lm.nodeKind);
+        uint64_t lineLo = lm.offsetAddr;
+        uint64_t lineHi = lineLo + static_cast<uint64_t>(sz);
+        if (!any) { lo = lineLo; hi = lineHi; any = true; }
+        else {
+            if (lineLo < lo) lo = lineLo;
+            if (lineHi > hi) hi = lineHi;
+        }
+    }
+    if (!any) return;
+    m_byteSel = QPair<uint64_t, uint64_t>{lo, hi};
+    applyByteSelectionOverlay();
 }
 
 void RcxEditor::updateChipHover(const HitInfo& h) {
@@ -2795,9 +3412,9 @@ void RcxEditor::dismissHistoryPopup() {
 }
 
 void RcxEditor::dismissAllPopups() {
-    if (m_historyPopup) static_cast<HoverPopup*>(m_historyPopup)->dismiss();
-    if (m_popupHost)    static_cast<HoverPopup*>(m_popupHost)->dismiss();
-    if (m_arrowTooltip) static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
+    if (m_historyPopup)    static_cast<HoverPopup*>(m_historyPopup)->dismiss();
+    if (m_popupHost)       static_cast<HoverPopup*>(m_popupHost)->dismiss();
+    if (m_arrowTooltip)    static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
 }
 
 QWidget* RcxEditor::hoverPopup() const { return m_popupHost; }
@@ -3298,6 +3915,22 @@ RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
     m_prevText.clear();
     EndEditInfo info{m_editState.nodeIdx, m_editState.subLine, m_editState.target};
     m_editState.active = false;
+    // Clear IND_EDIT_BOUNDS + reset byte-range state if this was a
+    // byte-range edit. The next inline edit gets a clean InlineEditState
+    // so commitInlineEdit's byteRange branch doesn't trigger on leftover
+    // state from this edit.
+    if (m_editState.byteRange) {
+        long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
+                             (long)IND_EDIT_BOUNDS);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE,
+                             (long)0, docLen);
+        m_editState.byteRange     = false;
+        m_editState.byteRangeAddr = 0;
+        m_editState.byteRangeLen  = 0;
+        m_editState.byteSegments.clear();
+        m_editState.byteSegIdx    = 0;
+    }
     m_sci->setReadOnly(true);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETWIDTH, 0);
     // Switch back to Arrow cursor (widget-local, doesn't fight splitters/menus)
@@ -3766,6 +4399,46 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 applyHoverHighlight();
             }
 
+            // Any plain (no Ctrl, no Shift) LMB press clears the byte
+            // selection, regardless of whether the press is on a hex
+            // byte or anywhere else. If it IS on a byte, m_byteSelAnchor
+            // is armed further down and a subsequent drag past 8 px
+            // creates a fresh selection — the cleared state is what the
+            // user wants between drags. Shift / Ctrl modifiers are
+            // preserved (Shift+Click extends, Ctrl is for node-multi-
+            // select); the existing extend / toggle handlers below run
+            // against the still-active selection.
+            if (m_byteSel.has_value()
+                && !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))) {
+                m_byteSel.reset();
+                applyByteSelectionOverlay();
+            }
+
+            // Shift+Click on a hex byte → extend the byte selection
+            // to that byte, matching the standard text-editor "click
+            // sets one end, Shift+Click sets the other end" idiom.
+            // Anchor is whichever byte the original drag set; if no
+            // selection is active yet, Shift+Click is a no-op for
+            // byte selection (the node-level Shift+Click handler
+            // below still runs).
+            if (m_byteSel.has_value()
+                && (me->modifiers() & Qt::ShiftModifier)
+                && !(me->modifiers() & Qt::ControlModifier)) {
+                auto clicked = byteAddrAt(h.line, h.col);
+                if (clicked.has_value()) {
+                    // Treat lo as the anchor and adjust hi (or flip if
+                    // user clicks BEFORE the anchor — pulling lo down).
+                    auto [lo, hi] = *m_byteSel;
+                    uint64_t anchor = lo;     // anchor = start of selection
+                    uint64_t target = *clicked;
+                    uint64_t newLo = qMin(anchor, target);
+                    uint64_t newHi = qMax(anchor, target) + 1; // half-open
+                    m_byteSel = QPair<uint64_t, uint64_t>{newLo, newHi};
+                    applyByteSelectionOverlay();
+                    return true;  // consume — don't fall through to node click
+                }
+            }
+
             if (h.inFoldCol) {
                 emit marginClicked(0, h.line, me->modifiers());
                 return true;
@@ -3946,6 +4619,24 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 m_dragLastLine = h.line;
                 m_dragInitMods = me->modifiers();
 
+                // Byte-selection arm: if the press lands on a hex byte
+                // AND no modifier is held (Ctrl/Shift mean "extend node
+                // selection" — row-drag wins there), record the anchor
+                // address. The next MouseMove past the 8-px threshold
+                // upgrades from row-drag to byte-drag. Click-without-
+                // movement falls through to the row-click below.
+                //
+                // The top-level "clear byte selection on non-byte click"
+                // pass earlier in this handler already dropped any
+                // stale m_byteSel when the press wasn't on a hex byte,
+                // so we don't repeat that check here.
+                auto pressByteAddr = byteAddrAt(h.line, h.col);
+                if (pressByteAddr.has_value()
+                    && !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))) {
+                    m_byteSelAnchor = pressByteAddr;
+                    m_byteSelDragging = false;
+                }
+
                 bool multi = m_currentSelIds.size() > 1;
 
                 if (alreadySelected && multi && plain) {
@@ -3961,12 +4652,47 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             return true;  // consume ALL left-clicks (prevent QScintilla caret/cursor)
         }
     }
-    // Drag-select: extend selection as mouse moves with button held
-    // Requires minimum drag distance to prevent accidental micro-drag selection
+    // Drag-select: extend selection as mouse moves with button held.
+    // Requires minimum drag distance to prevent accidental micro-drag
+    // selection. The outer guard now also fires when a byte-drag is
+    // armed or active so byte-mode upgrade can pre-empt the row-drag.
     if (obj == m_sci->viewport() && !m_editState.active
-        && event->type() == QEvent::MouseMove && m_dragging) {
+        && event->type() == QEvent::MouseMove
+        && (m_dragging || m_byteSelDragging || m_byteSelAnchor.has_value())) {
         auto* me = static_cast<QMouseEvent*>(event);
         if (me->buttons() & Qt::LeftButton) {
+            // Byte-drag upgrade check. Fires once when the press anchor
+            // is on a hex byte and the user has moved past the 8-px
+            // threshold. After upgrade, row-drag state is cleared so
+            // we don't double-extend.
+            if (m_byteSelAnchor.has_value() && !m_byteSelDragging) {
+                QPoint d = me->pos() - m_dragStartPos;
+                if (d.manhattanLength() >= 8) {
+                    m_byteSelDragging = true;
+                    m_dragging          = false;
+                    m_dragStarted       = false;
+                    m_pendingClickNodeId = 0;
+                }
+            }
+            if (m_byteSelDragging) {
+                auto h2 = hitTest(me->pos());
+                auto cur = byteAddrAt(h2.line, h2.col);
+                if (cur.has_value()) {
+                    uint64_t lo = qMin(*m_byteSelAnchor, *cur);
+                    uint64_t hi = qMax(*m_byteSelAnchor, *cur) + 1; // half-open
+                    m_byteSel = QPair<uint64_t,uint64_t>{lo, hi};
+                    applyByteSelectionOverlay();
+                }
+                // Cursor drifted off any hex byte column → don't shrink
+                // the selection. Drag-out-and-back-in stays stable. Swallow
+                // the event so row-drag doesn't try to extend underneath.
+                return true;
+            }
+            // Byte arm was set but the drag never moved past threshold —
+            // fall through to row-drag handling. Once threshold IS hit
+            // and arm goes inactive, row-drag takes over normally.
+            if (!m_dragging) return false;
+
             // Check drag threshold (8 pixels) before starting drag-selection
             if (!m_dragStarted) {
                 int dy = me->pos().y() - m_dragStartPos.y();
@@ -3989,9 +4715,29 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         } else {
             m_dragging = false;
             m_dragStarted = false;
+            m_byteSelDragging = false;
+            m_byteSelAnchor.reset();
         }
     }
     if (obj == m_sci->viewport() && event->type() == QEvent::MouseButtonRelease) {
+        // Byte-drag end: m_byteSel persists after release (so the user
+        // can see what they picked). Anchor + dragging flag reset so a
+        // subsequent press starts fresh. Pending row click is dropped
+        // because the upgrade already cleared m_pendingClickNodeId in
+        // MouseMove, but we re-clear here defensively.
+        if (m_byteSelDragging) {
+            m_byteSelDragging = false;
+            m_byteSelAnchor.reset();
+            m_dragging        = false;
+            m_dragStarted     = false;
+            m_pendingClickNodeId = 0;
+            return true;
+        }
+        // Byte arm without drag (click-only on a hex byte) → just drop
+        // the arm and let the row-click logic below finish the press
+        // (it's already fired on press for new selections, or it fires
+        // here for deferred clicks on already-selected rows).
+        m_byteSelAnchor.reset();
         m_dragging = false;
         m_dragStarted = false;
         if (m_pendingClickNodeId != 0) {
@@ -4035,11 +4781,31 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
     if (obj == m_sci->viewport() && !m_editState.active
         && event->type() == QEvent::MouseButtonDblClick) {
         auto* me = static_cast<QMouseEvent*>(event);
+        auto h = hitTest(me->pos());
+        // Hex byte double-click → enter hex-overwrite mode editing the
+        // entire hex node's byte range (8 for Hex64, 4 for Hex32, etc).
+        // Matches the hex-overwrite mode users get from Enter on a
+        // drag-selection. The byteAddrAt() lookup is the same one the
+        // press handler uses for byte-drag arming, so the click target
+        // is consistent: cursor was I-beam, click acts on bytes.
+        if (h.line >= 0 && byteAddrAt(h.line, h.col).has_value()) {
+            const LineMeta* lm = metaForLine(h.line);
+            if (lm && isHexPreview(lm->nodeKind)) {
+                m_pendingClickNodeId = 0;
+                if (h.nodeId != 0 && h.nodeId != kCommandRowId)
+                    emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
+                int sz = sizeForKind(lm->nodeKind);
+                m_byteSel = QPair<uint64_t, uint64_t>{
+                    lm->offsetAddr, lm->offsetAddr + uint64_t(sz)};
+                applyByteSelectionOverlay();
+                beginByteEdit();
+                return true;
+            }
+        }
         int line, tCol; EditTarget t;
         if (hitTestTarget(m_sci, m_meta, me->pos(), line, tCol, t)) {
             m_pendingClickNodeId = 0;   // cancel deferred selection change
             // Narrow selection to this node before editing
-            auto h = hitTest(me->pos());
             if (h.nodeId != 0 && h.nodeId != kCommandRowId)
                 emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
             return beginInlineEdit(t, line, tCol);
@@ -4173,8 +4939,31 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return false;
     case Qt::Key_Return:
     case Qt::Key_Enter:
+        // Byte selection → start hex-overwrite edit on the byte range.
+        // beginByteEdit emits statusHintRequested on cross-row refusal.
+        if (m_byteSel.has_value()) {
+            beginByteEdit();
+            return true;
+        }
         return beginInlineEdit(EditTarget::Value);
+    case Qt::Key_Backspace:
+        // Backspace is normally a no-op in normal mode; with a byte
+        // selection it zero-fills, matching the Delete behaviour
+        // below. Consume only when we own the action so other widgets
+        // (find bar) still see the key when no selection is active.
+        if (m_byteSel.has_value()) {
+            emit byteZeroFillRequested();
+            return true;
+        }
+        return false;
     case Qt::Key_Delete:
+        // Byte selection → zero-fill the range. Node selection →
+        // existing delete-node behaviour. No selection at all → silent
+        // consume (matches today).
+        if (m_byteSel.has_value()) {
+            emit byteZeroFillRequested();
+            return true;
+        }
         if (!m_currentSelIds.isEmpty())
             emit deleteSelectedRequested();
         return true;
@@ -4186,9 +4975,19 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return false;
     case Qt::Key_C:
         // Ctrl+Shift+C → legacy "copy node address" shortcut. Kept for muscle
-        // memory after the clipboard rework.
+        // memory after the clipboard rework. Byte-selection mode takes
+        // priority: copies the SELECTION RANGE ("0xLO..0xHI (N bytes)")
+        // instead of the line's node address — that's the more useful
+        // datum when a range is highlighted.
         if ((ke->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
             == (Qt::ControlModifier | Qt::ShiftModifier)) {
+            if (m_byteSel.has_value()) {
+                auto [lo, hi] = *m_byteSel;
+                QString text = QStringLiteral("0x%1..0x%2 (%3 bytes)")
+                    .arg(lo, 0, 16).arg(hi, 0, 16).arg(hi - lo);
+                QApplication::clipboard()->setText(text);
+                return true;
+            }
             int line, col;
             m_sci->getCursorPosition(&line, &col);
             const LineMeta* lm = metaForLine(line);
@@ -4198,9 +4997,15 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             }
             return true;
         }
-        // Ctrl+C → copy selected nodes as a portable blob (rcx-clipboard/v1
-        // + plain-text fallback). Controller owns the serialization.
+        // Ctrl+C → byte selection wins: copy "DE AD BE EF" hex string.
+        // Otherwise copy selected nodes as a portable blob
+        // (rcx-clipboard/v1 + plain-text fallback). Controller owns
+        // the serialization in both cases.
         if (ke->modifiers() == Qt::ControlModifier) {
+            if (m_byteSel.has_value()) {
+                emit byteCopyHexRequested();
+                return true;
+            }
             emit copyNodesRequested();
             return true;
         }
@@ -4214,8 +5019,13 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return false;
     case Qt::Key_V:
         if (ke->modifiers() == Qt::ControlModifier) {
-            // Ctrl+V → paste nodes; controller reads clipboard and inserts
-            // under the current parent at cursor offset.
+            // Byte selection → paste hex string over the range.
+            // Otherwise paste nodes; controller reads clipboard and
+            // inserts under the current parent at cursor offset.
+            if (m_byteSel.has_value()) {
+                emit bytePasteHexRequested();
+                return true;
+            }
             emit pasteNodesRequested();
             return true;
         }
@@ -4235,6 +5045,16 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     case Qt::Key_Up:
     case Qt::Key_Down: {
         int dir = (ke->key() == Qt::Key_Up) ? -1 : 1;
+        // Byte-selection mode owns plain Shift+Up/Down: snap the
+        // selection's high end to the next/previous hex row boundary.
+        // Checked before Ctrl+Shift (reorder) and before normal node
+        // navigation so byte-selection-active is the higher-precedence
+        // mode. Matches the Left/Right precedence pattern above.
+        if (m_byteSel.has_value()
+            && ke->modifiers() == Qt::ShiftModifier) {
+            snapByteSelectionToRow(dir);
+            return true;
+        }
         // Ctrl+Shift+Up/Down: reorder field in sibling list
         if ((ke->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
             == (Qt::ControlModifier | Qt::ShiftModifier)) {
@@ -4430,8 +5250,35 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     }
     case Qt::Key_Left:
     case Qt::Key_Right: {
+        const int dir = (ke->key() == Qt::Key_Right) ? 1 : -1;
+        const Qt::KeyboardModifiers m = ke->modifiers();
+
+        // ── Byte selection takes priority ──
+        // Shift+arrow OR Ctrl+Shift+arrow → extend selection by 1 byte
+        //   (positive dir grows `hi` rightward; negative dir shrinks
+        //   it). Both bindings do the same thing — Ctrl+Shift is a
+        //   common "extend" muscle memory from other text editors.
+        // Plain ← / → → no-op (absorbed). Users clear with Esc and
+        //   extend with Shift; plain arrows must not silently destroy
+        //   a multi-byte selection.
+        // Other modifier combos fall through to the existing variant
+        // cycle path.
+        if (m_byteSel.has_value()) {
+            if (m == Qt::ShiftModifier
+                || m == (Qt::ControlModifier | Qt::ShiftModifier)) {
+                extendByteSelection(dir);
+                return true;
+            }
+            if (m == Qt::NoModifier) {
+                // Absorb the keypress so Scintilla's cursor doesn't
+                // move (which would fire nodeClicked and clobber the
+                // current selection state).
+                return true;
+            }
+        }
+
         // Cycle through same-size type variants (non-container nodes only)
-        if (ke->modifiers() != Qt::NoModifier) return false;
+        if (m != Qt::NoModifier) return false;
         int ni = currentNodeIndex();
         if (ni < 0) return false;
         const LineMeta* lm = metaForLine([&]{ int l,c; m_sci->getCursorPosition(&l,&c); return l; }());
@@ -4439,19 +5286,39 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         // Only cycle for nodes with a fixed byte size (skip Struct/Array)
         int sz = sizeForKind(lm->nodeKind);
         if (sz <= 0) return false;
-        int dir = (ke->key() == Qt::Key_Right) ? 1 : -1;
         emit cycleSameSizeTypeRequested(ni, dir);
         return true;
     }
     // ── General navigation shortcuts ──
     case Qt::Key_Escape:
         if (ke->modifiers() == Qt::NoModifier) {
+            // Two-stage Esc: first drop byte selection if any (so the
+            // user can clear the byte highlight without losing their
+            // row-level node selection); a second Esc then clears the
+            // node selection. Matches the "Esc undoes the smallest
+            // visible state" pattern from text editors.
+            if (m_byteSel.has_value()) {
+                m_byteSel.reset();
+                applyByteSelectionOverlay();
+                return true;
+            }
             // Clear selection (deselect all)
             emit nodeClicked(-1, 0, Qt::NoModifier);
             return true;
         }
         return false;
     case Qt::Key_Home: {
+        // Byte-selection-mode: Shift+Home collapses the selection back
+        // to a single byte at the anchor. Mirrors the Shift+End extend
+        // case below. Only handles the Shift+Home combination; plain
+        // Home still does node nav.
+        if (m_byteSel.has_value()
+            && ke->modifiers() == Qt::ShiftModifier) {
+            auto [lo, _] = *m_byteSel;
+            m_byteSel = QPair<uint64_t, uint64_t>{lo, lo + 1};
+            applyByteSelectionOverlay();
+            return true;
+        }
         // Jump to first data node
         for (int i = 0; i < m_meta.size(); i++) {
             const auto& lm = m_meta[i];
@@ -4465,6 +5332,28 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return true;
     }
     case Qt::Key_End: {
+        // Byte-selection-mode: Shift+End extends `hi` to the last hex
+        // byte across every hex preview row. Same docHi math as
+        // extendByteSelection's positive clamp — single-shot version
+        // of "Shift+Down until you can't".
+        if (m_byteSel.has_value()
+            && ke->modifiers() == Qt::ShiftModifier) {
+            auto [lo, hi] = *m_byteSel;
+            uint64_t docHi = 0;
+            bool anyHex = false;
+            for (const LineMeta& lm : m_meta) {
+                if (lm.lineKind != LineKind::Field) continue;
+                if (!isHexPreview(lm.nodeKind)) continue;
+                uint64_t lineHi = lm.offsetAddr
+                    + static_cast<uint64_t>(sizeForKind(lm.nodeKind));
+                if (!anyHex || lineHi > docHi) { docHi = lineHi; anyHex = true; }
+            }
+            if (anyHex && docHi > hi) {
+                m_byteSel = QPair<uint64_t, uint64_t>{lo, docHi};
+                applyByteSelectionOverlay();
+            }
+            return true;
+        }
         // Jump to last data node
         for (int i = m_meta.size() - 1; i >= 0; i--) {
             const auto& lm = m_meta[i];
@@ -4480,6 +5369,24 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     }
     case Qt::Key_A:
         if (ke->modifiers() & Qt::ControlModifier) {
+            // Byte-selection mode wins: select all bytes of the
+            // containing hex node. Also fires when no byte selection
+            // is active but the cursor sits on a hex preview row's
+            // value column — creates a fresh whole-node byte sel.
+            if (m_byteSel.has_value()) {
+                selectAllHexBytes();
+                return true;
+            }
+            {
+                int curLine = 0, curCol = 0;
+                m_sci->getCursorPosition(&curLine, &curCol);
+                const LineMeta* lm = metaForLine(curLine);
+                if (lm && lm->lineKind == LineKind::Field
+                    && isHexPreview(lm->nodeKind)) {
+                    selectAllHexBytes();
+                    if (m_byteSel.has_value()) return true;
+                }
+            }
             // Select all siblings of current node
             int ni = currentNodeIndex();
             if (ni < 0) return true;
@@ -4627,7 +5534,12 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
     const int spanEnd = spanStart + m_editState.original.size();
 
     // Helper: replace a single character and re-apply hex dimming indicator
-    // (SCI_REPLACETARGET can clear indicators at the replacement position)
+    // (SCI_REPLACETARGET clears indicators at the edges of an indicator
+    // range — i.e. the very first / very last char of the active edit-
+    // bounds span loses its background highlight on replace. Re-fill
+    // IND_EDIT_BOUNDS at the replacement pos while a byte-range edit is
+    // in flight to keep the highlight contiguous as the user types past
+    // segment boundaries.)
     auto replaceCharAt = [this](long pos, char ch) {
         QByteArray buf(1, ch);
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, pos);
@@ -4636,6 +5548,11 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
                              (uintptr_t)1, buf.constData());
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HEX_DIM);
         m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, 1);
+        if (m_editState.byteRange) {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
+                                 IND_EDIT_BOUNDS);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, 1);
+        }
     };
 
     switch (ke->key()) {
@@ -4665,7 +5582,12 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
     }
 
     case Qt::Key_Left: {
-        if (col <= spanStart) return true;
+        if (col <= spanStart) {
+            // Multi-row: hop to the previous segment (last byte). For
+            // single-row edits advanceToByteSegment is a no-op.
+            if (advanceToByteSegment(-1)) return true;
+            return true;
+        }
         int newCol = col - 1;
         // In hex mode, skip over space separators
         if (isHexMode) {
@@ -4679,7 +5601,11 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
     }
 
     case Qt::Key_Right: {
-        if (col >= spanEnd - 1) return true;
+        if (col >= spanEnd - 1) {
+            // Multi-row: hop to the next segment (first byte).
+            if (advanceToByteSegment(+1)) return true;
+            return true;
+        }
         int newCol = col + 1;
         if (isHexMode) {
             QString lineText = getLineText(m_sci, line);
@@ -4692,7 +5618,19 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
     }
 
     case Qt::Key_Backspace: {
-        if (col <= spanStart) return true;
+        if (col <= spanStart) {
+            // Multi-row: hop to previous segment, reset its last byte
+            // to the reset value. Same UX as backspacing through a
+            // soft wrap in a regular text editor.
+            if (advanceToByteSegment(-1)) {
+                int newLine, newCol;
+                m_sci->getCursorPosition(&newLine, &newCol);
+                long resetPos = posFromCol(m_sci, newLine, newCol);
+                replaceCharAt(resetPos, isHexMode ? '0' : '.');
+                m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, resetPos);
+            }
+            return true;
+        }
         int prevCol = col - 1;
         if (isHexMode) {
             QString lineText = getLineText(m_sci, line);
@@ -4794,18 +5732,39 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
         int writeCol = col;
         if (writeCol < lineText.size() && lineText[writeCol] == ' ')
             writeCol++;
-        if (writeCol >= spanEnd) return true;
+        if (writeCol >= spanEnd) {
+            // End of current segment — for multi-row, advance to the
+            // next segment and write the digit there. Single-row just
+            // clamps (no-op).
+            if (!advanceToByteSegment(+1)) return true;
+            m_sci->getCursorPosition(&line, &writeCol);
+            // After advance, m_editState.spanStart/original reflect the
+            // new segment — re-read the locals for the write below.
+        }
 
         // Overwrite current digit
         long pos = posFromCol(m_sci, line, writeCol);
         replaceCharAt(pos, (char)ch.toLatin1());
 
-        // Advance cursor, skip over spaces
+        // Advance cursor, skip over spaces. If we'd run past the
+        // segment's end, hop to the next segment's first byte. At the
+        // VERY end of the edit (last segment, last digit) place the
+        // caret AT spanEnd (one past the last digit) so it reads as
+        // "you've filled everything" rather than sitting on top of
+        // the final character.
+        int newSpanEnd = m_editState.spanStart + m_editState.original.size();
         int nextCol = writeCol + 1;
         lineText = getLineText(m_sci, line);
-        if (nextCol < spanEnd && nextCol < lineText.size() && lineText[nextCol] == ' ')
+        if (nextCol < newSpanEnd && nextCol < lineText.size()
+            && lineText[nextCol] == ' ')
             nextCol++;
-        if (nextCol >= spanEnd) nextCol = spanEnd - 1;
+        if (nextCol >= newSpanEnd) {
+            if (advanceToByteSegment(+1)) return true;
+            // End of last segment — caret past the last digit.
+            m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
+                                 posFromCol(m_sci, line, newSpanEnd));
+            return true;
+        }
         m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
                              posFromCol(m_sci, line, nextCol));
     } else {
@@ -4831,6 +5790,15 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
 
 bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     if (target == EditTarget::TypeSelector) return false;  // handled by popup, not inline edit
+
+    // Edit and byte selection don't coexist this pass — clear any
+    // active byte highlight so the edit visuals own the row. If we
+    // ever wire "Enter on a byte selection → overwrite those bytes",
+    // this is the point that would change.
+    if (m_byteSel.has_value()) {
+        m_byteSel.reset();
+        applyByteSelectionOverlay();
+    }
 
     // Type, array element type and pointer target: handled by TypeSelectorPopup, not inline edit
     if (target == EditTarget::Type || target == EditTarget::ArrayElementType || target == EditTarget::PointerTarget) {
@@ -5199,7 +6167,15 @@ void RcxEditor::clampEditSelection() {
         if (sL != eL || sC != eC) {
             int curLine, curCol;
             m_sci->getCursorPosition(&curLine, &curCol);
-            m_sci->setCursorPosition(m_editState.line, curCol);
+            // Single-row: pin cursor back to the edit's line.
+            // Multi-row byte edit: cursor legitimately moves between
+            // segment lines — preserve whichever it's currently on
+            // (advanceToByteSegment already placed it there).
+            int targetLine = (m_editState.byteRange
+                              && m_editState.byteSegments.size() > 1)
+                ? curLine
+                : m_editState.line;
+            m_sci->setCursorPosition(targetLine, curCol);
         }
         m_clampingSelection = false;
         return;
@@ -5254,6 +6230,57 @@ void RcxEditor::commitInlineEdit() {
         editedText = lineText.mid(m_editState.spanStart, editedLen);
         if (!m_editState.hexOverwrite)
             editedText = editedText.trimmed();
+    }
+
+    // ── Byte-range commit branch ──
+    // beginByteEdit marked this edit as a byte-range overwrite. For
+    // single-row selections (1 segment) the edited text in
+    // `editedText` carries the typed digits. For multi-row, the typed
+    // digits live across multiple Scintilla lines — walk each segment
+    // and pull its current line's slice. Parse digit pairs (skipping
+    // inter-byte spaces) to raw bytes, concatenate, and route through
+    // byteRangeCommitRequested.
+    if (m_editState.byteRange) {
+        QByteArray raw;
+        raw.reserve(m_editState.byteRangeLen);
+        bool parseOk = true;
+        auto parseSegment = [&](const QString& segText, int wantBytes) -> bool {
+            int parsedBytes = 0;
+            int i = 0;
+            while (i < segText.size() && parsedBytes < wantBytes) {
+                while (i < segText.size() && segText[i] == QLatin1Char(' '))
+                    ++i;
+                if (i + 1 >= segText.size()) return false;
+                bool byteOk = false;
+                uint8_t b = (uint8_t)segText.mid(i, 2).toUInt(&byteOk, 16);
+                if (!byteOk) return false;
+                raw.append((char)b);
+                ++parsedBytes;
+                i += 2;
+            }
+            return parsedBytes == wantBytes;
+        };
+        if (m_editState.byteSegments.size() <= 1) {
+            // Single-row — use editedText already sliced from m_editState.line.
+            int want = m_editState.byteRangeLen;
+            if (!parseSegment(editedText, want)) parseOk = false;
+        } else {
+            // Multi-row — read each segment's current line slice.
+            for (const auto& seg : m_editState.byteSegments) {
+                QString segText = getLineText(m_sci, seg.line)
+                    .mid(seg.spanStart, seg.spanEnd - seg.spanStart);
+                if (!parseSegment(segText, seg.byteCount)) {
+                    parseOk = false;
+                    break;
+                }
+            }
+        }
+        uint64_t addr = m_editState.byteRangeAddr;
+        int wantLen   = m_editState.byteRangeLen;
+        endInlineEdit();
+        if (parseOk && raw.size() == wantLen)
+            emit byteRangeCommitRequested(addr, raw);
+        return;
     }
 
     // For Type edits: if nothing changed, commit original
@@ -5867,6 +6894,25 @@ void RcxEditor::applyHoverCursor() {
         }
         // else: desired stays Arrow (hovering over column padding)
     }
+
+    // Hex-byte override — wins over the rest of the chain. Hovering over
+    // any hex byte digit in a hex preview row's value column resolves
+    // via byteAddrAt(), which is exactly the press-handler's "this is a
+    // byte-selection arming zone" test. Matching the cursor to the
+    // press behaviour telegraphs the upcoming mode before the user
+    // drags. Falls through to whatever the chain above decided in any
+    // non-byte column.
+    if (h.line >= 0 && byteAddrAt(h.line, h.col).has_value())
+        desired = Qt::IBeamCursor;
+
+    // Clickable chip override — type-hint suggestions ("int32x2"),
+    // comment chips, enum chips, AddComment all respond to clicks.
+    // updateChipHover() (run from MouseMove just before this function)
+    // sets m_chipHoverLine when one is hovered; matching the cursor
+    // makes them feel like the other clickable RcxEditor items (fold
+    // toggle, footer pills, editable tokens).
+    if (m_chipHoverLine >= 0)
+        desired = Qt::PointingHandCursor;
 
     // ── Arrow tooltip on command row spans ──
     {
