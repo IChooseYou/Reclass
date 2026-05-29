@@ -8,6 +8,8 @@
 #include <QSettings>
 #include <QtEndian>
 #include <QStackedWidget>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QPainter>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
@@ -336,67 +338,734 @@ static QWidget* buildTextBodyWidget(const QString& body, const QFont& font,
 
 // Build the value-history rows widget (no "Set" buttons — those live
 // on the inline-edit path which uses ValueHistoryPopup directly).
-// Zebra-stripes alternate rows with a faint band so a tall history
-// is easier to scan top-to-bottom.
+//
+// Layout per row (newest first):
+//   [▸ |  value (mono)            12s |
+//   [2 |  value (mono dimmer)      1m |
+//   [3 |  value (mono dimmer)      4m |
+//
+// - Newest row marked with ▸ glyph in the index column (full-strength
+//   color); older rows numbered starting at 1 in textDim.
+// - Striped rows for readability on a tall list.
+// - Time column is right-aligned, fixed width (so values column stays
+//   stable — was previously stretched by the value label and time
+//   jiggled per-row when "9s" → "10s" rolled over).
+// - Time uses compact tokens (s/m/h/d/w, no "ago"); a Qt tooltip on
+//   each time label carries the absolute timestamp in ISO format.
+// - A thin separator inserted between the newest row and the rest so
+//   the eye can lock onto "current vs previous" at a glance.
 static QWidget* buildValueHistoryBody(const ValueHistory& hist,
                                        const QFont& font, const Theme& theme,
                                        QWidget* parent) {
-    auto* container = new QWidget(parent);
+    auto* container = new QWidget;
     auto* vbox = new QVBoxLayout(container);
-    vbox->setContentsMargins(0, 0, 0, 0);
+    // 4 px bottom margin so the last row / overflow footer doesn't
+    // visually kiss the host's lower chrome.
+    vbox->setContentsMargins(0, 0, 0, 4);
     vbox->setSpacing(0);
-    qint64 now = QDateTime::currentMSecsSinceEpoch();
-    int idx = 0;
-    // Each row sits in its own QFrame so we can paint a striped bg via
-    // setAutoFillBackground — VBoxLayout alone can't do per-row bg.
-    QColor stripe = theme.hover;
-    stripe.setAlpha(28);  // very subtle band
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QFontMetrics fm(font);
+
+    // Fixed-width columns so values stay aligned vertically as rows
+    // refresh. Index column = 2-char block ("8 " or "▸ "); time column
+    // = 5-char block ("999h " is the widest realistic token).
+    const int idxColWidth  = fm.horizontalAdvance(QStringLiteral("88"));
+    const int timeColWidth = fm.horizontalAdvance(QStringLiteral("999w"));
+
+    auto formatElapsed = [](qint64 elapsedMs) -> QString {
+        if (elapsedMs < 250)         return QStringLiteral("just");
+        if (elapsedMs < 1000)        return QStringLiteral("now");
+        if (elapsedMs < 60000)       return QStringLiteral("%1s").arg(elapsedMs / 1000);
+        if (elapsedMs < 3600000)     return QStringLiteral("%1m").arg(elapsedMs / 60000);
+        if (elapsedMs < 86400000)    return QStringLiteral("%1h").arg(elapsedMs / 3600000);
+        if (elapsedMs < 604800000)   return QStringLiteral("%1d").arg(elapsedMs / 86400000);
+        return QStringLiteral("%1w").arg(elapsedMs / 604800000);
+    };
+
+    // Time-recency tier color. Tiers mirror the heat semantics elsewhere
+    // (cold/warm/hot) but flip the direction: recent = warm color, old =
+    // dim. Helps the eye spot "the value changed RIGHT NOW vs minutes
+    // ago" without parsing the exact text.
+    auto timeTierColor = [&theme](qint64 elapsedMs) -> QColor {
+        if (elapsedMs < 1000)        return theme.indHoverSpan;     // accent (just/now)
+        if (elapsedMs < 60000)       return theme.text;             // strong (Ns)
+        if (elapsedMs < 3600000)     return theme.textDim;          // muted (Nm)
+        return theme.textMuted;                                     // deepest dim
+    };
+
+    // Parse a value string as a signed integer if it looks numeric and
+    // is small enough that a delta would be meaningful. Pointer-sized
+    // hex values (16 digits = full 64-bit) are excluded — deltas between
+    // heap allocations aren't useful and just add noise.
+    auto tryParseAsInt = [](const QString& s) -> std::optional<int64_t> {
+        QString trimmed = s.trimmed();
+        if (trimmed.isEmpty()) return std::nullopt;
+        bool ok = false;
+        if (trimmed.startsWith(QLatin1String("0x"))
+         || trimmed.startsWith(QLatin1String("0X"))) {
+            QString hex = trimmed.mid(2);
+            if (hex.size() >= 9) return std::nullopt;   // skip pointer-ish
+            uint64_t u = hex.toULongLong(&ok, 16);
+            if (!ok) return std::nullopt;
+            return static_cast<int64_t>(u);
+        }
+        int64_t i = trimmed.toLongLong(&ok, 10);
+        if (!ok) return std::nullopt;
+        return i;
+    };
+
+    // Pre-collect entries so we can compute pairwise deltas. forEachWithTime
+    // streams newest → oldest, so entries[0] is current and entries[N-1]
+    // is the oldest visible.
+    struct Entry { QString v; qint64 msec; std::optional<int64_t> num; };
+    QVector<Entry> entries;
+    entries.reserve(hist.uniqueCount());
     hist.forEachWithTime([&](const QString& v, qint64 msec) {
+        entries.append({v, msec, tryParseAsInt(v)});
+    });
+
+    // Build occurrence count map so we can tag repeats. Ring dedups
+    // consecutive duplicates at record(), but a value that flips back
+    // and forth (A → B → A → B …) IS recorded each time and shows up
+    // multiple times across entries. Tagging each instance with ×N
+    // helps the user spot "this value keeps coming back" without
+    // scanning the whole list.
+    QHash<QString, int> occurrences;
+    for (const auto& e : entries) occurrences[e.v]++;
+
+    // Pre-compute the delta column width. Use the widest realistic
+    // signed delta string ("+99999") to lock the column.
+    const int deltaColWidth = fm.horizontalAdvance(QStringLiteral("+99999"));
+
+    // Compute the largest pairwise numeric delta across the visible
+    // entries (absolute value). The row whose delta-from-prior matches
+    // this magnitude gets its delta label bolded — quick visual cue
+    // for "this was the biggest step". Zero when no numeric deltas
+    // exist (skips the bolding path entirely).
+    int64_t maxAbsDelta = 0;
+    for (int k = 0; k + 1 < entries.size(); ++k) {
+        if (!entries[k].num.has_value() || !entries[k + 1].num.has_value()) continue;
+        int64_t d = *entries[k].num - *entries[k + 1].num;
+        if (d < 0) d = -d;
+        if (d > maxAbsDelta) maxAbsDelta = d;
+    }
+
+    // Compute the average inter-event gap up front. Used to decide when
+    // an inter-row separator should fire — only when the gap between
+    // two adjacent rows is substantially larger than the typical gap
+    // (the value went quiet, then resumed). Falls back to 0 when fewer
+    // than two timestamped entries exist.
+    qint64 avgGapMs = 0;
+    {
+        qint64 totalSpan = 0;
+        int spans = 0;
+        // Walk newest→oldest pairs (entries already sorted newest-first).
+        for (int k = 0; k + 1 < entries.size(); ++k) {
+            if (entries[k].msec > 0 && entries[k + 1].msec > 0) {
+                totalSpan += entries[k].msec - entries[k + 1].msec;
+                spans++;
+            }
+        }
+        if (spans > 0) avgGapMs = totalSpan / spans;
+    }
+
+    QColor stripe = theme.hover;
+    stripe.setAlpha(22);  // a hair softer than before — the newest-row
+                          // marker carries more of the visual weight now
+    QColor hoverBg = theme.hover;
+    hoverBg.setAlpha(70);  // distinctly stronger than the zebra stripe
+                           // so the hovered row visibly pops out
+
+    const int unique = hist.uniqueCount();
+
+    // Body header — "5 entries · 3 unique · since 12m ago". Compact,
+    // italic, in textMuted. The 3-part summary covers: (a) ring depth,
+    // (b) how many DISTINCT values cycled through (only printed when
+    // less than total — equal counts are obvious from the rows), and
+    // (c) age of the oldest tracked entry. All three are computed
+    // from data we already have, no extra storage.
+    if (unique > 0) {
+        QString headerStr = QStringLiteral("%1 entr%2")
+            .arg(unique).arg(unique == 1 ? "y" : "ies");
+        // occurrences.size() = number of distinct values in the visible
+        // window. Only mention when smaller than total (a value cycled).
+        int distinct = occurrences.size();
+        if (distinct < unique) {
+            headerStr += QStringLiteral(" · %1 unique").arg(distinct);
+        }
+        // Monotonic-direction hint for numeric values. Walk pairwise
+        // deltas; if all non-zero deltas share a sign, surface ↑/↓.
+        // Common for counters, timers, IDs. Mixed-direction sequences
+        // (the typical bouncing-pointer case) get no hint — silence
+        // beats noise when there's no clean pattern.
+        {
+            int posDeltas = 0, negDeltas = 0;
+            for (int k = 0; k + 1 < entries.size(); ++k) {
+                if (!entries[k].num.has_value()
+                 || !entries[k + 1].num.has_value()) { posDeltas = -1; break; }
+                int64_t diff = *entries[k].num - *entries[k + 1].num;
+                if (diff > 0) posDeltas++;
+                else if (diff < 0) negDeltas++;
+            }
+            if (posDeltas > 0 && negDeltas == 0)
+                headerStr += QStringLiteral(" · ↑ rising");
+            else if (negDeltas > 0 && posDeltas == 0)
+                headerStr += QStringLiteral(" · ↓ falling");
+        }
+        // Find oldest entry with a real timestamp.
+        qint64 oldestMsec = 0;
+        for (int i = entries.size() - 1; i >= 0; --i) {
+            if (entries[i].msec > 0) {
+                oldestMsec = entries[i].msec;
+                qint64 elapsed = now - oldestMsec;
+                headerStr += QStringLiteral(" · since %1").arg(formatElapsed(elapsed));
+                break;
+            }
+        }
+        // Average change interval — total span / (changes - 1). Tells
+        // the user how often the value moves at a glance. Skipped when
+        // the span is too short (< 2s) to be meaningful, or when only
+        // one timestamped entry exists (can't compute an interval).
+        if (oldestMsec > 0 && entries.size() >= 3 && entries[0].msec > 0) {
+            qint64 span = entries[0].msec - oldestMsec;
+            int gaps = entries.size() - 1;
+            if (span >= 2000 && gaps > 0) {
+                qint64 avgMs = span / gaps;
+                headerStr += QStringLiteral(" · ~%1/Δ").arg(formatElapsed(avgMs));
+            }
+        }
+        // Stale-newest hint. When the most recent entry is itself
+        // long-aged (>5 minutes), the value hasn't moved recently —
+        // surface that so the user doesn't read "5 entries" as "still
+        // changing". Threshold scales: 5m for short ranges, 1h for
+        // longer ones (already covered by since X ago which gets bigger).
+        if (entries[0].msec > 0) {
+            qint64 newestElapsed = now - entries[0].msec;
+            if (newestElapsed > 5LL * 60 * 1000) {
+                headerStr += QStringLiteral(" · stale");
+            }
+        }
+        auto* header = new QLabel(headerStr, container);
+        QFont headerFont = font;
+        headerFont.setPointSizeF(qMax(7.0, font.pointSizeF() - 1.0));
+        headerFont.setItalic(true);
+        header->setFont(headerFont);
+        header->setStyleSheet(QStringLiteral("color:%1;").arg(theme.textMuted.name()));
+        header->setContentsMargins(6, 0, 6, 2);
+        // Tooltip on the header: absolute date range. Lets the user
+        // mouse-over "since 12m ago" to see the wall-clock window
+        // ("First: 2024-… · Last: 2024-…"). Skipped when only one
+        // timestamped entry exists (no range to show).
+        if (entries[0].msec > 0 && oldestMsec > 0
+            && oldestMsec != entries[0].msec) {
+            QDateTime firstDt = QDateTime::fromMSecsSinceEpoch(oldestMsec);
+            QDateTime lastDt  = QDateTime::fromMSecsSinceEpoch(entries[0].msec);
+            QString fmt = QStringLiteral("yyyy-MM-dd HH:mm:ss");
+            header->setToolTip(QStringLiteral("First: %1\nLast:  %2")
+                .arg(firstDt.toString(fmt), lastDt.toString(fmt)));
+        }
+        vbox->addWidget(header);
+
+        // Thin underline below the body header so it reads as its own
+        // zone, distinct from the row list. Same muted border alpha as
+        // the newest-vs-rest divider for consistency.
+        auto* headerLine = new QFrame(container);
+        headerLine->setFrameShape(QFrame::HLine);
+        headerLine->setFixedHeight(1);
+        QColor hlc = theme.border;
+        hlc.setAlpha(60);
+        headerLine->setStyleSheet(QStringLiteral("background:%1; border:none;")
+            .arg(hlc.name(QColor::HexArgb)));
+        auto* hlWrap = new QWidget(container);
+        auto* hll = new QVBoxLayout(hlWrap);
+        hll->setContentsMargins(6, 0, 6, 3);
+        hll->setSpacing(0);
+        hll->addWidget(headerLine);
+        vbox->addWidget(hlWrap);
+    }
+
+    int idx = 0;
+    for (const Entry& entry : entries) {
+        const QString& v = entry.v;
+        const qint64 msec = entry.msec;
         auto* rowFrame = new QFrame(container);
         rowFrame->setObjectName(QStringLiteral("histRow"));
-        rowFrame->setStyleSheet(
-            (idx % 2 == 1)
-                ? QStringLiteral("#histRow{background:rgba(%1,%2,%3,%4);}")
-                      .arg(stripe.red()).arg(stripe.green())
-                      .arg(stripe.blue()).arg(stripe.alpha())
-                : QString());
-        auto* row = new QHBoxLayout(rowFrame);
-        // Zero left/right margin — the popup's vbox already provides
-        // padding from the frame border. Adding row margin here on top
-        // of that double-indented ValueHistory text by 4 px compared to
-        // HexDump/Disasm body (whose QLabel sits flush against the
-        // stack edge), causing the "pushed over" misalignment.
-        row->setContentsMargins(0, 1, 0, 1);
-        row->setSpacing(8);
-        auto* label = new QLabel(v, rowFrame);
-        label->setFont(font);
-        // Newest row gets the full-strength number color; older rows
-        // fade slightly so the most-recent value reads as primary.
-        QColor valColor = theme.syntaxNumber;
-        if (idx > 2) {
-            valColor.setAlpha(qMax(140, 255 - idx * 18));
+        rowFrame->setAttribute(Qt::WA_Hover, true);  // enable :hover QSS
+        // Background composition:
+        //   - newest row: subtle accent tint so the "current" row reads
+        //     as a distinct band, not just a different glyph color
+        //   - odd-index older rows: muted hover-color stripe
+        //   - hover (any row): elevated hover color (wins via :hover)
+        QString baseBg;
+        QString extraBorder;
+        if (idx == 0) {
+            QColor accentTint = theme.indHoverSpan;
+            accentTint.setAlpha(28);
+            baseBg = QStringLiteral("background:rgba(%1,%2,%3,%4);")
+                .arg(accentTint.red()).arg(accentTint.green())
+                .arg(accentTint.blue()).arg(accentTint.alpha());
+            // 1-px accent border on top anchors the newest row as "the
+            // current state" — visually wraps the row in a thin chrome
+            // distinct from older rows. Uses the accent color at half
+            // alpha so it doesn't fight the row's own contents.
+            QColor border = theme.indHoverSpan;
+            border.setAlpha(140);
+            extraBorder = QStringLiteral("border-top:1px solid rgba(%1,%2,%3,%4);")
+                .arg(border.red()).arg(border.green())
+                .arg(border.blue()).arg(border.alpha());
+        } else if (idx % 2 == 1) {
+            baseBg = QStringLiteral("background:rgba(%1,%2,%3,%4);")
+                .arg(stripe.red()).arg(stripe.green())
+                .arg(stripe.blue()).arg(stripe.alpha());
         }
-        label->setStyleSheet(QStringLiteral("color: rgba(%1,%2,%3,%4);")
-            .arg(valColor.red()).arg(valColor.green())
-            .arg(valColor.blue()).arg(valColor.alpha()));
+        QString hoverRule = QStringLiteral("background:rgba(%1,%2,%3,%4);")
+            .arg(hoverBg.red()).arg(hoverBg.green())
+            .arg(hoverBg.blue()).arg(hoverBg.alpha());
+        rowFrame->setStyleSheet(QStringLiteral(
+            "#histRow{%1 %2 border-radius:2px;}"
+            "#histRow:hover{%3 border-radius:2px;}")
+            .arg(baseBg, extraBorder, hoverRule));
+
+        auto* row = new QHBoxLayout(rowFrame);
+        // Generous horizontal padding so values aren't kissing the
+        // popup edge; consistent vertical breathing room per row.
+        row->setContentsMargins(0, 3, 6, 3);  // left=0 to flush the rail
+        row->setSpacing(8);
+        // Pin row min-height to fontMetrics + padding so a tall list
+        // (10+ entries) doesn't get squished into 2-px bands when the
+        // host's fixed stack height clamps the body. Scroll area wraps
+        // this widget at return, so overflow scrolls instead of crushes.
+        const int rowMinH = fm.height() + 6;
+        rowFrame->setMinimumHeight(rowMinH);
+
+        // Recency rail — thin colored bar at the row's left edge,
+        // hue-matched to the time tier. Acts as a continuous "heat band"
+        // down the popup: bright at the top (recent), fading to muted at
+        // the bottom (old). Lets the eye gauge "how hot is this history"
+        // from peripheral vision without reading any text. The newest
+        // row gets a 3-px rail (vs 2-px on older) so the "active band"
+        // visually pops out of the gradient.
+        auto* rail = new QFrame(rowFrame);
+        rail->setFixedWidth(idx == 0 ? 3 : 2);
+        QColor railColor = (idx == 0)
+            ? theme.indHoverSpan
+            : (msec > 0 ? timeTierColor(now - msec) : theme.textMuted);
+        rail->setStyleSheet(QStringLiteral("background:%1; border:none;")
+            .arg(railColor.name()));
+        rail->setToolTip(idx == 0
+            ? QStringLiteral("Newest value (#1)")
+            : (msec > 0
+                ? QStringLiteral("Entry #%1 · recorded %2 ago")
+                    .arg(idx + 1).arg(formatElapsed(now - msec))
+                : QStringLiteral("Entry #%1").arg(idx + 1)));
+        row->addWidget(rail);
+
+        // Tiny gutter between rail and content (no QHBoxLayout::setSpacing
+        // change needed — done with a 4-px spacer item so the rail butts
+        // flush against the rowFrame edge but content still breathes).
+        row->addSpacing(4);
+
+        // Index column. Newest = pointer caret in accent color so the
+        // eye lands there first; older indices tier their color by the
+        // ENTRY'S elapsed time so the index + time columns form a
+        // matching pair of recency cues — eye scans either side and
+        // gets the same answer.
+        QString idxText = (idx == 0)
+            ? QStringLiteral("▸")
+            : QString::number(idx + 1);
+        auto* idxLabel = new QLabel(idxText, rowFrame);
+        idxLabel->setFont(font);
+        idxLabel->setFixedWidth(idxColWidth);
+        idxLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        QColor idxColor;
+        if (idx == 0) {
+            idxColor = theme.indHoverSpan;
+        } else if (msec > 0) {
+            idxColor = timeTierColor(now - msec);
+            idxColor.setAlpha(170);  // slightly more muted than the time text
+        } else {
+            idxColor = theme.textMuted;
+        }
+        idxLabel->setStyleSheet(QStringLiteral("color:rgba(%1,%2,%3,%4);")
+            .arg(idxColor.red()).arg(idxColor.green())
+            .arg(idxColor.blue()).arg(idxColor.alpha()));
+        row->addWidget(idxLabel);
+
+        // Value — full color on newest, slowly fading on older. Slight
+        // bold on the newest to mark it as the "current" reference.
+        // Older rows that REPEAT the newest value get an additional
+        // fade — the data point is already represented by row 0; the
+        // repeat is informational ("it bounced back"), not the value
+        // itself, so we de-emphasize it visually.
+        auto* label = new QLabel(rowFrame);
+        QFont valueFont = font;
+        if (idx == 0) valueFont.setBold(true);
+        label->setFont(valueFont);
+        QColor valColor = theme.syntaxNumber;
+        int valAlpha = 255;
+        if (idx > 0) {
+            valAlpha = qMax(150, 255 - idx * 18);
+            if (v == entries[0].v) valAlpha = qMax(110, valAlpha - 35);
+            valColor.setAlpha(valAlpha);
+        }
+        // Compute the display text. Empty / control-char values get
+        // sanitized placeholders so layout doesn't collapse and the
+        // user can still distinguish rows. Long values get middle-elided.
+        // Older rows whose value differs from the newest get per-char
+        // diff highlighting — chars that match the newest get the
+        // default faded color, chars that differ get the accent color
+        // so the user can spot WHERE the value changed at a glance
+        // (great for hex addresses where only a few digits roll). Skip
+        // diffing on elided rows (alignment with elided baseline gets
+        // messy) and on sanitized rows (the placeholder isn't real
+        // value content).
+        QString displayText = v;
+        bool sanitized = false;
+        if (v.isEmpty()) {
+            displayText = QStringLiteral("(empty)");
+            sanitized = true;
+        } else if (v.contains(QChar('\n')) || v.contains(QChar('\r'))
+                || v.contains(QChar('\t'))) {
+            // Replace embedded control chars with visible glyphs so a
+            // multi-line value doesn't blow out the row height.
+            displayText = v;
+            displayText.replace(QChar('\r'), QChar(0x21B5));   // ↵
+            displayText.replace(QChar('\n'), QChar(0x21B5));   // ↵
+            displayText.replace(QChar('\t'), QChar(0x2192));   // →
+            sanitized = true;
+        }
+        const int elideThreshold = 32;
+        bool elided = false;
+        if (displayText.size() > elideThreshold) {
+            displayText = fm.elidedText(displayText, Qt::ElideMiddle,
+                fm.horizontalAdvance(QString(elideThreshold, 'M')));
+            elided = true;
+        }
+        const QString& newestV = entries[0].v;
+        bool canDiff = (idx > 0) && !elided && !sanitized && (v != newestV)
+                       && (v.size() == newestV.size());
+        if (canDiff) {
+            // Build a rich-text span: matching chars in valColor, diff
+            // chars in indHoverSpan. Bold the diff chars too so they
+            // hold their own against the surrounding fade.
+            QString html;
+            html.reserve(v.size() * 8);
+            QString baseHex = QStringLiteral("rgba(%1,%2,%3,%4)")
+                .arg(valColor.red()).arg(valColor.green())
+                .arg(valColor.blue()).arg(valColor.alpha());
+            QColor diffCol = theme.indHoverSpan;
+            QString diffHex = QStringLiteral("rgba(%1,%2,%3,%4)")
+                .arg(diffCol.red()).arg(diffCol.green())
+                .arg(diffCol.blue()).arg(qMax(180, valAlpha));
+            for (int i = 0; i < v.size(); ++i) {
+                bool diff = (v[i] != newestV[i]);
+                QString ch = QString(v[i]).toHtmlEscaped();
+                if (diff) {
+                    html += QStringLiteral("<span style='color:%1;font-weight:bold;'>%2</span>")
+                        .arg(diffHex, ch);
+                } else {
+                    html += QStringLiteral("<span style='color:%1;'>%2</span>")
+                        .arg(baseHex, ch);
+                }
+            }
+            label->setTextFormat(Qt::RichText);
+            label->setText(html);
+        } else {
+            label->setText(displayText);
+            label->setStyleSheet(QStringLiteral("color:rgba(%1,%2,%3,%4);")
+                .arg(valColor.red()).arg(valColor.green())
+                .arg(valColor.blue()).arg(valColor.alpha()));
+        }
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        // Value tooltip — verbatim + alternate-base form. Lets the user
+        // mouse-over "0x42" and see "= 66" (or hover "256" and see
+        // "= 0x100") without doing the math. Only when the value
+        // parses as a sub-pointer integer; bigger values would give
+        // misleading conversions.
+        QString valueTip = v;
+        if (entry.num.has_value()) {
+            int64_t n = *entry.num;
+            QString trimmed = v.trimmed();
+            bool isHex = trimmed.startsWith(QLatin1String("0x"))
+                      || trimmed.startsWith(QLatin1String("0X"));
+            if (isHex) {
+                valueTip = QStringLiteral("%1\n= %2 (decimal)").arg(v).arg(n);
+            } else {
+                QString hexForm = QStringLiteral("0x%1")
+                    .arg(static_cast<uint64_t>(n), 0, 16);
+                valueTip = QStringLiteral("%1\n= %2 (hex)").arg(v, hexForm);
+            }
+            // ASCII decode — interpret the value's bytes as little-endian
+            // characters. Useful for spotting strings stored as 4/8-byte
+            // integers ("hash" → 0x68736168). Emit only when >=2 chars
+            // are printable; otherwise the decode is noise.
+            uint64_t bits = static_cast<uint64_t>(n);
+            QString ascii;
+            int printable = 0;
+            for (int byteIdx = 0; byteIdx < 8; ++byteIdx) {
+                uint8_t b = static_cast<uint8_t>((bits >> (byteIdx * 8)) & 0xFF);
+                if (b == 0) break;  // null-terminate (common case)
+                if (b >= 0x20 && b <= 0x7E) {
+                    ascii += QChar(b);
+                    ++printable;
+                } else {
+                    ascii += QChar('.');
+                }
+            }
+            if (printable >= 2) {
+                valueTip += QStringLiteral("\n= \"%1\" (ASCII LE)").arg(ascii);
+            }
+        }
+        label->setToolTip(valueTip);
         row->addWidget(label, 1);
+
+        // Repeated-value badge — show ×N when this value appears more
+        // than once across the ring. Useful for spotting bouncing
+        // values (A↔B) or hot toggles. Only emit on the FIRST (newest)
+        // occurrence so the count doesn't get repeated on every row.
+        int repeatCount = occurrences.value(v, 1);
+        bool firstSeen = true;
+        for (int k = 0; k < idx; ++k) {
+            if (entries[k].v == v) { firstSeen = false; break; }
+        }
+        if (repeatCount > 1 && firstSeen) {
+            auto* badge = new QLabel(QStringLiteral("×%1").arg(repeatCount), rowFrame);
+            QFont badgeFont = font;
+            badgeFont.setPointSizeF(qMax(7.0, font.pointSizeF() - 1.0));
+            badgeFont.setBold(true);
+            badge->setFont(badgeFont);
+            QColor badgeColor = theme.markerPtr;
+            badgeColor.setAlpha(220);
+            badge->setStyleSheet(QStringLiteral(
+                "color:rgba(%1,%2,%3,%4);"
+                "background:rgba(%1,%2,%3,40);"
+                "border:none; padding:0px 4px;")
+                .arg(badgeColor.red()).arg(badgeColor.green())
+                .arg(badgeColor.blue()).arg(badgeColor.alpha()));
+            badge->setAlignment(Qt::AlignCenter);
+            // Tooltip enumerates each appearance with its row index
+            // and elapsed time. Lets the user see the full bounce
+            // pattern at a glance.
+            QStringList lines;
+            lines << QStringLiteral("Appears %1 times:").arg(repeatCount);
+            for (int k = 0; k < entries.size(); ++k) {
+                if (entries[k].v != v) continue;
+                QString tag = (k == 0) ? QStringLiteral("▸ ") : QString::number(k + 1) + QStringLiteral(" ");
+                QString when;
+                if (entries[k].msec > 0) {
+                    qint64 el = now - entries[k].msec;
+                    when = QStringLiteral(" — %1 ago").arg(formatElapsed(el));
+                }
+                lines << QStringLiteral("  %1#%2%3").arg(tag).arg(k + 1).arg(when);
+            }
+            badge->setToolTip(lines.join('\n'));
+            row->addWidget(badge);
+        }
+
+        // Delta column. Shows the signed step from the older value
+        // (entries[idx+1]) to this value, when both parse as small
+        // integers. Pointers are excluded by tryParseAsInt's 9-digit
+        // cap, so memory addresses don't pollute the column with
+        // meaningless +0x4000000-style numbers. Positive deltas in
+        // syntaxNumber; negative in markerPtr (warm) so the direction
+        // reads without parsing the sign. Large magnitudes get K/M/G
+        // unit suffixes so the column doesn't spill into the time col.
+        auto compactNumber = [](int64_t absVal) -> QString {
+            if (absVal >= 1'000'000'000)
+                return QStringLiteral("%1G").arg(absVal / 1'000'000'000.0, 0, 'g', 3);
+            if (absVal >= 1'000'000)
+                return QStringLiteral("%1M").arg(absVal / 1'000'000.0,     0, 'g', 3);
+            if (absVal >= 10'000)
+                return QStringLiteral("%1K").arg(absVal / 1'000.0,         0, 'g', 3);
+            return QString::number(absVal);
+        };
+        QString deltaStr;
+        QString deltaTooltip;
+        QColor deltaColor = theme.textMuted;
+        if (idx + 1 < entries.size()
+            && entry.num.has_value()
+            && entries[idx + 1].num.has_value()) {
+            int64_t diff = *entry.num - *entries[idx + 1].num;
+            if (diff != 0) {
+                int64_t absDiff = (diff < 0) ? -diff : diff;
+                QString num = compactNumber(absDiff);
+                deltaStr = (diff > 0)
+                    ? QStringLiteral("+%1").arg(num)
+                    : QStringLiteral("−%1").arg(num);   // U+2212 minus
+                deltaColor = (diff > 0)
+                    ? theme.syntaxNumber
+                    : theme.markerPtr;
+                deltaColor.setAlpha(180);  // a touch dimmer than values
+                // Tooltip — exact full value (no compact suffix) plus
+                // a hex form when the magnitude is meaningful. Lets the
+                // user mouse-over a "+1.2K" delta to see "+1234 (+0x4D2)"
+                // without having to mentally expand the suffix.
+                QString sign = (diff > 0) ? QStringLiteral("+") : QStringLiteral("−");
+                QString hexForm = QStringLiteral("0x%1").arg(absDiff, 0, 16);
+                deltaTooltip = QStringLiteral("%1%2  (%3%4)")
+                    .arg(sign).arg(absDiff).arg(sign).arg(hexForm);
+            }
+        }
+        auto* deltaLabel = new QLabel(deltaStr, rowFrame);
+        // Bold the delta when it's the largest in the set — a quick
+        // visual cue for "the value moved the most here". Always
+        // applies whenever maxAbsDelta > 0 and this row's diff hits it.
+        QFont deltaFont = font;
+        if (maxAbsDelta > 0 && idx + 1 < entries.size()
+            && entry.num.has_value() && entries[idx + 1].num.has_value()) {
+            int64_t d = *entry.num - *entries[idx + 1].num;
+            if (d < 0) d = -d;
+            if (d == maxAbsDelta) deltaFont.setBold(true);
+        }
+        deltaLabel->setFont(deltaFont);
+        deltaLabel->setFixedWidth(deltaColWidth);
+        deltaLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        if (!deltaStr.isEmpty()) {
+            deltaLabel->setStyleSheet(QStringLiteral("color:rgba(%1,%2,%3,%4);")
+                .arg(deltaColor.red()).arg(deltaColor.green())
+                .arg(deltaColor.blue()).arg(deltaColor.alpha()));
+            deltaLabel->setToolTip(deltaTooltip);
+        }
+        row->addWidget(deltaLabel);
+
+        // Time. Right-aligned in a fixed-width column so 1-digit and
+        // 3-digit values land on the same right edge — preserves visual
+        // calm as elapsed counters tick. Color tiered by recency so the
+        // eye spots "just now" vs "hours ago" without reading the text.
         if (msec > 0) {
             qint64 elapsed = now - msec;
-            QString timeStr;
-            if (elapsed < 1000)        timeStr = QStringLiteral("now");
-            else if (elapsed < 60000)  timeStr = QStringLiteral("%1s ago").arg(elapsed / 1000);
-            else if (elapsed < 3600000) timeStr = QStringLiteral("%1m ago").arg(elapsed / 60000);
-            else                       timeStr = QStringLiteral("%1h ago").arg(elapsed / 3600000);
+            QString timeStr = formatElapsed(elapsed);
             auto* timeLabel = new QLabel(timeStr, rowFrame);
             timeLabel->setFont(font);
-            timeLabel->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textDim.name()));
+            timeLabel->setFixedWidth(timeColWidth);
+            timeLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            timeLabel->setStyleSheet(QStringLiteral("color:%1;")
+                .arg(timeTierColor(elapsed).name()));
+            QDateTime dt = QDateTime::fromMSecsSinceEpoch(msec);
+            timeLabel->setToolTip(dt.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
             row->addWidget(timeLabel);
+        } else {
+            // Keep the column placeholder so non-timestamped rows don't
+            // shift the value column rightward.
+            auto* spacer = new QLabel(rowFrame);
+            spacer->setFixedWidth(timeColWidth);
+            row->addWidget(spacer);
         }
+
         vbox->addWidget(rowFrame);
         ++idx;
-    });
+
+        // Time-gap divider — if the next-older entry's timestamp is
+        // significantly further back than the typical gap (>3× average
+        // AND >5 s absolute), insert a faint divider so the user can
+        // see "the value paused here". Skipped right after the newest-
+        // vs-rest separator since that's already drawn below this
+        // block on idx==1.
+        if (avgGapMs > 0
+            && idx < entries.size()
+            && msec > 0 && entries[idx].msec > 0
+            && idx > 1) {
+            qint64 gap = msec - entries[idx].msec;
+            if (gap > qMax<qint64>(5000, avgGapMs * 3)) {
+                auto* gapMark = new QFrame(container);
+                gapMark->setFrameShape(QFrame::HLine);
+                gapMark->setFixedHeight(1);
+                QColor gc = theme.markerPtr;
+                gc.setAlpha(80);
+                gapMark->setStyleSheet(
+                    QStringLiteral("background:%1;border:none;")
+                        .arg(gc.name(QColor::HexArgb)));
+                auto* gw = new QWidget(container);
+                auto* gl = new QVBoxLayout(gw);
+                gl->setContentsMargins(12, 3, 12, 3);  // inset so it doesn't
+                gl->setSpacing(0);                      // look like a stripe
+                gl->addWidget(gapMark);
+                // Tooltip explains why the divider is here.
+                gw->setToolTip(QStringLiteral("Quiet period: %1 between values")
+                    .arg(formatElapsed(gap)));
+                vbox->addWidget(gw);
+            }
+        }
+
+        // Thin separator between newest and the rest. Drawn ONCE, after
+        // the first row, to anchor the "current vs history" boundary.
+        if (idx == 1 && unique > 1) {
+            auto* sep = new QFrame(container);
+            sep->setFrameShape(QFrame::HLine);
+            sep->setFrameShadow(QFrame::Plain);
+            sep->setFixedHeight(1);
+            QColor sepCol = theme.border;
+            sepCol.setAlpha(120);
+            sep->setStyleSheet(QStringLiteral("background:%1; border:none;")
+                .arg(sepCol.name(QColor::HexArgb)));
+            // Tiny vertical breathing room above + below the divider.
+            auto* sepWrap = new QWidget(container);
+            auto* sl = new QVBoxLayout(sepWrap);
+            sl->setContentsMargins(6, 2, 6, 2);
+            sl->setSpacing(0);
+            sl->addWidget(sep);
+            vbox->addWidget(sepWrap);
+        }
+    }
+
+    // Ring-overflow indicator. ValueHistory caps at kCapacity entries;
+    // when `count` exceeds that, earlier values are silently dropped.
+    // Surface the drop count so the user knows "10 visible isn't the
+    // whole story". Keeps the user's mental model honest — without
+    // this, the popup looks like a complete log when it's actually a
+    // sliding window.
+    if (hist.count > unique) {
+        int discarded = hist.count - unique;
+        auto* overflow = new QLabel(
+            QStringLiteral("+ %1 earlier value%2 discarded")
+                .arg(discarded).arg(discarded == 1 ? "" : "s"),
+            container);
+        QFont smallFont = font;
+        smallFont.setPointSizeF(qMax(7.0, font.pointSizeF() - 1.0));
+        smallFont.setItalic(true);
+        overflow->setFont(smallFont);
+        overflow->setStyleSheet(QStringLiteral("color:%1;").arg(theme.textMuted.name()));
+        overflow->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        overflow->setContentsMargins(6, 4, 6, 0);
+        // Tooltip explains the ring-buffer behavior so the user
+        // understands WHY values are dropped (instead of assuming
+        // a bug). Always shows total recorded — handy stat.
+        overflow->setToolTip(QStringLiteral(
+            "ValueHistory is a %1-entry ring buffer.\n"
+            "Total recorded for this node: %2.\n"
+            "Older values are evicted as new ones arrive.")
+            .arg(ValueHistory::kCapacity).arg(hist.count));
+        vbox->addWidget(overflow);
+    }
+
     vbox->addStretch(1);
-    return container;
+
+    // Wrap in a vertical scroll area. The host's QStackedWidget is a
+    // fixed size; without a scroll wrapper, a 10-entry list with our
+    // current row height ends up taller than the stack and Qt squishes
+    // every row to fit (the symptom: visible rails but no readable
+    // text). The scroll area keeps each row at its natural minimum
+    // height and gives the user a scroll bar past the visible window.
+    auto* scroll = new QScrollArea(parent);
+    scroll->setWidget(container);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setStyleSheet(QStringLiteral(
+        "QScrollArea { background: transparent; border: none; }"
+        "QScrollBar:vertical {"
+        " background: transparent; width: 6px; margin: 0; }"
+        "QScrollBar::handle:vertical {"
+        " background: %1; border-radius: 3px; min-height: 20px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+        " background: none; height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+        " background: none; }")
+        .arg(theme.textMuted.name()));
+    container->setStyleSheet(QStringLiteral("background:transparent;"));
+    return scroll;
 }
 
 // ── HoverPopupHost ──
@@ -769,7 +1438,7 @@ private:
             html += QStringLiteral(" cycle &nbsp; ");
         }
         html += keyTagHtml(QStringLiteral("Esc"), t);
-        html += QStringLiteral(" dismiss");
+        html += QStringLiteral(" close all");
         html += QStringLiteral("</span>");
         m_footerHint->setText(html);
     }
@@ -1704,17 +2373,18 @@ void RcxEditor::setupMarkers() {
 }
 
 void RcxEditor::allocateMarginStyles() {
-    static constexpr int MSTYLE_NORMAL = 0;
-    static constexpr int MSTYLE_CONT   = 1;
+    static constexpr int MSTYLE_NORMAL = 0;  // default dim — used by most rows
+    static constexpr int MSTYLE_CONT   = 1;  // continuation rows
+    static constexpr int MSTYLE_BRIGHT = 2;  // innermost-depth rows (bright)
 
-    long base = m_sci->SendScintilla(QsciScintillaBase::SCI_ALLOCATEEXTENDEDSTYLES, (long)2);
+    long base = m_sci->SendScintilla(QsciScintillaBase::SCI_ALLOCATEEXTENDEDSTYLES, (long)3);
     m_marginStyleBase = (int)base;
     m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLEOFFSET, base);
 
     QByteArray fontName = editorFont().family().toUtf8();
     int fontSize = editorFont().pointSize();
 
-    for (int s = MSTYLE_NORMAL; s <= MSTYLE_CONT; s++) {
+    for (int s = MSTYLE_NORMAL; s <= MSTYLE_BRIGHT; s++) {
         unsigned long abs = (unsigned long)(base + s);
         m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFONT,
                              (uintptr_t)abs, fontName.constData());
@@ -1834,10 +2504,21 @@ void RcxEditor::applyTheme(const Theme& theme) {
     // Margin extended styles
     if (m_marginStyleBase >= 0) {
         long base = m_marginStyleBase;
+        // Styles 0 (NORMAL) + 1 (CONT) = dim — used for most rows.
         for (int s = 0; s <= 1; s++) {
             unsigned long abs = (unsigned long)(base + s);
             m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE,
                                  abs, theme.textFaint);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
+                                 abs, editorBg);
+        }
+        // Style 2 (BRIGHT) = highlight color for the innermost-depth
+        // rows. Used by reformatMargins() to call out the deepest
+        // expanded struct's offsets.
+        {
+            unsigned long abs = (unsigned long)(base + 2);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE,
+                                 abs, theme.text);
             m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
                                  abs, editorBg);
         }
@@ -2578,18 +3259,20 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta, int firstLine, in
         }
     }
 
-    // Tree-connector tint — apply IND_TREE_CONN (theme.textDim) over the
-    // prefix indent region of every nested line so ├ │ └ glyphs read
-    // slightly muted vs. the field type/name/value content. The range is
-    // [prefixWidth, prefixWidth + depth*kTreeIndent) — see LineGeometry
-    // in core.h for the column convention. CommandRow + flush-left
-    // footer lines have depth 0 here so they're skipped naturally.
+    // Tree-connector tint — apply IND_TREE_CONN (theme.textDim) ONLY
+    // to the row's own innermost connector glyph (├ / └ in the last
+    // kTreeIndent chars of the indent region). Ancestor │ pipes from
+    // outer levels stay at default theme.text. The indent region is
+    // [prefixWidth, prefixWidth + depth*kTreeIndent); each level is
+    // kTreeIndent chars wide, so the innermost connector occupies the
+    // trailing kTreeIndent chars — we paint only those. CommandRow +
+    // flush-left footer lines have depth 0 here so they're skipped.
     for (int i = begin; i < end; i++) {
         const LineMeta& lm = meta[i];
         if (lm.depth <= 0) continue;
         if (lm.lineKind == LineKind::CommandRow) continue;
         LineGeometry g = LineGeometry::forLine(lm);
-        const int colA = g.prefixWidth;
+        const int colA = g.prefixWidth + g.indentWidth - kTreeIndent;
         const int colB = g.prefixWidth + g.indentWidth;
         if (colB > colA)
             fillIndicatorCols(IND_TREE_CONN, i, colA, colB);
@@ -4924,7 +5607,11 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             return true;
         }
         if (ke->key() == Qt::Key_Escape) {
-            host->dismiss();
+            // Esc closes every open popup, not just the hover host —
+            // value-history popup (inline-edit context), arrow tooltip,
+            // and the host itself all go down together. The footer hint
+            // says "close all" to set expectations.
+            dismissAllPopups();
             return true;
         }
     }

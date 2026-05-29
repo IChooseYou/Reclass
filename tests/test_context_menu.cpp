@@ -485,20 +485,20 @@ private slots:
         m_ctrl->extractByteSelectionToNewClass(4, 20);
         QApplication::processEvents();
 
-        // A new root struct named ExtractedClass exists.
+        // A new root struct named UnnamedClass0 exists.
         int extractedRootIdx = -1;
         for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
             const auto& n = m_doc->tree.nodes[i];
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName == "ExtractedClass") {
+                && n.structTypeName == "UnnamedClass0") {
                 extractedRootIdx = i;
                 break;
             }
         }
-        QVERIFY2(extractedRootIdx >= 0, "ExtractedClass root struct missing");
+        QVERIFY2(extractedRootIdx >= 0, "UnnamedClass0 root struct missing");
         uint64_t extractedRootId = m_doc->tree.nodes[extractedRootIdx].id;
 
-        // ExtractedClass should contain greedy hex packing of 16 bytes:
+        // UnnamedClass0 should contain greedy hex packing of 16 bytes:
         // Hex64 + Hex64 (8 + 8 = 16).
         int extSpan = m_doc->tree.structSpan(extractedRootId);
         QCOMPARE(extSpan, 16);
@@ -653,12 +653,12 @@ private slots:
         m_ctrl->extractByteSelectionToNewClass(4, 16);
         QApplication::processEvents();
 
-        // Find the ExtractedClass.
+        // Find the UnnamedClass0.
         int extractedRootIdx = -1;
         for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
             const auto& n = m_doc->tree.nodes[i];
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName == "ExtractedClass") {
+                && n.structTypeName == "UnnamedClass0") {
                 extractedRootIdx = i; break;
             }
         }
@@ -727,11 +727,11 @@ private slots:
         for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
             const auto& n = m_doc->tree.nodes[i];
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName == "ExtractedClass") {
+                && n.structTypeName == "UnnamedClass0") {
                 extractedRootIdx = i; break;
             }
         }
-        QVERIFY2(extractedRootIdx >= 0, "ExtractedClass missing — VTable's FuncPtr64s falsely triggered cross-parent refusal");
+        QVERIFY2(extractedRootIdx >= 0, "UnnamedClass0 missing — VTable's FuncPtr64s falsely triggered cross-parent refusal");
         uint64_t exId = m_doc->tree.nodes[extractedRootIdx].id;
         QCOMPARE(m_doc->tree.structSpan(exId), 16);
 
@@ -761,7 +761,7 @@ private slots:
         // Tree unchanged.
         QCOMPARE(countNodes(), before);
         for (const auto& nd : m_doc->tree.nodes)
-            QVERIFY(nd.structTypeName != QStringLiteral("ExtractedClass"));
+            QVERIFY(nd.structTypeName != QStringLiteral("UnnamedClass0"));
     }
 };
 

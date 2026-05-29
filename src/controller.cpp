@@ -2349,17 +2349,19 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
         }
     };
 
-    // Dedup class name against existing root struct names.
-    QString typeName = QStringLiteral("ExtractedClass");
+    // Match the File → New Class naming convention: walk existing
+    // root struct names and pick the lowest-numbered UnnamedClassN
+    // that isn't taken. Same flat namespace, no "Extracted" prefix.
+    QString typeName;
     {
         QSet<QString> existing;
         for (const auto& nd : tree.nodes)
             if (nd.kind == NodeKind::Struct && !nd.structTypeName.isEmpty())
                 existing.insert(nd.structTypeName);
-        int counter = 2;
-        QString baseName = typeName;
-        while (existing.contains(typeName))
-            typeName = QStringLiteral("%1_%2").arg(baseName).arg(counter++);
+        int idx = 0;
+        do {
+            typeName = QStringLiteral("UnnamedClass%1").arg(idx++);
+        } while (existing.contains(typeName));
     }
 
     bool wasSuppressed = m_suppressRefresh;
@@ -2436,7 +2438,10 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
     embed.parentId       = parentId;
     embed.offset         = relLo;
     embed.structTypeName = typeName;
-    embed.name           = QStringLiteral("extracted");
+    // Field name mirrors the type name (lowercased) — same convention
+    // as a C-style "ClassFoo classfoo;" variable. Reads naturally and
+    // saves the user a rename when they accept the auto-generated name.
+    embed.name           = typeName.toLower();
     embed.refId          = root.id;
     embed.id             = tree.reserveId();
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{embed, {}}));
