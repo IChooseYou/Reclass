@@ -109,7 +109,7 @@ ProfilerDialog::ProfilerDialog(QWidget* parent) : ThemedDialog(parent) {
     const auto& t = ThemeManager::instance().current();
 
     QSettings s("Reclass", "Reclass");
-    QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
+    QFont monoFont(s.value("font", "IBM Plex Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
     auto* lay = new QVBoxLayout(this);

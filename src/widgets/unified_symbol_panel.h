@@ -394,7 +394,7 @@ public:
 
     void applyTheme(const Theme& t) {
         QSettings s("Reclass", "Reclass");
-        QFont base(s.value("font", "JetBrains Mono").toString(), 10);
+        QFont base(s.value("font", "IBM Plex Mono").toString(), 10);
         base.setFixedPitch(true);
         m_view->setFont(base);
         m_search->setFont(base);

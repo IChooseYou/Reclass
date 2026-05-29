@@ -41,7 +41,7 @@ public:
         const auto& t = ThemeManager::instance().current();
 
         QSettings s("Reclass", "Reclass");
-        QFont font(s.value("font", "JetBrains Mono").toString(), 10);
+        QFont font(s.value("font", "IBM Plex Mono").toString(), 10);
         font.setFixedPitch(true);
 
         auto* layout = new QVBoxLayout(this);

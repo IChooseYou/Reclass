@@ -92,7 +92,7 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
     *ok = false;
     const auto& theme = ThemeManager::instance().current();
     QSettings settings("Reclass", "Reclass");
-    QFont editorFont(settings.value("font", "JetBrains Mono").toString(), 12);
+    QFont editorFont(settings.value("font", "IBM Plex Mono").toString(), 12);
     editorFont.setFixedPitch(true);
 
     rcx::ThemedDialog dlg(parent);
@@ -3799,7 +3799,7 @@ static QWidgetAction* makeCycleRow(QMenu* menu,
                                     std::function<void(NodeKind)> onSelect) {
     const auto& theme = ThemeManager::instance().current();
     QSettings s("Reclass", "Reclass");
-    QFont font(s.value("font", "JetBrains Mono").toString(), 10);
+    QFont font(s.value("font", "IBM Plex Mono").toString(), 10);
     font.setFixedPitch(true);
     QString css = QStringLiteral(
         "QPushButton { background: transparent; color: %1;"
@@ -5369,7 +5369,7 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
 
     // Configure and show popup
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QString fontName = settings.value("font", "IBM Plex Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
     auto* sci = editor->scintilla();
@@ -5442,7 +5442,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
 
     // ── Font with zoom ──
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QString fontName = settings.value("font", "IBM Plex Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
     auto* sci = editor->scintilla();

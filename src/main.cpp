@@ -697,7 +697,7 @@ public:
                     // and to center vertically the same way Qt::AlignVCenter
                     // centers the text below.
                     QSettings s("Reclass", "Reclass");
-                    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+                    QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
                     f.setFixedPitch(true);
                     p->setFont(f);
                     QFontMetrics fm(f);
@@ -1387,7 +1387,7 @@ void MainWindow::createMenus() {
     actIbmPlex->setActionGroup(fontGroup);
     // Load saved preference
     QSettings settings("Reclass", "Reclass");
-    QString savedFont = settings.value("font", "JetBrains Mono").toString();
+    QString savedFont = settings.value("font", "IBM Plex Mono").toString();
     if      (savedFont == "JetBrains Mono")  actJetBrains->setChecked(true);
     else if (savedFont == "IBM Plex Mono")   actIbmPlex->setChecked(true);
     else                                      actConsolas->setChecked(true);
@@ -2098,7 +2098,7 @@ void MainWindow::createStatusBar() {
     // Sync status bar font to global editor font (10pt monospace)
     {
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
         f.setFixedPitch(true);
         m_statusLabel->setFont(f);
         sb->setMinimumHeight(QFontMetrics(f).height() + 6);
@@ -2109,7 +2109,7 @@ void MainWindow::createStatusBar() {
     {
         const auto& t = ThemeManager::instance().current();
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
         f.setFixedPitch(true);
 
         m_progressLabel = new QLabel(sb);
@@ -2289,7 +2289,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     {
         const auto& t = ThemeManager::instance().current();
         QSettings s("Reclass", "Reclass");
-        QString editorFont = s.value("font", "JetBrains Mono").toString();
+        QString editorFont = s.value("font", "IBM Plex Mono").toString();
         pane.tabWidget->setStyleSheet(QStringLiteral(
             "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
@@ -2551,7 +2551,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     {
         const auto& ct = ThemeManager::instance().current();
         QSettings cs("Reclass", "Reclass");
-        QString ef = cs.value("font", "JetBrains Mono").toString();
+        QString ef = cs.value("font", "IBM Plex Mono").toString();
 
         auto* cornerWidget = new QWidget;
         auto* cornerLayout = new QHBoxLayout(cornerWidget);
@@ -2839,7 +2839,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         }
         {
             QSettings settings("Reclass", "Reclass");
-            QFont f(settings.value("font", "JetBrains Mono").toString(), 12);
+            QFont f(settings.value("font", "IBM Plex Mono").toString(), 12);
             f.setFixedPitch(true);
             lbl->setFont(f);
         }
@@ -3624,7 +3624,7 @@ void MainWindow::setupDockTabBars() {
         // Set editor font so tab width sizing matches our label painting
         {
             QSettings s("Reclass", "Reclass");
-            QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
+            QFont tabFont(s.value("font", "IBM Plex Mono").toString(), 10);
             tabFont.setFixedPitch(true);
             tabBar->setFont(tabFont);
         }
@@ -4005,7 +4005,7 @@ void MainWindow::showDockSizeTipForAxis(QDockWidget* dock, const QSize& sz, bool
                              t.text, t.textDim, t.border);
 
     QSettings s("Reclass", "Reclass");
-    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+    QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
     f.setFixedPitch(true);
 
     // Find the OTHER widget across the divider — the doc dock area
@@ -4669,7 +4669,7 @@ void MainWindow::showShortcutsDialog() {
     dlg.resize(560, 520);
 
     QSettings settings("Reclass", "Reclass");
-    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
+    QFont monoFont(settings.value("font", "IBM Plex Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
     auto* lay = new QVBoxLayout(&dlg);
@@ -4897,7 +4897,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             // Set editor font so tab width sizing matches our label painting
             {
                 QSettings s("Reclass", "Reclass");
-                QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
+                QFont tabFont(s.value("font", "IBM Plex Mono").toString(), 10);
                 tabFont.setFixedPitch(true);
                 tabBar->setFont(tabFont);
             }
@@ -4928,7 +4928,7 @@ void MainWindow::applyTheme(const Theme& theme) {
 
     // Restyle per-pane view tab bars (Reclass / Code)
     {
-        QString editorFont = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
+        QString editorFont = QSettings("Reclass", "Reclass").value("font", "IBM Plex Mono").toString();
         QString paneTabStyle = QStringLiteral(
             "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
@@ -5219,7 +5219,7 @@ void MainWindow::showOptionsDialog(int initialPage) {
     auto& tm = ThemeManager::instance();
     OptionsResult current;
     current.themeIndex = tm.currentIndex();
-    current.fontName = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
+    current.fontName = QSettings("Reclass", "Reclass").value("font", "IBM Plex Mono").toString();
     current.menuBarTitleCase = m_menuBarTitleCase;
     current.showIcon = m_titleBar
         ? QSettings("Reclass", "Reclass").value("showIcon", false).toBool()
@@ -5432,7 +5432,7 @@ void MainWindow::updateScannerTitle() {
 
 void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QString fontName = settings.value("font", "IBM Plex Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
 
@@ -5494,7 +5494,7 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
 
 void MainWindow::setupDebugSci(QsciScintilla* sci) {
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QString fontName = settings.value("font", "IBM Plex Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
 
@@ -5537,7 +5537,7 @@ void MainWindow::applyDebugStyles(QsciScintilla* sci) {
     const QColor editorBg = theme.background.darker(115);
 
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "JetBrains Mono").toString();
+    QString fontName = settings.value("font", "IBM Plex Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
 
@@ -6674,7 +6674,7 @@ void MainWindow::showValidateDialog() {
     auto* list = new QListWidget(&dlg);
     list->setAlternatingRowColors(false);
     QSettings settings("Reclass", "Reclass");
-    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
+    QFont monoFont(settings.value("font", "IBM Plex Mono").toString(), 10);
     monoFont.setFixedPitch(true);
     list->setFont(monoFont);
     list->setStyleSheet(QStringLiteral(
@@ -6799,7 +6799,7 @@ void MainWindow::showFindFieldDialog() {
     layout->addWidget(search);
 
     QSettings settings("Reclass", "Reclass");
-    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
+    QFont monoFont(settings.value("font", "IBM Plex Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
     auto* list = new QListWidget(&dlg);
@@ -6995,7 +6995,7 @@ void MainWindow::createWorkspaceDock() {
             m_dockTitleLabel->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
             QSettings s("Reclass", "Reclass");
-            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+            QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
             f.setFixedPitch(true);
             m_dockTitleLabel->setFont(f);
         }
@@ -7041,7 +7041,7 @@ void MainWindow::createWorkspaceDock() {
     // Clear button uses our close.svg icon instead of Qt's default circle-X
     {
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
         f.setFixedPitch(true);
         m_workspaceSearch->setFont(f);
     }
@@ -7116,7 +7116,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     {
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
         f.setFixedPitch(true);
         m_workspaceTree->setFont(f);
     }
@@ -7675,7 +7675,7 @@ void MainWindow::createScannerDock() {
             m_scanDockTitle->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
             QSettings s("Reclass", "Reclass");
-            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+            QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
             f.setFixedPitch(true);
             m_scanDockTitle->setFont(f);
         }
@@ -7788,7 +7788,7 @@ void MainWindow::ensureScannerPanel() {
     m_scannerPanel->applyTheme(ThemeManager::instance().current());
     {
         QSettings settings("Reclass", "Reclass");
-        QString fontName = settings.value("font", "JetBrains Mono").toString();
+        QString fontName = settings.value("font", "IBM Plex Mono").toString();
         QFont f(fontName, 12);
         f.setFixedPitch(true);
         m_scannerPanel->setEditorFont(f);
@@ -7850,7 +7850,7 @@ void MainWindow::createSymbolsDock() {
 
     const auto& t = ThemeManager::instance().current();
     QSettings s("Reclass", "Reclass");
-    QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
+    QFont monoFont(s.value("font", "IBM Plex Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
     // Custom titlebar (matches scanner dock)
@@ -8620,7 +8620,7 @@ int MainWindow::computeWorkspaceDockWidth() const {
     }
     // Compute pixel width: badge(fontH) + gap(4) + name + gap + count pill(~30) + padding(24)
     QSettings s("Reclass", "Reclass");
-    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
+    QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
     f.setFixedPitch(true);
     QFontMetrics fm(f);
     int nameW = fm.horizontalAdvance(QString(maxChars, QChar('W')));
@@ -9519,7 +9519,7 @@ int main(int argc, char* argv[]) {
     // Apply saved font preference before creating any editors
     {
         QSettings settings("Reclass", "Reclass");
-        QString savedFont = settings.value("font", "JetBrains Mono").toString();
+        QString savedFont = settings.value("font", "IBM Plex Mono").toString();
         rcx::RcxEditor::setGlobalFontName(savedFont);
     }
 

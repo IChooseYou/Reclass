@@ -1091,7 +1091,7 @@ static constexpr int IND_BYTE_SEL     = 26; // Foreground recolor (TEXTFORE) on 
                                             // overlapping bytes — selection is an explicit user
                                             // action and should be the dominant visual signal.
 
-static QString g_fontName = "JetBrains Mono";
+static QString g_fontName = "IBM Plex Mono";
 
 static QFont editorFont() {
     QFont f(g_fontName, 12);
@@ -3228,7 +3228,12 @@ void RcxEditor::updateChipHover(const HitInfo& h) {
         const auto& lm = m_meta[h.line];
         for (const auto& c : lm.chips) {
             if (c.startCol < 0) continue;
-            if (h.col < c.startCol || h.col > c.endCol) continue;
+            // endCol is documentColumn(lineText.size()) — the column AFTER
+            // the chip's last character. Use exclusive end here so the
+            // PointingHand cursor matches the chip's visible glyphs only.
+            // (The click handler keeps inclusive endCol so the user can
+            // still mouse-down on the trailing edge without missing.)
+            if (h.col < c.startCol || h.col >= c.endCol) continue;
             if (!chipIsClickable(c.kind)) continue;
             newLine  = h.line;
             newStart = c.startCol;

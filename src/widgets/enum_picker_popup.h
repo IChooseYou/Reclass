@@ -392,7 +392,7 @@ private:
     void applyTheme() {
         const auto& t = ThemeManager::instance().current();
         QSettings s("Reclass", "Reclass");
-        QFont mono(s.value("font", "JetBrains Mono").toString(), 10);
+        QFont mono(s.value("font", "IBM Plex Mono").toString(), 10);
         mono.setFixedPitch(true);
         setFont(mono);
         m_title->setFont(mono);

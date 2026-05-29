@@ -108,6 +108,7 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     visualLayout->addRow("Color theme:", m_themeCombo);
 
     m_fontCombo = new QComboBox;
+    m_fontCombo->addItem("IBM Plex Mono");
     m_fontCombo->addItem("JetBrains Mono");
     m_fontCombo->addItem("Consolas");
     m_fontCombo->setCurrentText(current.fontName);
