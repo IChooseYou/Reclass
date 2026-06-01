@@ -525,17 +525,19 @@ public:
         // Transparent menu bar background (no CSS needed)
         if (elem == PE_PanelMenuBar)
             return;
-        // Dock tab bar base line — single 1px border between tab bar and content
-        if (elem == PE_FrameTabBarBase) {
-            if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
-                if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
-                    p->fillRect(opt->rect.left(), opt->rect.bottom(),
-                                opt->rect.width(), 1,
-                                opt->palette.color(QPalette::Dark));
-                    return;
-                }
-            }
-        }
+        // Suppress every PE_FrameTabBarBase paint. The dock-tab variant
+        // used to draw a 1-px line at the tab bar's bottom edge as a
+        // visual separator with the editor; the editor now has its own
+        // QSS border (rcxEditorContainer), so painting another line
+        // here just produced a double-line artifact at the editor's
+        // top edge. The pane-tab variant (Reclass/Code/Debug at the
+        // bottom) never wanted a base line either — its selected tab
+        // gets a 3-px QSS accent. Killing the whole primitive is the
+        // cleanest fix.
+        if (elem == PE_FrameTabBarBase)
+            return;
+        if (elem == PE_FrameTabWidget)
+            return;
         // Item-view row background — patch Highlight so the row bg matches CE_ItemViewItem
         if (elem == PE_PanelItemViewRow) {
             if (auto* vi = qstyleoption_cast<const QStyleOptionViewItem*>(opt)) {
@@ -628,9 +630,14 @@ public:
                     QColor bg = tab->palette.color(QPalette::Window);      // theme.background
                     if (hovered || (sentinel && selected))
                         bg = tab->palette.color(QPalette::Mid);            // theme.hover
-                    // Fill background 1px short at bottom so PE_FrameTabBarBase
-                    // base line (drawn first, full widget width) remains visible
-                    p->fillRect(tab->rect.adjusted(0, 0, 0, -1), bg);
+                    // Fill the entire tab rect. We used to leave the
+                    // bottom 1 px unfilled so PE_FrameTabBarBase could
+                    // paint through, but that primitive is now killed
+                    // (the editorContainer has its own QSS border). The
+                    // unfilled strip otherwise showed the chrome bg as
+                    // a stray line just above the editor border — the
+                    // "double line" at the top of the editor.
+                    p->fillRect(tab->rect, bg);
                     // Selected accent line on top (2px) — not for sentinel "+" tab
                     if (selected && !sentinel) {
                         p->fillRect(QRect(tab->rect.left(), tab->rect.top(),
@@ -821,9 +828,11 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
         "QScrollBar::handle:horizontal:hover { background: %2; }"
         "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
-        "QToolTip { background: %3; color: %4; border: 1px solid %5; padding: 3px 6px; }")
+        "QToolTip { background: %3; color: %4; border: 1px solid %5; padding: 5px 8px;"
+        "           font-family: '%6'; font-size: 10pt; }")
         .arg(theme.textFaint.name(), theme.textDim.name(),
-             theme.backgroundAlt.name(), theme.text.name(), theme.border.name()));
+             theme.backgroundAlt.name(), theme.text.name(), theme.border.name(),
+             QSettings("Reclass", "Reclass").value("font", "IBM Plex Mono").toString()));
 }
 
 class BorderOverlay : public QWidget {
@@ -2343,9 +2352,44 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // read-only Scintilla pinned on the right. Off by default — enabled via
     // View menu Minimap toggle. Text sync is driven by the editor's
     // documentApplied signal (see RcxEditor::applyDocument).
-    pane.editorContainer = new QWidget;
+    // Custom container that paints its own 1-DEVICE-pixel border.
+    // Going through QSS `border: 1px solid X` rendered as a 2-pixel
+    // sunken bevel because Qt treats QSS px as logical, then the
+    // display's DPR (1.5 on this monitor) multiplied that to 2 device
+    // pixels — visible as a "double line". Painting at 1 / DPR uses
+    // QRectF subpixel coordinates so the result is exactly one device
+    // pixel thick regardless of DPI scaling.
+    class EditorContainer : public QWidget {
+    public:
+        QColor borderColor;
+        explicit EditorContainer() : QWidget() {}
+    protected:
+        void paintEvent(QPaintEvent*) override {
+            if (!borderColor.isValid()) return;
+            QPainter p(this);
+            qreal t = 1.0 / devicePixelRatioF();  // 1 device pixel
+            qreal w = width(), h = height();
+            // Top border pushed DOWN by one device pixel so the chrome
+            // shows through at y=0..t and the border lands at y=t —
+            // gives the "lighter chrome on top, darker border below"
+            // sequence under the dock tab strip.
+            // Bottom + sides flush against the editor's own edges, no
+            // chrome strip — a single line at the bottom touches the
+            // pane tab strip directly.
+            p.fillRect(QRectF(0,         t,         w, t), borderColor);  // top
+            p.fillRect(QRectF(0,         h - t,     w, t), borderColor);  // bottom
+            p.fillRect(QRectF(0,         t,         t, h - t), borderColor);  // left
+            p.fillRect(QRectF(w - t,     t,         t, h - t), borderColor);  // right
+        }
+    };
+    {
+        auto* ec = new EditorContainer;
+        ec->setObjectName(QStringLiteral("rcxEditorContainer"));
+        ec->borderColor = ThemeManager::instance().current().border;
+        pane.editorContainer = ec;
+    }
     auto* ecLayout = new QHBoxLayout(pane.editorContainer);
-    ecLayout->setContentsMargins(0, 0, 0, 0);
+    ecLayout->setContentsMargins(1, 1, 1, 1);
     ecLayout->setSpacing(0);
     ecLayout->addWidget(pane.editor, /*stretch=*/1);
 
@@ -3621,6 +3665,15 @@ void MainWindow::setupDockTabBars() {
         tabBar->setElideMode(Qt::ElideNone);
         tabBar->setExpanding(false);
         tabBar->setUsesScrollButtons(true);
+        // Kill QTabBar's internal 2-pixel "base" bevel (palette.dark +
+        // palette.midlight strips at the tab bar's bottom). It bypasses
+        // our MenuBarStyle::PE_FrameTabBarBase suppression because the
+        // base bevel is computed inside QTabBar itself, not delegated
+        // to PE_FrameTabBarBase. Pixel scan of the production capture
+        // showed exactly two consecutive pixels (#959492 + #AAA8A4) at
+        // the doc tab bar's bottom edge, immediately above the editor
+        // — that's this internal bevel.
+        tabBar->setDrawBase(false);
         // Set editor font so tab width sizing matches our label painting
         {
             QSettings s("Reclass", "Reclass");
@@ -3687,7 +3740,7 @@ void MainWindow::setupDockTabBars() {
                 // color hover on the X is invisible. theme.selected gives
                 // a distinctly contrasting shade that paints visibly on
                 // top of the already-hovered tab.
-                btns->applyTheme(theme.selected);
+                btns->applyTheme(theme.text, theme.selected);
                 if (target) {
                     connect(btns->closeBtn, &QToolButton::clicked,
                             target, &QDockWidget::close);
@@ -4850,6 +4903,18 @@ void MainWindow::toggleMcp() {
 void MainWindow::applyTheme(const Theme& theme) {
     applyGlobalTheme(theme);
 
+    // Theme-level font override. When the theme JSON declares a `font`
+    // field, switching to it pushes that family through the standard
+    // setEditorFont() path — which iterates every editor, every pane,
+    // and persists the choice. The XP Luna theme uses this to lock the
+    // editor to IBM Plex Mono regardless of what the user had picked.
+    // Font-less themes don't touch the font, so the user's preference
+    // simply remains in effect.
+    if (!theme.font.isEmpty()
+        && rcx::RcxEditor::globalFontName() != theme.font) {
+        setEditorFont(theme.font);
+    }
+
 #ifdef __APPLE__
     applyMacTitleBarTheme(this, theme);
 #endif
@@ -4913,7 +4978,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             for (int i = 0; i < tabBar->count(); ++i) {
                 auto* btns = qobject_cast<DockTabButtons*>(
                     tabBar->tabButton(i, QTabBar::RightSide));
-                if (btns) btns->applyTheme(theme.selected);
+                if (btns) btns->applyTheme(theme.text, theme.selected);
             }
             // Update scroll arrow styling
             for (auto* btn : tabBar->findChildren<QToolButton*>(QString(), Qt::FindDirectChildrenOnly)) {
@@ -4969,6 +5034,11 @@ void MainWindow::applyTheme(const Theme& theme) {
                     pane.scopeCombo->setStyleSheet(comboStyle);
                 if (pane.fmtGear)
                     pane.fmtGear->setStyleSheet(gearStyle);
+                if (pane.editorContainer) {
+                    pane.editorContainer->setStyleSheet(QStringLiteral(
+                        "#rcxEditorContainer { border: 1px solid %1; }")
+                        .arg(theme.border.name()));
+                }
             }
         }
     }

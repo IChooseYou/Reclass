@@ -8,6 +8,8 @@
 #include <QPixmap>
 #include <QPainter>
 #include <QSvgRenderer>
+#include <QFile>
+#include <QByteArray>
 
 // Source-status icon shown on the LEFT side of a doc tab, indicating
 // which provider (File / Process / Kernel / etc) is currently active
@@ -81,12 +83,33 @@ public:
         closeBtn->setAutoRaise(true);
         closeBtn->setCursor(Qt::PointingHandCursor);
         closeBtn->setFixedSize(16, 16);
-        closeBtn->setIcon(QIcon(":/vsicons/close.svg"));
         closeBtn->setIconSize(QSize(12, 12));
         hl->addWidget(closeBtn);
     }
 
-    void applyTheme(const QColor& hover) {
+    // Re-tint the close X with the theme's text color so it stays
+    // visible on light chrome (the source SVG bakes #C5C5C5 which
+    // disappears against a near-white background). Same pattern as
+    // titlebar.cpp's themedSvgIcon helper.
+    void applyTheme(const QColor& tint, const QColor& hover) {
+        QFile f(QStringLiteral(":/vsicons/close.svg"));
+        if (f.open(QIODevice::ReadOnly)) {
+            QByteArray svg = f.readAll();
+            svg.replace("#C5C5C5", tint.name().toLatin1());
+            svg.replace("#c5c5c5", tint.name().toLatin1());
+            QSvgRenderer r(svg);
+            const qreal dpr = devicePixelRatioF();
+            QPixmap pm(QSize(12, 12) * (dpr > 0 ? dpr : 1.0));
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            r.render(&p, QRectF(0, 0, pm.width() / (dpr > 0 ? dpr : 1.0),
+                                       pm.height() / (dpr > 0 ? dpr : 1.0)));
+            p.end();
+            pm.setDevicePixelRatio(dpr);
+            closeBtn->setIcon(QIcon(pm));
+        }
         QString style = QStringLiteral(
             "QToolButton { border: none; padding: 1px; border-radius: 0px; }"
             "QToolButton:hover { background: %1; }").arg(hover.name());
