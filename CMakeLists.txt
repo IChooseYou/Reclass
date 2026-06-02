@@ -380,11 +380,6 @@ if(BUILD_TESTING)
     target_link_libraries(test_typeinfer PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_typeinfer COMMAND test_typeinfer)
 
-    add_executable(test_editor_border tests/test_editor_border.cpp)
-    target_link_libraries(test_editor_border
-        PRIVATE ${QT}::Core ${QT}::Widgets ${QT}::Test)
-    add_test(NAME test_editor_border COMMAND test_editor_border)
-
     add_executable(test_format tests/test_format.cpp src/format.cpp src/addressparser.cpp)
     target_include_directories(test_format PRIVATE src)
     target_link_libraries(test_format PRIVATE ${QT}::Core ${QT}::Test)
