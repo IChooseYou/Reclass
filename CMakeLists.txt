@@ -11,7 +11,7 @@ set(CMAKE_AUTOUIC ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 # Find Qt6 or Qt5 (config mode first, then FindQt5.cmake module for auto-download)
-set(_QT_COMPONENTS Core Widgets PrintSupport Svg Concurrent Network)
+set(_QT_COMPONENTS Core Gui Widgets PrintSupport Svg Concurrent Network)
 find_package(QT NAMES Qt6 Qt5 COMPONENTS ${_QT_COMPONENTS} QUIET)
 if(NOT QT_FOUND)
     find_package(Qt5 REQUIRED COMPONENTS ${_QT_COMPONENTS})
@@ -513,7 +513,7 @@ if(BUILD_TESTING)
     add_executable(test_import_xml tests/test_import_xml.cpp
         src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
     target_include_directories(test_import_xml PRIVATE src)
-    target_link_libraries(test_import_xml PRIVATE ${QT}::Core ${QT}::Test)
+    target_link_libraries(test_import_xml PRIVATE ${QT}::Core ${QT}::Test ${QT}::GuiPrivate)
     add_test(NAME test_import_xml COMMAND test_import_xml)
 
     add_executable(test_import_source tests/test_import_source.cpp
