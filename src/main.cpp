@@ -452,6 +452,31 @@ public:
             return 0;
         return QProxyStyle::pixelMetric(metric, opt, w);
     }
+    QRect subElementRect(SubElement sr, const QStyleOption* opt,
+                         const QWidget* w) const override {
+        // Fusion's default subElementRect for SE_TabBarTabLeftButton /
+        // SE_TabBarTabRightButton shifts the button UP by a couple of
+        // pixels when the tab is selected (legacy "selected tab sticks
+        // out" effect). That made the close X visibly jump up the
+        // moment a doc tab became active. We paint a flat tab shape
+        // (no protrusion), so the shift is purely cosmetic noise —
+        // re-center the button rect vertically inside the full tab.
+        if (sr == SE_TabBarTabLeftButton || sr == SE_TabBarTabRightButton) {
+            QRect r = QProxyStyle::subElementRect(sr, opt, w);
+            if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt)) {
+                // Center vertically inside the full tab rect, then
+                // nudge down 2 px so the X visually aligns with the
+                // tab label baseline (pure geometric center read as
+                // "too high" — Fusion places labels slightly below
+                // center, the X needs to match).
+                int cy = tab->rect.top()
+                         + (tab->rect.height() - r.height()) / 2 + 2;
+                r.moveTop(cy);
+            }
+            return r;
+        }
+        return QProxyStyle::subElementRect(sr, opt, w);
+    }
     void drawPrimitive(PrimitiveElement elem, const QStyleOption* opt,
                        QPainter* p, const QWidget* w) const override {
         // Opaque fill + 1px border at the true widget edge.
@@ -1189,7 +1214,7 @@ void MainWindow::createMenus() {
     file->addSeparator();
     auto* importMenu = file->addMenu("&Import");
     Qt5Qt6AddAction(importMenu, "From &Source...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importFromSource);
-    Qt5Qt6AddAction(importMenu, "ReClass &XML...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importReclassXml);
+    Qt5Qt6AddAction(importMenu, "ReClass XML / .NET (.&rcnet)...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importReclassXml);
     Qt5Qt6AddAction(importMenu, "&PDB...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importPdb);
     auto* exportMenu = file->addMenu("E&xport");
     Qt5Qt6AddAction(exportMenu, "&C++ Header...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportCpp);
@@ -2361,10 +2386,13 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // pixel thick regardless of DPI scaling.
     class EditorContainer : public QWidget {
     public:
-        QColor borderColor;
         explicit EditorContainer() : QWidget() {}
     protected:
         void paintEvent(QPaintEvent*) override {
+            // Border color is stored as a dynamic Qt property so the
+            // theme-apply path can refresh it without needing the
+            // class to be visible at file scope.
+            QColor borderColor = property("borderColor").value<QColor>();
             if (!borderColor.isValid()) return;
             QPainter p(this);
             qreal t = 1.0 / devicePixelRatioF();  // 1 device pixel
@@ -2385,7 +2413,8 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     {
         auto* ec = new EditorContainer;
         ec->setObjectName(QStringLiteral("rcxEditorContainer"));
-        ec->borderColor = ThemeManager::instance().current().border;
+        ec->setProperty("borderColor",
+                        ThemeManager::instance().current().border);
         pane.editorContainer = ec;
     }
     auto* ecLayout = new QHBoxLayout(pane.editorContainer);
@@ -5035,9 +5064,14 @@ void MainWindow::applyTheme(const Theme& theme) {
                 if (pane.fmtGear)
                     pane.fmtGear->setStyleSheet(gearStyle);
                 if (pane.editorContainer) {
-                    pane.editorContainer->setStyleSheet(QStringLiteral(
-                        "#rcxEditorContainer { border: 1px solid %1; }")
-                        .arg(theme.border.name()));
+                    // Refresh the dynamic property the custom
+                    // EditorContainer::paintEvent reads, then trigger a
+                    // repaint. Do NOT install a QSS border here — Qt
+                    // would draw it as a Fusion bevel (2-pixel light/
+                    // dark double line) on top of the custom paint.
+                    pane.editorContainer->setProperty(
+                        "borderColor", theme.border);
+                    pane.editorContainer->update();
                 }
             }
         }
@@ -6076,8 +6110,11 @@ void MainWindow::exportReclassXmlAction() {
 
 void MainWindow::importReclassXml() {
     QString filePath = QFileDialog::getOpenFileName(this,
-        "Import ReClass XML", {},
-        "ReClass XML (*.reclass *.MemeCls *.xml);;All Files (*)");
+        "Import ReClass / ReClass.NET", {},
+        "ReClass formats (*.reclass *.MemeCls *.xml *.rcnet);;"
+        "ReClass.NET (*.rcnet);;"
+        "ReClass XML (*.reclass *.MemeCls *.xml);;"
+        "All Files (*)");
     if (filePath.isEmpty()) return;
 
     QString error;
@@ -6482,13 +6519,18 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         }
     }
 
-    // Detect if this is an XML-based ReClass file by checking first bytes
+    // Detect if this is an XML-based ReClass file by checking first bytes.
+    // Also recognise the ReClass.NET .rcnet ZIP container (PK\x03\x04
+    // magic) — importReclassXml handles the unzip itself.
     bool isXml = false;
     {
         QFile probe(filePath);
         if (probe.open(QIODevice::ReadOnly)) {
             QByteArray head = probe.read(64);
-            isXml = head.trimmed().startsWith("<?xml") || head.trimmed().startsWith("<ReClass");
+            QByteArray trimmed = head.trimmed();
+            isXml = trimmed.startsWith("<?xml")
+                 || trimmed.startsWith("<ReClass")
+                 || head.startsWith("PK\x03\x04");
         }
     }
 

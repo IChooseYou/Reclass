@@ -1,9 +1,12 @@
 #include "import_reclass_xml.h"
 #include <QFile>
+#include <QFileInfo>
 #include <QXmlStreamReader>
 #include <QHash>
 #include <QVector>
+#include <QBuffer>
 #include <QDebug>
+#include <private/qzipreader_p.h>
 
 namespace rcx {
 
@@ -143,7 +146,7 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointe
     qDebug() << "[ImportXML] Opening file:" << filePath;
 
     QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    if (!file.open(QIODevice::ReadOnly)) {
         qDebug() << "[ImportXML] ERROR: Cannot open file";
         if (errorMsg) *errorMsg = QStringLiteral("Cannot open file: ") + filePath;
         return {};
@@ -151,7 +154,52 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointe
 
     qDebug() << "[ImportXML] File size:" << file.size() << "bytes";
 
-    QXmlStreamReader xml(&file);
+    // ReClass.NET ships .rcnet files as ZIP archives containing a single
+    // Data.xml entry. Detect the PK\x03\x04 magic (or a .rcnet extension)
+    // and unzip to a buffer before handing it to the XML parser. Plain
+    // XML files (ReClass 2013 / 2016 / Ex / MemeClsEx) fall through to
+    // the raw-file path unchanged.
+    QByteArray rawXml;
+    QByteArray head = file.peek(4);
+    bool isZip = head.startsWith("PK\x03\x04");
+    if (!isZip && QFileInfo(filePath).suffix().compare(
+                    QStringLiteral("rcnet"), Qt::CaseInsensitive) == 0) {
+        // Some .rcnet files have ZIP trailers we'd still want to try.
+        isZip = true;
+    }
+    if (isZip) {
+        file.seek(0);
+        QZipReader zr(&file);
+        if (!zr.isReadable()) {
+            if (errorMsg) *errorMsg = QStringLiteral(
+                "File looks like a .rcnet archive but couldn't be opened.");
+            return {};
+        }
+        // ReClass.NET writes a single Data.xml entry. Be defensive in
+        // case future versions add more files — pick the first .xml.
+        QByteArray xmlData;
+        for (const auto& info : zr.fileInfoList()) {
+            if (info.filePath.endsWith(QStringLiteral(".xml"),
+                                       Qt::CaseInsensitive)) {
+                xmlData = zr.fileData(info.filePath);
+                if (!xmlData.isEmpty()) break;
+            }
+        }
+        if (xmlData.isEmpty()) {
+            if (errorMsg) *errorMsg = QStringLiteral(
+                "ReClass.NET archive doesn't contain a Data.xml entry.");
+            return {};
+        }
+        rawXml = xmlData;
+        qDebug() << "[ImportXML] Extracted Data.xml from .rcnet archive,"
+                 << rawXml.size() << "bytes";
+    } else {
+        rawXml = file.readAll();
+    }
+
+    QBuffer xmlBuf(&rawXml);
+    xmlBuf.open(QIODevice::ReadOnly);
+    QXmlStreamReader xml(&xmlBuf);
     XmlVersion version = XmlVersion::V2016; // default to 2016 (most common)
 
     NodeTree tree;
