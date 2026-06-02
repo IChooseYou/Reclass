@@ -1000,10 +1000,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     overlay->raise();
     overlay->show();
 
-    // Central placeholder — will be replaced by start page after construction
+    // Central placeholder — will be replaced by start page after
+    // construction. Sizing is per-axis:
+    //   * Height pinned to 0 (max height = 0). Top doc dock area sits
+    //     directly above central; with central max=0 the top dock fills
+    //     the full vertical strip between the menu bar and bottom dock /
+    //     status bar. If central had any height it would steal it from
+    //     the doc dock (editor would only fill the top portion of the
+    //     window, leaving a dead band below the South pane tabs).
+    //   * Width left unbounded (max width = default = QWIDGETSIZE_MAX).
+    //     The right-edge separator on the workspace dock drags space
+    //     between the left dock area and central. With horizontal max
+    //     bounded (the prior setFixedSize(0,0) bug), central refused to
+    //     grow → splitter snapped right back → drag "fought" the user.
+    //     With horizontal unbounded, central absorbs the freed pixels
+    //     and the splitter moves freely.
+    // Size policy is Ignored,Fixed: horizontally Qt is free to allocate
+    // any leftover width to central; vertically central is fixed at the
+    // sizeHint (which is 0,0 by default for an empty QWidget).
     m_centralPlaceholder = new QWidget(this);
-    m_centralPlaceholder->setFixedSize(0, 0);
-    m_centralPlaceholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_centralPlaceholder->setMinimumSize(0, 0);
+    m_centralPlaceholder->setMaximumHeight(0);
+    m_centralPlaceholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     setCentralWidget(m_centralPlaceholder);
     setDockNestingEnabled(true);
     // Give left/right docks full height (corners belong to left/right, not top/bottom)
@@ -4073,6 +4091,16 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     }
     if (event->type() == QEvent::MouseButtonRelease) {
         if (m_dockSizeTip) m_dockSizeTip->dismiss();
+        // Persist the new dock size on drag-release. Otherwise the user
+        // resizes the workspace dock once, restarts the app, and Qt
+        // re-spawns it at the unbounded default again — which is
+        // exactly the "separator drag doesn't stick" complaint.
+        for (QDockWidget* d : {m_workspaceDock, m_bookmarksDock,
+                                m_symbolsDock, m_scannerDock}) {
+            if (!d || obj != d) continue;
+            saveDockSize(d);
+            break;
+        }
     }
     return QMainWindow::eventFilter(obj, event);
 }
@@ -7103,6 +7131,21 @@ void MainWindow::createWorkspaceDock() {
 
         m_dockTitleLabel = new QLabel("Project", titleBar);
         m_dockTitleLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+        // CRITICAL: the label's natural minimumSizeHint is the full text
+        // width ("Project — 12 structs · 3 enums" ≈ 250 px in IBM Plex
+        // Mono 10pt). QHBoxLayout sums this into the title bar's
+        // minimumSize, which propagates UP to the QDockWidget as its
+        // effective minimum width — silently outranking the explicit
+        // setMinimumWidth(180) on the dock. That's why the separator
+        // drag "fights back" at ~300 px and why the dock opens huge:
+        // QDockWidget::sizeHint() falls back to the title bar's hint
+        // when the content has nothing better to suggest. Force the
+        // label to be horizontally elastic so the layout stops
+        // broadcasting a text-width floor.
+        m_dockTitleLabel->setSizePolicy(QSizePolicy::Ignored,
+                                         QSizePolicy::Preferred);
+        m_dockTitleLabel->setMinimumWidth(0);
+        m_dockTitleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
         {
             m_dockTitleLabel->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
@@ -7111,9 +7154,7 @@ void MainWindow::createWorkspaceDock() {
             f.setFixedPitch(true);
             m_dockTitleLabel->setFont(f);
         }
-        headerLayout->addWidget(m_dockTitleLabel);
-
-        headerLayout->addStretch();
+        headerLayout->addWidget(m_dockTitleLabel, /*stretch=*/1);
 
         m_dockCloseBtn = new QToolButton(titleBar);
         m_dockCloseBtn->setIcon(QIcon(QStringLiteral(":/vsicons/close.svg")));
@@ -7624,6 +7665,17 @@ void MainWindow::createWorkspaceDock() {
     // skip rebuilds while hidden (see rebuildWorkspaceModelNow) so the
     // first show after a load has a stale empty model — this fixes
     // that without doing the work eagerly.
+    //
+    // Also re-cap the dock width on every show. The View → Workspace
+    // toggle hits setVisible() directly (bypassing placeSidebarDock's
+    // sizing path), and Qt's QMainWindow layout opens a previously
+    // hidden left dock at the natural-split width — often half the
+    // window. Worse, that wide size becomes the layout's new effective
+    // minimum, so the separator can't be dragged smaller without a
+    // float/redock cycle (which is what users were doing to recover).
+    // Defer the resize one tick so it runs after Qt's own layout pass
+    // settles — calling resizeDocks() inline at this point gets
+    // silently overridden by the show's size-hint resolution.
     connect(m_workspaceDock, &QDockWidget::visibilityChanged, this,
             [this](bool visible) {
         if (visible) rebuildWorkspaceModel();
