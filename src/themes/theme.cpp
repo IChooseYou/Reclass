@@ -44,6 +44,7 @@ const int kThemeFieldCount = static_cast<int>(std::extent_v<decltype(kThemeField
 QJsonObject Theme::toJson() const {
     QJsonObject o;
     o["name"] = name;
+    if (!font.isEmpty()) o["font"] = font;
     for (int i = 0; i < kThemeFieldCount; i++)
         o[kThemeFields[i].key] = (this->*kThemeFields[i].ptr).name();
     return o;
@@ -52,6 +53,7 @@ QJsonObject Theme::toJson() const {
 Theme Theme::fromJson(const QJsonObject& o) {
     Theme t;
     t.name = o["name"].toString("Untitled");
+    t.font = o["font"].toString();
     for (int i = 0; i < kThemeFieldCount; i++) {
         if (o.contains(kThemeFields[i].key))
             t.*kThemeFields[i].ptr = QColor(o[kThemeFields[i].key].toString());

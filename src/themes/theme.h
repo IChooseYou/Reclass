@@ -7,6 +7,12 @@ namespace rcx {
 
 struct Theme {
     QString name;
+    // Optional editor font override. When set (non-empty), switching
+    // to this theme forces the editor font to this family — useful for
+    // themes designed around a specific typeface (e.g. the XP Luna
+    // theme reads best in IBM Plex Mono). Empty = follow the user's
+    // saved font preference.
+    QString font;
 
     // ── Chrome ──
     QColor background;      // editor bg, margin bg, window
