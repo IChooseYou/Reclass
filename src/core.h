@@ -215,8 +215,6 @@ struct Node {
     QString  classKeyword;    // "struct", "class", or "enum" (empty = "struct")
     uint64_t parentId   = 0;   // 0 = root (no parent)
     int      offset     = 0;
-    bool     isStatic   = false;   // static field — excluded from struct layout
-    QString  offsetExpr;           // C/C++ expression → absolute address (static fields only)
     bool     isRelative = false;   // Pointer: target = base + value (RVA) instead of absolute
     int      arrayLen   = 1;   // Array: element count
     int      strLen     = 64;
@@ -271,10 +269,6 @@ struct Node {
             o["classKeyword"] = classKeyword;
         o["parentId"]  = QString::number(parentId);
         o["offset"]    = offset;
-        if (isStatic)
-            o["isStatic"] = true;
-        if (!offsetExpr.isEmpty())
-            o["offsetExpr"] = offsetExpr;
         if (isRelative)
             o["isRelative"] = true;
         o["arrayLen"]  = arrayLen;
@@ -320,8 +314,6 @@ struct Node {
         n.classKeyword = o["classKeyword"].toString();
         n.parentId  = o["parentId"].toString("0").toULongLong();
         n.offset    = o["offset"].toInt(0);
-        n.isStatic  = o["isStatic"].toBool(o["isHelper"].toBool(false));
-        n.offsetExpr = o["offsetExpr"].toString();
         n.isRelative = o["isRelative"].toBool(false);
         n.arrayLen  = qBound(1, o["arrayLen"].toInt(1), kMaxArrayLen);
         n.strLen    = qBound(1, o["strLen"].toInt(64), 1000000);
@@ -562,7 +554,6 @@ struct NodeTree {
             ranges.reserve(it.value().size());
             for (int ci : it.value()) {
                 const Node& n = nodes[ci];
-                if (n.isStatic) continue;
                 int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
                     ? structSpan(n.id) : n.byteSize();
                 // Zero-sized nodes (unfinished containers etc.) can't
@@ -772,7 +763,6 @@ struct NodeTree {
         QVector<int> kids = childMap ? childMap->value(structId) : childrenOf(structId);
         for (int ci : kids) {
             const Node& c = nodes[ci];
-            if (c.isStatic) continue;  // static fields don't affect struct size
             int sz = (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
                 ? structSpan(c.id, childMap, visited) : c.byteSize();
             int64_t end = (int64_t)c.offset + sz;
@@ -1021,7 +1011,6 @@ struct LineMeta {
     QString  pointerTargetName;    // Resolved target type name for Pointer32/64 (empty = "void")
     bool     isArrayElement  = false;  // true for synthesized primitive array element lines
     bool     isMemberLine   = false;  // true for enum member / bitfield member lines
-    bool     isStaticLine   = false;  // true for static field node lines
     int      braceCol       = -1;      // Column of trailing '{' on header lines (-1 = none); avoids per-char IPC scan
     uint64_t parentAddr     = 0;       // Absolute address of enclosing container (for relative offset display)
 
@@ -1098,8 +1087,6 @@ namespace cmd {
     struct ChangeOffset { uint64_t nodeId; int oldOffset, newOffset; };
     struct ChangeEnumMembers { uint64_t nodeId;
                                QVector<QPair<QString, int64_t>> oldMembers, newMembers; };
-    struct ChangeOffsetExpr { uint64_t nodeId; QString oldExpr, newExpr; };
-    struct ToggleStatic     { uint64_t nodeId; bool oldVal, newVal; };
     struct ToggleRelative   { uint64_t nodeId; bool oldVal, newVal; };
     struct ToggleBigEndian  { uint64_t nodeId; bool oldVal, newVal; };
     struct ChangeComment    { uint64_t nodeId; QString oldComment, newComment; };
@@ -1110,7 +1097,7 @@ using Command = std::variant<
     cmd::Insert, cmd::Remove, cmd::ChangeBase, cmd::WriteBytes,
     cmd::ChangeArrayMeta, cmd::ChangePointerRef, cmd::ChangeStructTypeName,
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
-    cmd::ChangeOffsetExpr, cmd::ToggleStatic, cmd::ToggleRelative,
+    cmd::ToggleRelative,
     cmd::ToggleBigEndian, cmd::ChangeComment
 >;
 
@@ -1124,7 +1111,7 @@ struct ColumnSpan {
 
 enum class EditTarget { Name, Type, Value, BaseAddress, Source, ArrayIndex, ArrayCount,
                         ArrayElementType, ArrayElementCount, PointerTarget,
-                        RootClassType, RootClassName, TypeSelector, StaticExpr, Comment };
+                        RootClassType, RootClassName, TypeSelector, Comment };
 
 // Column layout constants (shared with format.cpp span computation)
 inline constexpr int kFoldCol     = 3;   // 3-char fold indicator prefix per line
@@ -1240,24 +1227,6 @@ inline ColumnSpan memberValueSpanFor(const LineMeta& lm, const QString& lineText
     int valEnd = lineText.size();
     while (valEnd > valStart && lineText[valEnd - 1] == ' ') valEnd--;
     return {valStart, valEnd, true};
-}
-
-// Static field expression span: locates text between "return " and "→" / "(error)" / end
-inline ColumnSpan staticExprSpanFor(const LineMeta& /*lm*/, const QString& lineText) {
-    int ret = lineText.indexOf(QLatin1String("return "));
-    if (ret < 0) return {};
-    int exprStart = ret + 7;
-    // End: before arrow, before "(error)", or line end
-    int exprEnd = lineText.size();
-    int arrow = lineText.indexOf(QChar(0x2192), exprStart);
-    if (arrow > exprStart) exprEnd = arrow;
-    int err = lineText.indexOf(QLatin1String("(error)"), exprStart);
-    if (err > exprStart && err < exprEnd) exprEnd = err;
-    // Also stop at " }" for collapsed format
-    int brace = lineText.indexOf(QLatin1String(" }"), exprStart);
-    if (brace > exprStart && brace < exprEnd) exprEnd = brace;
-    while (exprEnd > exprStart && lineText[exprEnd - 1] == ' ') exprEnd--;
-    return {exprStart, exprEnd, true};
 }
 
 inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW = kColType, int nameW = kColName) {

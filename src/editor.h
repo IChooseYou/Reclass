@@ -94,7 +94,6 @@ public:
     bool beginInlineEdit(EditTarget target, int line = -1, int col = -1);
     void cancelInlineEdit();
     void setHexEditPending(bool v) { m_hexEditPending = v; }
-    void setStaticCompletions(const QStringList& words) { m_staticCompletions = words; }
 
     void applySelectionOverlay(const QSet<uint64_t>& selIds);
     void setCommandRowText(const QString& line);
@@ -350,7 +349,6 @@ private:
         int                      byteSegIdx = 0;
     };
     InlineEditState m_editState;
-    QStringList m_staticCompletions;  // autocomplete words for StaticExpr editing
 
     // ── Tab cycling state ──
     EditTarget m_lastTabTarget = EditTarget::Value;

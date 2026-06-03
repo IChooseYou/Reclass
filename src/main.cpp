@@ -5909,7 +5909,6 @@ QString MainWindow::generateDebugText(RcxEditor* editor) const {
                 .arg(dbgComment ? dbgComment->startCol : -1)
                 .arg(lm->effectiveTypeW)
                 .arg(lm->effectiveNameW);
-            if (lm->isStaticLine) meta += QStringLiteral(" static");
             if (lm->isContinuation) meta += QStringLiteral(" cont");
             if (lm->isMemberLine) meta += QStringLiteral(" member");
             if (lm->isArrayElement) meta += QStringLiteral(" arrElem");

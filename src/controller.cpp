@@ -1823,16 +1823,6 @@ void RcxController::connectEditor(RcxEditor* editor) {
             }
             break;
         }
-        case EditTarget::StaticExpr: {
-            if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
-                const Node& node = m_doc->tree.nodes[nodeIdx];
-                if (node.isStatic && text != node.offsetExpr) {
-                    m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::ChangeOffsetExpr{node.id, node.offsetExpr, text}));
-                }
-            }
-            break;
-        }
         case EditTarget::Comment: {
             if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
                 const Node& node = m_doc->tree.nodes[nodeIdx];
@@ -2253,7 +2243,6 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
     };
     for (int i = 0; i < tree.nodes.size(); ++i) {
         const Node& n = tree.nodes[i];
-        if (n.isStatic) continue;
         if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array) continue;
         if (!isInView(n.id)) continue;
         int sz = nodeSize(n);
@@ -2277,7 +2266,6 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
     QVector<int> intersected;
     for (int ci : tree.childrenOf(parentId)) {
         const Node& sib = tree.nodes[ci];
-        if (sib.isStatic) continue;
         int sz = nodeSize(sib);
         if (sz <= 0) continue;
         int rowLo = sib.offset, rowHi = rowLo + sz;
@@ -3030,14 +3018,6 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].enumMembers = isUndo ? c.oldMembers : c.newMembers;
-        } else if constexpr (std::is_same_v<T, cmd::ChangeOffsetExpr>) {
-            int idx = tree.indexOfId(c.nodeId);
-            if (idx >= 0)
-                tree.nodes[idx].offsetExpr = isUndo ? c.oldExpr : c.newExpr;
-        } else if constexpr (std::is_same_v<T, cmd::ToggleStatic>) {
-            int idx = tree.indexOfId(c.nodeId);
-            if (idx >= 0)
-                tree.nodes[idx].isStatic = isUndo ? c.oldVal : c.newVal;
         } else if constexpr (std::is_same_v<T, cmd::ToggleBigEndian>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
@@ -3755,18 +3735,6 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
     refresh();
 }
 
-void RcxController::insertStaticField(uint64_t parentId) {
-    Node sf;
-    sf.id = m_doc->tree.reserveId();
-    sf.kind = NodeKind::Hex64;
-    sf.name = QStringLiteral("static_field");
-    sf.parentId = parentId;
-    sf.offset = 0;
-    sf.isStatic = true;
-    sf.offsetExpr = QStringLiteral("base");
-    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{sf, {}}));
-}
-
 void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
     auto inputOpt = ThemedInputDialog::getText(parent,
         QStringLiteral("Append Bytes"),
@@ -4380,7 +4348,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     auto siblings = m_doc->tree.childrenOf(parentId);
                     for (int si : siblings) {
                         auto& sib = m_doc->tree.nodes[si];
-                        if (sib.id == nodeId || sib.isStatic) continue;
+                        if (sib.id == nodeId) continue;
                         if (sib.offset >= oldEnd) {
                             m_doc->undoStack.push(new RcxCommand(this,
                                 cmd::ChangeOffset{sib.id, sib.offset, sib.offset + delta}));
@@ -4714,15 +4682,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         // ── Structure ► submenu (only when relevant) ──
         {
-            auto* structMenu = menu.addMenu("Static");
+            auto* structMenu = menu.addMenu("Structure");
             bool hasStructAction = false;
 
             if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) {
                 structMenu->addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
                     insertNode(nodeId, 0, NodeKind::Hex64, "newField");
-                });
-                structMenu->addAction("Add Static Field", [this, nodeId]() {
-                    insertStaticField(nodeId);
                 });
                 if (node.collapsed) {
                     structMenu->addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
@@ -4735,38 +4700,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                         if (ni >= 0) toggleCollapse(ni);
                     });
                 }
-                hasStructAction = true;
-            }
-
-            // Add Static Field as sibling (for child nodes of a struct)
-            if (node.parentId != 0 && node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
-                uint64_t pid = node.parentId;
-                int pi = m_doc->tree.indexOfId(pid);
-                if (pi >= 0 && (m_doc->tree.nodes[pi].kind == NodeKind::Struct
-                             || m_doc->tree.nodes[pi].kind == NodeKind::Array)) {
-                    structMenu->addAction("Add Static Field", [this, pid]() {
-                        insertStaticField(pid);
-                    });
-                    hasStructAction = true;
-                }
-            }
-
-            // Static field: Edit Expression
-            if (node.isStatic) {
-                structMenu->addAction("Edit E&xpression", [this, editor, line, nodeId]() {
-                    QStringList completions;
-                    completions << QStringLiteral("base");
-                    int ni = m_doc->tree.indexOfId(nodeId);
-                    if (ni >= 0) {
-                        uint64_t pid = m_doc->tree.nodes[ni].parentId;
-                        for (const Node& sib : m_doc->tree.nodes) {
-                            if (sib.parentId == pid && !sib.isStatic && !sib.name.isEmpty())
-                                completions << sib.name;
-                        }
-                    }
-                    editor->setStaticCompletions(completions);
-                    editor->beginInlineEdit(EditTarget::StaticExpr, line);
-                });
                 hasStructAction = true;
             }
 
@@ -4829,18 +4762,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         insertMenu->addAction("Append bytes...", [this, &menu]() {
             appendBytesDialog(menu.parentWidget(), m_viewRootId ? m_viewRootId : 0);
         });
-
-        // Add Static Field to current view root
-        if (m_viewRootId != 0) {
-            int ri = m_doc->tree.indexOfId(m_viewRootId);
-            if (ri >= 0 && (m_doc->tree.nodes[ri].kind == NodeKind::Struct
-                         || m_doc->tree.nodes[ri].kind == NodeKind::Array)) {
-                uint64_t rootId = m_viewRootId;
-                menu.addAction("Add Static Field", [this, rootId]() {
-                    insertStaticField(rootId);
-                });
-            }
-        }
 
         menu.addSeparator();
     }
@@ -5576,12 +5497,9 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                 e.sizeBytes    = m_doc->tree.structSpan(n.id);
 
                 QVector<int> kids = m_doc->tree.childrenOf(n.id);
-                int nonStaticCount = 0;
                 int maxAlign = 1;
                 for (int i = 0; i < kids.size(); i++) {
                     const Node& child = m_doc->tree.nodes[kids[i]];
-                    if (child.isStatic) continue;
-                    nonStaticCount++;
                     int childAlign = alignmentFor(child.kind);
                     if (childAlign > maxAlign) maxAlign = childAlign;
                     if (e.fieldSummary.size() < 6) {
@@ -5601,7 +5519,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                             .arg(typeName, child.name);
                     }
                 }
-                e.fieldCount = nonStaticCount;
+                e.fieldCount = kids.size();
                 e.alignment  = maxAlign;
 
                 entries.append(e);
@@ -5991,7 +5909,7 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                     m_doc->undoStack.beginMacro(QStringLiteral("Adjust sibling offsets"));
                     for (int si : siblings) {
                         const auto& sib = m_doc->tree.nodes[si];
-                        if (sib.id == nodeId || sib.isStatic) continue;
+                        if (sib.id == nodeId) continue;
                         if (sib.offset >= oldEnd) {
                             m_doc->undoStack.push(new RcxCommand(this,
                                 cmd::ChangeOffset{sib.id, sib.offset,

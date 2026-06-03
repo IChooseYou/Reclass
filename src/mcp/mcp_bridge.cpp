@@ -434,7 +434,7 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                         "rename: {op:'rename', nodeId:'ID', name:'newName'}. "
                         "insert: {op:'insert', kind:'Hex64', name:'field', parentId:'ID', offset:0} — "
                         "optional fields: structTypeName, classKeyword, strLen, elementKind, arrayLen, refId, "
-                        "ptrDepth (0=struct ptr, 1=prim*, 2=prim**), isStatic (bool), offsetExpr (string), "
+                        "ptrDepth (0=struct ptr, 1=prim*, 2=prim**), "
                         "isRelative (bool, RVA pointer), "
                         "enumMembers ([{name:'X',value:0},...]), bitfieldMembers ([{name:'X',bitOffset:0,bitWidth:1},...]). "
                         "change_kind: {op:'change_kind', nodeId:'ID', kind:'UInt32'}. "
@@ -446,8 +446,6 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                         "change_array_meta: {op:'change_array_meta', nodeId:'ID', elementKind:'UInt32', arrayLen:10}. "
                         "collapse: {op:'collapse', nodeId:'ID', collapsed:true}. "
                         "change_enum_members: {op:'change_enum_members', nodeId:'ID', members:[{name:'X',value:0},...]}. "
-                        "change_offset_expr: {op:'change_offset_expr', nodeId:'ID', offsetExpr:'base + 0x10'}. "
-                        "toggle_static: {op:'toggle_static', nodeId:'ID', isStatic:true}. "
                         "toggle_relative: {op:'toggle_relative', nodeId:'ID', isRelative:true}. "
                         "group_into_union: {op:'group_into_union', nodeIds:['ID1','ID2',...]} — groups siblings into a union. "
                         "dissolve_union: {op:'dissolve_union', nodeId:'ID'} — flattens a union back to parent scope. "
@@ -1429,8 +1427,6 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             n.elementKind = kindFromString(op.value("elementKind").toString("UInt8"));
             n.arrayLen = qBound(1, (int)parseInteger(op.value("arrayLen"), 1), kMaxArrayLen);
             n.ptrDepth = qBound(0, (int)parseInteger(op.value("ptrDepth"), 0), 2);
-            n.isStatic = op.value("isStatic").toBool(false);
-            n.offsetExpr = op.value("offsetExpr").toString();
             n.isRelative = op.value("isRelative").toBool(false);
             // Enum members
             if (op.contains("enumMembers")) {
@@ -1623,32 +1619,6 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
                 applied++;
             } else {
                 skippedOps.append(QStringLiteral("op[%1]: change_enum_members nodeId '%2' not found").arg(i).arg(nid));
-            }
-        }
-        else if (opType == "change_offset_expr") {
-            QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
-            int idx = tree.indexOfId(nid.toULongLong());
-            if (idx >= 0) {
-                doc->undoStack.push(new RcxCommand(ctrl,
-                    cmd::ChangeOffsetExpr{tree.nodes[idx].id,
-                        tree.nodes[idx].offsetExpr,
-                        op.value("offsetExpr").toString()}));
-                applied++;
-            } else {
-                skippedOps.append(QStringLiteral("op[%1]: change_offset_expr nodeId '%2' not found").arg(i).arg(nid));
-            }
-        }
-        else if (opType == "toggle_static") {
-            QString nid = resolvePlaceholder(op.value("nodeId").toString(), placeholders);
-            int idx = tree.indexOfId(nid.toULongLong());
-            if (idx >= 0) {
-                bool newVal = op.value("isStatic").toBool();
-                doc->undoStack.push(new RcxCommand(ctrl,
-                    cmd::ToggleStatic{tree.nodes[idx].id,
-                        tree.nodes[idx].isStatic, newVal}));
-                applied++;
-            } else {
-                skippedOps.append(QStringLiteral("op[%1]: toggle_static nodeId '%2' not found").arg(i).arg(nid));
             }
         }
         else if (opType == "toggle_relative") {

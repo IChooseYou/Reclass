@@ -83,17 +83,13 @@ struct GenContext {
 
     void prepare() { output.reserve(tree.nodes.size() * 80); }
 
-    // Split children into regular (sorted by offset) and static fields
-    std::pair<QVector<int>, QVector<int>> prepareChildren(uint64_t structId) const {
-        QVector<int> children, staticIdxs;
-        for (int ci : childMap.value(structId)) {
-            if (tree.nodes[ci].isStatic) staticIdxs.append(ci);
-            else children.append(ci);
-        }
+    // Children sorted by offset.
+    QVector<int> prepareChildren(uint64_t structId) const {
+        QVector<int> children = childMap.value(structId);
         std::sort(children.begin(), children.end(), [&](int a, int b) {
             return tree.nodes[a].offset < tree.nodes[b].offset;
         });
-        return {children, staticIdxs};
+        return children;
     }
 
     QString uniquePadName() {
@@ -231,7 +227,7 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = indent(depth);
 
-    auto [children, staticIdxs] = ctx.prepareChildren(structId);
+    auto children = ctx.prepareChildren(structId);
 
     // Helper: emit a padding/hex run as a single collapsed byte array
     auto emitPadRun = [&](int relOffset, int size) {
@@ -367,13 +363,6 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
     if (!isUnion && cursor < structSize)
         emitPadRun(cursor, structSize - cursor);
 
-    // Emit static field comments (static fields are runtime-only, not part of struct layout)
-    for (int si : staticIdxs) {
-        const Node& sf = tree.nodes[si];
-        QString sfType = sf.structTypeName.isEmpty() ? ctx.cType(sf.kind) : sf.structTypeName;
-        ctx.output += ind + QStringLiteral("// static: %1 %2 @ %3\n")
-            .arg(sfType, sanitizeIdent(sf.name), sf.offsetExpr);
-    }
 }
 
 // ── Emit a complete top-level struct definition (Vergilius-style) ──
@@ -604,7 +593,7 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = indent(depth);
 
-    auto [children, staticIdxs] = ctx.prepareChildren(structId);
+    auto children = ctx.prepareChildren(structId);
 
     auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
@@ -720,12 +709,6 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
     if (!isUnion && cursor < structSize)
         emitPadRun(cursor, structSize - cursor);
 
-    for (int si : staticIdxs) {
-        const Node& sf = tree.nodes[si];
-        QString sfType = sf.structTypeName.isEmpty() ? rustType(ctx, sf.kind) : sf.structTypeName;
-        ctx.output += ind + QStringLiteral("// static: %1 %2 @ %3\n")
-            .arg(sfType, sanitizeIdent(sf.name), sf.offsetExpr);
-    }
 }
 
 static void emitRustStruct(GenContext& ctx, uint64_t structId) {
@@ -823,7 +806,6 @@ static void emitDefinesForStruct(GenContext& ctx, uint64_t structId,
 
     for (int ci : children) {
         const Node& child = ctx.tree.nodes[ci];
-        if (child.isStatic) continue;
         if (isHexNode(child.kind)) continue;
 
         QString fieldName = sanitizeIdent(child.name.isEmpty()
@@ -904,7 +886,7 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
 
     QString ind = indent(depth);
 
-    auto [children, staticIdxs] = ctx.prepareChildren(structId);
+    auto children = ctx.prepareChildren(structId);
 
     // C# uses [FieldOffset(N)] for explicit layout — no manual padding needed
     for (int ci : children) {
@@ -1024,12 +1006,6 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
         }
     }
 
-    for (int si : staticIdxs) {
-        const Node& sf = tree.nodes[si];
-        QString sfType = sf.structTypeName.isEmpty() ? csType(ctx, sf.kind) : sf.structTypeName;
-        ctx.output += ind + QStringLiteral("// static: %1 %2 @ %3\n")
-            .arg(sfType, sanitizeIdent(sf.name), sf.offsetExpr);
-    }
 }
 
 static void emitCSharpStruct(GenContext& ctx, uint64_t structId) {
@@ -1135,7 +1111,7 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = QStringLiteral("        ");  // 2 levels for inside _fields_
 
-    auto [children, staticIdxs] = ctx.prepareChildren(structId);
+    auto children = ctx.prepareChildren(structId);
 
     auto emitPadField = [&](int relOffset, int size) {
         if (size <= 0) return;
@@ -1346,13 +1322,6 @@ static void emitPythonStruct(GenContext& ctx, uint64_t structId) {
     emitPythonStructBody(ctx, structId, isUnion, 0);
 
     ctx.output += QStringLiteral("    ]\n");
-
-    // Emit static field comments
-    for (int si : ctx.prepareChildren(structId).second) {
-        const Node& sf = ctx.tree.nodes[si];
-        ctx.output += QStringLiteral("    # static: %1 %2 @ %3\n")
-            .arg(pyTypeName(sf.kind), sanitizeIdent(sf.name), sf.offsetExpr);
-    }
     ctx.output += QStringLiteral("\n");
 
     ctx.visiting.remove(structId);

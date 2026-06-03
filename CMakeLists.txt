@@ -590,11 +590,6 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_tutorial COMMAND test_tutorial)
 
-    add_executable(test_static_fields tests/test_static_fields.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_static_fields PRIVATE src)
-    target_link_libraries(test_static_fields PRIVATE ${QT}::Core ${QT}::Test)
-    add_test(NAME test_static_fields COMMAND test_static_fields)
-
     add_executable(test_scanner tests/test_scanner.cpp src/scanner.cpp)
     target_include_directories(test_scanner PRIVATE src)
     target_link_libraries(test_scanner PRIVATE ${QT}::Core ${QT}::Concurrent ${QT}::Test)

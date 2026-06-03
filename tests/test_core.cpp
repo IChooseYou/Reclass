@@ -674,114 +674,6 @@ private slots:
         QCOMPARE(h.heatLevel(), 2); // warm (count=4 → 3-4 range)
     }
 
-    // ── Static field node serialization ──
-
-    void testStaticFieldJsonRoundTrip() {
-        rcx::NodeTree tree;
-        tree.baseAddress = 0x14000000;
-
-        rcx::Node root;
-        root.kind = rcx::NodeKind::Struct;
-        root.name = "DOS_HEADER";
-        root.parentId = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        rcx::Node field;
-        field.kind = rcx::NodeKind::UInt32;
-        field.name = "e_lfanew";
-        field.parentId = rootId;
-        field.offset = 0x3C;
-        tree.addNode(field);
-
-        rcx::Node sf;
-        sf.kind = rcx::NodeKind::Struct;
-        sf.name = "nt_hdr";
-        sf.parentId = rootId;
-        sf.offset = 0;
-        sf.isStatic = true;
-        sf.offsetExpr = QStringLiteral("base + e_lfanew");
-        tree.addNode(sf);
-
-        QJsonObject json = tree.toJson();
-        rcx::NodeTree tree2 = rcx::NodeTree::fromJson(json);
-
-        QCOMPARE(tree2.nodes.size(), 3);
-        const auto& h = tree2.nodes[2];
-        QCOMPARE(h.isStatic, true);
-        QCOMPARE(h.offsetExpr, QStringLiteral("base + e_lfanew"));
-        QCOMPARE(h.name, QStringLiteral("nt_hdr"));
-    }
-
-    void testStaticFieldJsonBackwardCompat() {
-        // Old JSON without isStatic/offsetExpr should load with defaults
-        rcx::NodeTree tree;
-        rcx::Node root;
-        root.kind = rcx::NodeKind::Struct;
-        root.name = "Test";
-        root.parentId = 0;
-        int ri = tree.addNode(root);
-
-        QJsonObject json = tree.toJson();
-        rcx::NodeTree tree2 = rcx::NodeTree::fromJson(json);
-
-        QCOMPARE(tree2.nodes[0].isStatic, false);
-        QCOMPARE(tree2.nodes[0].offsetExpr, QString());
-    }
-
-    void testStructSpanExcludesStaticFields() {
-        using namespace rcx;
-        NodeTree tree;
-
-        Node root;
-        root.kind = NodeKind::Struct;
-        root.name = "Root";
-        root.parentId = 0;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        // Regular field: offset 0, size 4
-        Node f1;
-        f1.kind = NodeKind::UInt32;
-        f1.name = "a";
-        f1.parentId = rootId;
-        f1.offset = 0;
-        tree.addNode(f1);
-
-        // Regular field: offset 4, size 8
-        Node f2;
-        f2.kind = NodeKind::UInt64;
-        f2.name = "b";
-        f2.parentId = rootId;
-        f2.offset = 4;
-        tree.addNode(f2);
-
-        // Static field: should NOT affect span
-        Node sf;
-        sf.kind = NodeKind::Struct;
-        sf.name = "static_field";
-        sf.parentId = rootId;
-        sf.offset = 0;
-        sf.isStatic = true;
-        sf.offsetExpr = QStringLiteral("base");
-        tree.addNode(sf);
-
-        // Span should be max(0+4, 4+8) = 12, same as without static field
-        QCOMPARE(tree.structSpan(rootId), 12);
-    }
-
-    void testStaticExprSpanFor() {
-        using namespace rcx;
-        // Simulate a static field body line: "   return base + e_lfanew  → 0x1400000E8"
-        LineMeta lm;
-        lm.isStaticLine = true;
-        QString lineText = QStringLiteral("   return base + e_lfanew  \u2192 0x1400000E8");
-        ColumnSpan span = staticExprSpanFor(lm, lineText);
-        QVERIFY(span.valid);
-        QString expr = lineText.mid(span.start, span.end - span.start);
-        QCOMPARE(expr.trimmed(), QStringLiteral("base + e_lfanew"));
-    }
-
     // ── Test: comment field JSON round-trip ──
     void testCommentJsonRoundTrip() {
         rcx::Node n;
@@ -1025,8 +917,6 @@ private slots:
         n.classKeyword = QStringLiteral("class");
         n.parentId = 10;
         n.offset = 64;
-        n.isStatic = true;
-        n.offsetExpr = QStringLiteral("base + 0x10");
         n.isRelative = true;
         n.arrayLen = 5;
         n.strLen = 128;
@@ -1047,8 +937,6 @@ private slots:
         QCOMPARE(n2.classKeyword, n.classKeyword);
         QCOMPARE(n2.parentId, n.parentId);
         QCOMPARE(n2.offset, n.offset);
-        QCOMPARE(n2.isStatic, n.isStatic);
-        QCOMPARE(n2.offsetExpr, n.offsetExpr);
         QCOMPARE(n2.isRelative, n.isRelative);
         QCOMPARE(n2.arrayLen, n.arrayLen);
         QCOMPARE(n2.strLen, n.strLen);
@@ -1103,25 +991,6 @@ private slots:
         n.offset = 0;
         int ni = tree.addNode(n);
         QCOMPARE(tree.structSpan(tree.nodes[ni].id), 8);
-    }
-
-    void testStaticFieldExcludedFromSpan() {
-        rcx::NodeTree tree;
-        rcx::Node root; root.kind = rcx::NodeKind::Struct;
-        int ri = tree.addNode(root);
-        uint64_t rootId = tree.nodes[ri].id;
-
-        rcx::Node normal; normal.kind = rcx::NodeKind::UInt32;
-        normal.parentId = rootId; normal.offset = 0;
-        tree.addNode(normal);
-
-        rcx::Node staticF; staticF.kind = rcx::NodeKind::UInt64;
-        staticF.parentId = rootId; staticF.offset = 1000;
-        staticF.isStatic = true;
-        tree.addNode(staticF);
-
-        // Static field at offset 1000 should NOT inflate structSpan
-        QCOMPARE(tree.structSpan(rootId), 4); // just the UInt32
     }
 
     void testSubtreeIndices() {
@@ -1382,26 +1251,6 @@ private slots:
             n.parentId = uid; n.offset = 0;
             tree.addNode(n);
         }
-        QVERIFY(tree.findOverlaps().isEmpty());
-    }
-
-    void testFindOverlaps_staticFieldsIgnored() {
-        rcx::NodeTree tree;
-        rcx::Node r; r.kind = rcx::NodeKind::Struct;
-        r.name = "S"; r.parentId = 0;
-        int ri = tree.addNode(r);
-        uint64_t rid = tree.nodes[ri].id;
-        rcx::Node sf; sf.kind = rcx::NodeKind::Hex64;
-        sf.name = "static_thing"; sf.parentId = rid;
-        sf.offset = 0; sf.isStatic = true;
-        tree.addNode(sf);
-        rcx::Node f; f.kind = rcx::NodeKind::UInt32;
-        f.name = "real_field"; f.parentId = rid;
-        f.offset = 0;
-        tree.addNode(f);
-        // Real field's offset 0 overlaps with the static field's offset 0
-        // numerically — but static fields aren't sibling-bound, so the
-        // detector must skip them.
         QVERIFY(tree.findOverlaps().isEmpty());
     }
 

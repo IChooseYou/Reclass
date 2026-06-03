@@ -2041,18 +2041,6 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (m_exprEvaluator)
             QTimer::singleShot(0, this, [this]() { updateExprResultPopup(); });
 
-        // Autocomplete for static field expressions — show field names as user types
-        if (m_editState.target == EditTarget::StaticExpr && !m_staticCompletions.isEmpty()) {
-            // Get word at cursor
-            long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS);
-            long wordStart = m_sci->SendScintilla(QsciScintillaBase::SCI_WORDSTARTPOSITION, pos, (long)1);
-            int wordLen = (int)(pos - wordStart);
-            if (wordLen >= 1) {
-                QByteArray list = m_staticCompletions.join(' ').toUtf8();
-                m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSETSEPARATOR, (long)' ');
-                m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCSHOW, (uintptr_t)wordLen, list.constData());
-            }
-        }
     });
 
     connect(m_sci, &QsciScintilla::selectionChanged,
@@ -2129,6 +2117,15 @@ void RcxEditor::setupScintilla() {
     m_sci->setWrapMode(QsciScintilla::WrapNone);
     m_sci->setCaretLineVisible(false);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETWIDTH, 0);
+
+    // Kill QAbstractScrollArea's default frame. QsciScintilla inherits
+    // a `frameShape() == StyledPanel` which paints a 1-px border via
+    // QFrame::paintEvent — that's a SECOND drawing path, separate from
+    // MenuBarStyle::PE_Frame which we already return early for. The two
+    // borders stack at the top edge of the editor (editorContainer's
+    // QSS border + this frame) and read as a "double line". Setting
+    // NoFrame collapses them to a single line.
+    m_sci->setFrameShape(QFrame::NoFrame);
 
     // Arrow cursor by default — not the I-beam (this is a structured viewer, not a text editor)
     m_sci->viewport()->setCursor(Qt::ArrowCursor);
@@ -2393,8 +2390,18 @@ void RcxEditor::allocateMarginStyles() {
 }
 
 void RcxEditor::applyTheme(const Theme& theme) {
-    // Editor uses a slightly darker background than chrome for visual depth
-    const QColor editorBg = theme.background.darker(115);
+    // Editor paper:
+    //   - Dark themes: slightly darker than chrome for visual depth.
+    //   - Light themes (chrome lightness > 0.78): pure white. Threshold
+    //     of 0.78 catches the classic Windows 2000 / MSVC 6 panel gray
+    //     (#D4D0C8 ≈ 0.81 lightness) so the chrome stays gray while the
+    //     editor body renders pure white — same separation MSVC6, VC++,
+    //     and XP Notepad always had. The darker(115) formula on a pale
+    //     chrome produces dirty khaki paper that fights the rest of the
+    //     UI, so we bypass it once chrome reaches near-paper lightness.
+    const QColor editorBg = (theme.background.lightnessF() > 0.78)
+        ? QColor(QStringLiteral("#FFFFFF"))
+        : theme.background.darker(115);
 
     // Paper and text
     m_sci->setPaper(editorBg);
@@ -2759,7 +2766,6 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                 && a.isArrayHeader == b.isArrayHeader
                 && a.isArrayElement == b.isArrayElement
                 && a.isMemberLine == b.isMemberLine
-                && a.isStaticLine == b.isStaticLine
                 && a.heatLevel == b.heatLevel
                 && a.chips.size() == b.chips.size()
                 && std::equal(a.chips.cbegin(), a.chips.cend(), b.chips.cbegin(),
@@ -4681,20 +4687,6 @@ static ColumnSpan headerTypeNameSpan(const LineMeta& lm, const QString& lineText
     };
     if (kKeywords.contains(typeCol)) return {};
 
-    // Static field headers: "static hex64 target {" — skip "static " prefix
-    if (lm.isStaticLine) {
-        int cursor = ind;
-        while (cursor < typeEnd && lineText[cursor] == ' ') cursor++;
-        if (lineText.mid(cursor, 7) == QLatin1String("static "))
-            cursor += 7;
-        while (cursor < typeEnd && lineText[cursor] == ' ') cursor++;
-        int tStart = cursor;
-        while (cursor < typeEnd && lineText[cursor] != ' ') cursor++;
-        if (cursor > tStart)
-            return {tStart, cursor, true};
-        return {};
-    }
-
     // Named struct: entire type column is the type name (e.g. "_MMPTE")
     // Find the actual text bounds within the padded column
     int start = ind;
@@ -4780,8 +4772,7 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     if (lm->nodeIdx < 0) return false;
 
     // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
-    // Exception: static field names are always editable (they're function names)
-    if ((t == EditTarget::Name || t == EditTarget::Value) && isHexNode(lm->nodeKind) && !lm->isStaticLine)
+    if ((t == EditTarget::Name || t == EditTarget::Value) && isHexNode(lm->nodeKind))
         return false;
 
     QString lineText = getLineText(m_sci, line);
@@ -4807,10 +4798,6 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
         s = arrayElemCountSpanFor(*lm, lineText); break;
     case EditTarget::PointerTarget:
         s = pointerTargetSpanFor(*lm, lineText); break;
-    case EditTarget::StaticExpr:
-        if (lm->isStaticLine)
-            s = staticExprSpanFor(*lm, lineText);
-        break;
     case EditTarget::Comment: {
         const LineChip* cc = findChip(*lm, ChipKind::Comment);
         if (cc && cc->startCol >= 0 && cc->startCol < textLen)
@@ -6558,11 +6545,11 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         return false;
     // Hex nodes: only Type is editable via normal flow (double-click, F2, Enter)
     // Exception: context-menu-initiated hex/ASCII edits bypass this via m_hexEditPending
-    bool isHexEdit = m_hexEditPending && isHexNode(lm->nodeKind) && !lm->isStaticLine
+    bool isHexEdit = m_hexEditPending && isHexNode(lm->nodeKind)
         && (target == EditTarget::Name || target == EditTarget::Value);
     m_hexEditPending = false;
     if ((target == EditTarget::Name || target == EditTarget::Value)
-        && isHexNode(lm->nodeKind) && !lm->isStaticLine && !isHexEdit)
+        && isHexNode(lm->nodeKind) && !isHexEdit)
         return false;
 
     QString lineText;
