@@ -314,6 +314,10 @@ private:
     QFutureWatcher<PageMap>* m_refreshWatcher = nullptr;
     std::unique_ptr<SnapshotProvider> m_snapshotProv;
     PageMap         m_prevPages;
+    // Latches the "discarding all-zero page-0" debug log so a sustained
+    // unreadable-page condition doesn't flood the console at refresh
+    // tick rate. Cleared the first time we get a real read through.
+    bool            m_loggedAllZeroPage0 = false;
     QSet<int64_t>   m_changedOffsets;
     QHash<uint64_t, ValueHistory> m_valueHistory;
     QHash<uint64_t, uint64_t> m_lastValueAddr;  // nodeId → last offsetAddr used for value recording

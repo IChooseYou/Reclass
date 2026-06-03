@@ -36,6 +36,13 @@ struct TypeEntry {
     NodeKind    primitiveKind = NodeKind::Hex8;  // valid when entryKind==Primitive
     uint64_t    structId      = 0;               // valid when entryKind==Composite
     QString     displayName;
+    // RVA variant of a pointer entry. When true, picking this entry
+    // sets node.isRelative=true so the pointer dereferences as
+    // (parentBase + value) instead of value-as-absolute-address.
+    // Surfaced as a separate entry like "Pointer32 (RVA)" rather
+    // than a modifier toggle so it's discoverable from the same flow
+    // as Pointer32 / FuncPtr32 — no new UI surface.
+    bool        isRelative    = false;
     QString     classKeyword;                    // "struct", "class", "enum" (Composite only)
     bool        enabled       = true;            // false = grayed out (visible but not selectable)
     int         sizeBytes     = 0;               // size in bytes (for display)

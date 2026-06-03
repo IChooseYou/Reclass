@@ -24,6 +24,8 @@
 #include "themes/thememanager.h"
 #include "widgets/category_chip.h"
 #include "widgets/fuzzy_match.h"
+#include "rcxtooltip.h"
+#include <QSettings>
 
 namespace rcx {
 
@@ -81,11 +83,15 @@ QColor kindGroupColor(const QString& group) {
 
 QColor kindGroupDimColor(const QString& group) {
     QColor c = kindGroupColor(group);
-    // Blend 18% accent + 82% dark background
+    // Blend 18% accent + 82% theme background so the muted variant
+    // tracks the active palette instead of being baked against a dark
+    // #1e1e1e. The old constant looked right under VS2022 dark, but on
+    // a light theme it baked a dirty dark tint into every group chip.
+    const QColor bg = ThemeManager::instance().current().background;
     return QColor(
-        (c.red()   * 18 + 0x1e * 82) / 100,
-        (c.green() * 18 + 0x1e * 82) / 100,
-        (c.blue()  * 18 + 0x1e * 82) / 100);
+        (c.red()   * 18 + bg.red()   * 82) / 100,
+        (c.green() * 18 + bg.green() * 82) / 100,
+        (c.blue()  * 18 + bg.blue()  * 82) / 100);
 }
 
 QString kindGroupFor(NodeKind k) {
@@ -109,6 +115,14 @@ class TypeSelectorDelegate : public QStyledItemDelegate {
 public:
     explicit TypeSelectorDelegate(TypeSelectorPopup* popup, QObject* parent = nullptr)
         : QStyledItemDelegate(parent), m_popup(popup) {}
+
+    // Hide the field-summary tooltip if it's currently visible. The
+    // tooltip is a top-level Qt::ToolTip window owned by the delegate,
+    // not by the popup's list view, so closing the popup leaves it
+    // stranded on screen until we explicitly dismiss it here.
+    void hideTip() {
+        if (m_rcxTip) m_rcxTip->hide();
+    }
 
     void setFont(const QFont& f) {
         m_font = f;
@@ -362,17 +376,35 @@ public:
             if (row >= 0 && row < m_filtered->size()) {
                 const auto& e = (*m_filtered)[row];
                 if (e.entryKind == TypeEntry::Composite && !e.fieldSummary.isEmpty()) {
-                    QString tip = QStringLiteral("%1 (0x%2 bytes, %3 fields)\n")
-                        .arg(e.displayName, QString::number(e.sizeBytes, 16).toUpper())
+                    // Themed RcxTooltip — matches the rest of the app's
+                    // visual language (rounded body, arrow callout, same
+                    // mono font as the chooser, theme palette colors).
+                    // Default QToolTip used system fonts/colors and looked
+                    // out of place against the chooser's dark chrome.
+                    QString title = QStringLiteral("%1 (0x%2 bytes, %3 fields)")
+                        .arg(e.displayName,
+                             QString::number(e.sizeBytes, 16).toUpper())
                         .arg(e.fieldCount);
-                    tip += e.fieldSummary.join(QChar('\n'));
+                    QString body = e.fieldSummary.join(QChar('\n'));
                     if (e.fieldCount > e.fieldSummary.size())
-                        tip += QStringLiteral("\n...");
-                    QToolTip::showText(event->globalPos(), tip, view);
+                        body += QStringLiteral("\n...");
+                    if (!m_rcxTip) {
+                        m_rcxTip = new RcxTooltip(nullptr);
+                    }
+                    const auto& t = ThemeManager::instance().current();
+                    m_rcxTip->setTheme(t.backgroundAlt, t.border,
+                                       t.text, t.text, t.border);
+                    m_rcxTip->populate(title, body, m_font);
+                    // Anchor at the cursor position. The earlier fixed-X
+                    // variant was for the editor's row-anchored callouts
+                    // (which always want the same X relative to the row);
+                    // here the tooltip is mouse-driven, so it should
+                    // follow the cursor exactly.
+                    m_rcxTip->showAt(event->globalPos());
                     return true;
                 }
             }
-            QToolTip::hideText();
+            if (m_rcxTip) m_rcxTip->hide();
             return true;
         }
         return QStyledItemDelegate::helpEvent(event, view, option, index);
@@ -391,6 +423,7 @@ private:
     const QVector<QVector<int>>* m_matchPositions = nullptr;
     const TypeEntry* m_currentEntry = nullptr;
     bool m_hasCurrent = false;
+    mutable RcxTooltip* m_rcxTip = nullptr;  // themed callout for field summary
 };
 
 // ── TypeSelectorPopup ──
@@ -799,7 +832,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_createBtn->setAccessibleName(QStringLiteral("Create new type"));
         m_createBtn->setStyleSheet(QStringLiteral(
             "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-            "  padding: 2px 10px; border-radius: 3px; }"
+            "  padding: 2px 10px; border-radius: 0px; }"
             "QToolButton:hover { color: %4; background: %5; border-color: %5; }"
             "QToolButton:pressed { background: %6; }")
             .arg(theme.text.name(), theme.background.name(), theme.border.name(),
@@ -821,13 +854,20 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_saveBtn->setAutoRaise(true);
         m_saveBtn->setCursor(Qt::PointingHandCursor);
         m_saveBtn->setAccessibleName(QStringLiteral("OK"));
+        // Outline-only primary button — square corners, accent border to
+        // mark this as the dialog's primary action without resorting to a
+        // filled blue background. Matches the user's validated dialog
+        // visual language (see CLAUDE-MEMORY: dialog conventions).
         m_saveBtn->setStyleSheet(QStringLiteral(
             "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-            "  padding: 2px 14px; border-radius: 3px; }"
-            "QToolButton:hover { background: %4; }"
+            "  padding: 2px 14px; border-radius: 0px; }"
+            "QToolButton:hover { color: %1; background: %4; border-color: %1; }"
             "QToolButton:pressed { background: %5; }")
-            .arg(theme.text.name(), theme.selection.name(), theme.syntaxKeyword.name(),
-                 theme.selection.lighter(120).name(), theme.selection.darker(110).name()));
+            .arg(theme.text.name(),           // text
+                 theme.background.name(),     // bg
+                 theme.borderFocused.name(),  // accent outline
+                 theme.hover.name(),          // hover bg
+                 theme.surface.name()));      // pressed bg
         connect(m_saveBtn, &QToolButton::clicked, this, [this]() {
             acceptCurrent();
         });
@@ -836,19 +876,12 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         layout->addLayout(row);
     }
 
-    // ── Footer crumb: shows selected type info ──
-    {
-        m_footerLabel = new QLabel;
-        m_footerLabel->setTextFormat(Qt::RichText);
-        m_footerLabel->setFixedHeight(20);
-        QFont footerFont = m_footerLabel->font();
-        footerFont.setPointSize(qMax(7, footerFont.pointSize() - 2));
-        m_footerLabel->setFont(footerFont);
-        m_footerLabel->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; padding: 0 3px; border-top: 1px solid %2; }")
-            .arg(theme.textFaint.name(), theme.border.name()));
-        layout->addWidget(m_footerLabel);
-    }
+    // (Footer crumb removed — the action row above the OK button already
+    // shows "<type> → <size>" right where the user is about to click,
+    // so the dim "<type> · <size> · <group>" line duplicated the same
+    // info one band lower without adding anything. Less visual noise,
+    // same actionable information.)
+    m_footerLabel = nullptr;
 
 }
 
@@ -1881,6 +1914,17 @@ void TypeSelectorPopup::paintEvent(QPaintEvent* event) {
 
 void TypeSelectorPopup::hideEvent(QHideEvent* event) {
     QFrame::hideEvent(event);
+    // Dismiss the delegate's themed field-summary tooltip. It's a
+    // top-level Qt::ToolTip window separate from the popup, so it
+    // would otherwise stay on screen after the chooser is closed.
+    if (m_listView) {
+        // The delegate is the static_cast'able TypeSelectorDelegate
+        // we install in the constructor — there is only ever one item
+        // delegate set on m_listView. No Q_OBJECT on the delegate
+        // class, so qobject_cast doesn't apply.
+        if (auto* d = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate()))
+            d->hideTip();
+    }
     emit dismissed();
 }
 

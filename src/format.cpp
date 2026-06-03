@@ -300,7 +300,21 @@ QString fmtPointerHeader(const Node& node, int depth, bool collapsed,
         QString val = fit(readValue(node, prov, addr, 0), COL_VALUE);
         return ind + type + SEP + name + SEP + val;
     }
-    return ind + type + SEP + node.name + SEP + QStringLiteral("{");
+    // Expanded: still show the raw stored pointer value, then open the
+    // brace. For an absolute pointer the value matches the first child's
+    // offset column (helpful confirmation). For an RVA pointer the raw
+    // value (e.g. 0x78 for e_lfanew) differs from the resolved target —
+    // surfacing it here is the only way a user can diagnose a shifted
+    // or wrong RVA without diving into raw bytes.
+    //
+    // The value lines up with sibling rows' value columns via the
+    // fixed-width name pad (fit(node.name, colName)). DO NOT also pad
+    // the value to COL_VALUE — that would push the trailing '{' all
+    // the way to the right edge of the value column (≈96 chars),
+    // visually disconnecting the brace from its row.
+    QString name = fit(node.name, colName);
+    QString val  = readValue(node, prov, addr, 0);
+    return ind + type + SEP + name + SEP + val + QStringLiteral(" {");
 }
 
 // ── Hex / ASCII preview ──

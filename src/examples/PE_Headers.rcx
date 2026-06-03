@@ -14,11 +14,10 @@
         },
         {
             "id": "101",
-            "kind": "Hex16",
+            "kind": "UInt16",
             "name": "e_magic",
             "offset": 0,
-            "parentId": "100",
-            "comment": "'MZ' = 0x5A4D"
+            "parentId": "100"
         },
         {
             "id": "102",
@@ -153,8 +152,7 @@
             "parentId": "100",
             "refId": "200",
             "isRelative": true,
-            "collapsed": false,
-            "comment": "RVA → IMAGE_NT_HEADERS64 (target = imageBase + e_lfanew)"
+            "collapsed": false
         },
         {
             "id": "200",
@@ -168,11 +166,10 @@
         },
         {
             "id": "201",
-            "kind": "Hex32",
+            "kind": "UInt32",
             "name": "Signature",
             "offset": 0,
-            "parentId": "200",
-            "comment": "'PE\\0\\0' = 0x00004550"
+            "parentId": "200"
         },
         {
             "id": "210",
@@ -186,11 +183,10 @@
         },
         {
             "id": "211",
-            "kind": "Hex16",
+            "kind": "UInt16",
             "name": "Machine",
             "offset": 0,
-            "parentId": "210",
-            "comment": "0x8664 = AMD64, 0x14C = i386, 0xAA64 = ARM64"
+            "parentId": "210"
         },
         {
             "id": "212",
@@ -229,7 +225,7 @@
         },
         {
             "id": "217",
-            "kind": "Hex16",
+            "kind": "UInt16",
             "name": "Characteristics",
             "offset": 18,
             "parentId": "210"
@@ -246,11 +242,10 @@
         },
         {
             "id": "221",
-            "kind": "Hex16",
+            "kind": "UInt16",
             "name": "Magic",
             "offset": 0,
-            "parentId": "220",
-            "comment": "0x20B = PE32+ (64-bit), 0x10B = PE32 (32-bit)"
+            "parentId": "220"
         },
         {
             "id": "222",
@@ -289,22 +284,21 @@
         },
         {
             "id": "227",
-            "kind": "Hex32",
+            "kind": "UInt32",
             "name": "AddressOfEntryPoint",
             "offset": 16,
-            "parentId": "220",
-            "comment": "RVA from imageBase"
+            "parentId": "220"
         },
         {
             "id": "228",
-            "kind": "Hex32",
+            "kind": "UInt32",
             "name": "BaseOfCode",
             "offset": 20,
             "parentId": "220"
         },
         {
             "id": "229",
-            "kind": "Hex64",
+            "kind": "UInt64",
             "name": "ImageBase",
             "offset": 24,
             "parentId": "220"
@@ -388,7 +382,7 @@
         },
         {
             "id": "241",
-            "kind": "Hex32",
+            "kind": "UInt32",
             "name": "CheckSum",
             "offset": 64,
             "parentId": "220"
@@ -398,12 +392,11 @@
             "kind": "UInt16",
             "name": "Subsystem",
             "offset": 68,
-            "parentId": "220",
-            "comment": "2 = WINDOWS_GUI, 3 = WINDOWS_CUI, 1 = NATIVE"
+            "parentId": "220"
         },
         {
             "id": "243",
-            "kind": "Hex16",
+            "kind": "UInt16",
             "name": "DllCharacteristics",
             "offset": 70,
             "parentId": "220"
@@ -438,7 +431,7 @@
         },
         {
             "id": "248",
-            "kind": "Hex32",
+            "kind": "UInt32",
             "name": "LoaderFlags",
             "offset": 104,
             "parentId": "220"
@@ -448,8 +441,7 @@
             "kind": "UInt32",
             "name": "NumberOfRvaAndSizes",
             "offset": 108,
-            "parentId": "220",
-            "comment": "usually 16"
+            "parentId": "220"
         },
         {
             "id": "300",
@@ -461,8 +453,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "301", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "300" },
-        { "id": "302", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "300" },
+        {
+            "id": "301",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "300"
+        },
+        {
+            "id": "302",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "300"
+        },
         {
             "id": "310",
             "kind": "Struct",
@@ -473,8 +477,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "311", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "310" },
-        { "id": "312", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "310" },
+        {
+            "id": "311",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "310"
+        },
+        {
+            "id": "312",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "310"
+        },
         {
             "id": "320",
             "kind": "Struct",
@@ -485,8 +501,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "321", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "320" },
-        { "id": "322", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "320" },
+        {
+            "id": "321",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "320"
+        },
+        {
+            "id": "322",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "320"
+        },
         {
             "id": "330",
             "kind": "Struct",
@@ -497,8 +525,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "331", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "330" },
-        { "id": "332", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "330" },
+        {
+            "id": "331",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "330"
+        },
+        {
+            "id": "332",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "330"
+        },
         {
             "id": "340",
             "kind": "Struct",
@@ -509,8 +549,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "341", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "340" },
-        { "id": "342", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "340" },
+        {
+            "id": "341",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "340"
+        },
+        {
+            "id": "342",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "340"
+        },
         {
             "id": "350",
             "kind": "Struct",
@@ -521,8 +573,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "351", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "350" },
-        { "id": "352", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "350" },
+        {
+            "id": "351",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "350"
+        },
+        {
+            "id": "352",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "350"
+        },
         {
             "id": "360",
             "kind": "Struct",
@@ -533,8 +597,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "361", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "360" },
-        { "id": "362", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "360" },
+        {
+            "id": "361",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "360"
+        },
+        {
+            "id": "362",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "360"
+        },
         {
             "id": "370",
             "kind": "Struct",
@@ -545,8 +621,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "371", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "370" },
-        { "id": "372", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "370" },
+        {
+            "id": "371",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "370"
+        },
+        {
+            "id": "372",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "370"
+        },
         {
             "id": "380",
             "kind": "Struct",
@@ -557,8 +645,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "381", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "380" },
-        { "id": "382", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "380" },
+        {
+            "id": "381",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "380"
+        },
+        {
+            "id": "382",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "380"
+        },
         {
             "id": "390",
             "kind": "Struct",
@@ -569,8 +669,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "391", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "390" },
-        { "id": "392", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "390" },
+        {
+            "id": "391",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "390"
+        },
+        {
+            "id": "392",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "390"
+        },
         {
             "id": "400",
             "kind": "Struct",
@@ -581,8 +693,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "401", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "400" },
-        { "id": "402", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "400" },
+        {
+            "id": "401",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "400"
+        },
+        {
+            "id": "402",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "400"
+        },
         {
             "id": "410",
             "kind": "Struct",
@@ -593,8 +717,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "411", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "410" },
-        { "id": "412", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "410" },
+        {
+            "id": "411",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "410"
+        },
+        {
+            "id": "412",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "410"
+        },
         {
             "id": "420",
             "kind": "Struct",
@@ -605,8 +741,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "421", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "420" },
-        { "id": "422", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "420" },
+        {
+            "id": "421",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "420"
+        },
+        {
+            "id": "422",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "420"
+        },
         {
             "id": "430",
             "kind": "Struct",
@@ -617,8 +765,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "431", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "430" },
-        { "id": "432", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "430" },
+        {
+            "id": "431",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "430"
+        },
+        {
+            "id": "432",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "430"
+        },
         {
             "id": "440",
             "kind": "Struct",
@@ -629,8 +789,20 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "441", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "440" },
-        { "id": "442", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "440" },
+        {
+            "id": "441",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "440"
+        },
+        {
+            "id": "442",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "440"
+        },
         {
             "id": "450",
             "kind": "Struct",
@@ -641,7 +813,385 @@
             "refId": "0",
             "collapsed": true
         },
-        { "id": "451", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "450" },
-        { "id": "452", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "450" }
+        {
+            "id": "451",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "450"
+        },
+        {
+            "id": "452",
+            "kind": "UInt32",
+            "name": "Size",
+            "offset": 4,
+            "parentId": "450"
+        },
+        {
+            "id": "500",
+            "kind": "Struct",
+            "name": "section",
+            "structTypeName": "IMAGE_SECTION_HEADER",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true
+        },
+        {
+            "id": "501",
+            "kind": "UTF8",
+            "name": "Name",
+            "offset": 0,
+            "parentId": "500",
+            "strLen": 8
+        },
+        {
+            "id": "502",
+            "kind": "UInt32",
+            "name": "VirtualSize",
+            "offset": 8,
+            "parentId": "500"
+        },
+        {
+            "id": "503",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 12,
+            "parentId": "500"
+        },
+        {
+            "id": "504",
+            "kind": "UInt32",
+            "name": "SizeOfRawData",
+            "offset": 16,
+            "parentId": "500"
+        },
+        {
+            "id": "505",
+            "kind": "UInt32",
+            "name": "PointerToRawData",
+            "offset": 20,
+            "parentId": "500"
+        },
+        {
+            "id": "506",
+            "kind": "UInt32",
+            "name": "PointerToRelocations",
+            "offset": 24,
+            "parentId": "500"
+        },
+        {
+            "id": "507",
+            "kind": "UInt32",
+            "name": "PointerToLinenumbers",
+            "offset": 28,
+            "parentId": "500"
+        },
+        {
+            "id": "508",
+            "kind": "UInt16",
+            "name": "NumberOfRelocations",
+            "offset": 32,
+            "parentId": "500"
+        },
+        {
+            "id": "509",
+            "kind": "UInt16",
+            "name": "NumberOfLinenumbers",
+            "offset": 34,
+            "parentId": "500"
+        },
+        {
+            "id": "510",
+            "kind": "UInt32",
+            "name": "Characteristics",
+            "offset": 36,
+            "parentId": "500"
+        },
+        {
+            "id": "520",
+            "kind": "Array",
+            "name": "Sections",
+            "offset": 264,
+            "parentId": "200",
+            "elementKind": "Struct",
+            "refId": "500",
+            "arrayLen": 16,
+            "collapsed": false
+        },
+        {
+            "id": "600",
+            "kind": "Struct",
+            "name": "exportDir",
+            "structTypeName": "IMAGE_EXPORT_DIRECTORY",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true
+        },
+        {
+            "id": "601",
+            "kind": "UInt32",
+            "name": "Characteristics",
+            "offset": 0,
+            "parentId": "600"
+        },
+        {
+            "id": "602",
+            "kind": "UInt32",
+            "name": "TimeDateStamp",
+            "offset": 4,
+            "parentId": "600"
+        },
+        {
+            "id": "603",
+            "kind": "UInt16",
+            "name": "MajorVersion",
+            "offset": 8,
+            "parentId": "600"
+        },
+        {
+            "id": "604",
+            "kind": "UInt16",
+            "name": "MinorVersion",
+            "offset": 10,
+            "parentId": "600"
+        },
+        {
+            "id": "605",
+            "kind": "UInt32",
+            "name": "Name",
+            "offset": 12,
+            "parentId": "600"
+        },
+        {
+            "id": "606",
+            "kind": "UInt32",
+            "name": "Base",
+            "offset": 16,
+            "parentId": "600"
+        },
+        {
+            "id": "607",
+            "kind": "UInt32",
+            "name": "NumberOfFunctions",
+            "offset": 20,
+            "parentId": "600"
+        },
+        {
+            "id": "608",
+            "kind": "UInt32",
+            "name": "NumberOfNames",
+            "offset": 24,
+            "parentId": "600"
+        },
+        {
+            "id": "609",
+            "kind": "UInt32",
+            "name": "AddressOfFunctions",
+            "offset": 28,
+            "parentId": "600"
+        },
+        {
+            "id": "610",
+            "kind": "UInt32",
+            "name": "AddressOfNames",
+            "offset": 32,
+            "parentId": "600"
+        },
+        {
+            "id": "611",
+            "kind": "UInt32",
+            "name": "AddressOfNameOrdinals",
+            "offset": 36,
+            "parentId": "600"
+        },
+        {
+            "id": "700",
+            "kind": "Struct",
+            "name": "importDesc",
+            "structTypeName": "IMAGE_IMPORT_DESCRIPTOR",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true
+        },
+        {
+            "id": "701",
+            "kind": "UInt32",
+            "name": "OriginalFirstThunk",
+            "offset": 0,
+            "parentId": "700"
+        },
+        {
+            "id": "702",
+            "kind": "UInt32",
+            "name": "TimeDateStamp",
+            "offset": 4,
+            "parentId": "700"
+        },
+        {
+            "id": "703",
+            "kind": "UInt32",
+            "name": "ForwarderChain",
+            "offset": 8,
+            "parentId": "700"
+        },
+        {
+            "id": "704",
+            "kind": "UInt32",
+            "name": "Name",
+            "offset": 12,
+            "parentId": "700"
+        },
+        {
+            "id": "705",
+            "kind": "UInt32",
+            "name": "FirstThunk",
+            "offset": 16,
+            "parentId": "700"
+        },
+        {
+            "id": "800",
+            "kind": "Struct",
+            "name": "baseReloc",
+            "structTypeName": "IMAGE_BASE_RELOCATION",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true
+        },
+        {
+            "id": "801",
+            "kind": "UInt32",
+            "name": "VirtualAddress",
+            "offset": 0,
+            "parentId": "800"
+        },
+        {
+            "id": "802",
+            "kind": "UInt32",
+            "name": "SizeOfBlock",
+            "offset": 4,
+            "parentId": "800"
+        },
+        {
+            "id": "900",
+            "kind": "Struct",
+            "name": "debugDir",
+            "structTypeName": "IMAGE_DEBUG_DIRECTORY",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true
+        },
+        {
+            "id": "901",
+            "kind": "UInt32",
+            "name": "Characteristics",
+            "offset": 0,
+            "parentId": "900"
+        },
+        {
+            "id": "902",
+            "kind": "UInt32",
+            "name": "TimeDateStamp",
+            "offset": 4,
+            "parentId": "900"
+        },
+        {
+            "id": "903",
+            "kind": "UInt16",
+            "name": "MajorVersion",
+            "offset": 8,
+            "parentId": "900"
+        },
+        {
+            "id": "904",
+            "kind": "UInt16",
+            "name": "MinorVersion",
+            "offset": 10,
+            "parentId": "900"
+        },
+        {
+            "id": "905",
+            "kind": "UInt32",
+            "name": "Type",
+            "offset": 12,
+            "parentId": "900"
+        },
+        {
+            "id": "906",
+            "kind": "UInt32",
+            "name": "SizeOfData",
+            "offset": 16,
+            "parentId": "900"
+        },
+        {
+            "id": "907",
+            "kind": "UInt32",
+            "name": "AddressOfRawData",
+            "offset": 20,
+            "parentId": "900"
+        },
+        {
+            "id": "908",
+            "kind": "UInt32",
+            "name": "PointerToRawData",
+            "offset": 24,
+            "parentId": "900"
+        },
+        {
+            "id": "1000",
+            "kind": "Struct",
+            "name": "tlsDir",
+            "structTypeName": "IMAGE_TLS_DIRECTORY64",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": true
+        },
+        {
+            "id": "1001",
+            "kind": "UInt64",
+            "name": "StartAddressOfRawData",
+            "offset": 0,
+            "parentId": "1000"
+        },
+        {
+            "id": "1002",
+            "kind": "UInt64",
+            "name": "EndAddressOfRawData",
+            "offset": 8,
+            "parentId": "1000"
+        },
+        {
+            "id": "1003",
+            "kind": "UInt64",
+            "name": "AddressOfIndex",
+            "offset": 16,
+            "parentId": "1000"
+        },
+        {
+            "id": "1004",
+            "kind": "UInt64",
+            "name": "AddressOfCallBacks",
+            "offset": 24,
+            "parentId": "1000"
+        },
+        {
+            "id": "1005",
+            "kind": "UInt32",
+            "name": "SizeOfZeroFill",
+            "offset": 32,
+            "parentId": "1000"
+        },
+        {
+            "id": "1006",
+            "kind": "UInt32",
+            "name": "Characteristics",
+            "offset": 36,
+            "parentId": "1000"
+        }
     ]
 }

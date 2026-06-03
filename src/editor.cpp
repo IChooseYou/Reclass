@@ -3913,6 +3913,7 @@ void RcxEditor::updateChipHover(const HitInfo& h) {
     int newLine = -1;
     int newStart = -1;
     int newEnd = -1;
+    ChipKind newKind = ChipKind::Comment;
     if (m_hoverInside && h.line >= 0 && h.line < m_meta.size()) {
         const auto& lm = m_meta[h.line];
         for (const auto& c : lm.chips) {
@@ -3927,6 +3928,7 @@ void RcxEditor::updateChipHover(const HitInfo& h) {
             newLine  = h.line;
             newStart = c.startCol;
             newEnd   = c.endCol;
+            newKind  = c.kind;
             break;
         }
     }
@@ -3942,6 +3944,7 @@ void RcxEditor::updateChipHover(const HitInfo& h) {
     m_chipHoverLine     = newLine;
     m_chipHoverStartCol = newStart;
     m_chipHoverEndCol   = newEnd;
+    m_chipHoverKind     = newKind;
     applyChipButtonOverlay();
 }
 
@@ -5161,6 +5164,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                         m_chipHoverLine     = h.line;
                         m_chipHoverStartCol = c.startCol;
                         m_chipHoverEndCol   = c.endCol;
+                        m_chipHoverKind     = c.kind;
                         m_chipPressed       = true;
                         applyChipButtonOverlay();
                     }
@@ -7585,13 +7589,15 @@ void RcxEditor::applyHoverCursor() {
         desired = Qt::IBeamCursor;
 
     // Clickable chip override — type-hint suggestions ("int32x2"),
-    // comment chips, enum chips, AddComment all respond to clicks.
-    // updateChipHover() (run from MouseMove just before this function)
-    // sets m_chipHoverLine when one is hovered; matching the cursor
-    // makes them feel like the other clickable RcxEditor items (fold
-    // toggle, footer pills, editable tokens).
-    if (m_chipHoverLine >= 0)
-        desired = Qt::PointingHandCursor;
+    // enum chips, AddComment all open a dropdown/dialog on click and
+    // get PointingHand. Comment chips are inline-editable text and
+    // get I-beam, matching the cursor convention for hex bytes / name
+    // / value spans.
+    if (m_chipHoverLine >= 0) {
+        desired = (m_chipHoverKind == ChipKind::Comment)
+                  ? Qt::IBeamCursor
+                  : Qt::PointingHandCursor;
+    }
 
     // ── Arrow tooltip on command row spans ──
     {

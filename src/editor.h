@@ -256,6 +256,11 @@ private:
     int  m_chipHoverLine     = -1;
     int  m_chipHoverStartCol = -1;
     int  m_chipHoverEndCol   = -1;
+    // Kind of the chip currently under the cursor. Used by
+    // applyHoverCursor to pick I-beam for Comment (inline-editable
+    // text) vs PointingHand for the rest (TypeHint, Enum, AddComment
+    // — buttons / dropdowns).
+    ChipKind m_chipHoverKind  = ChipKind::Comment;
     bool m_chipPressed       = false;
     uint64_t m_hoveredNodeId = 0;
     int      m_hoveredLine = -1;

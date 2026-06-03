@@ -3022,6 +3022,10 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].bigEndian = isUndo ? c.oldVal : c.newVal;
+        } else if constexpr (std::is_same_v<T, cmd::ToggleRelative>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0)
+                tree.nodes[idx].isRelative = isUndo ? c.oldVal : c.newVal;
         } else if constexpr (std::is_same_v<T, cmd::ChangeComment>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
@@ -5481,6 +5485,16 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                 e.alignment     = m.align;
                 e.kindGroup     = kindGroupFor(m.kind);
                 entries.append(e);
+                // For Pointer32 / Pointer64, append an RVA variant
+                // immediately after so users can pick "Pointer32 (RVA)"
+                // from the same list — no modifier checkbox needed.
+                if (m.kind == NodeKind::Pointer32 || m.kind == NodeKind::Pointer64) {
+                    TypeEntry rva = e;
+                    rva.isRelative = true;
+                    rva.displayName = QString::fromLatin1(m.typeName)
+                                    + QStringLiteral(" (RVA)");
+                    entries.append(rva);
+                }
             }
         };
 
@@ -5567,12 +5581,18 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                 }
             } else if (node) {
                 if (!(node->kind == NodeKind::Struct && node->refId != 0)) {
+                    // For pointer kinds, the catalog now ships two
+                    // entries per width (absolute + RVA). Match the
+                    // variant that mirrors node->isRelative so opening
+                    // the chooser on an existing RVA pointer pre-
+                    // selects the "(RVA)" entry.
                     for (auto& e : entries) {
-                        if (e.entryKind == TypeEntry::Primitive && e.primitiveKind == node->kind) {
-                            currentEntry = e;
-                            hasCurrent = true;
-                            break;
-                        }
+                        if (e.entryKind != TypeEntry::Primitive) continue;
+                        if (e.primitiveKind != node->kind) continue;
+                        if (isPtr && e.isRelative != node->isRelative) continue;
+                        currentEntry = e;
+                        hasCurrent = true;
+                        break;
                     }
                 }
             }
@@ -5805,6 +5825,29 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
             } else {
                 if (resolved.primitiveKind != nodeKind)
                     changeNodeKind(nodeIdx, resolved.primitiveKind);
+                // Apply RVA flag from the catalog entry. The catalog
+                // ships two pointer entries per width — "Pointer32" and
+                // "Pointer32 (RVA)" — that differ only in isRelative.
+                // Honour the pick explicitly so switching from RVA to
+                // absolute clears the flag, and vice versa.
+                if (isPointerKind(resolved.primitiveKind)) {
+                    int idx = m_doc->tree.indexOfId(nodeId);
+                    if (idx >= 0 && m_doc->tree.nodes[idx].isRelative != resolved.isRelative) {
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ToggleRelative{nodeId,
+                                m_doc->tree.nodes[idx].isRelative,
+                                resolved.isRelative}));
+                    }
+                    // Hint about the second step: the user just picked
+                    // a void pointer kind (and possibly RVA). Without
+                    // a refId the row will read as "void*" / "void* rva"
+                    // and won't expand. Tell them how to wire a target.
+                    if (idx >= 0 && m_doc->tree.nodes[idx].refId == 0) {
+                        emit statusHint(QStringLiteral(
+                            "Pointer set. Re-open the type chooser and "
+                            "pick a struct to set the target."));
+                    }
+                }
             }
         } else if (resolved.entryKind == TypeEntry::Composite) {
             bool wasSuppressed = m_suppressRefresh;
@@ -5843,6 +5886,22 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                             cmd::ChangePointerRef{nodeId, n.refId, resolved.structId}));
                 }
 
+            } else if (isPointerKind(nodeKind)) {
+                // Composite picked on an existing Pointer node — set
+                // refId (the pointer's struct target) without changing
+                // the node's kind, ptrDepth, or isRelative. This is
+                // the second step of the "Pointer32 (RVA) → MyStruct"
+                // workflow: user picks ptr32 (RVA) first to set kind
+                // + isRelative, then reopens the chooser and picks the
+                // target struct here. Preserving kind/isRelative means
+                // they don't get clobbered back to inline Struct.
+                int idx = m_doc->tree.indexOfId(nodeId);
+                if (idx >= 0 && m_doc->tree.nodes[idx].refId != resolved.structId) {
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangePointerRef{nodeId,
+                            m_doc->tree.nodes[idx].refId,
+                            resolved.structId}));
+                }
             } else {
                 // Plain struct: e.g. "Material" → Struct + structTypeName + refId + collapsed
                 if (nodeKind != NodeKind::Struct)
@@ -6658,10 +6717,16 @@ void RcxController::onReadComplete() {
             if (p0[i] != 0) { allZero = false; break; }
         }
         if (allZero) {
-            qDebug() << "[Refresh] discarding all-zero page-0, keeping stale snapshot";
+            if (!m_loggedAllZeroPage0) {
+                qDebug() << "[Refresh] discarding all-zero page-0, keeping stale snapshot (further occurrences silenced)";
+                m_loggedAllZeroPage0 = true;
+            }
             return;
         }
     }
+    // First successful non-all-zero refresh — re-arm the log latch so a
+    // future all-zero burst gets a single line again.
+    m_loggedAllZeroPage0 = false;
 
     // Compute which byte offsets changed (for change highlighting) and
     // update per-page stability counters.

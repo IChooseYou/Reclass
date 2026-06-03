@@ -2655,6 +2655,217 @@ private slots:
             if (line.trimmed() == QStringLiteral("{")) { foundBrace = true; break; }
         QVERIFY(foundBrace);
     }
+
+    // Regression for the broken-at-top-level RVA pointer semantics.
+    // Before the fix: target = recursion-time `base` parameter + value.
+    // At the top level, `base == 0`, so the target collapsed to just
+    // `value`, which sent reads to a literal address like 0x78 instead
+    // of imageBase+0x78. PE_Headers.rcx looked correct in tree shape but
+    // every dereferenced Signature read 0x00000000 because 0x78 was
+    // unmapped. Fix: `target = tree.baseAddress + value` (matches PE
+    // RVA convention).
+    void testTopLevelRvaPointerResolvesAgainstTreeBaseAddress() {
+        using namespace rcx;
+        constexpr uint64_t kImageBase = 0x140000000ULL;
+        constexpr uint32_t kElfanew   = 0x78;
+        constexpr uint32_t kPeSig     = 0x00004550;  // 'PE\0\0'
+
+        // Inline base-translating provider: read(addr) maps
+        // addr → buffer[addr - imageBase]. Mirrors a real PE process
+        // attach where reads come in as absolute VAs and the OS does
+        // the VA → file-offset mapping. Required because the RVA fix
+        // would be invisible to a baseAddress=0 test (adding 0 is a
+        // no-op so the broken and fixed paths render identically).
+        struct TestPeProvider : Provider {
+            QByteArray data;
+            uint64_t   imgBase;
+            TestPeProvider(QByteArray d, uint64_t b)
+                : data(std::move(d)), imgBase(b) {}
+            bool read(uint64_t addr, void* buf, int len) const override {
+                if (addr < imgBase) return false;
+                uint64_t off = addr - imgBase;
+                if (off + (uint64_t)len > (uint64_t)data.size()) return false;
+                std::memcpy(buf, data.constData() + off, len);
+                return true;
+            }
+            // Default isReadable assumes addr is a file offset; override
+            // so the base-translation maths matches the read() above.
+            bool isReadable(uint64_t addr, int len) const override {
+                if (len < 0) return false;
+                if (addr < imgBase) return false;
+                uint64_t off = addr - imgBase;
+                return off + (uint64_t)len <= (uint64_t)data.size();
+            }
+            int size() const override { return data.size(); }
+            uint64_t base() const override { return imgBase; }
+            QString name() const override { return QStringLiteral("test"); }
+            QString kind() const override { return QStringLiteral("Process"); }
+        };
+
+        QByteArray buf(0x400, '\0');
+        memcpy(buf.data() + 0x3C, &kElfanew, 4);
+        memcpy(buf.data() + 0x78, &kPeSig,   4);
+
+        TestPeProvider prov(buf, kImageBase);
+
+        NodeTree tree;
+        tree.baseAddress = kImageBase;
+
+        Node dos;
+        dos.kind = NodeKind::Struct;
+        dos.structTypeName = "IMAGE_DOS_HEADER";
+        dos.name = "dos";
+        dos.parentId = 0;
+        dos.collapsed = false;
+        int di = tree.addNode(dos);
+        uint64_t dosId = tree.nodes[di].id;
+
+        Node nt;
+        nt.kind = NodeKind::Struct;
+        nt.structTypeName = "IMAGE_NT_HEADERS64";
+        nt.name = "nt";
+        nt.parentId = 0;
+        nt.collapsed = true;
+        int ni = tree.addNode(nt);
+        uint64_t ntId = tree.nodes[ni].id;
+
+        Node sig;
+        sig.kind = NodeKind::UInt32;
+        sig.name = "Signature";
+        sig.parentId = ntId;
+        sig.offset = 0;
+        tree.addNode(sig);
+
+        Node lfanew;
+        lfanew.kind = NodeKind::Pointer32;
+        lfanew.name = "e_lfanew";
+        lfanew.parentId = dosId;
+        lfanew.offset = 0x3C;
+        lfanew.refId = ntId;
+        lfanew.isRelative = true;
+        lfanew.collapsed = false;  // expand the pointer so Signature renders
+        tree.addNode(lfanew);
+
+        ComposeResult result = compose(tree, prov);
+
+        // The Signature row's resolved address must be imageBase +
+        // e_lfanew, NOT just e_lfanew. Look up the meta entry whose
+        // node is the Signature field and assert offsetAddr matches.
+        uint64_t expected = kImageBase + kElfanew;
+        bool found = false;
+        for (const auto& lm : result.meta) {
+            if (lm.lineKind != LineKind::Field) continue;
+            int idx = lm.nodeIdx;
+            if (idx < 0 || idx >= tree.nodes.size()) continue;
+            if (tree.nodes[idx].name != QStringLiteral("Signature")) continue;
+            found = true;
+            QCOMPARE(lm.offsetAddr, expected);
+            break;
+        }
+        QVERIFY2(found,
+                 "Signature line never appeared in compose output — "
+                 "Pointer32 RVA expansion is silently broken");
+
+        // And the bytes read at that target should be the PE magic.
+        // Verifies the provider was queried with the correct absolute
+        // address (would read 0 if we sent it 0x78 instead of
+        // 0x140000078).
+        QCOMPARE(prov.readU32(expected), kPeSig);
+
+        // The expanded e_lfanew header must surface the raw stored RVA
+        // (0x78). Without this, a user can't see the value that drove
+        // the resolved target — diagnosing a shifted/wrong RVA becomes
+        // impossible. The header line is the one that ends in " {" and
+        // contains "e_lfanew".
+        QStringList lines = result.text.split('\n');
+        bool foundHeader = false;
+        for (const auto& line : lines) {
+            if (!line.contains(QStringLiteral("e_lfanew"))) continue;
+            if (!line.endsWith(QStringLiteral("{"))) continue;
+            foundHeader = true;
+            QVERIFY2(line.contains(QStringLiteral("0x78")),
+                     qPrintable(QStringLiteral(
+                         "expanded e_lfanew header must show the raw "
+                         "stored RVA value '0x78'; got:\n  ") + line));
+            break;
+        }
+        QVERIFY2(foundHeader,
+                 "expanded e_lfanew header line ending with '{' not found");
+    }
+
+    // Regression: the non-RVA case of the same rendering change.
+    // Expanded absolute Pointer64 headers also now show their raw
+    // stored value before '{' — keeping the header informative when a
+    // pointer's target is known but the user wants to confirm what
+    // address it lives at without scanning the next line.
+    void testExpandedAbsolutePointerHeaderShowsValue() {
+        using namespace rcx;
+        constexpr uint64_t kBufBase = 0;
+        constexpr uint64_t kPtrSlot = 0x10;
+        constexpr uint64_t kPtrValue = 0x00000ABCDEF01234ULL;
+
+        QByteArray buf(0x80, '\0');
+        memcpy(buf.data() + kPtrSlot, &kPtrValue, 8);
+        BufferProvider prov(buf);
+
+        NodeTree tree;
+        tree.baseAddress = kBufBase;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "Owner";
+        root.name = "owner";
+        root.parentId = 0;
+        root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node target;
+        target.kind = NodeKind::Struct;
+        target.structTypeName = "Target";
+        target.name = "target";
+        target.parentId = 0;
+        target.collapsed = true;
+        int ti = tree.addNode(target);
+        uint64_t targetId = tree.nodes[ti].id;
+
+        Node leaf;
+        leaf.kind = NodeKind::UInt32;
+        leaf.name = "x";
+        leaf.parentId = targetId;
+        leaf.offset = 0;
+        tree.addNode(leaf);
+
+        Node ptr;
+        ptr.kind = NodeKind::Pointer64;
+        ptr.name = "next";
+        ptr.parentId = rootId;
+        ptr.offset = kPtrSlot;
+        ptr.refId = targetId;
+        ptr.collapsed = false;  // expanded
+        tree.addNode(ptr);
+
+        ComposeResult result = compose(tree, prov);
+
+        QStringList lines = result.text.split('\n');
+        QString stored = QStringLiteral("0x%1")
+                           .arg(kPtrValue, 0, 16).toUpper();
+        bool found = false;
+        for (const auto& line : lines) {
+            if (!line.contains(QStringLiteral("next"))) continue;
+            if (!line.endsWith(QStringLiteral("{"))) continue;
+            found = true;
+            // fmtPointer64 hex output is lower-case; compare
+            // case-insensitively.
+            QVERIFY2(line.contains(stored, Qt::CaseInsensitive),
+                     qPrintable(QStringLiteral(
+                         "expanded absolute Pointer header must show "
+                         "its stored value before '{'; got:\n  ") + line));
+            break;
+        }
+        QVERIFY2(found,
+                 "expanded 'next' header line not found");
+    }
 };
 
 QTEST_MAIN(TestCompose)

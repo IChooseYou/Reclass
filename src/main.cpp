@@ -6529,12 +6529,21 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         QFileInfo shadowInfo(shadow);
         if (shadowInfo.exists() && shadowInfo.isFile()
             && shadowInfo.lastModified() > origInfo.lastModified()) {
+            // Show the full absolute path so the user can verify
+            // exactly which file (and which shadow) the prompt refers
+            // to before agreeing — important when the same basename
+            // exists in multiple places.
             bool restore = ThemedMessageBox::confirm(this,
                 QStringLiteral("Restore Autosave?"),
-                QStringLiteral("A more recent autosave exists for this file "
-                               "(saved %1, original %2). Open the autosave instead?")
-                    .arg(QLocale().toString(shadowInfo.lastModified(), QLocale::ShortFormat))
-                    .arg(QLocale().toString(origInfo.lastModified(), QLocale::ShortFormat)),
+                QStringLiteral(
+                    "A more recent autosave exists for this file.\n\n"
+                    "Original:\n  %1\n  modified %2\n\n"
+                    "Autosave:\n  %3\n  modified %4\n\n"
+                    "Open the autosave instead?")
+                    .arg(origInfo.absoluteFilePath())
+                    .arg(QLocale().toString(origInfo.lastModified(), QLocale::ShortFormat))
+                    .arg(shadowInfo.absoluteFilePath())
+                    .arg(QLocale().toString(shadowInfo.lastModified(), QLocale::ShortFormat)),
                 QStringLiteral("Restore"),
                 QStringLiteral("Open original"));
             if (restore) {

@@ -1162,9 +1162,16 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 }
             }
 
-            // Relative pointer (RVA): target = base + value
+            // Relative pointer (RVA): target = tree.baseAddress + value.
+            // Matches PE/COFF/ELF RVA convention — values are offsets
+            // from the document's base (imageBase when attached at
+            // module load), NOT from the recursion-time parent base.
+            // Using `base` (the recursion arg) here made top-level
+            // RVA pointers resolve to literal `value` since base=0 at
+            // root, which read e.g. NT_HEADERS at 0x78 instead of
+            // imageBase+0x78.
             if (node.isRelative && ptrVal != 0)
-                ptrVal += base;
+                ptrVal += tree.baseAddress;
 
             // Follow extra indirection levels for ** struct pointers
             // ptrDepth=0 → single deref (normal *), ptrDepth=1 → double deref (**)
