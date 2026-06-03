@@ -8,8 +8,51 @@
 #include "core.h"
 #include "providers/null_provider.h"
 #include "providers/buffer_provider.h"
+#include "providerregistry.h"
+#include "iplugin.h"
 
 using namespace rcx;
+
+// ── Fake provider + plugin for the "adopt new provider's base" test ──
+// A real Process plugin would open a process and report its main module
+// base. The regression we're catching: when the user switches sources,
+// the controller must replace a stale baseAddress (e.g. a heap pointer
+// left over from the New-Class self-attach) with the new provider's
+// base, otherwise every read lands on unmapped memory and shows 00.
+// We use a plain BufferProvider subclass that reports a known base()
+// and a no-dialog plugin that hands back a fixed target string from
+// selectTarget so the test runs headless.
+class FakeBasedProvider : public BufferProvider {
+public:
+    FakeBasedProvider(const QByteArray& data, uint64_t base)
+        : BufferProvider(data), m_base(base) {}
+    uint64_t base() const override { return m_base; }
+private:
+    uint64_t m_base;
+};
+
+class FakeProviderPlugin : public IProviderPlugin {
+public:
+    FakeProviderPlugin(uint64_t base, const QString& target)
+        : m_base(base), m_target(target) {}
+    std::string Name()        const override { return "FakeProvider"; }
+    std::string Description() const override { return "Test-only fake provider plugin"; }
+    std::string Version()     const override { return "0.0"; }
+    std::string Author()      const override { return "test"; }
+    k_ELoadType LoadType()    const override { return k_ELoadTypeManual; }
+    bool canHandle(const QString&) const override { return true; }
+    std::unique_ptr<rcx::Provider> createProvider(const QString&,
+                                                   QString* /*errorMsg*/ = nullptr) override {
+        return std::make_unique<FakeBasedProvider>(QByteArray(64, '\x00'), m_base);
+    }
+    bool selectTarget(QWidget* /*parent*/, QString* target) override {
+        *target = m_target;
+        return true;
+    }
+private:
+    uint64_t m_base;
+    QString  m_target;
+};
 
 static void buildTree(NodeTree& tree) {
     tree.baseAddress = 0x1000;
@@ -239,6 +282,45 @@ private slots:
         QApplication::processEvents();
 
         QVERIFY(m_doc->provider->name().isEmpty());
+    }
+
+    // ── Regression: attaching to a new source must adopt that source's
+    //    baseAddress, even if the previous baseAddress was a non-default
+    //    value (e.g. the heap pointer the "New Class" flow stamps in via
+    //    self-attach). The bug: selectSource only replaced baseAddress
+    //    when it was exactly 0x00400000, so after a self-attach the
+    //    stale Reclass.exe heap pointer survived the switch to another
+    //    process, every read landed on unmapped memory, and the editor
+    //    showed all 00s while the address bar still displayed the
+    //    leftover pointer (e.g. 0x233C8AEDDB0).
+    void testSelectSourceAdoptsProviderBaseAfterSelfAttach() {
+        // Stamp the document with a non-default baseAddress that
+        // mirrors the post-self-attach state — a heap-shaped pointer
+        // that has nothing to do with the new target we're about to
+        // pick. If the controller fails to overwrite this on attach,
+        // the test catches it.
+        constexpr uint64_t kStaleSelfAttachBase = 0x233C8AEDDB0ull;
+        constexpr uint64_t kNewProviderBase     = 0x00007FF712340000ull;
+        m_doc->tree.baseAddress = kStaleSelfAttachBase;
+        m_doc->tree.baseAddressFormula.clear();
+
+        // Register a no-dialog fake plugin so selectSource can run
+        // headless. ProviderRegistry is a process-wide singleton —
+        // unregister at end of test so other tests aren't polluted.
+        const QString kFakeId = QStringLiteral("fakebaseprovider");
+        FakeProviderPlugin fake(kNewProviderBase,
+                                QStringLiteral("42:target.exe"));
+        ProviderRegistry::instance().registerProvider(
+            QStringLiteral("FakeBaseProvider"), kFakeId, &fake);
+
+        // Drive the same path a user takes when they pick a new
+        // process from the source menu.
+        m_ctrl->selectSource(QStringLiteral("Fake Base Provider"));
+        QApplication::processEvents();
+
+        QCOMPARE(m_doc->tree.baseAddress, kNewProviderBase);
+
+        ProviderRegistry::instance().unregisterProvider(kFakeId);
     }
 };
 
