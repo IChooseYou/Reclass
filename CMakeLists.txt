@@ -216,10 +216,17 @@ target_link_libraries(Reclass PRIVATE
     ${QT}::Svg
     ${QT}::Concurrent
     ${QT}::Network
-    ${QT}::GuiPrivate
     QScintilla::QScintilla
     ${_QT_WINEXTRAS}
 )
+# Qt6::GuiPrivate (for QZipReader, used by ReClass.NET .rcnet import)
+# isn't shipped in the binary Qt distribution on macOS. Gate the link
+# and a compile define; if absent, the .rcnet path falls back to an
+# error message ("supported on Linux/Windows builds only").
+if(TARGET ${QT}::GuiPrivate)
+    target_link_libraries(Reclass PRIVATE ${QT}::GuiPrivate)
+    target_compile_definitions(Reclass PRIVATE RCX_HAVE_QZIPREADER)
+endif()
 if(WIN32)
     target_link_libraries(Reclass PRIVATE dbghelp dwmapi psapi raw_pdb)
 
@@ -513,7 +520,11 @@ if(BUILD_TESTING)
     add_executable(test_import_xml tests/test_import_xml.cpp
         src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
     target_include_directories(test_import_xml PRIVATE src)
-    target_link_libraries(test_import_xml PRIVATE ${QT}::Core ${QT}::Test ${QT}::GuiPrivate)
+    target_link_libraries(test_import_xml PRIVATE ${QT}::Core ${QT}::Test)
+    if(TARGET ${QT}::GuiPrivate)
+        target_link_libraries(test_import_xml PRIVATE ${QT}::GuiPrivate)
+        target_compile_definitions(test_import_xml PRIVATE RCX_HAVE_QZIPREADER)
+    endif()
     add_test(NAME test_import_xml COMMAND test_import_xml)
 
     add_executable(test_import_source tests/test_import_source.cpp
@@ -525,7 +536,11 @@ if(BUILD_TESTING)
     add_executable(test_export_xml tests/test_export_xml.cpp
         src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
     target_include_directories(test_export_xml PRIVATE src)
-    target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test ${QT}::GuiPrivate)
+    target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test)
+    if(TARGET ${QT}::GuiPrivate)
+        target_link_libraries(test_export_xml PRIVATE ${QT}::GuiPrivate)
+        target_compile_definitions(test_export_xml PRIVATE RCX_HAVE_QZIPREADER)
+    endif()
     add_test(NAME test_export_xml COMMAND test_export_xml)
 
     add_executable(test_disasm tests/test_disasm.cpp

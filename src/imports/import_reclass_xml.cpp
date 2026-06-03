@@ -6,7 +6,9 @@
 #include <QVector>
 #include <QBuffer>
 #include <QDebug>
+#ifdef RCX_HAVE_QZIPREADER
 #include <private/qzipreader_p.h>
+#endif
 
 namespace rcx {
 
@@ -168,6 +170,7 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointe
         isZip = true;
     }
     if (isZip) {
+#ifdef RCX_HAVE_QZIPREADER
         file.seek(0);
         QZipReader zr(&file);
         if (!zr.isReadable()) {
@@ -193,6 +196,16 @@ NodeTree importReclassXml(const QString& filePath, QString* errorMsg, int pointe
         rawXml = xmlData;
         qDebug() << "[ImportXML] Extracted Data.xml from .rcnet archive,"
                  << rawXml.size() << "bytes";
+#else
+        // Qt's QZipReader lives in QtGui private headers, which the
+        // binary Qt distribution on macOS doesn't ship. The Reclass
+        // build there can't unzip .rcnet; flag it cleanly so the user
+        // gets a real error instead of garbage XML parse failures.
+        if (errorMsg) *errorMsg = QStringLiteral(
+            "ReClass.NET .rcnet import is only available in Linux and "
+            "Windows builds (this build's Qt doesn't ship QZipReader).");
+        return {};
+#endif
     } else {
         rawXml = file.readAll();
     }
