@@ -1862,6 +1862,7 @@ void RcxController::setTrackValues(bool on) {
     if (!on) {
         m_valueHistory.clear();
         m_lastValueAddr.clear();
+        m_lastValueBytes.clear();
         for (auto& lm : m_lastResult.meta)
             lm.heatLevel = 0;
         refresh();
@@ -1872,6 +1873,7 @@ void RcxController::resetChangeTracking() {
     m_changedOffsets.clear();
     m_valueHistory.clear();
     m_lastValueAddr.clear();
+    m_lastValueBytes.clear();
     m_prevPages.clear();
     m_valueTrackCooldown = 5; // suppress tracking for ~1s
     for (auto& lm : m_lastResult.meta)
@@ -1983,10 +1985,55 @@ void RcxController::refresh() {
                     // Clear stale history if this node's effective address changed
                     // (e.g. viewRoot switch, pointer expand/collapse, MCP restructure)
                     auto addrIt = m_lastValueAddr.find(lm.nodeId);
-                    if (addrIt != m_lastValueAddr.end() && addrIt.value() != addr)
+                    if (addrIt != m_lastValueAddr.end() && addrIt.value() != addr) {
                         m_valueHistory.remove(lm.nodeId);
+                        m_lastValueBytes.remove(lm.nodeId);
+                    }
                     m_lastValueAddr[lm.nodeId] = addr;
-                    m_valueHistory[lm.nodeId].record(val);
+
+                    // Change-detection keys on the underlying RAW BYTES, not the
+                    // formatted display string. Reformatting identical bytes —
+                    // Hex64 "0x0" -> Pointer64 "nullptr", an endianness/RVA flag
+                    // toggle, etc. — must NOT count as a value change. Keying on
+                    // the string lit up the heatmap and fired the previous-values
+                    // popup on those no-op reformats (user: "nullptr and 0 are the
+                    // same value underneath, it's annoying").
+                    //
+                    // Exception: a primitive pointer that DEREFERENCES its target
+                    // displays "-> <value>", so its meaningful value lives at
+                    // *ptr, not in the pointer's own bytes. For those we keep
+                    // string-based detection so a target-memory change still
+                    // registers even when the pointer itself is fixed.
+                    //
+                    // This must mirror readValueImpl's deref condition EXACTLY
+                    // (format.cpp Pointer64 case): only a *non-null Pointer64*
+                    // with ptrDepth>0 + a valid primitive target dereferences.
+                    // Pointer32 NEVER dereferences (always shows the address), and
+                    // a null pointer shows "nullptr" (no deref) — both belong on
+                    // the byte path. Including Pointer32 / null here would wrongly
+                    // route them to string-detection and re-expose the very
+                    // format-only-firing bug this guard fixes.
+                    bool derefsTarget = false;
+                    if (node.kind == NodeKind::Pointer64
+                        && node.ptrDepth > 0 && node.refId == 0
+                        && isValidPrimitivePtrTarget(node.elementKind)) {
+                        derefsTarget = (prov->readU64(addr) != 0);
+                    }
+
+                    bool shouldRecord;
+                    if (derefsTarget) {
+                        // record()'s internal string dedup decides.
+                        shouldRecord = true;
+                    } else {
+                        QByteArray rawBytes = prov->readBytes(addr, sz);
+                        auto bytesIt = m_lastValueBytes.find(lm.nodeId);
+                        shouldRecord = (bytesIt == m_lastValueBytes.end()
+                                        || bytesIt.value() != rawBytes);
+                        if (shouldRecord)
+                            m_lastValueBytes[lm.nodeId] = rawBytes;
+                    }
+                    if (shouldRecord)
+                        m_valueHistory[lm.nodeId].record(val);
                     lm.heatLevel = m_valueHistory[lm.nodeId].heatLevel();
                 }
             }
@@ -2830,6 +2877,7 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
     auto clearNodeHistory = [&](uint64_t id) {
         m_valueHistory.remove(id);
         m_lastValueAddr.remove(id);
+        m_lastValueBytes.remove(id);
     };
 
     auto clearHistoryForAdjs = [&](const QVector<cmd::OffsetAdj>& adjs) {
@@ -6885,6 +6933,7 @@ void RcxController::resetSnapshot() {
     m_changedOffsets.clear();
     m_valueHistory.clear();
     m_lastValueAddr.clear();
+    m_lastValueBytes.clear();
     // Speedup-related state — module identity and page stability are
     // both per-attach. Switching processes (resetProvider →
     // resetSnapshot) must drop these or stale data leaks across.

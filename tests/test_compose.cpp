@@ -2866,6 +2866,54 @@ private slots:
         QVERIFY2(found,
                  "expanded 'next' header line not found");
     }
+
+    // Regression: an untyped RVA pointer (isRelative, refId == 0) is
+    // rendered by composeLeaf, not the expansion path in composeNode.
+    // composeLeaf must surface the " rva" suffix in the type column so
+    // the user can tell it apart from a plain void* — picking
+    // "Pointer32 (RVA)" from the type chooser before wiring a struct
+    // target keeps refId == 0, and the field used to show just "void*".
+    void testLeafRvaPointerShowsRvaSuffix() {
+        using namespace rcx;
+        QByteArray buf(0x40, '\0');
+        BufferProvider prov(buf);
+
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "Owner";
+        root.name = "owner";
+        root.parentId = 0;
+        root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node ptr;
+        ptr.kind = NodeKind::Pointer64;
+        ptr.name = "rvaField";
+        ptr.parentId = rootId;
+        ptr.offset = 0x10;
+        ptr.refId = 0;            // untyped → rendered as a leaf
+        ptr.isRelative = true;    // RVA flag set, no struct target yet
+        tree.addNode(ptr);
+
+        ComposeResult result = compose(tree, prov);
+
+        QStringList lines = result.text.split('\n');
+        bool found = false;
+        for (const auto& line : lines) {
+            if (!line.contains(QStringLiteral("rvaField"))) continue;
+            found = true;
+            QVERIFY2(line.contains(QStringLiteral("void* rva")),
+                     qPrintable(QStringLiteral(
+                         "untyped RVA pointer must show 'void* rva' in "
+                         "its type column; got:\n  ") + line));
+            break;
+        }
+        QVERIFY2(found, "rvaField line not found in compose output");
+    }
 };
 
 QTEST_MAIN(TestCompose)

@@ -711,27 +711,92 @@ private slots:
         }
         QVERIFY2(foundHot, "Pre-clear: LineMeta should show heat > 0");
 
-        // Now simulate what the "Clear Value History" context menu does:
-        // remove from history map + clear subtree + refresh
-        history.remove(targetId);
-        for (int ci : m_doc->tree.subtreeIndices(targetId))
-            history.remove(m_doc->tree.nodes[ci].id);
-
+        // Clear value history exactly as the "Clear All History" context-menu
+        // action does — resetChangeTracking() wipes the per-node history AND
+        // the raw-byte change-detection cache together, then refresh()
+        // re-composes. (The earlier version of this test reached straight into
+        // the private history map, which left the byte cache stale — a state
+        // no real code path produces now that change-detection keys on bytes.)
+        m_ctrl->resetChangeTracking();
         m_ctrl->refresh();
         QApplication::processEvents();
 
-        // After clear + refresh, heatLevel must be 0 for this node
+        // Immediately after clear, heatLevel must be 0 for this node.
         for (const auto& lm : m_ctrl->lastResult().meta) {
             if (lm.nodeId == targetId) {
                 QCOMPARE(lm.heatLevel, 0);
             }
         }
 
-        // The history entry should exist again (re-recorded by refresh)
-        // but with only 1 unique value → heatLevel 0
+        // resetChangeTracking arms a short cooldown that suppresses re-recording
+        // for a few ticks (so a refresh burst right after a clear can't relight
+        // heat). Pump past it; the buffer is static, so exactly ONE baseline
+        // value re-records — the raw-byte guard suppresses re-recording the
+        // unchanged bytes on every subsequent tick. End state: uniqueCount 1,
+        // heat 0 (calm, not spuriously hot).
+        for (int i = 0; i < 8; ++i) {
+            m_ctrl->refresh();
+            QApplication::processEvents();
+        }
         QVERIFY(history.contains(targetId));
         QCOMPARE(history[targetId].heatLevel(), 0);
         QCOMPARE(history[targetId].uniqueCount(), 1);
+    }
+
+    // ── Regression: a type change that only REFORMATS identical bytes
+    // must not register as a value change. Hex64 "0x0" -> Pointer64
+    // "nullptr" is the user's exact complaint ("nullptr and 0 are the same
+    // value underneath, it's annoying") — the previous-values popup fired
+    // and the heatmap lit up even though no memory moved. Change-detection
+    // now keys on the raw bytes, so this stays calm.
+    void testTypeReformatDoesNotBumpHeat() {
+        auto* doc = new RcxDocument();
+        doc->tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "root";
+        root.parentId = 0;
+        root.offset = 0;
+        root.collapsed = false;
+        int ri = doc->tree.addNode(root);
+        uint64_t rootId = doc->tree.nodes[ri].id;
+
+        Node f;
+        f.kind = NodeKind::Hex64;
+        f.name = "field";
+        f.parentId = rootId;
+        f.offset = 0;
+        int fi = doc->tree.addNode(f);
+        uint64_t fieldId = doc->tree.nodes[fi].id;
+
+        // 16 zeroed bytes — the Hex64 field reads value 0 ("0x0").
+        doc->provider = std::make_unique<BaseAwareProvider>(QByteArray(16, '\0'), 0);
+
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->setTrackValues(true);
+
+        // Establish the baseline "0x0" record.
+        for (int i = 0; i < 3; ++i) { ctrl->refresh(); QApplication::processEvents(); }
+        QVERIFY(ctrl->valueHistory().contains(fieldId));
+        QCOMPARE(ctrl->valueHistory()[fieldId].uniqueCount(), 1);
+        QCOMPARE(ctrl->valueHistory()[fieldId].heatLevel(), 0);
+
+        // Reformat the SAME zero bytes: Hex64 -> Pointer64. The displayed
+        // value flips from "0x0" to "nullptr"; the bytes do not change.
+        int idx = doc->tree.indexOfId(fieldId);
+        ctrl->changeNodeKind(idx, NodeKind::Pointer64);
+        for (int i = 0; i < 4; ++i) { ctrl->refresh(); QApplication::processEvents(); }
+
+        // No new history entry, no heat — the reformat is invisible to
+        // change-detection. (Before the byte-guard fix this recorded a 2nd
+        // value -> cold heat -> the previous-values popup fired spuriously.)
+        QVERIFY(ctrl->valueHistory().contains(fieldId));
+        QCOMPARE(ctrl->valueHistory()[fieldId].uniqueCount(), 1);
+        QCOMPARE(ctrl->valueHistory()[fieldId].heatLevel(), 0);
+
+        delete ctrl;
+        delete doc;
     }
 
     // ── Keyboard shortcut logic tests ──

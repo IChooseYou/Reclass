@@ -321,6 +321,12 @@ private:
     QSet<int64_t>   m_changedOffsets;
     QHash<uint64_t, ValueHistory> m_valueHistory;
     QHash<uint64_t, uint64_t> m_lastValueAddr;  // nodeId → last offsetAddr used for value recording
+    // nodeId → raw bytes of the last sampled value. Change-detection keys on
+    // this (not the formatted display string) so a no-op reformat of identical
+    // bytes — Hex64 "0x0" → Pointer64 "nullptr", endianness/RVA toggle — doesn't
+    // register as a value change and spuriously light the heatmap / fire the
+    // previous-values popup.
+    QHash<uint64_t, QByteArray> m_lastValueBytes;
     bool            m_trackValues = true;
     int             m_valueTrackCooldown = 0; // suppress value recording for N refresh cycles after clear
     uint64_t        m_refreshGen = 0;

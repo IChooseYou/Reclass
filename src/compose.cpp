@@ -337,6 +337,14 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             QString stars = QString(node.ptrDepth + 1, QChar('*'));
             ptrTypeOverride = (ptrTargetName.isEmpty() ? QStringLiteral("void") : ptrTargetName) + stars;
         }
+        // Mirror the typed-pointer header path (composeNode): a relative
+        // (RVA) pointer must surface " rva" in its type so the user can
+        // tell an untyped RVA pointer apart from a plain void*. Without
+        // this, picking "Pointer32 (RVA)" before wiring a struct target
+        // (refId still 0 → rendered here as a leaf) showed just "void*"
+        // with no hint the RVA flag took.
+        if (node.isRelative)
+            ptrTypeOverride += QStringLiteral(" rva");
     }
 
     // Detect type overflow in compact mode (for effectiveTypeW)
