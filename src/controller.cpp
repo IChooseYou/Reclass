@@ -6352,10 +6352,31 @@ void RcxController::selectSource(const QString& text) {
                             m_doc->tree.baseAddressFormula, ptrSz, &cbs);
                         if (result.ok)
                             m_doc->tree.baseAddress = result.value;
-                    } else if (newBase != 0 && m_doc->tree.baseAddress == 0x00400000) {
-                        // Only apply provider base for fresh/default projects.
-                        // If user loaded an .rcx with a custom base, preserve it.
-                        m_doc->tree.baseAddress = newBase;
+                    } else {
+                        // Adopt the new provider's base when this target
+                        // hasn't been seen before. The old test ("base ==
+                        // 0x00400000") only caught the fresh-project case
+                        // and missed:
+                        //   * the "New Class" self-attach, which leaves
+                        //     baseAddress pointing at a heap pointer in
+                        //     Reclass.exe (m_ownedBuffer) — that pointer
+                        //     reads as unmapped 00s in any other target;
+                        //   * any other prior attach where the user
+                        //     never set a custom base.
+                        // Saved sources we've seen before take their own
+                        // saved baseAddress in the existingIdx branch
+                        // below, so this only fires for genuinely new
+                        // attaches.
+                        QString identifier = providerInfo->identifier;
+                        bool isExisting = false;
+                        for (const auto& s : m_savedSources) {
+                            if (s.kind == identifier && s.providerTarget == target) {
+                                isExisting = true;
+                                break;
+                            }
+                        }
+                        if (!isExisting && newBase != 0)
+                            m_doc->tree.baseAddress = newBase;
                     }
                     resetSnapshot();
                     emit m_doc->documentChanged();

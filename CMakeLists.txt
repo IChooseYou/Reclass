@@ -525,7 +525,7 @@ if(BUILD_TESTING)
     add_executable(test_export_xml tests/test_export_xml.cpp
         src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
     target_include_directories(test_export_xml PRIVATE src)
-    target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test)
+    target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test ${QT}::GuiPrivate)
     add_test(NAME test_export_xml COMMAND test_export_xml)
 
     add_executable(test_disasm tests/test_disasm.cpp
