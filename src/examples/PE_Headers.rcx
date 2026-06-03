@@ -1,0 +1,647 @@
+{
+    "baseAddress": "0",
+    "nextId": "9000",
+    "nodes": [
+        {
+            "id": "100",
+            "kind": "Struct",
+            "name": "dos",
+            "structTypeName": "IMAGE_DOS_HEADER",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": false
+        },
+        {
+            "id": "101",
+            "kind": "Hex16",
+            "name": "e_magic",
+            "offset": 0,
+            "parentId": "100",
+            "comment": "'MZ' = 0x5A4D"
+        },
+        {
+            "id": "102",
+            "kind": "UInt16",
+            "name": "e_cblp",
+            "offset": 2,
+            "parentId": "100"
+        },
+        {
+            "id": "103",
+            "kind": "UInt16",
+            "name": "e_cp",
+            "offset": 4,
+            "parentId": "100"
+        },
+        {
+            "id": "104",
+            "kind": "UInt16",
+            "name": "e_crlc",
+            "offset": 6,
+            "parentId": "100"
+        },
+        {
+            "id": "105",
+            "kind": "UInt16",
+            "name": "e_cparhdr",
+            "offset": 8,
+            "parentId": "100"
+        },
+        {
+            "id": "106",
+            "kind": "UInt16",
+            "name": "e_minalloc",
+            "offset": 10,
+            "parentId": "100"
+        },
+        {
+            "id": "107",
+            "kind": "UInt16",
+            "name": "e_maxalloc",
+            "offset": 12,
+            "parentId": "100"
+        },
+        {
+            "id": "108",
+            "kind": "UInt16",
+            "name": "e_ss",
+            "offset": 14,
+            "parentId": "100"
+        },
+        {
+            "id": "109",
+            "kind": "UInt16",
+            "name": "e_sp",
+            "offset": 16,
+            "parentId": "100"
+        },
+        {
+            "id": "110",
+            "kind": "UInt16",
+            "name": "e_csum",
+            "offset": 18,
+            "parentId": "100"
+        },
+        {
+            "id": "111",
+            "kind": "UInt16",
+            "name": "e_ip",
+            "offset": 20,
+            "parentId": "100"
+        },
+        {
+            "id": "112",
+            "kind": "UInt16",
+            "name": "e_cs",
+            "offset": 22,
+            "parentId": "100"
+        },
+        {
+            "id": "113",
+            "kind": "UInt16",
+            "name": "e_lfarlc",
+            "offset": 24,
+            "parentId": "100"
+        },
+        {
+            "id": "114",
+            "kind": "UInt16",
+            "name": "e_ovno",
+            "offset": 26,
+            "parentId": "100"
+        },
+        {
+            "id": "115",
+            "kind": "Array",
+            "name": "e_res",
+            "offset": 28,
+            "parentId": "100",
+            "elementKind": "UInt16",
+            "arrayLen": 4,
+            "collapsed": true
+        },
+        {
+            "id": "116",
+            "kind": "UInt16",
+            "name": "e_oemid",
+            "offset": 36,
+            "parentId": "100"
+        },
+        {
+            "id": "117",
+            "kind": "UInt16",
+            "name": "e_oeminfo",
+            "offset": 38,
+            "parentId": "100"
+        },
+        {
+            "id": "118",
+            "kind": "Array",
+            "name": "e_res2",
+            "offset": 40,
+            "parentId": "100",
+            "elementKind": "UInt16",
+            "arrayLen": 10,
+            "collapsed": true
+        },
+        {
+            "id": "119",
+            "kind": "Pointer32",
+            "name": "e_lfanew",
+            "offset": 60,
+            "parentId": "100",
+            "refId": "200",
+            "isRelative": true,
+            "collapsed": false,
+            "comment": "RVA → IMAGE_NT_HEADERS64 (target = imageBase + e_lfanew)"
+        },
+        {
+            "id": "200",
+            "kind": "Struct",
+            "name": "nt",
+            "structTypeName": "IMAGE_NT_HEADERS64",
+            "offset": 0,
+            "parentId": "0",
+            "refId": "0",
+            "collapsed": false
+        },
+        {
+            "id": "201",
+            "kind": "Hex32",
+            "name": "Signature",
+            "offset": 0,
+            "parentId": "200",
+            "comment": "'PE\\0\\0' = 0x00004550"
+        },
+        {
+            "id": "210",
+            "kind": "Struct",
+            "name": "FileHeader",
+            "structTypeName": "IMAGE_FILE_HEADER",
+            "offset": 4,
+            "parentId": "200",
+            "refId": "0",
+            "collapsed": false
+        },
+        {
+            "id": "211",
+            "kind": "Hex16",
+            "name": "Machine",
+            "offset": 0,
+            "parentId": "210",
+            "comment": "0x8664 = AMD64, 0x14C = i386, 0xAA64 = ARM64"
+        },
+        {
+            "id": "212",
+            "kind": "UInt16",
+            "name": "NumberOfSections",
+            "offset": 2,
+            "parentId": "210"
+        },
+        {
+            "id": "213",
+            "kind": "UInt32",
+            "name": "TimeDateStamp",
+            "offset": 4,
+            "parentId": "210"
+        },
+        {
+            "id": "214",
+            "kind": "UInt32",
+            "name": "PointerToSymbolTable",
+            "offset": 8,
+            "parentId": "210"
+        },
+        {
+            "id": "215",
+            "kind": "UInt32",
+            "name": "NumberOfSymbols",
+            "offset": 12,
+            "parentId": "210"
+        },
+        {
+            "id": "216",
+            "kind": "UInt16",
+            "name": "SizeOfOptionalHeader",
+            "offset": 16,
+            "parentId": "210"
+        },
+        {
+            "id": "217",
+            "kind": "Hex16",
+            "name": "Characteristics",
+            "offset": 18,
+            "parentId": "210"
+        },
+        {
+            "id": "220",
+            "kind": "Struct",
+            "name": "OptionalHeader",
+            "structTypeName": "IMAGE_OPTIONAL_HEADER64",
+            "offset": 24,
+            "parentId": "200",
+            "refId": "0",
+            "collapsed": false
+        },
+        {
+            "id": "221",
+            "kind": "Hex16",
+            "name": "Magic",
+            "offset": 0,
+            "parentId": "220",
+            "comment": "0x20B = PE32+ (64-bit), 0x10B = PE32 (32-bit)"
+        },
+        {
+            "id": "222",
+            "kind": "UInt8",
+            "name": "MajorLinkerVersion",
+            "offset": 2,
+            "parentId": "220"
+        },
+        {
+            "id": "223",
+            "kind": "UInt8",
+            "name": "MinorLinkerVersion",
+            "offset": 3,
+            "parentId": "220"
+        },
+        {
+            "id": "224",
+            "kind": "UInt32",
+            "name": "SizeOfCode",
+            "offset": 4,
+            "parentId": "220"
+        },
+        {
+            "id": "225",
+            "kind": "UInt32",
+            "name": "SizeOfInitializedData",
+            "offset": 8,
+            "parentId": "220"
+        },
+        {
+            "id": "226",
+            "kind": "UInt32",
+            "name": "SizeOfUninitializedData",
+            "offset": 12,
+            "parentId": "220"
+        },
+        {
+            "id": "227",
+            "kind": "Hex32",
+            "name": "AddressOfEntryPoint",
+            "offset": 16,
+            "parentId": "220",
+            "comment": "RVA from imageBase"
+        },
+        {
+            "id": "228",
+            "kind": "Hex32",
+            "name": "BaseOfCode",
+            "offset": 20,
+            "parentId": "220"
+        },
+        {
+            "id": "229",
+            "kind": "Hex64",
+            "name": "ImageBase",
+            "offset": 24,
+            "parentId": "220"
+        },
+        {
+            "id": "230",
+            "kind": "UInt32",
+            "name": "SectionAlignment",
+            "offset": 32,
+            "parentId": "220"
+        },
+        {
+            "id": "231",
+            "kind": "UInt32",
+            "name": "FileAlignment",
+            "offset": 36,
+            "parentId": "220"
+        },
+        {
+            "id": "232",
+            "kind": "UInt16",
+            "name": "MajorOperatingSystemVersion",
+            "offset": 40,
+            "parentId": "220"
+        },
+        {
+            "id": "233",
+            "kind": "UInt16",
+            "name": "MinorOperatingSystemVersion",
+            "offset": 42,
+            "parentId": "220"
+        },
+        {
+            "id": "234",
+            "kind": "UInt16",
+            "name": "MajorImageVersion",
+            "offset": 44,
+            "parentId": "220"
+        },
+        {
+            "id": "235",
+            "kind": "UInt16",
+            "name": "MinorImageVersion",
+            "offset": 46,
+            "parentId": "220"
+        },
+        {
+            "id": "236",
+            "kind": "UInt16",
+            "name": "MajorSubsystemVersion",
+            "offset": 48,
+            "parentId": "220"
+        },
+        {
+            "id": "237",
+            "kind": "UInt16",
+            "name": "MinorSubsystemVersion",
+            "offset": 50,
+            "parentId": "220"
+        },
+        {
+            "id": "238",
+            "kind": "UInt32",
+            "name": "Win32VersionValue",
+            "offset": 52,
+            "parentId": "220"
+        },
+        {
+            "id": "239",
+            "kind": "UInt32",
+            "name": "SizeOfImage",
+            "offset": 56,
+            "parentId": "220"
+        },
+        {
+            "id": "240",
+            "kind": "UInt32",
+            "name": "SizeOfHeaders",
+            "offset": 60,
+            "parentId": "220"
+        },
+        {
+            "id": "241",
+            "kind": "Hex32",
+            "name": "CheckSum",
+            "offset": 64,
+            "parentId": "220"
+        },
+        {
+            "id": "242",
+            "kind": "UInt16",
+            "name": "Subsystem",
+            "offset": 68,
+            "parentId": "220",
+            "comment": "2 = WINDOWS_GUI, 3 = WINDOWS_CUI, 1 = NATIVE"
+        },
+        {
+            "id": "243",
+            "kind": "Hex16",
+            "name": "DllCharacteristics",
+            "offset": 70,
+            "parentId": "220"
+        },
+        {
+            "id": "244",
+            "kind": "UInt64",
+            "name": "SizeOfStackReserve",
+            "offset": 72,
+            "parentId": "220"
+        },
+        {
+            "id": "245",
+            "kind": "UInt64",
+            "name": "SizeOfStackCommit",
+            "offset": 80,
+            "parentId": "220"
+        },
+        {
+            "id": "246",
+            "kind": "UInt64",
+            "name": "SizeOfHeapReserve",
+            "offset": 88,
+            "parentId": "220"
+        },
+        {
+            "id": "247",
+            "kind": "UInt64",
+            "name": "SizeOfHeapCommit",
+            "offset": 96,
+            "parentId": "220"
+        },
+        {
+            "id": "248",
+            "kind": "Hex32",
+            "name": "LoaderFlags",
+            "offset": 104,
+            "parentId": "220"
+        },
+        {
+            "id": "249",
+            "kind": "UInt32",
+            "name": "NumberOfRvaAndSizes",
+            "offset": 108,
+            "parentId": "220",
+            "comment": "usually 16"
+        },
+        {
+            "id": "300",
+            "kind": "Struct",
+            "name": "ExportDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 112,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "301", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "300" },
+        { "id": "302", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "300" },
+        {
+            "id": "310",
+            "kind": "Struct",
+            "name": "ImportDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 120,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "311", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "310" },
+        { "id": "312", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "310" },
+        {
+            "id": "320",
+            "kind": "Struct",
+            "name": "ResourceDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 128,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "321", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "320" },
+        { "id": "322", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "320" },
+        {
+            "id": "330",
+            "kind": "Struct",
+            "name": "ExceptionDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 136,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "331", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "330" },
+        { "id": "332", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "330" },
+        {
+            "id": "340",
+            "kind": "Struct",
+            "name": "SecurityDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 144,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "341", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "340" },
+        { "id": "342", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "340" },
+        {
+            "id": "350",
+            "kind": "Struct",
+            "name": "BaseRelocationDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 152,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "351", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "350" },
+        { "id": "352", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "350" },
+        {
+            "id": "360",
+            "kind": "Struct",
+            "name": "DebugDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 160,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "361", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "360" },
+        { "id": "362", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "360" },
+        {
+            "id": "370",
+            "kind": "Struct",
+            "name": "ArchitectureDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 168,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "371", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "370" },
+        { "id": "372", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "370" },
+        {
+            "id": "380",
+            "kind": "Struct",
+            "name": "GlobalPtrDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 176,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "381", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "380" },
+        { "id": "382", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "380" },
+        {
+            "id": "390",
+            "kind": "Struct",
+            "name": "TlsDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 184,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "391", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "390" },
+        { "id": "392", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "390" },
+        {
+            "id": "400",
+            "kind": "Struct",
+            "name": "LoadConfigDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 192,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "401", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "400" },
+        { "id": "402", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "400" },
+        {
+            "id": "410",
+            "kind": "Struct",
+            "name": "BoundImportDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 200,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "411", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "410" },
+        { "id": "412", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "410" },
+        {
+            "id": "420",
+            "kind": "Struct",
+            "name": "IatDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 208,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "421", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "420" },
+        { "id": "422", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "420" },
+        {
+            "id": "430",
+            "kind": "Struct",
+            "name": "DelayImportDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 216,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "431", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "430" },
+        { "id": "432", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "430" },
+        {
+            "id": "440",
+            "kind": "Struct",
+            "name": "ComDescriptorDirectory",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 224,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "441", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "440" },
+        { "id": "442", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "440" },
+        {
+            "id": "450",
+            "kind": "Struct",
+            "name": "Reserved15",
+            "structTypeName": "IMAGE_DATA_DIRECTORY",
+            "offset": 232,
+            "parentId": "220",
+            "refId": "0",
+            "collapsed": true
+        },
+        { "id": "451", "kind": "Hex32", "name": "VirtualAddress", "offset": 0, "parentId": "450" },
+        { "id": "452", "kind": "UInt32", "name": "Size",           "offset": 4, "parentId": "450" }
+    ]
+}
