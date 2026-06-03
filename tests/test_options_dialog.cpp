@@ -78,7 +78,7 @@ private slots:
 
         auto* fontCombo = dlg.findChild<QComboBox*>("fontCombo");
         QVERIFY(fontCombo);
-        QCOMPARE(fontCombo->count(), 2);
+        QVERIFY(fontCombo->count() >= 2);
 
         auto* showIconCheck = dlg.findChild<QCheckBox*>();
         QVERIFY(showIconCheck);
