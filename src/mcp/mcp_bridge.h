@@ -83,6 +83,9 @@ private:
     QJsonObject toolNodeHistory(const QJsonObject& args);
     QJsonObject toolScannerScan(const QJsonObject& args);
     QJsonObject toolScannerScanPattern(const QJsonObject& args);
+    QJsonObject toolScannerRescan(const QJsonObject& args);
+    QJsonObject toolScannerResults(const QJsonObject& args);
+    QJsonObject toolScannerFindMatrix(const QJsonObject& args);
     QJsonObject toolReconnect(const QJsonObject& args);
     QJsonObject toolProcessInfo(const QJsonObject& args);
     QJsonObject toolSymbolsLoad(const QJsonObject& args);

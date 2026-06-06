@@ -111,6 +111,79 @@ private slots:
         QCOMPARE(tree2.nodes[1].offset, 8);
     }
 
+    // Comprehensive round-trip: EVERY serializable Node field set to a distinct
+    // non-default value, so a field added to the struct + toJson() but forgotten
+    // in fromJson() (silent data loss on save→load) is caught. Guards the core
+    // .rcx document format. (collapsed is intentionally always-true on load and
+    // viewIndex is transient — both excluded by design.)
+    void testNode_allFieldsRoundTrip() {
+        rcx::Node n;
+        n.id            = 0x1234;
+        n.kind          = rcx::NodeKind::Struct;
+        n.name          = "ptr";
+        n.structTypeName= "MyStruct";
+        n.classKeyword  = "union";             // != "struct" so it serializes
+        n.parentId      = 0x99;
+        n.offset        = 0x40;
+        n.isRelative    = true;
+        n.arrayLen      = 7;
+        n.strLen        = 128;
+        n.refId         = 0x55;
+        n.elementKind   = rcx::NodeKind::Int32;
+        n.ptrDepth      = 2;
+        n.bigEndian     = true;
+        n.comment       = "hello // world";
+        n.enumMembers   = {{"A", 1}, {"B", -2}};
+        rcx::BitfieldMember bm; bm.name = "flag"; bm.bitOffset = 3; bm.bitWidth = 5;
+        n.bitfieldMembers = {bm};
+
+        rcx::Node r = rcx::Node::fromJson(n.toJson());
+        QCOMPARE(r.id, n.id);
+        QCOMPARE(r.kind, n.kind);
+        QCOMPARE(r.name, n.name);
+        QCOMPARE(r.structTypeName, n.structTypeName);
+        QCOMPARE(r.classKeyword, n.classKeyword);
+        QCOMPARE(r.parentId, n.parentId);
+        QCOMPARE(r.offset, n.offset);
+        QCOMPARE(r.isRelative, n.isRelative);
+        QCOMPARE(r.arrayLen, n.arrayLen);
+        QCOMPARE(r.strLen, n.strLen);
+        QCOMPARE(r.refId, n.refId);
+        QCOMPARE(r.elementKind, n.elementKind);
+        QCOMPARE(r.ptrDepth, n.ptrDepth);
+        QCOMPARE(r.bigEndian, n.bigEndian);
+        QCOMPARE(r.comment, n.comment);
+        QCOMPARE(r.enumMembers.size(), n.enumMembers.size());
+        QCOMPARE(r.enumMembers[0].first, QString("A"));
+        QCOMPARE(r.enumMembers[0].second, (int64_t)1);
+        QCOMPARE(r.enumMembers[1].second, (int64_t)-2);
+        QCOMPARE(r.bitfieldMembers.size(), 1);
+        QCOMPARE(r.bitfieldMembers[0].name, QString("flag"));
+        QCOMPARE(r.bitfieldMembers[0].bitOffset, (uint8_t)3);
+        QCOMPARE(r.bitfieldMembers[0].bitWidth, (uint8_t)5);
+    }
+
+    // Comprehensive tree-level round-trip: baseAddressFormula / initialClass /
+    // pointerSize / bookmarks (the fields NodeTree::toJson writes beyond nodes).
+    void testNodeTree_allFieldsRoundTrip() {
+        rcx::NodeTree t;
+        t.baseAddress        = 0x140000000ULL;
+        t.baseAddressFormula = "module+0x10";
+        t.initialClass       = "Foo";
+        t.pointerSize        = 4;              // != 8 so it serializes
+        rcx::Bookmark b; b.name = "health"; b.addressFormula = "base+0x8";
+        t.bookmarks.append(b);
+
+        rcx::NodeTree r = rcx::NodeTree::fromJson(t.toJson());
+        QCOMPARE(r.baseAddress, t.baseAddress);
+        QCOMPARE(r.baseAddressFormula, t.baseAddressFormula);
+        QCOMPARE(r.initialClass, t.initialClass);
+        QCOMPARE(r.pointerSize, t.pointerSize);
+        QCOMPARE(r.bookmarks.size(), 1);
+        QCOMPARE(r.bookmarks[0].name, QString("health"));
+        QCOMPARE(r.bookmarks[0].addressFormula, QString("base+0x8"));
+    }
+
     void testBufferProvider() {
         QByteArray data(16, '\0');
         data[0] = 0x42;
@@ -395,6 +468,91 @@ private slots:
         QVERIFY(vs.valid);
         QCOMPARE(vs.start, 41); // 18 + 22 + 1 (kSepWidth)
         QCOMPARE(vs.end, 41 + rcx::kColValue);   // start + kColValue
+    }
+
+    // selIdForLine is the single source of truth for the line→encoded-selId
+    // rule, shared by RcxController::handleNodeClick (click selection),
+    // RcxEditor::applyByteSelectionOverlay (byte→row sync), and
+    // RcxController::showContextMenu (right-click "already selected?" test).
+    // If any caller diverged from this encoding the byte selection / submenu
+    // would mis-fire (e.g. raw-id vs encoded-id mismatch on array elements),
+    // so pin every branch here.
+    void testSelIdForLine() {
+        using namespace rcx;
+        const uint64_t nid = 0x1234;
+
+        // Plain field → bare nodeId (no encoding bits).
+        LineMeta field;
+        field.lineKind = LineKind::Field;
+        field.nodeId = nid;
+        QCOMPARE(selIdForLine(field), nid);
+
+        // Footer → nodeId | kFooterIdBit.
+        LineMeta footer;
+        footer.lineKind = LineKind::Footer;
+        footer.nodeId = nid;
+        QCOMPARE(selIdForLine(footer), nid | kFooterIdBit);
+
+        // Array element → makeArrayElemSelId(nodeId, idx); decodes back.
+        LineMeta elem;
+        elem.lineKind = LineKind::Field;
+        elem.nodeId = nid;
+        elem.isArrayElement = true;
+        elem.arrayElementIdx = 7;
+        const uint64_t elemId = selIdForLine(elem);
+        QCOMPARE(elemId, makeArrayElemSelId(nid, 7));
+        QVERIFY((elemId & kArrayElemBit) != 0);
+        QCOMPARE(arrayElemIdxFromSelId(elemId), 7);
+        QVERIFY(elemId != nid);  // the bug-class guard: encoded != raw
+
+        // Member line → makeMemberSelId(nodeId, subLine); decodes back.
+        LineMeta member;
+        member.lineKind = LineKind::Field;
+        member.nodeId = nid;
+        member.isMemberLine = true;
+        member.subLine = 3;
+        const uint64_t memId = selIdForLine(member);
+        QCOMPARE(memId, makeMemberSelId(nid, 3));
+        QVERIFY((memId & kMemberBit) != 0);
+        QCOMPARE(memberSubFromSelId(memId), 3);
+
+        // Footer takes precedence even if other flags are set defensively.
+        LineMeta footerElem;
+        footerElem.lineKind = LineKind::Footer;
+        footerElem.nodeId = nid;
+        footerElem.isArrayElement = true;
+        footerElem.arrayElementIdx = 1;
+        QCOMPARE(selIdForLine(footerElem), nid | kFooterIdBit);
+    }
+
+    // selKindOf is the single disambiguator for encoded selIds. The flag
+    // bits are NOT independent: the 20-bit array index field reaches bit 61
+    // (= kMemberBit) for indices >= 2^19, so a high-index array element id
+    // also has the member bit set. selKindOf must classify it as ArrayElem
+    // (priority footer > array > member), and the index must still decode.
+    void testSelKindOf() {
+        using namespace rcx;
+        const uint64_t nid = 0x1234;
+
+        QCOMPARE(selKindOf(nid), SelKind::Plain);
+        QCOMPARE(selKindOf(nid | kFooterIdBit), SelKind::Footer);
+        QCOMPARE(selKindOf(makeArrayElemSelId(nid, 5)), SelKind::ArrayElem);
+        QCOMPARE(selKindOf(makeMemberSelId(nid, 5)), SelKind::Member);
+
+        // The collision case: array index 0x80000 (524288) sets bit 19 of
+        // the index → bit 61 of the selId (= kMemberBit). Must still be
+        // ArrayElem, and the full 20-bit index must round-trip.
+        const int bigIdx = 0x80000;  // 524288, within kMaxArrayLen (2^20)
+        uint64_t bigId = makeArrayElemSelId(nid, bigIdx);
+        QVERIFY((bigId & kMemberBit) != 0);          // the bit DOES collide
+        QCOMPARE(selKindOf(bigId), SelKind::ArrayElem);  // …but priority wins
+        QCOMPARE(arrayElemIdxFromSelId(bigId), bigIdx);  // index intact
+        QCOMPARE(bigId & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                           | kMemberBit | kMemberSubMask), nid);  // nodeId intact
+
+        // Footer never trips array/member; member never trips array/footer.
+        QCOMPARE(selKindOf(nid | kFooterIdBit), SelKind::Footer);
+        QCOMPARE(selKindOf(makeMemberSelId(nid, 0x7FFFF)), SelKind::Member);
     }
 
     void testNodeIdJsonRoundTrip() {

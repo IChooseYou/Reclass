@@ -1,5 +1,6 @@
 #pragma once
 #include "providers/provider.h"
+#include "matrixscan.h"
 #include <QObject>
 #include <QByteArray>
 #include <QString>
@@ -72,6 +73,13 @@ struct ScanRequest {
 
     // If non-empty, only scan within these address ranges (intersected with provider regions).
     QVector<AddressRange> constrainRegions;
+
+    // Matrix-scan mode: when true, the engine scans 64-byte / 4-byte-aligned
+    // windows for 4x4 affine view-matrix candidates (see matrixscan.h) instead
+    // of matching pattern/value bytes. scanValue carries the 64 matrix bytes and
+    // ScanResult::matchScore the 0..100 confidence.
+    bool             matrixScan = false;
+    MatrixScanParams matrixParams;
 };
 
 struct ScanResult {
@@ -79,6 +87,7 @@ struct ScanResult {
     QString    regionModule;
     QByteArray scanValue;       // cached bytes at scan/update time
     QByteArray previousValue;   // value before last update
+    int        matchScore = 0;  // 0..100 for scored scans (matrix mode); 0 otherwise
 };
 
 // Statistics emitted from a scan — surfaced in the status line.

@@ -530,7 +530,9 @@ void ScanEngine::abort() {
 void ScanEngine::start(std::shared_ptr<Provider> provider, const ScanRequest& req) {
     if (isRunning()) return;
 
-    if (req.condition != ScanCondition::UnknownValue) {
+    // Matrix mode has no pattern (it scores float windows), so skip the
+    // pattern-required validation for it.
+    if (req.condition != ScanCondition::UnknownValue && !req.matrixScan) {
         if (req.pattern.isEmpty()) {
             emit error(QStringLiteral("Empty pattern"));
             return;
@@ -582,9 +584,12 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
     const bool isTypedConst = (cond == ScanCondition::BiggerThan)
                            || (cond == ScanCondition::SmallerThan)
                            || (cond == ScanCondition::Between);
+    // Matrix mode is orthogonal to the value/pattern conditions: it scores
+    // 64-byte float windows instead of matching pattern bytes.
+    const bool isMatrix = req.matrixScan;
 
     if (!prov) return results;
-    if (!isCapture && !isTypedConst && req.pattern.isEmpty())
+    if (!isCapture && !isTypedConst && !isMatrix && req.pattern.isEmpty())
         return results;
     if (isTypedConst && req.pattern.isEmpty())
         return results;
@@ -619,10 +624,11 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
         regions.append(fallback);
     }
 
-    const int patternLen = (isCapture || isTypedConst) ? req.valueSize : req.pattern.size();
+    const int patternLen = isMatrix ? 64
+                         : ((isCapture || isTypedConst) ? req.valueSize : req.pattern.size());
     const char* pat = isCapture ? nullptr : req.pattern.constData();
     const char* msk = isCapture ? nullptr : req.mask.constData();
-    const int alignment = qMax(1, req.alignment);
+    const int alignment = isMatrix ? 4 : qMax(1, req.alignment);
     const int valSize = (isCapture || isTypedConst) ? req.valueSize : patternLen;
     const bool hasRange = (req.startAddress != 0 || req.endAddress != 0) &&
                            req.endAddress > req.startAddress;
@@ -631,7 +637,7 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
     // (Aligned scans can't use BMH's variable shift table — they'd skip
     //  matches that don't land on the alignment grid; the naive loop with
     //  alignment-stride is still cheap enough.)
-    bool bmhEligible = !isCapture && patternLen >= 4 && alignment == 1;
+    bool bmhEligible = !isCapture && !isMatrix && patternLen >= 4 && alignment == 1;
     if (bmhEligible && msk) {
         for (int j = 0; j < patternLen; j++) {
             if ((unsigned char)msk[j] != 0xFF) { bmhEligible = false; break; }
@@ -774,7 +780,33 @@ QVector<ScanResult> ScanEngine::runScan(std::shared_ptr<Provider> prov,
             int scanEnd = readLen - patternLen;
             const char* data = chunk.constData();
 
-            if (isCapture) {
+            if (isMatrix) {
+                // Score each 64-byte / 4-aligned window as a 4x4 affine view
+                // matrix. The float-validity gate rejects almost every window,
+                // so this stays close to a normal aligned scan in cost.
+                const MatrixScanParams& mp = req.matrixParams;
+                // Snap the first window to an ABSOLUTE 4-aligned address. A
+                // custom 'regions' constraint can give an unaligned regStart;
+                // without this snap every window would be misaligned and a
+                // genuinely 4-aligned matrix is never tested.
+                int iStart = (int)(((uint64_t)alignment - ((regStart + off) % alignment)) % alignment);
+                for (int i = iStart; i <= scanEnd; i += alignment) {
+                    if ((i & (kAbortStride - 1)) == 0 && m_abort.load())
+                        goto done;
+                    MatrixScanResult mr = scoreMatrixWindow(
+                        reinterpret_cast<const uint8_t*>(data + i), mp);
+                    if (mr.score >= mp.minScore) {
+                        ScanResult r;
+                        r.address = regStart + off + (uint64_t)i;
+                        r.regionModule = formatRegionContext(region, r.address);
+                        r.scanValue = QByteArray(data + i, 64);
+                        r.matchScore = mr.score;
+                        results.append(r);
+                        if (results.size() >= req.maxResults)
+                            goto done;
+                    }
+                }
+            } else if (isCapture) {
                 // Capture every aligned address (UnknownValue + comparison
                 // conditions seed the result list this way; rescan filters
                 // against the captured bytes later).
@@ -912,6 +944,15 @@ done:
         // The first scan can't compare against anything — the panel turns these
         // into UnknownValue at first-scan time, so we shouldn't reach here for
         // a true "first scan". Defensive: just return.
+    }
+
+    // Matrix mode: rank best candidates first so the top result is the most
+    // matrix-like window.
+    if (isMatrix && results.size() > 1) {
+        std::sort(results.begin(), results.end(),
+                  [](const ScanResult& a, const ScanResult& b) {
+                      return a.matchScore > b.matchScore;
+                  });
     }
     return results;
 }

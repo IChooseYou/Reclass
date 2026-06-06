@@ -180,6 +180,28 @@ public:
     void applySelectionOverlays();
     QSet<uint64_t> selectedIds() const { return m_selIds; }
 
+    // Mirror an editor's byte selection into the row selection. The set is
+    // the encoded selIds of every hex row the byte selection covers (empty
+    // = clear). Driven by RcxEditor::byteSelectionRowsChanged so the grey
+    // M_SELECTED rows track the byte selection.
+    void onByteSelectionRows(const QSet<uint64_t>& selIds);
+
+    // ── Byte-selection op handlers ──
+    // One implementation shared by the Ctrl+C/V/Del keyboard shortcuts
+    // (wired in connectEditor) and the right-click "Selected bytes ▸"
+    // submenu (built in showContextMenu). Each reads the live byte range
+    // from editor->byteSelection() and performs provider I/O.
+    void byteCopyHex(RcxEditor* editor);
+    void byteCopyCArray(RcxEditor* editor);
+    void byteCopyPython(RcxEditor* editor);
+    void byteSaveAsFile(RcxEditor* editor);
+    void bytePasteHex(RcxEditor* editor);
+    void byteZeroFill(RcxEditor* editor);
+    QByteArray readSelectionBytes(RcxEditor* editor);
+    // Append the "Selected bytes (N) ▸" submenu to the top of a node menu
+    // when `editor` has an active byte selection. No-op otherwise.
+    void addByteSubmenu(QMenu& menu, RcxEditor* editor);
+
     void setViewRootId(uint64_t id);
     uint64_t viewRootId() const { return m_viewRootId; }
     void scrollToNodeId(uint64_t nodeId);

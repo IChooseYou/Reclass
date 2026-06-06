@@ -453,6 +453,211 @@ void RcxController::removeSplitEditor(RcxEditor* editor) {
     editor->disconnect(this);
 }
 
+// ── Byte-selection op handlers ──
+// Factored out of connectEditor's signal connections so the right-click
+// "Selected bytes (N) ▸" submenu and the Ctrl+C/V/Del keyboard shortcuts
+// share one implementation. Each reads the live byte range from
+// editor->byteSelection() and does provider I/O via the active snapshot
+// (snapshot wins over the real provider when both are present, so copied
+// values match what the user sees).
+
+QByteArray RcxController::readSelectionBytes(RcxEditor* editor) {
+    auto range = editor->byteSelection();
+    if (!range || !m_doc->provider) return {};
+    uint64_t lo = range->first;
+    int n = static_cast<int>(range->second - range->first);
+    if (n <= 0 || n > 65536) return {};
+    const Provider* prov = m_snapshotProv
+        ? static_cast<const Provider*>(m_snapshotProv.get())
+        : m_doc->provider.get();
+    if (!prov->isReadable(lo, n)) {
+        emit statusHint(QStringLiteral("Couldn't read %1 bytes at 0x%2")
+            .arg(n).arg(lo, 0, 16));
+        return {};
+    }
+    return prov->readBytes(lo, n);
+}
+
+void RcxController::byteCopyHex(RcxEditor* editor) {
+    auto range = editor->byteSelection();
+    if (!range || !m_doc->provider) return;
+    uint64_t lo = range->first;
+    int n = static_cast<int>(range->second - range->first);
+    if (n <= 0 || n > 65536) return;
+    const Provider* prov = m_snapshotProv
+        ? static_cast<const Provider*>(m_snapshotProv.get())
+        : m_doc->provider.get();
+    QByteArray data = prov->isReadable(lo, n) ? prov->readBytes(lo, n)
+                                              : QByteArray();
+    if (data.size() < n) {
+        emit statusHint(QStringLiteral("Couldn't read %1 bytes at 0x%2")
+            .arg(n).arg(lo, 0, 16));
+        return;
+    }
+    QString hex;
+    hex.reserve(n * 3);
+    for (int i = 0; i < n; ++i) {
+        if (i > 0) hex += QLatin1Char(' ');
+        hex += QStringLiteral("%1")
+            .arg((uint8_t)data[i], 2, 16, QChar('0')).toUpper();
+    }
+    QApplication::clipboard()->setText(hex);
+    emit statusHint(QStringLiteral("Copied %1 byte%2 as hex")
+        .arg(n).arg(n == 1 ? "" : "s"));
+}
+
+void RcxController::byteCopyCArray(RcxEditor* editor) {
+    QByteArray data = readSelectionBytes(editor);
+    if (data.isEmpty()) return;
+    // Format as `{0xDE, 0xAD, 0xBE, 0xEF}` — direct paste into a C/C++
+    // array initializer. Linewrap at 16 bytes/row. Build the hex digits
+    // separately so .toUpper() doesn't touch the literal lowercase `0x`.
+    QString out;
+    out.reserve(data.size() * 7);
+    out += QLatin1Char('{');
+    for (int i = 0; i < data.size(); ++i) {
+        if (i > 0) out += QLatin1Char(',');
+        if (i > 0 && (i % 16) == 0) out += QLatin1Char('\n');
+        else if (i > 0)              out += QLatin1Char(' ');
+        QString digits = QStringLiteral("%1")
+            .arg((uint8_t)data[i], 2, 16, QChar('0')).toUpper();
+        out += QStringLiteral("0x") + digits;
+    }
+    out += QLatin1Char('}');
+    QApplication::clipboard()->setText(out);
+    emit statusHint(QStringLiteral("Copied %1 byte%2 as C array")
+        .arg(data.size()).arg(data.size() == 1 ? "" : "s"));
+}
+
+void RcxController::byteCopyPython(RcxEditor* editor) {
+    QByteArray data = readSelectionBytes(editor);
+    if (data.isEmpty()) return;
+    // Python bytes literal `b'\xde\xad...'`, lowercase to match repr().
+    QString out;
+    out.reserve(4 + data.size() * 4);
+    out += QStringLiteral("b'");
+    for (int i = 0; i < data.size(); ++i) {
+        out += QStringLiteral("\\x%1")
+            .arg((uint8_t)data[i], 2, 16, QChar('0'));
+    }
+    out += QLatin1Char('\'');
+    QApplication::clipboard()->setText(out);
+    emit statusHint(QStringLiteral("Copied %1 byte%2 as Python bytes")
+        .arg(data.size()).arg(data.size() == 1 ? "" : "s"));
+}
+
+void RcxController::byteSaveAsFile(RcxEditor* editor) {
+    auto range = editor->byteSelection();
+    if (!range) return;
+    uint64_t lo = range->first;
+    int n = static_cast<int>(range->second - range->first);
+    if (n <= 0 || n > (1 << 27)) {  // 128 MB sanity cap
+        emit statusHint(QStringLiteral("Selection too large to save"));
+        return;
+    }
+    QString defaultName = QStringLiteral("bytes_%1_%2.bin")
+        .arg(lo, 0, 16).arg(n);
+    QString path = QFileDialog::getSaveFileName(
+        qobject_cast<QWidget*>(parent()),
+        QStringLiteral("Save Bytes"),
+        defaultName,
+        QStringLiteral("Binary (*.bin);;All Files (*)"));
+    if (path.isEmpty()) return;
+    QString err;
+    if (writeSelectedBytesToFile(lo, n, path, &err)) {
+        emit statusHint(QStringLiteral("Saved %1 byte%2 to %3")
+            .arg(n).arg(n == 1 ? "" : "s")
+            .arg(QFileInfo(path).fileName()));
+    } else {
+        emit statusHint(err.isEmpty()
+            ? QStringLiteral("Save failed") : err);
+    }
+}
+
+void RcxController::bytePasteHex(RcxEditor* editor) {
+    auto range = editor->byteSelection();
+    if (!range || !m_doc->provider) return;
+    if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
+        emit statusHint(QStringLiteral("Target is read-only"));
+        return;
+    }
+    uint64_t lo = range->first;
+    int n = static_cast<int>(range->second - range->first);
+    if (n <= 0 || n > 65536) return;
+
+    // Parse via ClipboardCodec::parseLenientHex (per-token left-pad + 0x
+    // handling are unit-tested in tests/test_lenient_hex.cpp).
+    QString parseErr;
+    QByteArray bytes = ClipboardCodec::parseLenientHex(
+        QApplication::clipboard()->text(), &parseErr);
+    if (bytes.isEmpty()) {
+        emit statusHint(parseErr.isEmpty()
+            ? QStringLiteral("Clipboard isn't valid hex")
+            : QStringLiteral("Clipboard: ") + parseErr);
+        return;
+    }
+    // Clamp to the selection length: truncate longer, zero-pad shorter.
+    QByteArray write(n, '\0');
+    int copyN = qMin(bytes.size(), n);
+    memcpy(write.data(), bytes.constData(), copyN);
+
+    QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
+        ? m_doc->provider->readBytes(lo, n)
+        : QByteArray(n, '\0');
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::WriteBytes{lo, oldBytes, write}));
+    emit statusHint(QStringLiteral("Pasted %1 byte%2 at 0x%3")
+        .arg(n).arg(n == 1 ? "" : "s").arg(lo, 0, 16));
+}
+
+void RcxController::byteZeroFill(RcxEditor* editor) {
+    auto range = editor->byteSelection();
+    if (!range || !m_doc->provider) return;
+    if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
+        emit statusHint(QStringLiteral("Target is read-only"));
+        return;
+    }
+    uint64_t lo = range->first;
+    int n = static_cast<int>(range->second - range->first);
+    if (n <= 0 || n > 65536) return;
+    QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
+        ? m_doc->provider->readBytes(lo, n)
+        : QByteArray(n, '\0');
+    QByteArray zeros(n, '\0');
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::WriteBytes{lo, oldBytes, zeros}));
+    emit statusHint(QStringLiteral("Zero-filled %1 byte%2 at 0x%3")
+        .arg(n).arg(n == 1 ? "" : "s").arg(lo, 0, 16));
+}
+
+void RcxController::onByteSelectionRows(const QSet<uint64_t>& selIds) {
+    // The byte selection owns the row selection while active: replace
+    // m_selIds wholesale with the covered rows (may be empty → clears).
+    m_selIds = selIds;
+    m_anchorLine = -1;
+    updateCommandRow();
+    applySelectionOverlays();
+    emit selectionChanged(m_selIds.size());
+}
+
+void RcxController::addByteSubmenu(QMenu& menu, RcxEditor* editor) {
+    if (!editor || !editor->hasByteSelection()) return;
+    QMenu* sub = menu.addMenu(
+        tr("Selected bytes (%1)").arg(editor->byteSelectionByteCount()));
+    sub->addAction(tr("Copy as hex"),           [this, editor]() { byteCopyHex(editor); });
+    sub->addAction(tr("Copy as C array"),       [this, editor]() { byteCopyCArray(editor); });
+    sub->addAction(tr("Copy as Python bytes"),  [this, editor]() { byteCopyPython(editor); });
+    sub->addAction(tr("Edit hex…"),             [editor]() { editor->beginByteEdit(); });
+    sub->addAction(tr("Zero-fill"),             [this, editor]() { byteZeroFill(editor); });
+    sub->addAction(tr("Paste hex"),             [this, editor]() { bytePasteHex(editor); });
+    sub->addAction(tr("Save bytes as binary…"), [this, editor]() { byteSaveAsFile(editor); });
+    sub->addAction(tr("Break into new class"),  [this, editor]() {
+        auto r = editor->byteSelectionRange();
+        extractByteSelectionToNewClass(r.first, r.second);
+    });
+    menu.addSeparator();
+}
+
 void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::marginClicked,
             this, [this, editor](int margin, int line, Qt::KeyboardModifiers mods) {
@@ -684,203 +889,28 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // reads via the active provider's snapshot (so values match what
     // the user sees), writes via cmd::WriteBytes for undoability.
 
-    // Hex-string helper used by both copy + paste. Format matches the
-    // hex-row preview: uppercase, space-separated 2-digit pairs.
-    auto byteRangeFromEditor = [editor]() -> std::optional<QPair<uint64_t,uint64_t>> {
-        return editor->byteSelection();
-    };
-
+    // The handler bodies live in named methods (byteCopyHex, bytePasteHex,
+    // …) so the right-click "Selected bytes ▸" submenu invokes exactly the
+    // same logic as these Ctrl+C/V/Del keyboard shortcuts.
     connect(editor, &RcxEditor::byteCopyHexRequested, this,
-            [this, byteRangeFromEditor]() {
-        auto range = byteRangeFromEditor();
-        if (!range || !m_doc->provider) return;
-        uint64_t lo = range->first;
-        int n = static_cast<int>(range->second - range->first);
-        if (n <= 0 || n > 65536) return;
-        const Provider* prov = m_snapshotProv
-            ? static_cast<const Provider*>(m_snapshotProv.get())
-            : m_doc->provider.get();
-        QByteArray data = prov->isReadable(lo, n) ? prov->readBytes(lo, n)
-                                                  : QByteArray();
-        if (data.size() < n) {
-            emit statusHint(QStringLiteral("Couldn't read %1 bytes at 0x%2")
-                .arg(n).arg(lo, 0, 16));
-            return;
-        }
-        QString hex;
-        hex.reserve(n * 3);
-        for (int i = 0; i < n; ++i) {
-            if (i > 0) hex += QLatin1Char(' ');
-            hex += QStringLiteral("%1")
-                .arg((uint8_t)data[i], 2, 16, QChar('0')).toUpper();
-        }
-        QApplication::clipboard()->setText(hex);
-        emit statusHint(QStringLiteral("Copied %1 byte%2 as hex")
-            .arg(n).arg(n == 1 ? "" : "s"));
-    });
-
-    // Copy-as-C-array / copy-as-Python: same read path as plain hex
-    // copy, different formatter. Both factored out so they're easy to
-    // smoke-test through the existing test_byte_selection_controller.
-    auto readSelectionBytes = [this, byteRangeFromEditor]() -> QByteArray {
-        auto range = byteRangeFromEditor();
-        if (!range || !m_doc->provider) return {};
-        uint64_t lo = range->first;
-        int n = static_cast<int>(range->second - range->first);
-        if (n <= 0 || n > 65536) return {};
-        const Provider* prov = m_snapshotProv
-            ? static_cast<const Provider*>(m_snapshotProv.get())
-            : m_doc->provider.get();
-        if (!prov->isReadable(lo, n)) {
-            emit statusHint(QStringLiteral("Couldn't read %1 bytes at 0x%2")
-                .arg(n).arg(lo, 0, 16));
-            return {};
-        }
-        return prov->readBytes(lo, n);
-    };
-
+            [this, editor]() { byteCopyHex(editor); });
     connect(editor, &RcxEditor::byteCopyAsCArrayRequested, this,
-            [this, readSelectionBytes]() {
-        QByteArray data = readSelectionBytes();
-        if (data.isEmpty()) return;
-        // Format as `{0xDE, 0xAD, 0xBE, 0xEF}` — direct paste into a
-        // C/C++ array initializer. Linewrap at 16 bytes/row so long
-        // selections don't produce one absurdly wide line.
-        QString out;
-        out.reserve(data.size() * 7);
-        out += QLatin1Char('{');
-        for (int i = 0; i < data.size(); ++i) {
-            if (i > 0) out += QLatin1Char(',');
-            if (i > 0 && (i % 16) == 0) out += QLatin1Char('\n');
-            else if (i > 0)              out += QLatin1Char(' ');
-            // Build the hex digits separately so .toUpper() doesn't
-            // touch the literal `0x` prefix (which must stay lowercase
-            // for C/C++ to parse). Without this, the output became
-            // "0X1A" which is technically still legal C++ but reads
-            // wrong to most eyes.
-            QString digits = QStringLiteral("%1")
-                .arg((uint8_t)data[i], 2, 16, QChar('0')).toUpper();
-            out += QStringLiteral("0x") + digits;
-        }
-        out += QLatin1Char('}');
-        QApplication::clipboard()->setText(out);
-        emit statusHint(QStringLiteral("Copied %1 byte%2 as C array")
-            .arg(data.size()).arg(data.size() == 1 ? "" : "s"));
-    });
-
-    connect(editor, &RcxEditor::byteSaveAsFileRequested, this,
-            [this, byteRangeFromEditor]() {
-        auto range = byteRangeFromEditor();
-        if (!range) return;
-        uint64_t lo = range->first;
-        int n = static_cast<int>(range->second - range->first);
-        if (n <= 0 || n > (1 << 27)) {  // 128 MB sanity cap
-            emit statusHint(QStringLiteral("Selection too large to save"));
-            return;
-        }
-        QString defaultName = QStringLiteral("bytes_%1_%2.bin")
-            .arg(lo, 0, 16).arg(n);
-        QString path = QFileDialog::getSaveFileName(
-            qobject_cast<QWidget*>(parent()),
-            QStringLiteral("Save Bytes"),
-            defaultName,
-            QStringLiteral("Binary (*.bin);;All Files (*)"));
-        if (path.isEmpty()) return;
-        QString err;
-        if (writeSelectedBytesToFile(lo, n, path, &err)) {
-            emit statusHint(QStringLiteral("Saved %1 byte%2 to %3")
-                .arg(n).arg(n == 1 ? "" : "s")
-                .arg(QFileInfo(path).fileName()));
-        } else {
-            emit statusHint(err.isEmpty()
-                ? QStringLiteral("Save failed") : err);
-        }
-    });
-
+            [this, editor]() { byteCopyCArray(editor); });
     connect(editor, &RcxEditor::byteCopyAsPythonRequested, this,
-            [this, readSelectionBytes]() {
-        QByteArray data = readSelectionBytes();
-        if (data.isEmpty()) return;
-        // Format as Python bytes literal `b'\xde\xad\xbe\xef'`. Lowercase
-        // hex digits because Python's repr(bytes(...)) uses lowercase —
-        // copy-pasteability into a REPL is the use case.
-        QString out;
-        out.reserve(4 + data.size() * 4);
-        out += QStringLiteral("b'");
-        for (int i = 0; i < data.size(); ++i) {
-            out += QStringLiteral("\\x%1")
-                .arg((uint8_t)data[i], 2, 16, QChar('0'));
-        }
-        out += QLatin1Char('\'');
-        QApplication::clipboard()->setText(out);
-        emit statusHint(QStringLiteral("Copied %1 byte%2 as Python bytes")
-            .arg(data.size()).arg(data.size() == 1 ? "" : "s"));
-    });
-
+            [this, editor]() { byteCopyPython(editor); });
+    connect(editor, &RcxEditor::byteSaveAsFileRequested, this,
+            [this, editor]() { byteSaveAsFile(editor); });
     connect(editor, &RcxEditor::bytePasteHexRequested, this,
-            [this, byteRangeFromEditor]() {
-        auto range = byteRangeFromEditor();
-        if (!range || !m_doc->provider) return;
-        if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
-            emit statusHint(QStringLiteral("Target is read-only"));
-            return;
-        }
-        uint64_t lo = range->first;
-        int n = static_cast<int>(range->second - range->first);
-        if (n <= 0 || n > 65536) return;
-
-        // Parse via ClipboardCodec::parseLenientHex so the per-token
-        // left-pad + 0x prefix handling are testable in isolation. See
-        // tests/test_lenient_hex.cpp for the cases that drive the
-        // implementation.
-        QString parseErr;
-        QByteArray bytes = ClipboardCodec::parseLenientHex(
-            QApplication::clipboard()->text(), &parseErr);
-        if (bytes.isEmpty()) {
-            emit statusHint(parseErr.isEmpty()
-                ? QStringLiteral("Clipboard isn't valid hex")
-                : QStringLiteral("Clipboard: ") + parseErr);
-            return;
-        }
-        // Clamp to the selection length: truncate longer, zero-pad shorter.
-        QByteArray write(n, '\0');
-        int copyN = qMin(bytes.size(), n);
-        memcpy(write.data(), bytes.constData(), copyN);
-
-        QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
-            ? m_doc->provider->readBytes(lo, n)
-            : QByteArray(n, '\0');
-        m_doc->undoStack.push(new RcxCommand(this,
-            cmd::WriteBytes{lo, oldBytes, write}));
-        emit statusHint(QStringLiteral("Pasted %1 byte%2 at 0x%3")
-            .arg(n).arg(n == 1 ? "" : "s").arg(lo, 0, 16));
-    });
-
+            [this, editor]() { bytePasteHex(editor); });
     connect(editor, &RcxEditor::byteZeroFillRequested, this,
-            [this, byteRangeFromEditor]() {
-        auto range = byteRangeFromEditor();
-        if (!range || !m_doc->provider) return;
-        if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
-            emit statusHint(QStringLiteral("Target is read-only"));
-            return;
-        }
-        uint64_t lo = range->first;
-        int n = static_cast<int>(range->second - range->first);
-        if (n <= 0 || n > 65536) return;
-        QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
-            ? m_doc->provider->readBytes(lo, n)
-            : QByteArray(n, '\0');
-        QByteArray zeros(n, '\0');
-        m_doc->undoStack.push(new RcxCommand(this,
-            cmd::WriteBytes{lo, oldBytes, zeros}));
-        emit statusHint(QStringLiteral("Zero-filled %1 byte%2 at 0x%3")
-            .arg(n).arg(n == 1 ? "" : "s").arg(lo, 0, 16));
-    });
-
+            [this, editor]() { byteZeroFill(editor); });
     connect(editor, &RcxEditor::byteBreakIntoClassRequested, this,
             [this](uint64_t lo, uint64_t hi) {
         extractByteSelectionToNewClass(lo, hi);
     });
+    // Byte selection → row selection mirror (see onByteSelectionRows).
+    connect(editor, &RcxEditor::byteSelectionRowsChanged, this,
+            [this](const QSet<uint64_t>& ids) { onByteSelectionRows(ids); });
 
     // Byte-range Enter commit. beginByteEdit narrowed the inline edit
     // to a byte range; commitInlineEdit emitted this with the parsed
@@ -2937,14 +2967,19 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             // Bump refresh-gen to discard any in-flight async read that
             // would record the OLD-format value into the NEW node.
             m_refreshGen++;
-            // Keep the value-history entries across kind changes. The
-            // earlier behavior wiped them ("format changed, history is
-            // stale") but that made the hover popup go silent the moment
-            // a user accepted a TypeHint chip on a hot field — the most
-            // common moment when seeing the trend is most useful. Mixed
-            // old/new format strings ride in the ring for at most
-            // ValueHistory::kCapacity (10) entries; once the cycle laps,
-            // all entries are in the new format on their own.
+            // Re-baseline the node's OWN value history on a kind change.
+            // A type change is not a memory change, so it must not produce
+            // heat or fire the previous-values popup on static data. Keeping
+            // the old history was actively wrong here: when the new kind has a
+            // different byte size (e.g. Hex64 -> Int32 from an int32x2 split,
+            // 8 bytes -> 4), the raw-byte change-detector compares the stale
+            // 8-byte sample against the new 4-byte read, always mismatches, and
+            // records a spurious "change" — lighting the heatmap on a buffer
+            // that never moved. Even same-size reformats (Hex64 "0x0" ->
+            // Pointer64 "nullptr") would add a second distinct string entry.
+            // Clearing both history + byte cache makes the field re-baseline to
+            // a single value (heat 0); real subsequent byte changes re-arm heat.
+            clearNodeHistory(c.nodeId);
             clearHistoryForAdjs(c.offAdjs);
         } else if constexpr (std::is_same_v<T, cmd::Rename>) {
             int idx = tree.indexOfId(c.nodeId);
@@ -3890,8 +3925,22 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
     // Selection policy
     if (hasNode) {
-        uint64_t clickedId = m_doc->tree.nodes[nodeIdx].id;
+        // Use the SAME encoded id the click path stores (selIdForLine):
+        // array-element / member / footer rows carry encoding bits in
+        // m_selIds, so a raw-nodeId membership test would treat an
+        // already-selected such row as "outside the selection" and reset
+        // it — wrongly dropping an active byte selection (and its submenu)
+        // when you right-click the very rows it covers. Match handleNodeClick.
+        uint64_t clickedId = (line >= 0 && line < m_lastResult.meta.size())
+            ? selIdForLine(m_lastResult.meta[line])
+            : m_doc->tree.nodes[nodeIdx].id;
         if (!m_selIds.contains(clickedId)) {
+            // Right-clicking a row outside the current selection moves the
+            // selection here and drops any active byte selection (and its
+            // submenu) so the two stay coherent. clearByteSelection emits
+            // byteSelectionRowsChanged(empty) → onByteSelectionRows clears
+            // m_selIds, so do it before installing the clicked id.
+            if (editor) editor->clearByteSelection();
             m_selIds.clear();
             m_selIds.insert(clickedId);
             m_anchorLine = line;
@@ -3902,6 +3951,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     // Multi-select batch actions
     if (hasNode && m_selIds.size() > 1) {
         QMenu menu;
+        addByteSubmenu(menu, editor);  // "Selected bytes (N) ▸" at top, if any
         int count = m_selIds.size();
         QSet<uint64_t> ids = m_selIds;
 
@@ -4234,12 +4284,19 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 .arg(QFileInfo(path).fileName()));
         });
 
+        menu.addSeparator();
+        menu.addAction(tr("Clear selection"), [this, editor]() {
+            if (editor) editor->clearByteSelection();
+            clearSelection();
+        });
+
         emit contextMenuAboutToShow(&menu, line);
         menu.exec(globalPos);
         return;
     }
 
     QMenu menu;
+    addByteSubmenu(menu, editor);  // "Selected bytes (N) ▸" at top, if any
 
     // ── Node-specific actions (only when clicking on a node) ──
     if (hasNode) {
@@ -5010,6 +5067,16 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         }
     }
 
+    // Bottom "Clear selection" — clears the byte selection and the row
+    // selection together. Only offered when there's something to clear.
+    if ((editor && editor->hasByteSelection()) || !m_selIds.isEmpty()) {
+        if (!menu.isEmpty()) menu.addSeparator();
+        menu.addAction(tr("Clear selection"), [this, editor]() {
+            if (editor) editor->clearByteSelection();
+            clearSelection();
+        });
+    }
+
     emit contextMenuAboutToShow(&menu, line);
     menu.exec(globalPos);
 }
@@ -5076,14 +5143,7 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     //   everything else → nodeId
     auto effectiveId = [this](int ln, uint64_t nid) -> uint64_t {
         if (ln < 0 || ln >= m_lastResult.meta.size()) return nid;
-        const auto& lm = m_lastResult.meta[ln];
-        if (lm.lineKind == LineKind::Footer)
-            return nid | kFooterIdBit;
-        if (lm.isArrayElement && lm.arrayElementIdx >= 0)
-            return makeArrayElemSelId(nid, lm.arrayElementIdx);
-        if (lm.isMemberLine && lm.subLine >= 0)
-            return makeMemberSelId(nid, lm.subLine);
-        return nid;
+        return selIdForLine(m_lastResult.meta[ln]);
     };
 
     // Escape / deselect: nodeId=0 means clear selection

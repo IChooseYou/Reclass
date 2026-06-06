@@ -86,6 +86,20 @@ public:
         applyByteSelectionOverlay();
         return true;
     }
+    // Convenience accessors for the amalgamated context menu (controller
+    // builds the "Selected bytes (N) ▸" submenu from these).
+    bool hasByteSelection() const { return m_byteSel.has_value(); }
+    QPair<uint64_t, uint64_t> byteSelectionRange() const {
+        return m_byteSel.value_or(QPair<uint64_t, uint64_t>{0, 0});
+    }
+    int byteSelectionByteCount() const {
+        return m_byteSel ? static_cast<int>(m_byteSel->second - m_byteSel->first) : 0;
+    }
+    // Enter hex-overwrite inline edit on the active byte range (single hex
+    // row only; cross-row selections are refused with a statusHint).
+    // Public so the controller's "Selected bytes ▸ Edit hex…" action can
+    // invoke it. Definition + full contract noted in the private section.
+    void beginByteEdit();
 
     // ── Inline editing ──
     bool isEditing() const { return m_editState.active; }
@@ -206,6 +220,12 @@ signals:
     // the selection start. Refused if the selection crosses parents
     // or non-hex fields.
     void byteBreakIntoClassRequested(uint64_t lo, uint64_t hi);
+    // Emitted by applyByteSelectionOverlay whenever the set of node rows
+    // covered by the byte selection changes (de-duped against the prior
+    // set, suppressed during applyDocument). The controller mirrors this
+    // into its row selection (m_selIds) so the grey M_SELECTED rows track
+    // the byte selection. An empty set clears the row selection.
+    void byteSelectionRowsChanged(const QSet<uint64_t>& selIds);
     // Fired by commitInlineEdit when the user accepts a byte-range
     // hex-overwrite edit (Enter inside a hex-byte selection). Carries
     // the absolute address + raw bytes parsed from the edited hex
@@ -296,6 +316,10 @@ private:
     // selection target.
     std::optional<uint64_t> m_byteSelAnchor;
     bool     m_byteSelDragging = false;
+    // Last set of covered-row selIds emitted via byteSelectionRowsChanged.
+    // De-dups the emit so a multi-pixel drag only re-syncs when it crosses
+    // a row boundary, and a passive refresh repaint doesn't re-emit.
+    QSet<uint64_t> m_lastByteRows;
 
     // ── Deferred click (protects multi-select on double-click) ──
     uint64_t m_pendingClickNodeId = 0;
@@ -530,7 +554,6 @@ private:
     std::optional<uint64_t> byteAddrAt(int line, int col) const;
     void applyByteSelectionOverlay();
     void updateByteSelStatus();
-    void beginByteEdit();
     void extendByteSelection(int dByte);
     // snapByteSelectionToRow: row-aware Shift+Down/Up for byte selection.
     //   dir = +1 → Shift+Down: jump `hi` to end of current hex row, then

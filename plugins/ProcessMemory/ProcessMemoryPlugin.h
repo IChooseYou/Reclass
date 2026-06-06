@@ -22,7 +22,7 @@ public:
     bool write(uint64_t addr, const void* buf, int len) override;
     bool isWritable() const override { return m_writable; }
     QString name() const override { return m_processName; }
-    QString kind() const override { return QStringLiteral("LocalProcess"); }
+    QString kind() const override { return QStringLiteral("Process"); }
     QString getSymbol(uint64_t addr) const override;
     uint64_t symbolToAddress(const QString& name) const override;
 

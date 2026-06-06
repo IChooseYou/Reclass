@@ -11,10 +11,15 @@
 #include <QStringListModel>
 #include <QLabel>
 #include <QFrame>
+#include <QScreen>
+#include <QSet>
+#include <QFontInfo>
 #include <Qsci/qsciscintilla.h>
 #include "controller.h"
 #include "typeselectorpopup.h"
 #include "themes/thememanager.h"
+#include "widgets/category_chip.h"
+#include "fontutil.h"
 #include "core.h"
 
 Q_DECLARE_METATYPE(rcx::TypeEntry)
@@ -644,6 +649,121 @@ private slots:
         QCOMPARE(spec.arrayCount, 0);
     }
 
+    // ── Regression: re-filtering must PRESERVE the user's selection, not snap
+    // it back to the first row. Before the fix, typing one more character (or
+    // toggling a chip / re-sorting) reset the selection to row 0, so a
+    // following Enter committed the wrong type. Pure model-state test —
+    // deterministic headless, no GUI integration needed.
+    void testSelectionSurvivesRefilter() {
+        TypeSelectorPopup popup;
+        auto mk = [](const QString& n, NodeKind k) {
+            TypeEntry e; e.entryKind = TypeEntry::Primitive;
+            e.primitiveKind = k; e.displayName = n; return e;
+        };
+        QVector<TypeEntry> types;
+        types << mk("alpha", NodeKind::Int32)
+              << mk("gamma_target", NodeKind::Int32)
+              << mk("gamble", NodeKind::Int32);
+        popup.setTypes(types);
+
+        auto* listView = popup.findChild<QListView*>();
+        QVERIFY(listView);
+        auto* filterEdit = popup.findChild<QLineEdit*>();
+        QVERIFY(filterEdit);
+        auto* model = listView->model();
+        QVERIFY(model);
+
+        // Select "gamma_target".
+        int targetRow = -1;
+        for (int r = 0; r < model->rowCount(); ++r)
+            if (model->index(r, 0).data().toString().contains("gamma_target")) { targetRow = r; break; }
+        QVERIFY(targetRow >= 0);
+        listView->setCurrentIndex(model->index(targetRow, 0));
+
+        // Type a filter that still matches the selected entry (and others).
+        filterEdit->setText(QStringLiteral("gam"));
+        QApplication::processEvents();
+
+        // Selection must still be on "gamma_target", NOT snapped to row 0.
+        QModelIndex cur = listView->currentIndex();
+        QVERIFY(cur.isValid());
+        QVERIFY2(cur.data().toString().contains("gamma_target"),
+                 qPrintable(QStringLiteral("selection moved to: %1").arg(cur.data().toString())));
+    }
+
+    // ── Regression: dismissed() means "closed WITHOUT a pick". It must NOT
+    // fire when the user actually committed a selection (the hideEvent that
+    // follows an accept previously emitted dismissed() too). Pure signal-state
+    // test — no GUI position needed.
+    void testDismissedNotEmittedOnPick() {
+        TypeSelectorPopup popup;
+        TypeEntry e; e.entryKind = TypeEntry::Primitive;
+        e.primitiveKind = NodeKind::Int32; e.displayName = "int32_t";
+        popup.setTypes({e});
+
+        QSignalSpy dismissSpy(&popup, &TypeSelectorPopup::dismissed);
+        QVERIFY(dismissSpy.isValid());
+
+        // 1) Plain dismiss (no pick) DOES emit dismissed().
+        popup.show();
+        QApplication::processEvents();
+        popup.hide();
+        QApplication::processEvents();
+        QCOMPARE(dismissSpy.count(), 1);
+
+        // 2) A committed pick (via "+ New") must NOT emit dismissed() again.
+        QToolButton* newBtn = nullptr;
+        for (auto* b : popup.findChildren<QToolButton*>())
+            if (b->text().contains("New")) { newBtn = b; break; }
+        QVERIFY2(newBtn, "Could not find '+ New' button");
+
+        QSignalSpy createSpy(&popup, &TypeSelectorPopup::createNewTypeRequested);
+        popup.show();
+        QApplication::processEvents();
+        newBtn->click();  // create pick → createNewTypeRequested + hide
+        QApplication::processEvents();
+        QCOMPARE(createSpy.count(), 1);    // the pick did fire
+        QCOMPARE(dismissSpy.count(), 1);   // ...but dismissed did NOT fire again
+    }
+
+    // Regression: opening near a screen edge must yield an on-screen popup of a
+    // usable size. The old geometry math sized height as
+    // `avail.bottom() - globalPos.y()` (and width likewise), which collapses to
+    // ~1px — or negative — when opened at the bottom/right edge. placeOnScreen()
+    // now clamps to a minimum and shifts the origin back on-screen. Geometry is
+    // set before show(), so this is deterministic + headless (no GUI flake).
+    void testPopupStaysOnScreenAtEdge() {
+        QScreen* screen = QApplication::primaryScreen();
+        QVERIFY(screen);
+        const QRect avail = screen->availableGeometry();
+
+        TypeSelectorPopup popup;
+        TypeEntry e; e.entryKind = TypeEntry::Primitive;
+        e.primitiveKind = NodeKind::Int32; e.displayName = "int32_t";
+        popup.setTypes({e});
+
+        // Worst case for the old shrink-to-fit math: the extreme bottom-right.
+        popup.popupLoading(QPoint(avail.right() - 1, avail.bottom() - 1));
+        QApplication::processEvents();
+
+        const QSize sz = popup.size();
+        // Never degenerate. (A tiny headless 'offscreen' work area caps the
+        // popup to the screen, so compare against min(120, work-area).)
+        QVERIFY2(sz.width()  >= qMin(120, avail.width())
+              && sz.height() >= qMin(120, avail.height()),
+                 qPrintable(QString("degenerate popup size %1x%2 (work area %3x%4)")
+                    .arg(sz.width()).arg(sz.height()).arg(avail.width()).arg(avail.height())));
+
+        // And it must sit fully within the work area — origin shifted back
+        // on-screen rather than spilling off the right/bottom edge.
+        const QRect g = popup.geometry();
+        QVERIFY2(g.left() >= avail.left() && g.top() >= avail.top()
+              && g.right() <= avail.right() && g.bottom() <= avail.bottom(),
+                 qPrintable(QString("popup (%1,%2 %3x%4) spills off work area (%5,%6 %7x%8)")
+                    .arg(g.left()).arg(g.top()).arg(g.width()).arg(g.height())
+                    .arg(avail.left()).arg(avail.top()).arg(avail.width()).arg(avail.height())));
+    }
+
     // ── FieldType popup: selecting a composite (struct) type changes node kind + structTypeName + collapsed ──
 
     void testFieldTypeCompositeChangesNodeToStruct() {
@@ -862,6 +982,82 @@ private slots:
         auto* listView = popup.findChild<QListView*>();
         QVERIFY(listView);
         QVERIFY(listView->model()->rowCount() > 2);
+    }
+
+    // Regression: each section header's kindGroup (which drives its pip color)
+    // must be a real group KEY, not the first word of its human label. The bug
+    // derived it via `title.left(indexOf(' '))`, yielding "Pointer"/"String"/
+    // "Type" — none of which kindGroupColor() knows (it wants Ptr/Str/Ctr), so
+    // those pips fell back to a neutral default. A composite buckets to "Ctr"
+    // (label "Type"), so it exercises the exact failure. Deterministic.
+    void testSectionKindGroupKeysAreValid() {
+        TypeSelectorPopup popup;
+        TypeEntry comp; comp.entryKind = TypeEntry::Composite;
+        comp.structId = 7; comp.displayName = "MyStruct"; comp.classKeyword = "struct";
+        TypeEntry prim; prim.entryKind = TypeEntry::Primitive;
+        prim.primitiveKind = NodeKind::Int32; prim.displayName = "int32_t";
+        popup.setTypes({comp, prim});
+
+        static const QSet<QString> validKeys = {
+            QStringLiteral("Hex"), QStringLiteral("Int"), QStringLiteral("Float"),
+            QStringLiteral("Ptr"), QStringLiteral("Vec"), QStringLiteral("Str"),
+            QStringLiteral("Ctr"), QStringLiteral("Common")};
+        int sections = 0;
+        for (const auto& e : popup.filteredTypes()) {
+            if (e.entryKind != TypeEntry::Section) continue;
+            ++sections;
+            QVERIFY2(validKeys.contains(e.kindGroup),
+                qPrintable(QString("section '%1' has bogus pip key '%2' "
+                    "(expected Hex/Int/Float/Ptr/Vec/Str/Ctr/Common)")
+                    .arg(e.displayName, e.kindGroup)));
+        }
+        QVERIFY2(sections > 0, "no section headers produced");
+    }
+    // Direct unit test of the shared helper that ALL the font-size derivations
+    // (scanner headers, typechooser chips, hex/profiler/sourcechooser popups)
+    // now route through. Guards the foundation in isolation, independent of any
+    // one consumer's widget plumbing.
+    void testResolvedPointSizeHandlesPixelFonts() {
+        // Point-sized font → returned unchanged.
+        QFont pt(QStringLiteral("Arial"), 13);
+        QCOMPARE(rcx::resolvedPointSize(pt), 13);
+        // Pixel-sized font → pointSize() is -1, but resolvedPointSize must give a
+        // concrete positive size (the whole point — -1 is what collapsed derived
+        // sizes to the floor).
+        QFont px(QStringLiteral("Arial"));
+        px.setPixelSize(32);
+        QCOMPARE(px.pointSize(), -1);
+        const int r = rcx::resolvedPointSize(px);
+        QVERIFY2(r > 0,
+            qPrintable(QString("resolvedPointSize returned %1 for a pixel font "
+                "(must be a concrete >0 size, never -1)").arg(r)));
+    }
+
+    // Regression: derived (chip / title / small) fonts must not collapse to the
+    // 7pt floor when the base font is specified in PIXELS. QFont::pointSize()
+    // returns -1 for a pixel-sized font, so `qMax(7, pointSize()*k)` snapped
+    // every derived font to 7pt; resolvedPointSize() resolves a real size via
+    // QFontInfo first. A 40px base stays well above 10pt at any DPI, so a
+    // correctly-derived chip font (≈0.75×) clears 7. Deterministic.
+    void testDerivedFontsDontSnapToFloorWithPixelFont() {
+        TypeSelectorPopup popup;
+        QFont pixelFont(QStringLiteral("Arial"));
+        pixelFont.setPixelSize(40);                 // pointSize() == -1
+        QCOMPARE(pixelFont.pointSize(), -1);        // sanity: it really is pixel-sized
+        popup.setFont(pixelFont);
+
+        const auto chips = popup.findChildren<rcx::CategoryChip*>();
+        QVERIFY2(!chips.isEmpty(), "no category chips found");
+        for (auto* chip : chips) {
+            // QFontInfo resolves a concrete point size whether the font is in
+            // point- or pixel-mode (raw font().pointSize() reports -1 in pixel
+            // mode, which is why we don't use it here). Bug → ~7pt; fix → the
+            // 0.75×-of-resolved size, comfortably above 7 for a 40px base.
+            const int ps = QFontInfo(chip->font()).pointSize();
+            QVERIFY2(ps > 7,
+                qPrintable(QString("chip font resolved to %1pt (expected >7 for a "
+                    "40px base font — resolvedPointSize regression)").arg(ps)));
+        }
     }
     // ── FieldType popup: primitive with [n] creates an array ──
 

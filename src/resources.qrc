@@ -51,6 +51,12 @@
         <file alias="whole-word.svg">vsicons/whole-word.svg</file>
         <file alias="selection.svg">vsicons/list-selection.svg</file>
         <file alias="symbol-numeric.svg">vsicons/symbol-numeric.svg</file>
+        <file alias="symbol-event.svg">vsicons/symbol-event.svg</file>
+        <file alias="symbol-key.svg">vsicons/symbol-key.svg</file>
+        <file alias="bookmark.svg">vsicons/bookmark.svg</file>
+        <file alias="home.svg">vsicons/home.svg</file>
+        <file alias="shield.svg">vsicons/shield.svg</file>
+        <file alias="warning.svg">vsicons/warning.svg</file>
         <file alias="symbol-ruler.svg">vsicons/symbol-ruler.svg</file>
         <file alias="settings-gear.svg">vsicons/settings-gear.svg</file>
         <file alias="chevron-down.svg">vsicons/chevron-down.svg</file>

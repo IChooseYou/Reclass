@@ -938,16 +938,41 @@ inline int arrayElemIdxFromSelId(uint64_t selId) {
     return (int)((selId & kArrayElemMask) >> kArrayElemShift);
 }
 
-// Member selection encoding (enum/bitfield members) — mirrors array element pattern
-static constexpr uint64_t kMemberBit      = 0x2000000000000000ULL;
+// Member selection encoding (enum/bitfield members) — mirrors the array
+// element pattern, but the flag bit sits one position LOWER (bit 61 vs the
+// array's bit 62), so the value field is 19 bits (42-60), NOT 20. The mask
+// must therefore EXCLUDE bit 61 (= kMemberBit): a 20-bit mask (0x3FFFFC…,
+// reaching bit 61) would read the flag bit back into the decoded subLine
+// and inflate every result by 2^19 (524288), so memberSubFromSelId never
+// matched the real subLine and member rows were never highlighted.
+// (The strip mask used for node lookup is kMemberBit | kMemberSubMask =
+// bits 42-61, unchanged by this narrowing.)
+static constexpr uint64_t kMemberBit      = 0x2000000000000000ULL;  // bit 61
 static constexpr uint64_t kMemberSubShift = 42;
-static constexpr uint64_t kMemberSubMask  = 0x3FFFFC0000000000ULL;
+static constexpr uint64_t kMemberSubMask  = 0x1FFFFC0000000000ULL;  // bits 42-60 (19 bits)
 
 inline uint64_t makeMemberSelId(uint64_t nodeId, int subLine) {
-    return nodeId | kMemberBit | ((uint64_t)(subLine & 0xFFFFF) << kMemberSubShift);
+    return nodeId | kMemberBit | ((uint64_t)(subLine & 0x7FFFF) << kMemberSubShift);
 }
 inline int memberSubFromSelId(uint64_t selId) {
     return (int)((selId & kMemberSubMask) >> kMemberSubShift);
+}
+
+// What kind of selection an encoded selId represents. The flag bits are
+// NOT independent: the 20-bit array index field (bits 42-61) reaches bit
+// 61 (= kMemberBit) for indices >= 2^19, so a high array element id also
+// has the member bit set. Disambiguate by PRIORITY (footer 63 > array 62
+// > member 61) — this is the single source of truth; never test the flag
+// bits independently (a `selId & kMemberBit` check would misclassify a
+// high-index array element as a member). Decode the index/subLine only
+// after classifying: arrayElemIdxFromSelId reads the full 20-bit field, so
+// the array index round-trips correctly even with bit 61 set.
+enum class SelKind : uint8_t { Plain, Footer, ArrayElem, Member };
+inline SelKind selKindOf(uint64_t selId) {
+    if (selId & kFooterIdBit)  return SelKind::Footer;
+    if (selId & kArrayElemBit) return SelKind::ArrayElem;
+    if (selId & kMemberBit)    return SelKind::Member;
+    return SelKind::Plain;
 }
 
 // ── Tail chips ──
@@ -1036,6 +1061,22 @@ inline const LineChip* findChip(const LineMeta& lm, ChipKind kind) {
 
 inline bool isSyntheticLine(const LineMeta& lm) {
     return lm.lineKind == LineKind::CommandRow;
+}
+
+// Encoded selection id for a composed line — the single source of truth
+// for the line→selId rule. Footer rows carry the footer bit, array
+// elements the array-elem encoding, members the member encoding;
+// everything else is the bare nodeId. Used by both the controller's
+// click handler (handleNodeClick) and the editor's byte-selection→row
+// sync so a byte selection produces exactly the ids a click would.
+inline uint64_t selIdForLine(const LineMeta& lm) {
+    if (lm.lineKind == LineKind::Footer)
+        return lm.nodeId | kFooterIdBit;
+    if (lm.isArrayElement && lm.arrayElementIdx >= 0)
+        return makeArrayElemSelId(lm.nodeId, lm.arrayElementIdx);
+    if (lm.isMemberLine && lm.subLine >= 0)
+        return makeMemberSelId(lm.nodeId, lm.subLine);
+    return lm.nodeId;
 }
 
 // ── Layout Info ──

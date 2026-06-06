@@ -2,6 +2,7 @@
 #include <QtTest/QSignalSpy>
 #include <QApplication>
 #include <QSplitter>
+#include <QTemporaryFile>
 #include <Qsci/qsciscintilla.h>
 #include "controller.h"
 #include "core.h"
@@ -111,6 +112,37 @@ private slots:
         m_splitter = nullptr;
         delete m_doc;
         m_doc = nullptr;
+    }
+
+    // ── File-level .rcx save→load round-trip ──
+    // The primary persistence path: RcxDocument::save writes the tree PLUS the
+    // document-level typeAliases map; load() reads both back (the aliases after
+    // the validation pass). This guards that the whole file round-trips — a
+    // regression dropping the typeAliases read would silently lose user aliases.
+    void testFileSaveLoadRoundTrip() {
+        auto* doc = new RcxDocument();
+        Node root; root.kind = NodeKind::Struct; root.name = "Root";
+        root.structTypeName = "MyType"; root.parentId = 0; root.offset = 0;
+        doc->tree.addNode(root);
+        doc->typeAliases[NodeKind::Float] = QStringLiteral("vec_component");
+
+        QTemporaryFile f;
+        QVERIFY(f.open());
+        const QString path = f.fileName();
+        f.close();
+        QVERIFY(doc->save(path));
+
+        auto* doc2 = new RcxDocument();
+        QVERIFY(doc2->load(path));
+        QCOMPARE(doc2->tree.nodes.size(), doc->tree.nodes.size());
+        QCOMPARE(doc2->tree.nodes[0].name, QString("Root"));
+        QCOMPARE(doc2->tree.nodes[0].structTypeName, QString("MyType"));
+        QVERIFY2(doc2->typeAliases.contains(NodeKind::Float),
+                 "typeAliases must survive the file round-trip");
+        QCOMPARE(doc2->typeAliases.value(NodeKind::Float), QString("vec_component"));
+
+        delete doc;
+        delete doc2;
     }
 
     // ── Test: setNodeValue writes bytes to provider ──
@@ -791,6 +823,63 @@ private slots:
         // No new history entry, no heat — the reformat is invisible to
         // change-detection. (Before the byte-guard fix this recorded a 2nd
         // value -> cold heat -> the previous-values popup fired spuriously.)
+        QVERIFY(ctrl->valueHistory().contains(fieldId));
+        QCOMPARE(ctrl->valueHistory()[fieldId].uniqueCount(), 1);
+        QCOMPARE(ctrl->valueHistory()[fieldId].heatLevel(), 0);
+
+        delete ctrl;
+        delete doc;
+    }
+
+    // ── Regression: a SIZE-CHANGING kind change (Hex64 -> Int32, the
+    // int32x2 split path) over a STATIC buffer must not fire value history.
+    // The raw-byte change-detector would otherwise compare the stale 8-byte
+    // sample against the new 4-byte read, always mismatch, and record a
+    // spurious change — lighting the heatmap on memory that never moved.
+    // (User: "i set int32x2, why did it fire value histories on static data".)
+    void testKindChangeShrinkDoesNotBumpHeat() {
+        auto* doc = new RcxDocument();
+        doc->tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "root";
+        root.parentId = 0;
+        root.offset = 0;
+        root.collapsed = false;
+        int ri = doc->tree.addNode(root);
+        uint64_t rootId = doc->tree.nodes[ri].id;
+
+        Node f;
+        f.kind = NodeKind::Hex64;
+        f.name = "field";
+        f.parentId = rootId;
+        f.offset = 0;
+        int fi = doc->tree.addNode(f);
+        uint64_t fieldId = doc->tree.nodes[fi].id;
+
+        // 16 static bytes with a recognizable non-zero low word.
+        QByteArray buf(16, '\0');
+        uint32_t lo = 0xDEADBEEF;
+        memcpy(buf.data(), &lo, 4);
+        doc->provider = std::make_unique<BaseAwareProvider>(buf, 0);
+
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->setTrackValues(true);
+
+        // Baseline as Hex64.
+        for (int i = 0; i < 3; ++i) { ctrl->refresh(); QApplication::processEvents(); }
+        QVERIFY(ctrl->valueHistory().contains(fieldId));
+        QCOMPARE(ctrl->valueHistory()[fieldId].uniqueCount(), 1);
+
+        // Shrink to Int32 (size 8 -> 4): this is what the int32x2 split does to
+        // the first half. The node keeps its id.
+        int idx = doc->tree.indexOfId(fieldId);
+        ctrl->changeNodeKind(idx, NodeKind::Int32);
+        for (int i = 0; i < 4; ++i) { ctrl->refresh(); QApplication::processEvents(); }
+
+        // Re-baselined: exactly one value, no heat. (Before the fix the stale
+        // 8-byte sample vs new 4-byte read mismatched every tick -> false heat.)
         QVERIFY(ctrl->valueHistory().contains(fieldId));
         QCOMPARE(ctrl->valueHistory()[fieldId].uniqueCount(), 1);
         QCOMPARE(ctrl->valueHistory()[fieldId].heatLevel(), 0);

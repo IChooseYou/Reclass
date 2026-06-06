@@ -25,6 +25,7 @@
 #include "widgets/category_chip.h"
 #include "widgets/fuzzy_match.h"
 #include "rcxtooltip.h"
+#include "fontutil.h"
 #include <QSettings>
 
 namespace rcx {
@@ -36,12 +37,21 @@ TypeSpec parseTypeSpec(const QString& text) {
     QString s = text.trimmed();
     if (s.isEmpty()) return spec;
 
-    // Check for pointer suffix: "Ball*" or "Ball**"
+    // Check for pointer suffix: "Ball*", "Ball**", "Ball***".
+    // Chop EVERY trailing '*' (tolerating whitespace between stars, e.g.
+    // "Ball * *") so a stray star is never left dangling in the base name —
+    // "int***" must yield baseName "int", not "int*". Depth is capped at 2.
     if (s.endsWith('*')) {
+        int depth = 0;
+        for (;;) {
+            QString t = s.trimmed();
+            if (!t.endsWith('*')) { s = t; break; }
+            t.chop(1);
+            s = t;
+            ++depth;
+        }
         spec.isPointer = true;
-        s.chop(1);
-        spec.ptrDepth = 1;
-        if (s.endsWith('*')) { s.chop(1); spec.ptrDepth = 2; }
+        spec.ptrDepth = qBound(1, depth, 2);
         spec.baseName = s.trimmed();
         return spec;
     }
@@ -50,11 +60,13 @@ TypeSpec parseTypeSpec(const QString& text) {
     int bracket = s.indexOf('[');
     if (bracket > 0 && s.endsWith(']')) {
         spec.baseName = s.left(bracket).trimmed();
-        QString countStr = s.mid(bracket + 1, s.size() - bracket - 2);
+        // Trim so "int32_t[ 10 ]" parses; clamp absurd counts so a typo like
+        // "[2000000000]" can't request a multi-GB array span downstream.
+        QString countStr = s.mid(bracket + 1, s.size() - bracket - 2).trimmed();
         bool ok;
         int count = countStr.toInt(&ok);
         if (ok && count > 0)
-            spec.arrayCount = count;
+            spec.arrayCount = qMin(count, 1 << 20);
         return spec;
     }
 
@@ -65,6 +77,10 @@ TypeSpec parseTypeSpec(const QString& text) {
 // Fuzzy scorer lives in widgets/fuzzy_match.h (strict substring + word-start
 // initials, replaces an older loose subsequence matcher that produced
 // hundreds of false-positive matches in big symbol lists).
+
+// resolvedPointSize() lives in fontutil.h (shared with scannerpanel.cpp) — it
+// guards against pixel-sized base fonts collapsing every derived size to the
+// 7pt floor. See the include at the top of this file.
 
 // ── Per-group accent colors (derived from theme semantic colors) ──
 
@@ -121,14 +137,14 @@ public:
     // not by the popup's list view, so closing the popup leaves it
     // stranded on screen until we explicitly dismiss it here.
     void hideTip() {
-        if (m_rcxTip) m_rcxTip->hide();
+        sharedRcxTooltip()->hide();
     }
 
     void setFont(const QFont& f) {
         m_font = f;
         m_fm = QFontMetrics(f);
         m_smallFont = f;
-        m_smallFont.setPointSize(qMax(7, f.pointSize() - 2));
+        m_smallFont.setPointSize(qMax(7, resolvedPointSize(f) - 2));
         m_sfm = QFontMetrics(m_smallFont);
         recomputeLayout();
         updateCachedSizeHint();
@@ -267,8 +283,18 @@ public:
                                             : t.text;
         painter->setFont(m_font);
         const QString fullText = index.data().toString();
-        const int dashIdx = fullText.lastIndexOf(QStringLiteral(" - "));
-        const QString namePart = dashIdx > 0 ? fullText.left(dashIdx) : fullText;
+        // The name segment is the entry's displayName; the model string also
+        // carries a " - <size>B" suffix. Take the base straight from the entry
+        // when we have it — reconstructing via lastIndexOf(" - ") mis-split any
+        // displayName containing " - " (e.g. a zero-size type), throwing off the
+        // fuzzy-highlight character offsets which index into displayName.
+        QString namePart;
+        if (entry) {
+            namePart = entry->displayName;
+        } else {
+            const int dashIdx = fullText.lastIndexOf(QStringLiteral(" - "));
+            namePart = dashIdx > 0 ? fullText.left(dashIdx) : fullText;
+        }
         const int nameW = nameEnd - x;
 
         // Fuzzy highlight
@@ -338,7 +364,9 @@ public:
 
             painter->fillRect(barX, barY, m_barW, barH, t.surface);
             if (entry->sizeBytes > 0) {
-                const int fillW = qBound(1, entry->sizeBytes * m_barW / m_maxSz, m_barW);
+                // 64-bit math: a huge composite sizeBytes * m_barW can overflow int.
+                const int fillW = qBound<int>(1,
+                    int(qint64(entry->sizeBytes) * m_barW / m_maxSz), m_barW);
                 QColor fc = groupCol;
                 fc.setAlpha(isSel ? 200 : 140);
                 painter->fillRect(barX, barY, fillW, barH, fc);
@@ -388,23 +416,21 @@ public:
                     QString body = e.fieldSummary.join(QChar('\n'));
                     if (e.fieldCount > e.fieldSummary.size())
                         body += QStringLiteral("\n...");
-                    if (!m_rcxTip) {
-                        m_rcxTip = new RcxTooltip(nullptr);
-                    }
+                    auto* tip = sharedRcxTooltip();
                     const auto& t = ThemeManager::instance().current();
-                    m_rcxTip->setTheme(t.backgroundAlt, t.border,
-                                       t.text, t.text, t.border);
-                    m_rcxTip->populate(title, body, m_font);
+                    tip->setTheme(t.backgroundAlt, t.border,
+                                  t.text, t.text, t.border);
+                    tip->populate(title, body, m_font);
                     // Anchor at the cursor position. The earlier fixed-X
                     // variant was for the editor's row-anchored callouts
                     // (which always want the same X relative to the row);
                     // here the tooltip is mouse-driven, so it should
                     // follow the cursor exactly.
-                    m_rcxTip->showAt(event->globalPos());
+                    tip->showAt(event->globalPos());
                     return true;
                 }
             }
-            if (m_rcxTip) m_rcxTip->hide();
+            sharedRcxTooltip()->hide();
             return true;
         }
         return QStyledItemDelegate::helpEvent(event, view, option, index);
@@ -423,7 +449,6 @@ private:
     const QVector<QVector<int>>* m_matchPositions = nullptr;
     const TypeEntry* m_currentEntry = nullptr;
     bool m_hasCurrent = false;
-    mutable RcxTooltip* m_rcxTip = nullptr;  // themed callout for field summary
 };
 
 // ── TypeSelectorPopup ──
@@ -524,15 +549,20 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         auto* allBtn = makeQuick(QStringLiteral("all"));
         auto* noneBtn = makeQuick(QStringLiteral("none"));
         connect(allBtn, &QToolButton::clicked, this, [this, refilter]() {
-            for (auto* c : m_groupChips) c->setChecked(true);
+            // Block per-chip toggled() during the bulk change so we refilter
+            // ONCE at the end instead of N times (one per chip).
+            for (auto* c : m_groupChips) { QSignalBlocker b(c); c->setChecked(true); }
+            refilter();
         });
         connect(noneBtn, &QToolButton::clicked, this, [this, refilter]() {
-            // Keep at least one group on
-            bool first = true;
+            // Keep exactly one group on, deterministically (Hex) — the prior
+            // code kept "the first" in QHash iteration order, so which group
+            // survived was effectively random across runs/builds.
             for (auto it = m_groupChips.begin(); it != m_groupChips.end(); ++it) {
-                it.value()->setChecked(first);
-                first = false;
+                QSignalBlocker b(it.value());
+                it.value()->setChecked(it.key() == QStringLiteral("Hex"));
             }
+            refilter();
         });
         chipLayout->addWidget(allBtn);
         chipLayout->addWidget(noneBtn);
@@ -841,10 +871,13 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
             int modId = m_modGroup ? m_modGroup->checkedId() : -1;
             if (modId < 0) modId = 0;  // -1 (no button checked) → 0 (plain)
             int arrCount = 0;
-            if (modId == 3 && m_arrayCountEdit)
+            if (modId == 3 && m_arrayCountEdit) {
                 arrCount = m_arrayCountEdit->text().trimmed().toInt();
-            emit createNewTypeRequested(modId, arrCount);
+                if (arrCount < 1) arrCount = 1;  // array toggle on → never 0
+            }
+            m_accepted = true;
             hide();
+            emit createNewTypeRequested(modId, arrCount);
         });
         row->addWidget(m_createBtn);
 
@@ -931,8 +964,36 @@ void TypeSelectorPopup::warmUp() {
     QApplication::processEvents();
 }
 
+void TypeSelectorPopup::placeOnScreen(const QPoint& globalPos, int w, int h) {
+    QScreen* screen = QApplication::screenAt(globalPos);
+    if (!screen) screen = QApplication::primaryScreen();
+    QPoint origin = globalPos;
+    if (screen) {
+        const QRect avail = screen->availableGeometry();
+        // Cap to the work area but never below a usable minimum — the old code
+        // computed height as `avail.bottom() - globalPos.y()`, which goes to
+        // zero or negative when opened near the bottom/right edge, leaving a
+        // degenerate 1px window at the wrong spot.
+        w = qBound(120, w, avail.width());
+        h = qBound(120, h, avail.height());
+        // Overflow → shift the origin back onto the screen (flip up/left)
+        // instead of shrinking the popup.
+        if (origin.x() + w > avail.right())  origin.setX(avail.right()  - w + 1);
+        if (origin.y() + h > avail.bottom()) origin.setY(avail.bottom() - h + 1);
+        origin.setX(qMax(avail.left(), origin.x()));
+        origin.setY(qMax(avail.top(),  origin.y()));
+    }
+    setFixedSize(w, h);
+    move(origin);
+    show();
+    raise();
+    activateWindow();
+    m_filterEdit->setFocus();
+}
+
 void TypeSelectorPopup::popupLoading(const QPoint& globalPos) {
     m_loading = true;
+    m_accepted = false;
     auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
     if (delegate) delegate->setLoading(true);
 
@@ -960,21 +1021,7 @@ void TypeSelectorPopup::popupLoading(const QPoint& globalPos) {
     int popupW = charW * 54;
     int popupH = qMax(400, rowH * 14 + rowH * 2 + 20);
 
-    QScreen* screen = QApplication::screenAt(globalPos);
-    if (screen) {
-        QRect avail = screen->availableGeometry();
-        if (globalPos.y() + popupH > avail.bottom())
-            popupH = avail.bottom() - globalPos.y();
-        if (globalPos.x() + popupW > avail.right())
-            popupW = avail.right() - globalPos.x();
-    }
-
-    setFixedSize(popupW, popupH);
-    move(globalPos);
-    show();
-    raise();
-    activateWindow();
-    m_filterEdit->setFocus();
+    placeOnScreen(globalPos, popupW, popupH);
 }
 
 void TypeSelectorPopup::setFont(const QFont& font) {
@@ -982,7 +1029,7 @@ void TypeSelectorPopup::setFont(const QFont& font) {
 
     {
         QFont tf = font;
-        tf.setPointSize(qMax(7, font.pointSize() - 1));
+        tf.setPointSize(qMax(7, resolvedPointSize(font) - 1));
         m_titleLabel->setFont(tf);
     }
     m_escLabel->setFont(font);
@@ -990,7 +1037,7 @@ void TypeSelectorPopup::setFont(const QFont& font) {
     m_listView->setFont(font);
 
     QFont smallFont = font;
-    smallFont.setPointSize(qMax(7, font.pointSize() - 1));
+    smallFont.setPointSize(qMax(7, resolvedPointSize(font) - 1));
     m_btnPtr->setFont(smallFont);
     m_btnDblPtr->setFont(smallFont);
     m_btnArray->setFont(smallFont);
@@ -1000,7 +1047,7 @@ void TypeSelectorPopup::setFont(const QFont& font) {
     m_saveBtn->setFont(smallFont);
 
     QFont chipFont = font;
-    chipFont.setPointSize(qMax(7, (int)(font.pointSize() * 0.75)));
+    chipFont.setPointSize(qMax(7, (int)(resolvedPointSize(font) * 0.75)));
     for (auto* c : m_groupChips) c->setFont(chipFont);
     if (m_statusLabel) m_statusLabel->setFont(chipFont);
     if (m_footerLabel) m_footerLabel->setFont(chipFont);
@@ -1143,7 +1190,10 @@ void TypeSelectorPopup::setModifier(int modId, int arrayCount) {
     else if (modId == 2) m_btnDblPtr->setChecked(true);
     else if (modId == 3) {
         m_btnArray->setChecked(true);
-        m_arrayCountEdit->setText(QString::number(arrayCount));
+        // Clamp to >=1: arrayCount 0/negative would defeat the QIntValidator
+        // and later be dropped as "not an array", silently committing a plain
+        // type while the toggle reads as checked.
+        m_arrayCountEdit->setText(QString::number(qMax(1, arrayCount)));
         m_arrayCountEdit->show();
     }
     // else: all unchecked = plain (no modifier)
@@ -1155,6 +1205,17 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
     if (delegate) delegate->setLoading(false);
 
     m_allTypes = types;
+    // Normalize kindGroup ONCE here — setTypes is the single owner of the type
+    // list, so the filter/query path never has to mutate m_allTypes as a side
+    // effect (it used to auto-assign in 3 duplicate spots inside applyFilter).
+    // Empty kindGroup means "auto": primitives map by primitiveKind, everything
+    // else is a container ("Ctr").
+    for (auto& t : m_allTypes) {
+        if (t.entryKind == TypeEntry::Section) continue;
+        if (t.kindGroup.isEmpty())
+            t.kindGroup = (t.entryKind == TypeEntry::Primitive)
+                ? kindGroupFor(t.primitiveKind) : QStringLiteral("Ctr");
+    }
     // Cache max display name length for popup width calculation
     m_cachedMaxNameLen = 0;
     for (const auto& t : m_allTypes) {
@@ -1188,6 +1249,10 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
     m_filterEdit->setPlaceholderText(placeholder.arg(typeCount));
 
     m_filterEdit->clear();
+    // Drop any stale selection from a prior open so applyFilter's restore
+    // logic doesn't carry it over; the current-type pre-select below sets
+    // the real selection for this open.
+    m_listView->setCurrentIndex(QModelIndex());
     applyFilter(QString());
 
     // Pre-select current type in list
@@ -1209,6 +1274,7 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
 }
 
 void TypeSelectorPopup::popup(const QPoint& globalPos) {
+    m_accepted = false;
     QFontMetrics fm(m_font);
     // Popup width scales with the font. The earlier hard 540-px cap was the
     // right size at the default 10 pt font but it never grew when the user
@@ -1227,21 +1293,7 @@ void TypeSelectorPopup::popup(const QPoint& globalPos) {
     int listH = qBound(rowH * 3, rowH * (int)m_filteredTypes.size(), rowH * 16);
     int popupH = qMax(400, headerH + listH + footerH);
 
-    QScreen* screen = QApplication::screenAt(globalPos);
-    if (screen) {
-        QRect avail = screen->availableGeometry();
-        if (globalPos.y() + popupH > avail.bottom())
-            popupH = avail.bottom() - globalPos.y();
-        if (globalPos.x() + popupW > avail.right())
-            popupW = avail.right() - globalPos.x();
-    }
-
-    setFixedSize(popupW, popupH);
-    move(globalPos);
-    show();
-    raise();
-    activateWindow();
-    m_filterEdit->setFocus();
+    placeOnScreen(globalPos, popupW, popupH);
 }
 
 void TypeSelectorPopup::updateModifierPreview() {
@@ -1276,7 +1328,7 @@ void TypeSelectorPopup::updateModifierPreview() {
             : QStringLiteral("dyn");
         m_footerLabel->setText(QStringLiteral(
             "<span style='color:%1'>%2 \u00B7 %3 \u00B7 %4</span>")
-            .arg(t.textFaint.name(), entry.displayName, szText, entry.kindGroup));
+            .arg(t.textFaint.name(), entry.displayName.toHtmlEscaped(), szText, entry.kindGroup));
     }
 
     int modId = m_modGroup->checkedId();
@@ -1302,7 +1354,7 @@ void TypeSelectorPopup::updateModifierPreview() {
 
     // Format: "type+modifier → size (+diff)"
     QString label = QStringLiteral("<span style='color:%1'>%2%3</span>")
-        .arg(t.text.name(), entry.displayName, suffix);
+        .arg(t.text.name(), entry.displayName.toHtmlEscaped(), suffix);
 
     if (newSize > 0) {
         label += QStringLiteral("<span style='color:%1'> \u2192 %2B</span>")
@@ -1338,7 +1390,7 @@ void TypeSelectorPopup::updateDetailPane() {
     const int modId = m_modGroup ? m_modGroup->checkedId() : -1;
 
     // Use the actual font point size — all HTML sizes are relative to this
-    const int pt = m_font.pointSize();
+    const int pt = resolvedPointSize(m_font);
     const int ptS = qMax(7, pt - 2);   // small text
     const int ptXS = qMax(7, pt - 3);  // section labels
 
@@ -1366,7 +1418,7 @@ void TypeSelectorPopup::updateDetailPane() {
         "<div style='font-size:%3pt;font-weight:bold;color:%4'>%5</div>"
         "<div style='font-size:%6pt;color:%7'>%8</div></div>")
         .arg(t.border.name(), t.backgroundAlt.name())
-        .arg(pt).arg(t.text.name(), entry.displayName)
+        .arg(pt).arg(t.text.name(), entry.displayName.toHtmlEscaped())
         .arg(ptXS).arg(t.textMuted.name(), entry.kindGroup);
 
     // ── Layout ──
@@ -1428,7 +1480,7 @@ void TypeSelectorPopup::updateDetailPane() {
             "border:1px solid %3;line-height:1.6'>")
             .arg(ptS).arg(t.background.name(), t.border.name());
 
-        QString tn = entry.displayName;
+        QString tn = entry.displayName.toHtmlEscaped();
         if (modId == 1 || modId == 2) {
             QString stars = (modId == 2) ? QStringLiteral("**") : QStringLiteral("*");
             html += QStringLiteral("<span style='color:%1'>%2</span>"
@@ -1489,7 +1541,7 @@ void TypeSelectorPopup::updateDetailPane() {
             "<a href='action:select' style='color:%4;text-decoration:none'>"
             "\u2713 Select %5</a></div>")
             .arg(t.selection.name(), t.syntaxKeyword.name())
-            .arg(ptS).arg(t.text.name(), entry.displayName);
+            .arg(ptS).arg(t.text.name(), entry.displayName.toHtmlEscaped());
 
         bool canPtr = entry.entryKind == TypeEntry::Composite
             || isValidPrimitivePtrTarget(entry.primitiveKind);
@@ -1500,7 +1552,7 @@ void TypeSelectorPopup::updateDetailPane() {
                 "<a href='action:ptr' style='color:%4;text-decoration:none'>"
                 "* Pointer \u2192 %5</a></div>")
                 .arg(t.surface.name(), t.border.name())
-                .arg(ptS).arg(t.textDim.name(), entry.displayName);
+                .arg(ptS).arg(t.textDim.name(), entry.displayName.toHtmlEscaped());
 
         html += QStringLiteral(
             "<div style='padding:3px 6px;background:%1;"
@@ -1508,7 +1560,7 @@ void TypeSelectorPopup::updateDetailPane() {
             "<a href='action:arr' style='color:%4;text-decoration:none'>"
             "[ ] Array of %5</a></div>")
             .arg(t.surface.name(), t.border.name())
-            .arg(ptS).arg(t.textDim.name(), entry.displayName);
+            .arg(ptS).arg(t.textDim.name(), entry.displayName.toHtmlEscaped());
         html += QStringLiteral("</div>");
     }
 
@@ -1516,6 +1568,26 @@ void TypeSelectorPopup::updateDetailPane() {
 }
 
 void TypeSelectorPopup::applyFilter(const QString& text) {
+    // Remember the currently-selected entry's identity so a re-filter / chip
+    // toggle / re-sort can RESTORE it after the rebuild, instead of snapping
+    // the selection back to the first row. The old behavior meant typing one
+    // more character (or toggling a chip) silently moved the selection, so a
+    // following Enter accepted the wrong type. (setTypes() clears the current
+    // index before calling us, so this never carries a selection across opens
+    // — its own current-type pre-select still wins on open.)
+    bool selHad = false;
+    QString selName; TypeEntry::Kind selKind = TypeEntry::Primitive;
+    NodeKind selPrim = NodeKind::Hex8; bool selRel = false; uint64_t selStruct = 0;
+    if (QModelIndex ci = m_listView->currentIndex(); ci.isValid()) {
+        int r = ci.row();
+        if (r >= 0 && r < m_filteredTypes.size()
+            && m_filteredTypes[r].entryKind != TypeEntry::Section) {
+            const TypeEntry& s = m_filteredTypes[r];
+            selHad = true; selName = s.displayName; selKind = s.entryKind;
+            selPrim = s.primitiveKind; selRel = s.isRelative; selStruct = s.structId;
+        }
+    }
+
     m_filteredTypes.clear();
     m_matchPositions.clear();
     QStringList displayStrings;
@@ -1550,12 +1622,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     for (const auto& t : m_allTypes) {
         if (t.entryKind == TypeEntry::Section) continue;
         totalNonSection++;
-        QString g = t.kindGroup;
-        if (g.isEmpty()) {
-            g = (t.entryKind == TypeEntry::Primitive)
-                ? kindGroupFor(t.primitiveKind) : QStringLiteral("Ctr");
-        }
-        totalGroupCounts[g]++;
+        totalGroupCounts[t.kindGroup]++;  // kindGroup normalized in setTypes
     }
 
     // Pre-reserve to avoid realloc churn
@@ -1571,15 +1638,8 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         scored.reserve(totalTypes);
 
         for (int i = 0; i < totalTypes; i++) {
-            auto& t = m_allTypes[i];
+            const auto& t = m_allTypes[i];
             if (t.entryKind == TypeEntry::Section) continue;
-            // Auto-assign kindGroup if missing
-            if (t.kindGroup.isEmpty()) {
-                if (t.entryKind == TypeEntry::Primitive)
-                    t.kindGroup = kindGroupFor(t.primitiveKind);
-                else
-                    t.kindGroup = QStringLiteral("Ctr");
-            }
             QVector<int> pos;
             int sc = fuzzyScore(filterBase, t.displayName, &pos);
             if (sc <= 0) continue;
@@ -1587,7 +1647,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             if (catAllowed(t))
                 scored.push_back(Scored{i, sc, std::move(pos)});
         }
-        std::sort(scored.begin(), scored.end(),
+        std::stable_sort(scored.begin(), scored.end(),
                   [](const Scored& a, const Scored& b) { return a.score > b.score; });
 
         for (const auto& s : scored) {
@@ -1601,16 +1661,9 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         static const char* kGroupOrder[] = {"Hex","Int","Float","Ptr","Vec","Str","Ctr","Common"};
         static const char* kGroupLabels[] = {"Hex","Int / Bool","Float","Pointer / FuncPtr","Vec / Mat","String","Type","Common Types"};
         QHash<QString, QVector<TypeEntry>> buckets;
-        for (auto& t : m_allTypes) {
+        for (const auto& t : m_allTypes) {
             if (t.entryKind == TypeEntry::Section) continue;
-            // Auto-assign kindGroup if missing (tests / external callers)
-            if (t.kindGroup.isEmpty()) {
-                if (t.entryKind == TypeEntry::Primitive)
-                    t.kindGroup = kindGroupFor(t.primitiveKind);
-                else
-                    t.kindGroup = QStringLiteral("Ctr");
-            }
-            groupCounts[t.kindGroup]++;
+            groupCounts[t.kindGroup]++;  // kindGroup normalized in setTypes
             if (catAllowed(t))
                 buckets[t.kindGroup].append(t);
         }
@@ -1626,12 +1679,17 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
         };
 
-        auto appendSection = [&](const QString& title, const QVector<TypeEntry>& items) {
+        auto appendSection = [&](const QString& title, const QString& groupKey,
+                                 const QVector<TypeEntry>& items) {
             if (items.isEmpty()) return;
             TypeEntry sec;
             sec.entryKind = TypeEntry::Section;
             sec.displayName = title;
-            sec.kindGroup = title.left(title.indexOf(' ')); // for section pip color
+            // Use the EXACT group key for the pip color. Deriving it from the
+            // label's first word produced "Pointer"/"String"/"Type" — none of
+            // which kindGroupColor() knows ("Ptr"/"Str"/"Ctr"), so those pips
+            // fell through to the neutral default instead of red/salmon/green.
+            sec.kindGroup = groupKey;
             sec.enabled = false;
             m_filteredTypes.append(sec);
             m_matchPositions.append(QVector<int>());
@@ -1658,7 +1716,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                         recents.append(*it);
                 }
                 if (!recents.isEmpty())
-                    appendSection(QStringLiteral("Recent"), recents);
+                    appendSection(QStringLiteral("Recent"), QStringLiteral("Common"), recents);
             }
             // Group view: per-kindGroup sections
             for (int gi = 0; gi < 8; gi++) {
@@ -1672,20 +1730,21 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 // hex64 above hex128, which broke the size-descending
                 // expectation. Always sort Hex by size desc.
                 if (g == QStringLiteral("Hex")) {
-                    std::sort(items.begin(), items.end(), bySizeDesc);
+                    std::stable_sort(items.begin(), items.end(), bySizeDesc);
                 } else if (m_mode != TypePopupMode::Root && m_currentNodeSize > 0) {
                     QVector<TypeEntry> sameSize, other;
                     for (const auto& p : items) {
                         if (p.sizeBytes == m_currentNodeSize) sameSize.append(p);
                         else other.append(p);
                     }
-                    std::sort(sameSize.begin(), sameSize.end(), alphabetical);
-                    std::sort(other.begin(), other.end(), bySizeDesc);
+                    std::stable_sort(sameSize.begin(), sameSize.end(), alphabetical);
+                    std::stable_sort(other.begin(), other.end(), bySizeDesc);
                     items = sameSize + other;
                 } else {
-                    std::sort(items.begin(), items.end(), bySizeDesc);
+                    std::stable_sort(items.begin(), items.end(), bySizeDesc);
                 }
-                appendSection(QString::fromLatin1(kGroupLabels[gi]), items);
+                appendSection(QString::fromLatin1(kGroupLabels[gi]),
+                              QString::fromLatin1(kGroupOrder[gi]), items);
             }
         } else {
             // Flat sorted list (no sections) — name/size/align
@@ -1694,18 +1753,18 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             int dir = m_sortDir;
             switch (m_sortMode) {
             case SortName:
-                std::sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
+                std::stable_sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
                     return dir * a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
                 });
                 break;
             case SortSize:
-                std::sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
+                std::stable_sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
                     if (a.sizeBytes != b.sizeBytes) return dir * (a.sizeBytes - b.sizeBytes) < 0;
                     return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
                 });
                 break;
             case SortAlign:
-                std::sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
+                std::stable_sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
                     if (a.alignment != b.alignment) return dir * (a.alignment - b.alignment) < 0;
                     return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
                 });
@@ -1735,6 +1794,16 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         m_filteredTypes.append(empty);
         m_matchPositions.append(QVector<int>());
         displayStrings << empty.displayName;
+    }
+
+    // Point the delegate at the freshly-rebuilt vectors BEFORE setStringList:
+    // setStringList can trigger a synchronous repaint, and if the delegate's
+    // pointers were still unset (first open) that paint rendered rows with no
+    // entry/highlight data. The vectors are fully populated by here, so this is
+    // safe — and it closes the transient mismatch window.
+    if (auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate())) {
+        delegate->setFilteredTypes(&m_filteredTypes);
+        delegate->setMatchPositions(&m_matchPositions);
     }
 
     m_model->setStringList(displayStrings);
@@ -1768,15 +1837,24 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             m_statusLabel->setText(QStringLiteral("%1 types").arg(resultCount));
     }
 
-    auto* delegate = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
-    if (delegate) {
-        delegate->setFilteredTypes(&m_filteredTypes);
-        delegate->setMatchPositions(&m_matchPositions);
+    // Restore the previously-selected entry if it survived the rebuild;
+    // otherwise fall back to the first selectable row.
+    int target = -1;
+    if (selHad) {
+        for (int i = 0; i < m_filteredTypes.size(); ++i) {
+            const TypeEntry& e = m_filteredTypes[i];
+            if (e.entryKind == TypeEntry::Section || !e.enabled) continue;
+            if (e.displayName != selName || e.entryKind != selKind) continue;
+            bool same = (selKind == TypeEntry::Composite)
+                ? (e.structId == selStruct)
+                : (e.primitiveKind == selPrim && e.isRelative == selRel);
+            if (same) { target = i; break; }
+        }
     }
-
-    int first = nextSelectableRow(0, 1);
-    if (first >= 0)
-        m_listView->setCurrentIndex(m_model->index(first));
+    if (target < 0)
+        target = nextSelectableRow(0, 1);
+    if (target >= 0)
+        m_listView->setCurrentIndex(m_model->index(target));
 }
 
 void TypeSelectorPopup::acceptCurrent() {
@@ -1786,26 +1864,40 @@ void TypeSelectorPopup::acceptCurrent() {
 }
 
 void TypeSelectorPopup::acceptIndex(int row) {
+    // Ignore accepts while the skeleton placeholders are showing: the model
+    // has dummy rows but m_filteredTypes still holds the PREVIOUS open's
+    // entries, so accepting here would emit a stale, unrelated type.
+    if (m_loading) return;
     if (row < 0 || row >= m_filteredTypes.size()) return;
-    const TypeEntry& entry = m_filteredTypes[row];
+    // Copy by value: the typeSelected slot can rebuild the document and
+    // re-enter applyFilter(), which clears m_filteredTypes — a reference into
+    // it would dangle mid-emit.
+    const TypeEntry entry = m_filteredTypes[row];
     if (entry.entryKind == TypeEntry::Section) return;
     if (!entry.enabled) return;
 
     // Build full text with modifier from toggle buttons
-    int modId = m_modGroup->checkedId();
+    int modId = m_modGroup ? m_modGroup->checkedId() : -1;
     QString fullText = entry.displayName;
     if (modId == 1)
         fullText += QStringLiteral("*");
     else if (modId == 2)
         fullText += QStringLiteral("**");
     else if (modId == 3) {
-        QString countText = m_arrayCountEdit->text().trimmed();
-        if (!countText.isEmpty())
-            fullText += QStringLiteral("[%1]").arg(countText);
+        // Array toggle is on → always emit an array. An empty/blank count
+        // defaults to 1 rather than silently dropping the "[]" and committing
+        // a plain (non-array) type, which contradicted the visible preview.
+        QString countText = m_arrayCountEdit ? m_arrayCountEdit->text().trimmed() : QString();
+        bool ok = false;
+        int count = countText.toInt(&ok);
+        if (!ok || count < 1) count = 1;
+        fullText += QStringLiteral("[%1]").arg(count);
     }
 
-    emit typeSelected(entry, fullText);
+    // Hide before emitting so the popup is inert while the slot runs.
+    m_accepted = true;
     hide();
+    emit typeSelected(entry, fullText);
 }
 
 int TypeSelectorPopup::nextSelectableRow(int from, int direction) const {
@@ -1828,8 +1920,9 @@ bool TypeSelectorPopup::eventFilter(QObject* obj, QEvent* event) {
             return true;
         }
 
-        // Ctrl+F focuses the filter from anywhere
-        if (ke->key() == Qt::Key_F && (ke->modifiers() & Qt::ControlModifier)) {
+        // Ctrl+F focuses the filter from anywhere. Exact-match the modifier so
+        // Ctrl+Shift+F / Ctrl+Alt+F don't get hijacked.
+        if (ke->key() == Qt::Key_F && ke->modifiers() == Qt::ControlModifier) {
             m_filterEdit->setFocus();
             m_filterEdit->selectAll();
             return true;
@@ -1925,7 +2018,10 @@ void TypeSelectorPopup::hideEvent(QHideEvent* event) {
         if (auto* d = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate()))
             d->hideTip();
     }
-    emit dismissed();
+    // Only emit dismissed() when the popup closed WITHOUT a pick — a
+    // successful accept already emitted typeSelected/createNewTypeRequested.
+    if (!m_accepted)
+        emit dismissed();
 }
 
 } // namespace rcx

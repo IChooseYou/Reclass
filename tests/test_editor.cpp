@@ -1234,6 +1234,94 @@ private slots:
                      .arg(targetLine).arg(markers, 0, 16)));
     }
 
+    // ── Test: enum MEMBER + array-element rows highlight correctly ──
+    // Guards two selId-encoding fixes at the actual paint layer:
+    //  1. kMemberSubMask collision — before the fix, memberSubFromSelId
+    //     inflated the decoded subLine by 2^19, so member lines never
+    //     matched in applySelectionOverlay and member selection was
+    //     silently invisible. This asserts the member row DOES highlight.
+    //  2. selKindOf disambiguation — a member selId must not paint
+    //     array-element rows, and an array-element selId must not paint
+    //     member rows (the flag bits overlap; classification is by
+    //     priority, not independent bit tests).
+    void testMemberAndArrayElemSelectionPaints() {
+        // One document containing both an enum (with members) and a small
+        // primitive array, so member lines and array-element lines coexist.
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "T";
+        root.name = "t";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node en;                       // enums are Struct + classKeyword "enum"
+        en.kind = NodeKind::Struct;
+        en.classKeyword = "enum";
+        en.structTypeName = "Color";
+        en.name = "color";
+        en.parentId = rootId;
+        en.offset = 0;
+        en.collapsed = false;
+        en.enumMembers = { {"Red", 0}, {"Green", 1}, {"Blue", 2} };
+        int ei = tree.addNode(en);
+        uint64_t enumId = tree.nodes[ei].id;
+
+        Node arr;
+        arr.kind = NodeKind::Array;
+        arr.name = "bytes";
+        arr.parentId = rootId;
+        arr.offset = 4;
+        arr.elementKind = NodeKind::Hex8;
+        arr.arrayLen = 3;
+        arr.collapsed = false;
+        int ai = tree.addNode(arr);
+        uint64_t arrId = tree.nodes[ai].id;
+
+        BufferProvider prov = makeTestProvider();
+        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(result);
+        auto* sci = m_editor->scintilla();
+        auto markerGet = [sci](int line) {
+            return (int)sci->SendScintilla(
+                QsciScintillaBase::SCI_MARKERGET, (unsigned long)line);
+        };
+
+        int memberLine = -1, memberSub = -1, arrLine = -1, arrIdx = -1;
+        for (int i = 0; i < result.meta.size(); i++) {
+            const auto& lm = result.meta[i];
+            if (memberLine < 0 && lm.isMemberLine && lm.nodeId == enumId) {
+                memberLine = i; memberSub = lm.subLine;
+            }
+            if (arrLine < 0 && lm.isArrayElement && lm.nodeId == arrId) {
+                arrLine = i; arrIdx = lm.arrayElementIdx;
+            }
+        }
+        QVERIFY2(memberLine >= 0, "no enum member line composed");
+        QVERIFY2(arrLine >= 0, "no array element line composed");
+
+        // Member selected → its row highlights (the previously-dead fix);
+        // the array-element row must NOT be lit by a member selId.
+        m_editor->applySelectionOverlay({ makeMemberSelId(enumId, memberSub) });
+        QVERIFY2(markerGet(memberLine) & (1 << M_SELECTED),
+            qPrintable(QString("member row %1 not highlighted (mask=0x%2)")
+                .arg(memberLine).arg(markerGet(memberLine), 0, 16)));
+        QVERIFY2(!(markerGet(arrLine) & (1 << M_SELECTED)),
+            "array-element row wrongly highlighted by a member selId");
+
+        // Array element selected → its row highlights; member row clears.
+        m_editor->applySelectionOverlay({ makeArrayElemSelId(arrId, arrIdx) });
+        QVERIFY2(markerGet(arrLine) & (1 << M_SELECTED),
+            qPrintable(QString("array-element row %1 not highlighted (mask=0x%2)")
+                .arg(arrLine).arg(markerGet(arrLine), 0, 16)));
+        QVERIFY2(!(markerGet(memberLine) & (1 << M_SELECTED)),
+            "member row wrongly highlighted by an array-element selId");
+
+        m_editor->applyDocument(m_result);  // restore fixture doc
+    }
+
     void testMenuItemSizeIsAccessible() {
         // Instantiate the same QProxyStyle used by the app (MenuBarStyle is
         // defined in main.cpp — we replicate the logic here to test it)

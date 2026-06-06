@@ -12,10 +12,58 @@
 #include <QEnterEvent>
 #include "titlebar.h"
 #include "themes/thememanager.h"
+#include "svgicon.h"
 
 class TestTitleBarBorder : public QObject {
     Q_OBJECT
 private slots:
+
+    // Regression: themedVsIcon must rasterize the glyph across the WHOLE pixmap
+    // at dpr != 1, not just the top-left logical-size corner. The bug (set
+    // devicePixelRatio AFTER attaching the painter, and render into size/dpr)
+    // left the glyph cropped to the top-left quadrant at HiDPI — which read as
+    // title-bar / dock-tab icons "too high" and small. Deterministic + headless.
+    void testThemedIconFillsPixmapAtHighDpr() {
+        const int logical = 20;
+        const qreal dpr = 2.0;
+        // chrome-close (an X) spans almost the full 16-unit viewBox, so a
+        // correctly-rendered icon reaches well into the bottom-right of the
+        // device pixmap; a cropped one stays inside the top-left logical×logical.
+        QIcon icon = rcx::themedVsIcon(QStringLiteral(":/vsicons/chrome-close.svg"),
+                                       Qt::white, logical, dpr);
+        QPixmap pm = icon.pixmap(QSize(logical, logical), dpr);
+        QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+        const int W = img.width(), H = img.height();
+        // dpr=2 → device pixmap is 40×40.
+        QVERIFY2(W == logical * dpr && H == logical * dpr,
+                 qPrintable(QString("expected %1x%1 device px, got %2x%3")
+                            .arg((int)(logical * dpr)).arg(W).arg(H)));
+
+        // Bounding box of non-transparent (glyph) pixels.
+        int minX = W, minY = H, maxX = -1, maxY = -1;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+                if (qAlpha(img.pixel(x, y)) > 30) {
+                    minX = qMin(minX, x); maxX = qMax(maxX, x);
+                    minY = qMin(minY, y); maxY = qMax(maxY, y);
+                }
+        QVERIFY2(maxX >= 0, "icon rendered fully transparent (resource missing?)");
+
+        // The decisive check: the glyph must extend PAST the top-left quadrant
+        // boundary (logical, = W/2 here). Under the old bug every lit pixel sat
+        // within the top-left logical×logical corner, so maxX/maxY <= ~logical.
+        QVERIFY2(maxX > logical && maxY > logical,
+                 qPrintable(QString("glyph cropped to top-left: bbox=(%1,%2)-(%3,%4) "
+                            "in %5x%6 — expected it to extend past (%7,%7)")
+                            .arg(minX).arg(minY).arg(maxX).arg(maxY).arg(W).arg(H).arg(logical)));
+
+        // And it should be roughly centered (bbox center near pixmap center),
+        // not biased to a corner.
+        const double cx = (minX + maxX) / 2.0, cy = (minY + maxY) / 2.0;
+        QVERIFY2(qAbs(cx - W / 2.0) <= W * 0.18 && qAbs(cy - H / 2.0) <= H * 0.18,
+                 qPrintable(QString("glyph off-center: center=(%1,%2) pixmap=%3x%4")
+                            .arg(cx).arg(cy).arg(W).arg(H)));
+    }
 
     // Diagnose and verify: close button red hover does NOT bleed below the title bar
     void testCloseButtonHoverNoBleed() {

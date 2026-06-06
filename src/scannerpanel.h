@@ -93,8 +93,52 @@ public:
                                               bool filterExecutable = false, bool filterWritable = false,
                                               const QVector<AddressRange>& constrainRegions = {});
 
+    /** Blocking value scan with an explicit condition. Drives the SAME result set the panel keeps
+     *  (m_results), so a subsequent runRescanAndWait narrows it — this is the iterative-narrowing
+     *  loop the UI uses, exposed for MCP/automation. UnknownValue captures every aligned address
+     *  (value ignored); Between uses value=lower, value2=upper; compare-against-previous conditions
+     *  (Changed/Increased/...) have no baseline on a first scan and capture-all instead. A hard
+     *  timeout aborts a runaway scan and returns the partial set. */
+    QVector<ScanResult> runValueScanAndWait(ValueType valueType, ScanCondition condition,
+                                            const QString& value, const QString& value2 = {},
+                                            bool filterExecutable = false, bool filterWritable = false,
+                                            bool skipSystemModules = false,
+                                            const QVector<AddressRange>& constrainRegions = {},
+                                            int timeoutMs = 120000);
+
+    /** Blocking re-scan over the current result set using the existing engine (the UI Next-Scan
+     *  path). Narrows m_results in place. value/value2 used for typed conditions (Between uses both),
+     *  delta for IncreasedBy/DecreasedBy. */
+    QVector<ScanResult> runRescanAndWait(ScanCondition condition, const QString& value = {},
+                                         const QString& value2 = {}, const QString& delta = {},
+                                         int timeoutMs = 120000);
+
+    /** Blocking structure-aware scan for 4x4 affine view-matrix candidates (see matrixscan.h).
+     *  Returns candidates ranked best-first; also populates the panel result set so the agent can
+     *  then runRescanAndWait(Changed) while moving the camera to confirm the live one. */
+    QVector<ScanResult> runMatrixScanAndWait(const MatrixScanParams& params,
+                                             bool filterExecutable = false, bool filterWritable = true,
+                                             bool skipSystemModules = true, int maxCandidates = 64,
+                                             const QVector<AddressRange>& constrainRegions = {},
+                                             int timeoutMs = 120000);
+
+    // Accessors for the MCP bridge to build structured responses (formatValue/valueSize are private).
+    int       scanGeneration()  const { return m_scanGeneration; }
+    ValueType lastValueType()   const { return m_lastValueType; }
+    int       lastScanMode()    const { return m_lastScanMode; }
+    QString   formatValuePublic(const QByteArray& bytes) const { return formatValue(bytes); }
+    int       valueSizePublic() const { return valueSize(); }
+
 signals:
     void goToAddress(uint64_t address);
+
+protected:
+    // All tooltips in the scanner are suppressed — they flickered and fought
+    // with the hover UI. Swallowing QEvent::ToolTip for the whole subtree
+    // kills them at the source, so no setToolTip call site (static, dynamic,
+    // or item-view) can surface one. Installed on this + every descendant
+    // widget at the end of the constructor.
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
 private slots:
     void onModeChanged(int index);
@@ -118,6 +162,14 @@ private:
     void updateModuleColumnVisibility();
 
     void onConditionChanged(int index);
+
+    // SCAN FOR group is collapsible: the clickable header toggles m_scanBody
+    // (criteria form + fast-scan + filter chips). The action buttons + progress
+    // strip sit above the body and stay visible when collapsed.
+    void setScanForCollapsed(bool collapsed);
+    QPushButton* m_scanForHeader = nullptr;
+    QWidget*     m_scanBody = nullptr;
+    bool         m_scanForCollapsed = false;
 
     // Input widgets
     QComboBox*    m_modeCombo;      // Signature / Value

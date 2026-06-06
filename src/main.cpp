@@ -1,6 +1,5 @@
 #include "mainwindow.h"
 #include <cstdio>
-#include <QSvgRenderer>
 #include "docksizereadout.h"
 #include "tab_source_icon.h"
 #include "profiler.h"

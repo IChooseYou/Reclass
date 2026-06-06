@@ -1,5 +1,6 @@
 #include "hextoolbarpopup.h"
 #include "themes/thememanager.h"
+#include "fontutil.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -38,7 +39,7 @@ HexToolbarPopup::HexToolbarPopup(QWidget* parent)
 void HexToolbarPopup::setFont(const QFont& font) {
     m_font = font;
     QFont small = font;
-    small.setPointSize(qMax(7, font.pointSize() - 1));
+    small.setPointSize(qMax(7, rcx::resolvedPointSize(font) - 1));
     m_offsetEdit->setFont(small);
 }
 

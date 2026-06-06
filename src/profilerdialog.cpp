@@ -2,6 +2,7 @@
 #include "profiler.h"
 #include "themes/thememanager.h"
 #include "widgets/dialog_button.h"
+#include "fontutil.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -49,7 +50,7 @@ protected:
         }
 
         QFont labelFont = font();
-        labelFont.setPointSize(qMax(8, font().pointSize() - 1));
+        labelFont.setPointSize(qMax(8, rcx::resolvedPointSize(font()) - 1));
         p.setFont(labelFont);
         QFontMetrics fm(labelFont);
         int barH    = qMax(14, fm.height() + 4);

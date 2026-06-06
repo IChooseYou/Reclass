@@ -1,5 +1,6 @@
 #pragma once
 
+#include "svgicon.h"
 #include <QWidget>
 #include <QToolButton>
 #include <QHBoxLayout>
@@ -89,27 +90,11 @@ public:
 
     // Re-tint the close X with the theme's text color so it stays
     // visible on light chrome (the source SVG bakes #C5C5C5 which
-    // disappears against a near-white background). Same pattern as
-    // titlebar.cpp's themedSvgIcon helper.
+    // disappears against a near-white background). Shares the tinted
+    // dpr-aware render with titlebar.cpp via rcx::themedVsIcon.
     void applyTheme(const QColor& tint, const QColor& hover) {
-        QFile f(QStringLiteral(":/vsicons/close.svg"));
-        if (f.open(QIODevice::ReadOnly)) {
-            QByteArray svg = f.readAll();
-            svg.replace("#C5C5C5", tint.name().toLatin1());
-            svg.replace("#c5c5c5", tint.name().toLatin1());
-            QSvgRenderer r(svg);
-            const qreal dpr = devicePixelRatioF();
-            QPixmap pm(QSize(12, 12) * (dpr > 0 ? dpr : 1.0));
-            pm.fill(Qt::transparent);
-            QPainter p(&pm);
-            p.setRenderHint(QPainter::Antialiasing, true);
-            p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-            r.render(&p, QRectF(0, 0, pm.width() / (dpr > 0 ? dpr : 1.0),
-                                       pm.height() / (dpr > 0 ? dpr : 1.0)));
-            p.end();
-            pm.setDevicePixelRatio(dpr);
-            closeBtn->setIcon(QIcon(pm));
-        }
+        closeBtn->setIcon(rcx::themedVsIcon(QStringLiteral(":/vsicons/close.svg"),
+                                            tint, 12, devicePixelRatioF()));
         QString style = QStringLiteral(
             "QToolButton { border: none; padding: 1px; border-radius: 0px; }"
             "QToolButton:hover { background: %1; }").arg(hover.name());

@@ -1909,51 +1909,12 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     m_sci->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_sci, &QWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
-        // Right-click on active byte selection (and the click landed
-        // inside a hex preview row's value column) → byte-ops menu.
-        // Checked first so the per-byte actions take precedence over
-        // the node-level context menu when there's a live selection.
-        if (m_byteSel.has_value()) {
-            HitInfo bhi = hitTest(pos);
-            if (byteAddrAt(bhi.line, bhi.col).has_value()) {
-                QMenu menu;
-                auto* aBreak   = menu.addAction(QStringLiteral("Break into new class"));
-                menu.addSeparator();
-                auto* aCopyHex = menu.addAction(QStringLiteral("Copy as hex"));
-                aCopyHex->setShortcut(QKeySequence::Copy);
-                auto* aCopyC   = menu.addAction(QStringLiteral("Copy as C array"));
-                auto* aCopyPy  = menu.addAction(QStringLiteral("Copy as Python bytes"));
-                auto* aSave    = menu.addAction(QStringLiteral("Save as binary file…"));
-                menu.addSeparator();
-                auto* aPaste   = menu.addAction(QStringLiteral("Paste hex"));
-                aPaste->setShortcut(QKeySequence::Paste);
-                auto* aEdit    = menu.addAction(QStringLiteral("Edit hex…"));
-                auto* aZero    = menu.addAction(QStringLiteral("Zero-fill"));
-                aZero->setShortcut(QKeySequence::Delete);
-                menu.addSeparator();
-                auto* aClear   = menu.addAction(QStringLiteral("Clear selection"));
-                aClear->setShortcut(QKeySequence(Qt::Key_Escape));
+        // Byte-selection ops are no longer a standalone editor menu — the
+        // controller folds them into a "Selected bytes (N) ▸" submenu at
+        // the top of the node context menu (see RcxController::showContext-
+        // Menu / addByteSubmenu), so a right-click anywhere falls through
+        // to contextMenuRequested below and the controller decides.
 
-                QAction* chosen = menu.exec(m_sci->mapToGlobal(pos));
-                if (!chosen) return;
-                if      (chosen == aCopyHex) emit byteCopyHexRequested();
-                else if (chosen == aCopyC)   emit byteCopyAsCArrayRequested();
-                else if (chosen == aCopyPy)  emit byteCopyAsPythonRequested();
-                else if (chosen == aSave)    emit byteSaveAsFileRequested();
-                else if (chosen == aPaste)   emit bytePasteHexRequested();
-                else if (chosen == aEdit)    beginByteEdit();
-                else if (chosen == aZero)    emit byteZeroFillRequested();
-                else if (chosen == aBreak) {
-                    auto [lo, hi] = *m_byteSel;
-                    emit byteBreakIntoClassRequested(lo, hi);
-                }
-                else if (chosen == aClear)   {
-                    m_byteSel.reset();
-                    applyByteSelectionOverlay();
-                }
-                return;
-            }
-        }
         // Right-click on offset margin → show margin mode menu
         int margin0Width = (int)m_sci->SendScintilla(
             QsciScintillaBase::SCI_GETMARGINWIDTHN, 0UL, 0L);
@@ -3305,9 +3266,14 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
 
     // Use index: iterate selected IDs, look up their lines
     for (uint64_t selId : selIds) {
-        bool isFooterSel = (selId & kFooterIdBit) != 0;
-        bool isArrayElemSel = (selId & kArrayElemBit) != 0;
-        bool isMemberSel = (selId & kMemberBit) != 0;
+        // Classify by PRIORITY via selKindOf (the single source of truth) —
+        // NOT independent flag-bit tests: a high array index (>= 2^19) sets
+        // bit 61 (= kMemberBit), so `selId & kMemberBit` would misread it as
+        // a member and the member branch below would skip painting the row.
+        SelKind sk = selKindOf(selId);
+        bool isFooterSel = sk == SelKind::Footer;
+        bool isArrayElemSel = sk == SelKind::ArrayElem;
+        bool isMemberSel = sk == SelKind::Member;
         int arrayElemIdx = isArrayElemSel ? arrayElemIdxFromSelId(selId) : -1;
         int memberSubLine = isMemberSel ? memberSubFromSelId(selId) : -1;
         uint64_t nodeId = selId & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
@@ -3477,6 +3443,10 @@ void RcxEditor::applyByteSelectionOverlay() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE,
                          (long)0, docLen);
 
+    // Collect the encoded selId of every hex row the byte selection
+    // overlaps; mirrored into the controller's row selection below so the
+    // grey M_SELECTED highlight tracks the byte selection across all rows.
+    QSet<uint64_t> covered;
     if (m_byteSel.has_value()) {
         const uint64_t selLo = m_byteSel->first;
         const uint64_t selHi = m_byteSel->second;
@@ -3488,6 +3458,7 @@ void RcxEditor::applyByteSelectionOverlay() {
             uint64_t lineLo = lm.offsetAddr;
             uint64_t lineHi = lineLo + static_cast<uint64_t>(sz);
             if (selHi <= lineLo || selLo >= lineHi) continue;  // no overlap
+            covered.insert(selIdForLine(lm));
             QString lineText = getLineText(m_sci, i);
             ColumnSpan vs = valueSpan(lm, lineText.size(),
                                       lm.effectiveTypeW, lm.effectiveNameW);
@@ -3503,6 +3474,17 @@ void RcxEditor::applyByteSelectionOverlay() {
             int hiCol = vs.start + (lastByte - 1) * 3 + 2;
             fillIndicatorCols(IND_BYTE_SEL, i, vs.start + firstByte * 3, hiCol);
         }
+    }
+
+    // Mirror the covered rows into the controller's row selection so the
+    // grey M_SELECTED highlight tracks the byte selection. De-duped (only
+    // emit when the covered set changes) and suppressed during
+    // applyDocument — a refresh re-applies overlays itself, and emitting
+    // mid-refresh would reorder the selection repaint. An empty `covered`
+    // (no byte selection) emits empty, which clears the row selection.
+    if (!m_applyingDocument && covered != m_lastByteRows) {
+        m_lastByteRows = covered;
+        emit byteSelectionRowsChanged(covered);
     }
 
     // Tail-call so the status-bar line is rebuilt on every selection
@@ -5603,6 +5585,16 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             // and the host itself all go down together. The footer hint
             // says "close all" to set expectations.
             dismissAllPopups();
+            // Make Esc STICK. Without this the dwell-elapsed flag stays
+            // true, so the preview pops right back on the next mouse twitch
+            // within the same row — Esc felt useless, and the only way to
+            // stop the re-appearing popup was disabling Hover Effects in
+            // Options (then re-enabling it). Resetting the dwell here means
+            // the preview only returns after the user rests on a DIFFERENT
+            // node/line (or re-dwells elsewhere) — it never globally
+            // disables, and never needs an options toggle to recover.
+            m_hoverDwellElapsed = false;
+            if (m_hoverDwellTimer) m_hoverDwellTimer->stop();
             return true;
         }
     }
@@ -5975,11 +5967,12 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     // ── General navigation shortcuts ──
     case Qt::Key_Escape:
         if (ke->modifiers() == Qt::NoModifier) {
-            // Two-stage Esc: first drop byte selection if any (so the
-            // user can clear the byte highlight without losing their
-            // row-level node selection); a second Esc then clears the
-            // node selection. Matches the "Esc undoes the smallest
-            // visible state" pattern from text editors.
+            // Single-stage Esc: if a byte selection is active, drop it —
+            // applyByteSelectionOverlay now emits an empty covered-rows
+            // set, so the mirrored grey row selection clears in the same
+            // gesture (byte + rows go together, per the coupled-selection
+            // design). With no byte selection, Esc clears the node
+            // selection as before.
             if (m_byteSel.has_value()) {
                 m_byteSel.reset();
                 applyByteSelectionOverlay();

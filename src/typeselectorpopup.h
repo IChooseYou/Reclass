@@ -98,6 +98,9 @@ public:
     /// Force native window creation to avoid cold-start delay.
     void warmUp();
 
+    /// Test accessor: the current filtered/sectioned row model (read-only).
+    const QVector<TypeEntry>& filteredTypes() const { return m_filteredTypes; }
+
     /// One-time per-process primer: absorbs ~300ms DLL/style/font init cost.
     /// Call early (e.g. from main() or MainWindow constructor) so the first
     /// user-visible popup open is fast on all platforms.
@@ -155,6 +158,10 @@ private:
     int                m_currentNodeSize = 0;
     int                m_pointerSize = 8;
     bool               m_loading = false;
+    // True once the user committed a pick this open (typeSelected /
+    // createNewTypeRequested), so hideEvent doesn't ALSO emit dismissed() —
+    // dismissed means "closed without choosing". Reset on each popup().
+    bool               m_accepted = false;
     QFont              m_font;
     int                m_cachedMaxNameLen = 0; // longest displayName length (chars)
 
@@ -165,6 +172,11 @@ private:
     QVector<QToolButton*> m_sortBtns;
 
     void applyFilter(const QString& text);
+    // Size the popup to (w,h) and place it at globalPos, shifting the origin
+    // back onto the screen (rather than shrinking to a sliver / negative size)
+    // when it would overflow the right/bottom edge. Shared by popup() and
+    // popupLoading() so their geometry can't diverge. Shows + focuses the popup.
+    void placeOnScreen(const QPoint& globalPos, int w, int h);
     void updateModifierPreview();
     void updateDetailPane();
     void acceptCurrent();

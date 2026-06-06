@@ -707,16 +707,26 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                 {"valueType", QJsonObject{{"type", "string"},
                     {"description", "Value type: float, double, int32, uint32, int64, uint64, int16, uint16, int8, uint8."}}},
                 {"value", QJsonObject{{"type", "string"},
-                    {"description", "Value to search for (e.g. \"120\" for float 120)."}}},
+                    {"description", "Value to search for (e.g. \"120\"). Lower bound when condition=between. Omit when condition=unknown."}}},
+                {"value2", QJsonObject{{"type", "string"},
+                    {"description", "Upper bound when condition=between."}}},
+                {"condition", QJsonObject{{"type", "string"},
+                    {"description", "exact (default) | unknown (capture ALL aligned values — use for floats when the value is unknown) | between (value..value2) | bigger | smaller. To find a moving camera/view matrix: condition=unknown valueType=float, move the camera, then scanner.rescan condition=changed, repeat."}}},
                 {"filterExecutable", QJsonObject{{"type", "boolean"},
                     {"description", "Only scan executable regions (default false). For value scans use false; use writable instead."}}},
                 {"filterWritable", QJsonObject{{"type", "boolean"},
-                    {"description", "Only scan writable regions (default false). Recommended true for value scans to hit data/heap, not code."}}},
+                    {"description", "Only scan writable regions (default false). Recommended true for value scans (and matrices, written every frame) to hit data/heap, not code."}}},
+                {"skipSystemModules", QJsonObject{{"type", "boolean"},
+                    {"description", "Skip ntdll/kernel32/Qt6/etc. (default false). Recommended true on a multi-GB process to cut the search space."}}},
+                {"offset", QJsonObject{{"type", "integer"},
+                    {"description", "Result page offset (default 0)."}}},
+                {"limit", QJsonObject{{"type", "integer"},
+                    {"description", "Result page size (default 50, max 500). Response carries scanId, total, capped."}}},
                 {"regions", QJsonObject{{"type", "array"},
                     {"description", "Restrict scan to these address ranges. Each element is [startHex, endHex], e.g. [[\"0x10000\",\"0x20000\"],[\"0x50000\",\"0x60000\"]]. Ranges are intersected with the provider's real memory regions."},
                     {"items", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}}}}}}
             }},
-            {"required", QJsonArray{"valueType", "value"}}
+            {"required", QJsonArray{"valueType"}}
         }}
     });
 
@@ -743,6 +753,90 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                     {"items", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}}}}}}
             }},
             {"required", QJsonArray{"pattern"}}
+        }}
+    });
+
+    // 10b. scanner.rescan — narrow the current result set (iterative narrowing).
+    tools.append(QJsonObject{
+        {"name", "scanner.rescan"},
+        {"description", "Narrow the CURRENT scanner result set (from scanner.scan) by re-reading each "
+                        "address and keeping those matching a condition. This is the core iterative-"
+                        "narrowing loop. To isolate a moving view/camera matrix: scanner.scan "
+                        "condition=unknown valueType=float, then move/rotate the camera in-game, then "
+                        "scanner.rescan condition=changed; repeat until a handful of addresses remain — "
+                        "those are the floats that update every frame (the live matrix). Conditions: "
+                        "changed | unchanged | increased | decreased | bigger (value) | smaller (value) | "
+                        "between (value..value2) | exact (value) | increased_by (delta) | decreased_by (delta)."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}},
+                {"condition", QJsonObject{{"type", "string"},
+                    {"description", "changed | unchanged | increased | decreased | bigger | smaller | between | exact | increased_by | decreased_by."}}},
+                {"value", QJsonObject{{"type", "string"},
+                    {"description", "Operand for exact/bigger/smaller/between (lower bound)."}}},
+                {"value2", QJsonObject{{"type", "string"},
+                    {"description", "Upper bound for between."}}},
+                {"delta", QJsonObject{{"type", "string"},
+                    {"description", "Step for increased_by / decreased_by."}}},
+                {"scanId", QJsonObject{{"type", "integer"},
+                    {"description", "Optional: the scanId from a prior scan/rescan; rejected if the set changed under you."}}},
+                {"offset", QJsonObject{{"type", "integer"}, {"description", "Result page offset (default 0)."}}},
+                {"limit", QJsonObject{{"type", "integer"}, {"description", "Result page size (default 50, max 500)."}}}
+            }},
+            {"required", QJsonArray{"condition"}}
+        }}
+    });
+
+    // 10c. scanner.results — page/inspect the current result set (no rescan).
+    tools.append(QJsonObject{
+        {"name", "scanner.results"},
+        {"description", "Page through the current scanner result set without rescanning, returning each "
+                        "address and its value. Set floatWindow=16 to also dump 16 floats around each shown "
+                        "address so you can eyeball a contiguous 4x4 matrix (a view matrix is 16 finite "
+                        "floats whose last row or column is ~ 0,0,0,1)."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}},
+                {"offset", QJsonObject{{"type", "integer"}, {"description", "Result page offset (default 0)."}}},
+                {"limit", QJsonObject{{"type", "integer"}, {"description", "Result page size (default 50, max 500)."}}},
+                {"floatWindow", QJsonObject{{"type", "integer"},
+                    {"description", "If >0 (e.g. 16), dump this many floats around each shown address (max 64, first 8 addresses) to inspect for a Mat4x4."}}}
+            }}
+        }}
+    });
+
+    // 10d. scanner.find_matrix — structure-aware one-pass view-matrix finder.
+    tools.append(QJsonObject{
+        {"name", "scanner.find_matrix"},
+        {"description", "Structure-aware ONE-PASS scan for a 4x4 affine view/camera matrix — no known "
+                        "value needed. Scores 64-byte, 4-byte-aligned windows of 16 floats: all finite/"
+                        "plausible AND the homogeneous row/column ~ (0,0,0,1) (handles row-major and "
+                        "column-major), optionally an orthonormal 3x3 rotation block. Collapses multi-GB "
+                        "memory to a few ranked candidates (score 0-100). Defaults skip system modules and "
+                        "scan writable data. After this, move/rotate the camera and scanner.rescan "
+                        "condition=changed to confirm the LIVE matrix among static ones; apply a top "
+                        "candidate as a Mat4x4 node."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"}, {"description", "MDI tab index (0-based). Omit for active tab."}}},
+                {"maxCandidates", QJsonObject{{"type", "integer"}, {"description", "Max ranked candidates (default 32)."}}},
+                {"requireOrthonormal", QJsonObject{{"type", "boolean"}, {"description", "Require an orthonormal 3x3 rotation block (default false)."}}},
+                {"affineEps", QJsonObject{{"type", "number"}, {"description", "Tolerance for the (0,0,0,1) test (default 1e-3)."}}},
+                {"orthoEps", QJsonObject{{"type", "number"}, {"description", "Tolerance for unit-length/orthogonality (default 1e-2)."}}},
+                {"magMax", QJsonObject{{"type", "number"}, {"description", "Reject any |component| above this (default 1e7); raise for large world-space translations."}}},
+                {"minScore", QJsonObject{{"type", "integer"}, {"description", "Drop candidates below this score 0-100 (default 60)."}}},
+                {"filterWritable", QJsonObject{{"type", "boolean"}, {"description", "Only writable regions (default true)."}}},
+                {"filterExecutable", QJsonObject{{"type", "boolean"}, {"description", "Only executable regions (default false)."}}},
+                {"skipSystemModules", QJsonObject{{"type", "boolean"}, {"description", "Skip ntdll/kernel32/etc. (default true)."}}},
+                {"regions", QJsonObject{{"type", "array"},
+                    {"description", "Restrict to [startHex,endHex] ranges (intersected with provider regions)."},
+                    {"items", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}}}}}}
+            }}
         }}
     });
 
@@ -1096,6 +1190,9 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "node.history")  result = toolNodeHistory(args);
     else if (toolName == "scanner.scan")  result = toolScannerScan(args);
     else if (toolName == "scanner.scan_pattern") result = toolScannerScanPattern(args);
+    else if (toolName == "scanner.rescan")  result = toolScannerRescan(args);
+    else if (toolName == "scanner.results") result = toolScannerResults(args);
+    else if (toolName == "scanner.find_matrix") result = toolScannerFindMatrix(args);
     else if (toolName == "mcp.reconnect") result = toolReconnect(args);
     else if (toolName == "process.info") result = toolProcessInfo(args);
     else if (toolName == "symbols.load") result = toolSymbolsLoad(args);
@@ -2293,6 +2390,58 @@ static QVector<AddressRange> parseRegionsArg(const QJsonObject& args, QString* e
     return out;
 }
 
+static ScanCondition scanConditionFromString(const QString& s, bool* ok = nullptr) {
+    QString l = s.trimmed().toLower();
+    if (ok) *ok = true;
+    if (l == QStringLiteral("exact") || l == QStringLiteral("exactvalue"))       return ScanCondition::ExactValue;
+    if (l == QStringLiteral("unknown") || l == QStringLiteral("unknownvalue"))   return ScanCondition::UnknownValue;
+    if (l == QStringLiteral("changed"))     return ScanCondition::Changed;
+    if (l == QStringLiteral("unchanged"))   return ScanCondition::Unchanged;
+    if (l == QStringLiteral("increased"))   return ScanCondition::Increased;
+    if (l == QStringLiteral("decreased"))   return ScanCondition::Decreased;
+    if (l == QStringLiteral("bigger") || l == QStringLiteral("biggerthan"))   return ScanCondition::BiggerThan;
+    if (l == QStringLiteral("smaller") || l == QStringLiteral("smallerthan")) return ScanCondition::SmallerThan;
+    if (l == QStringLiteral("between"))     return ScanCondition::Between;
+    if (l == QStringLiteral("increased_by") || l == QStringLiteral("increasedby")) return ScanCondition::IncreasedBy;
+    if (l == QStringLiteral("decreased_by") || l == QStringLiteral("decreasedby")) return ScanCondition::DecreasedBy;
+    if (ok) *ok = false;
+    return ScanCondition::ExactValue;
+}
+
+// Build a structured, paged text response over a scan result set. scanId is the
+// panel's scan generation (so the agent can detect a set that changed under it).
+static QString buildScanPage(ScannerPanel* panel, const QVector<ScanResult>& results,
+                             int offset, int limit, bool capped, const QString& header) {
+    const int total = results.size();
+    offset = qMax(0, offset);
+    limit  = qBound(1, limit, 500);
+    QString msg = header;
+    msg += QStringLiteral("\nscanId=%1  total=%2  capped=%3")
+        .arg(panel->scanGeneration()).arg(total).arg(capped ? QStringLiteral("true") : QStringLiteral("false"));
+    if (total == 0) {
+        msg += QStringLiteral("\n(no results)");
+        return msg;
+    }
+    if (offset >= total) {
+        msg += QStringLiteral("\n(offset %1 is past the end; total=%2)").arg(offset).arg(total);
+        return msg;
+    }
+    int end = qMin(total, offset + limit);
+    msg += QStringLiteral("\nshowing [%1, %2):").arg(offset).arg(end);
+    for (int i = offset; i < end; i++) {
+        const ScanResult& r = results[i];
+        msg += QStringLiteral("\n  0x%1").arg(r.address, 16, 16, QChar('0'));
+        QString val = panel->formatValuePublic(r.scanValue);
+        if (!val.isEmpty()) msg += QStringLiteral("  = %1").arg(val);
+        if (!r.previousValue.isEmpty())
+            msg += QStringLiteral("  (prev %1)").arg(panel->formatValuePublic(r.previousValue));
+        if (!r.regionModule.isEmpty()) msg += QStringLiteral("  [%1]").arg(r.regionModule);
+    }
+    if (end < total)
+        msg += QStringLiteral("\n  ... %1 more (use offset=%2 to page)").arg(total - end).arg(end);
+    return msg;
+}
+
 QJsonObject McpBridge::toolScannerScan(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
@@ -2301,12 +2450,24 @@ QJsonObject McpBridge::toolScannerScan(const QJsonObject& args) {
     if (!panel) return makeTextResult("Scanner panel not available", true);
 
     QString valueTypeStr = args.value("valueType").toString();
-    QString value = args.value("value").toString();
-    bool filterExec = args.value("filterExecutable").toBool();
+    QString value   = args.value("value").toString();
+    QString value2  = args.value("value2").toString();
+    QString condStr = args.value("condition").toString(QStringLiteral("exact"));
+    bool filterExec  = args.value("filterExecutable").toBool();
     bool filterWrite = args.value("filterWritable").toBool();
+    bool skipSys     = args.value("skipSystemModules").toBool();
+    int offset = args.value("offset").toInt(0);
+    int limit  = args.value("limit").toInt(50);
 
-    if (value.isEmpty())
-        return makeTextResult("Missing 'value' (e.g. \"120\")", true);
+    bool condOk = false;
+    ScanCondition cond = scanConditionFromString(condStr, &condOk);
+    if (!condOk)
+        return makeTextResult(QStringLiteral("Unknown condition '%1'. Use exact | unknown | between | bigger | smaller.").arg(condStr), true);
+
+    // 'unknown' captures every aligned address with no value — the float-capture
+    // entry point for the move-and-rescan-Changed workflow.
+    if (cond != ScanCondition::UnknownValue && value.isEmpty())
+        return makeTextResult("Missing 'value' (or use condition=unknown to capture all aligned values, e.g. floats)", true);
 
     QString regErr;
     auto constrainRegions = parseRegionsArg(args, &regErr);
@@ -2314,28 +2475,146 @@ QJsonObject McpBridge::toolScannerScan(const QJsonObject& args) {
         return makeTextResult(regErr, true);
 
     ValueType vt = valueTypeFromString(valueTypeStr);
-    QVector<ScanResult> results = panel->runValueScanAndWait(vt, value, filterExec, filterWrite, constrainRegions);
+    QVector<ScanResult> results = panel->runValueScanAndWait(
+        vt, cond, value, value2, filterExec, filterWrite, skipSys, constrainRegions);
 
-    QString msg = QStringLiteral("Scan (%1 = %2): %3 result(s).")
-        .arg(valueTypeStr.isEmpty() ? QStringLiteral("float") : valueTypeStr)
-        .arg(value)
-        .arg(results.size());
-    if (!constrainRegions.isEmpty()) {
-        uint64_t totalConstrained = 0;
-        for (const auto& r : constrainRegions) totalConstrained += r.end - r.start;
-        msg += QStringLiteral("\nRegion constraint: %1 range(s), %2 bytes total requested.")
-            .arg(constrainRegions.size()).arg(totalConstrained);
+    bool capped = results.size() >= 10000000 ||
+                  (cond != ScanCondition::UnknownValue && results.size() >= 50000);
+    QString header = QStringLiteral("Scan %1 (%2)")
+        .arg(valueTypeStr.isEmpty() ? QStringLiteral("float") : valueTypeStr, condStr);
+    if (capped)
+        header += QStringLiteral(" — CAPPED; narrow with 'regions'/filters then rescan");
+    return makeTextResult(buildScanPage(panel, results, offset, limit, capped, header));
+}
+
+QJsonObject McpBridge::toolScannerRescan(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+    ScannerPanel* panel = m_mainWindow->m_scannerPanel;
+    if (!panel) return makeTextResult("Scanner panel not available", true);
+
+    if (panel->results().isEmpty())
+        return makeTextResult("No current scan. Run scanner.scan first, then narrow with scanner.rescan.", true);
+
+    QString condStr = args.value("condition").toString();
+    if (condStr.isEmpty())
+        return makeTextResult("Missing 'condition' (changed | unchanged | increased | decreased | bigger | smaller | between | exact | increased_by | decreased_by)", true);
+    bool condOk = false;
+    ScanCondition cond = scanConditionFromString(condStr, &condOk);
+    if (!condOk)
+        return makeTextResult(QStringLiteral("Unknown condition '%1'.").arg(condStr), true);
+
+    if (args.contains("scanId")) {
+        int sid = args.value("scanId").toInt();
+        if (sid != panel->scanGeneration())
+            return makeTextResult(QStringLiteral("scanId %1 is stale (current %2); re-read with scanner.results.")
+                                  .arg(sid).arg(panel->scanGeneration()), true);
     }
-    const int showAddrs = 15;
-    if (!results.isEmpty()) {
-        msg += QStringLiteral("\nFirst addresses:");
-        for (int i = 0; i < qMin(results.size(), showAddrs); i++) {
-            msg += QStringLiteral("\n  0x%1").arg(results[i].address, 16, 16, QChar('0'));
-            if (!results[i].regionModule.isEmpty())
-                msg += QStringLiteral(" (%1)").arg(results[i].regionModule);
+
+    int before = panel->results().size();
+    QString value  = args.value("value").toString();
+    QString value2 = args.value("value2").toString();
+    QString delta  = args.value("delta").toString();
+    int offset = args.value("offset").toInt(0);
+    int limit  = args.value("limit").toInt(50);
+
+    QVector<ScanResult> narrowed = panel->runRescanAndWait(cond, value, value2, delta);
+    QString header = QStringLiteral("Rescan %1: %2 -> %3").arg(condStr).arg(before).arg(narrowed.size());
+    return makeTextResult(buildScanPage(panel, narrowed, offset, limit, false, header));
+}
+
+QJsonObject McpBridge::toolScannerResults(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+    ScannerPanel* panel = m_mainWindow->m_scannerPanel;
+    if (!panel) return makeTextResult("Scanner panel not available", true);
+
+    const QVector<ScanResult>& results = panel->results();
+    if (results.isEmpty())
+        return makeTextResult("No current scan results. Run scanner.scan first.", true);
+
+    int offset = args.value("offset").toInt(0);
+    int limit  = args.value("limit").toInt(50);
+    int floatWindow = args.value("floatWindow").toInt(0);
+
+    QString msg = buildScanPage(panel, results, offset, limit, false,
+                                QStringLiteral("Current scan results"));
+
+    // Optional: dump a window of floats around each shown address so the agent
+    // can eyeball a contiguous Mat4x4 (16 floats) block near a candidate.
+    if (floatWindow > 0) {
+        floatWindow = qBound(4, floatWindow, 64);
+        std::shared_ptr<rcx::Provider> provider = (tab->doc && tab->doc->provider) ? tab->doc->provider : nullptr;
+        if (provider) {
+            int o = qMax(0, offset);
+            int end = qMin(results.size(), o + qBound(1, limit, 500));
+            int shown = 0;
+            const int kMaxWindows = 8;  // bound output
+            for (int i = o; i < end && shown < kMaxWindows; i++, shown++) {
+                uint64_t base = results[i].address;
+                uint64_t backBytes = (uint64_t)(floatWindow / 2) * 4;
+                uint64_t start = base >= backBytes ? base - backBytes : base;
+                QByteArray buf(floatWindow * 4, '\0');
+                if (provider->read(start, buf.data(), buf.size())) {
+                    msg += QStringLiteral("\n  floats around 0x%1 (from 0x%2):")
+                        .arg(base, 0, 16).arg(start, 0, 16);
+                    const float* f = reinterpret_cast<const float*>(buf.constData());
+                    for (int k = 0; k < floatWindow; k++) {
+                        if (k % 4 == 0) msg += QStringLiteral("\n    ");
+                        msg += QStringLiteral("%1 ").arg((double)f[k], 0, 'g', 6);
+                    }
+                }
+            }
         }
-        if (results.size() > showAddrs)
-            msg += QStringLiteral("\n  ... and %1 more").arg(results.size() - showAddrs);
+    }
+    return makeTextResult(msg);
+}
+
+QJsonObject McpBridge::toolScannerFindMatrix(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+    ScannerPanel* panel = m_mainWindow->m_scannerPanel;
+    if (!panel) return makeTextResult("Scanner panel not available", true);
+
+    MatrixScanParams mp;
+    mp.requireOrthonormal = args.value("requireOrthonormal").toBool(false);
+    if (args.contains("affineEps")) mp.affineEps = (float)args.value("affineEps").toDouble();
+    if (args.contains("orthoEps"))  mp.orthoEps  = (float)args.value("orthoEps").toDouble();
+    if (args.contains("magMax"))    mp.magMax    = (float)args.value("magMax").toDouble();
+    if (args.contains("minScore"))  mp.minScore  = args.value("minScore").toInt();
+
+    bool filterWrite = args.value("filterWritable").toBool(true);
+    bool filterExec  = args.value("filterExecutable").toBool(false);
+    bool skipSys     = args.value("skipSystemModules").toBool(true);
+    int  maxCand     = args.value("maxCandidates").toInt(32);
+
+    QString regErr;
+    auto constrainRegions = parseRegionsArg(args, &regErr);
+    if (!regErr.isEmpty())
+        return makeTextResult(regErr, true);
+
+    QVector<ScanResult> results = panel->runMatrixScanAndWait(
+        mp, filterExec, filterWrite, skipSys, maxCand, constrainRegions);
+
+    QString msg = QStringLiteral("find_matrix: %1 candidate(s) (scanId=%2). Then move/rotate the camera "
+                                 "and scanner.rescan condition=changed to confirm the LIVE matrix.")
+        .arg(results.size()).arg(panel->scanGeneration());
+    int shown = 0;
+    for (const ScanResult& r : results) {
+        if (shown++ >= 16) {
+            msg += QStringLiteral("\n  ... %1 more").arg(results.size() - 16);
+            break;
+        }
+        msg += QStringLiteral("\n  0x%1  score=%2").arg(r.address, 0, 16).arg(r.matchScore);
+        if (!r.regionModule.isEmpty()) msg += QStringLiteral("  [%1]").arg(r.regionModule);
+        if (r.scanValue.size() >= 64) {
+            const float* f = reinterpret_cast<const float*>(r.scanValue.constData());
+            for (int row = 0; row < 4; row++) {
+                msg += QStringLiteral("\n      [%1 %2 %3 %4]")
+                    .arg((double)f[row*4+0], 0, 'g', 5).arg((double)f[row*4+1], 0, 'g', 5)
+                    .arg((double)f[row*4+2], 0, 'g', 5).arg((double)f[row*4+3], 0, 'g', 5);
+            }
+        }
     }
     return makeTextResult(msg);
 }

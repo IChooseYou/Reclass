@@ -1,5 +1,6 @@
 #include "sourcechooserpopup.h"
 #include "themes/thememanager.h"
+#include "fontutil.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -105,7 +106,7 @@ public:
                 return QSize(opt.rect.width(), fm.height() + 8);
             if (hasSubline(e)) {
                 QFont small = baseFont;
-                small.setPointSize(qMax(7, baseFont.pointSize() - 2));
+                small.setPointSize(qMax(7, rcx::resolvedPointSize(baseFont) - 2));
                 return QSize(opt.rect.width(), fm.height() + QFontMetrics(small).height() + 14);
             }
         }
@@ -124,7 +125,7 @@ public:
         QRect r = opt.rect;
 
         QFont smallFont = baseFont;
-        smallFont.setPointSize(qMax(7, baseFont.pointSize() - 2));
+        smallFont.setPointSize(qMax(7, rcx::resolvedPointSize(baseFont) - 2));
         QFontMetrics sfm(smallFont);
 
         // ── Section header ──
@@ -408,7 +409,7 @@ void SourceChooserPopup::setFont(const QFont& font) {
     m_titleLabel->setFont(bold);
 
     QFont small = font;
-    small.setPointSize(qMax(7, font.pointSize() - 2));
+    small.setPointSize(qMax(7, rcx::resolvedPointSize(font) - 2));
     m_footerLabel->setFont(small);
     m_escBtn->setFont(small);
 
@@ -550,7 +551,7 @@ void SourceChooserPopup::popup(const QPoint& globalPos) {
     int popupW = qBound(360, (m_cachedMaxNameLen + 24) * charW, 560);
 
     QFont small = m_font;
-    small.setPointSize(qMax(7, m_font.pointSize() - 2));
+    small.setPointSize(qMax(7, rcx::resolvedPointSize(m_font) - 2));
     QFontMetrics sfm(small);
 
     int singleRowH = fm.height() + 12;

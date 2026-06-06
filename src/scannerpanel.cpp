@@ -27,6 +27,7 @@
 #include <QLocale>
 #include <QStyle>
 #include <QFrame>
+#include "fontutil.h"   // resolvedPointSize — guards pixel-font size derivations
 
 namespace rcx {
 
@@ -81,11 +82,17 @@ protected:
         int x      = (width() - blockW) / 2;
         int baseline = (height() + fm.ascent() - fm.descent()) / 2;
 
+        // Brightness ladder is text > textDim > textMuted > textFaint. The
+        // chips are the CONTENT of their section, so they must not be dimmer
+        // than the section header (textDim) above them — otherwise the label
+        // reads as lighter than its own content. Unchecked pip/text sit at
+        // textMuted/textDim (>= header); checked uses the scanner accent +
+        // full-strength text.
         p.fillRect(x, (height() - pipSz) / 2, pipSz, pipSz,
-                   chk ? onColor : t.textFaint);
+                   chk ? onColor : t.textMuted);
         x += pipSz + gap;
 
-        p.setPen(chk ? t.text : t.textMuted);
+        p.setPen(chk ? t.text : t.textDim);
         p.setFont(font());
         p.drawText(x, baseline, text());
     }
@@ -141,7 +148,7 @@ protected:
 // pulls its theme colors from the live theme manager.
 class ScanButton : public QPushButton {
 public:
-    enum Style { Primary, Secondary, Subtle };
+    enum Style { Primary, Secondary, Flat };
     explicit ScanButton(const QIcon& ic, const QString& label,
                         Style s = Secondary, QWidget* parent = nullptr)
         : QPushButton(ic, label, parent), m_style(s) {
@@ -166,37 +173,32 @@ private:
         // hover background = theme.hover, NEVER a solid accent fill. The
         // "primary" affordance is a thin 2 px accent border on top — a
         // subtle pulse, not a glaring purple slab.
-        QString fg, accent;
+        // Clean, flat buttons — NO accent top-stripe (it was visual noise and
+        // clipped at the panel edge). A 3-tier visual ladder instead:
+        //   Primary   = the one clear primary (First Scan): faint raised fill +
+        //               soft accent border, never a glaring slab.
+        //   Secondary = bordered (Next Scan / Go to / Copy).
+        //   Flat      = text-only until hover (Undo / Reset).
+        QString border;
         switch (m_style) {
-        case Primary:
-            fg     = t.text.name();
-            accent = t.indHoverSpan.name();   // 2 px top stripe only
-            break;
-        case Secondary:
-            fg     = t.text.name();
-            accent = QStringLiteral("transparent");
-            break;
-        case Subtle:
-            fg     = t.textDim.name();
-            accent = QStringLiteral("transparent");
-            break;
+        case Primary:   border = t.borderFocused.name(); break;  // accent outline = the one primary
+        case Secondary: border = t.border.name(); break;
+        case Flat:      border = QStringLiteral("transparent"); break;
         }
-        // [iter 47] When the button is mid-cancel (scan in flight), use the
-        // theme's `focusGlow` (documented as warm amber, used by the MCP
-        // focus pulse) for the top stripe — reads as "click to abort"
-        // instead of "click to start a fresh scan." Pulled from the theme
-        // so light/dark/custom themes stay consistent.
-        if (property("scanCancel").toBool()) {
-            accent = t.focusGlow.name();
-        }
+        // [iter 47] Mid-cancel (scan in flight): a full warm `focusGlow` border
+        // reads as "click to abort" — theme-derived so all themes stay coherent.
+        if (property("scanCancel").toBool())
+            border = t.focusGlow.name();
+        // Outline-only and SQUARE — the app uses no rounded corners and no
+        // filled-slab buttons. Resting background is transparent for every
+        // style; hover paints the fill. Primary is just the accent-outlined one.
         setStyleSheet(QStringLiteral(
-            "QPushButton { background: transparent; color:%1;"
-            "  border: 1px solid %2; border-top: 2px solid %3;"
-            "  border-radius: 2px; padding: 2px 12px; }"
-            "QPushButton:hover { background:%4; }"
-            "QPushButton:pressed { background:%5; }"
-            "QPushButton:disabled { color:%6; border-top-color: %2; }")
-            .arg(fg, t.border.name(), accent,
+            "QPushButton { background: transparent; color:%1; border:1px solid %2;"
+            "  padding:3px 12px; }"
+            "QPushButton:hover { background:%3; }"
+            "QPushButton:pressed { background:%4; }"
+            "QPushButton:disabled { color:%5; }")
+            .arg(t.text.name(), border,
                  t.hover.name(), t.hover.darker(115).name(), t.textMuted.name()));
     }
 };
@@ -235,6 +237,26 @@ void AddressDelegate::paint(QPainter* painter, const QStyleOptionViewItem& optio
     painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, text.mid(dimEnd));
 }
 
+// Makes the in-place cell editor inherit the item's DISPLAY alignment. Qt's
+// default editor is always left-aligned, so double-clicking a right-aligned
+// numeric value cell popped a left-aligned QLineEdit — the text jumped sides
+// the moment you started editing. Reading the item's TextAlignmentRole and
+// applying it to the editor keeps edit and display in lockstep.
+class AlignedEditorDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem& opt,
+                          const QModelIndex& index) const override {
+        QWidget* w = QStyledItemDelegate::createEditor(parent, opt, index);
+        if (auto* le = qobject_cast<QLineEdit*>(w)) {
+            const QVariant a = index.data(Qt::TextAlignmentRole);
+            if (a.isValid())
+                le->setAlignment(static_cast<Qt::Alignment>(a.toInt()));
+        }
+        return w;
+    }
+};
+
 ScannerPanel::ScannerPanel(QWidget* parent)
     : QWidget(parent)
     , m_engine(new ScanEngine(this))
@@ -247,28 +269,79 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     // sections add their own header padding for breathing).
     mainLayout->setSpacing(7);
 
-    // Helper: small all-caps section header. Mirrors the workspace's
-    // "ALL TYPES" / "PINNED" label style — proper visual grouping
-    // instead of inline "Filters:" labels jammed into the controls.
-    auto makeSectionHeader = [this](const QString& text) -> QLabel* {
-        auto* lbl = new QLabel(text, this);
-        lbl->setProperty("scannerHeader", true);
-        QFont f = lbl->font();
-        f.setPointSize(qMax(8, f.pointSize() - 2));
-        f.setCapitalization(QFont::AllUppercase);
-        // [iter 3] Brighter section headers — bumped letter-spacing from 1
-        // to 1.5 px so they read as proper category dividers, not muted
-        // labels easy to miss.
-        f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
-        // [iter 4] Bolder weight for the section header so it competes
-        // for attention with the inputs that follow it.
-        f.setWeight(QFont::DemiBold);
-        lbl->setFont(f);
-        // [iter 5] Top margin gives breathing room above each section,
-        // bottom margin keeps the input cluster snug to its header.
-        lbl->setContentsMargins(0, 4, 0, 1);
-        return lbl;
+    // Helper: a flush SECTION group — a borderless QFrame with a small all-caps
+    // header label (dim, full-width underline divider) at the top and a content
+    // VBox below, so the eye can see where the group begins. Used for the
+    // RESULTS section; the SCAN FOR group is hand-built above because its header
+    // is a clickable collapse toggle rather than a plain label. Returns the
+    // frame; the caller fills `*outContent`.
+    auto makeSection = [this](const QString& title, QVBoxLayout** outContent) -> QFrame* {
+        auto* frame = new QFrame(this);
+        frame->setObjectName(QStringLiteral("scanSection"));  // styled in applyTheme
+        auto* v = new QVBoxLayout(frame);
+        // No box, so no inset padding — content sits flush and the header's
+        // underline divider spans the full panel width (mainLayout supplies the
+        // outer margin). Just a little vertical breathing room per section.
+        v->setContentsMargins(0, 4, 0, 4);
+        v->setSpacing(6);
+        if (!title.isEmpty()) {
+            auto* hdr = new QLabel(title, frame);
+            hdr->setProperty("scannerHeader", true);   // textDim (dimmer than content)
+            QFont f = hdr->font();
+            f.setPointSize(qMax(8, resolvedPointSize(f) - 2));
+            f.setCapitalization(QFont::AllUppercase);
+            f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
+            f.setWeight(QFont::DemiBold);
+            hdr->setFont(f);
+            v->addWidget(hdr);
+        }
+        *outContent = v;
+        return frame;
     };
+
+    // Two real sections now: a single collapsible SCAN FOR group and RESULTS.
+    // The SCAN FOR group is hand-built (its header is a clickable toggle, not a
+    // plain label); RESULTS still uses makeSection. RESULTS gets the vertical
+    // stretch so the table grows with the dock.
+    auto* scanSection = new QFrame(this);
+    scanSection->setObjectName(QStringLiteral("scanSection"));
+    auto* scanContent = new QVBoxLayout(scanSection);
+    scanContent->setContentsMargins(0, 4, 0, 4);
+    scanContent->setSpacing(6);
+
+    // Clickable header: chevron + "SCAN FOR". Same visual language as the
+    // scannerHeader labels (uppercase, letter-spaced, demibold, dim, full-width
+    // underline divider) but it toggles the criteria body below it.
+    m_scanForHeader = new QPushButton(scanSection);
+    m_scanForHeader->setProperty("scanForHeader", true);   // styled in applyTheme
+    m_scanForHeader->setText(QString::fromUtf8("\xE2\x96\xBE  SCAN FOR"));  // ▾
+    m_scanForHeader->setCursor(Qt::PointingHandCursor);
+    m_scanForHeader->setFlat(true);
+    m_scanForHeader->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    {
+        QFont f = m_scanForHeader->font();
+        f.setPointSize(qMax(8, resolvedPointSize(f) - 2));
+        f.setCapitalization(QFont::AllUppercase);
+        f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
+        f.setWeight(QFont::DemiBold);
+        m_scanForHeader->setFont(f);
+    }
+    connect(m_scanForHeader, &QPushButton::clicked, this,
+            [this]() { setScanForCollapsed(!m_scanForCollapsed); });
+    scanContent->addWidget(m_scanForHeader);
+
+    // The collapsible body holds the criteria form + fast-scan + filter chips.
+    // Action buttons + progress strip are added straight into scanContent
+    // (above the body) so they remain visible when the group is collapsed.
+    m_scanBody = new QWidget(scanSection);
+    auto* bodyContent = new QVBoxLayout(m_scanBody);
+    bodyContent->setContentsMargins(0, 0, 0, 0);
+    bodyContent->setSpacing(6);
+
+    QVBoxLayout* resultsContent = nullptr;
+    QFrame* resultsSection = makeSection(QStringLiteral("Results"), &resultsContent);
+    mainLayout->addWidget(scanSection);
+    mainLayout->addWidget(resultsSection, 1);
 
     // ═══════════════════════════════════════════════════════════════════
     // ROW 1 — Action buttons (Cheat Engine layout)
@@ -294,7 +367,7 @@ ScannerPanel::ScannerPanel(QWidget* parent)
 
     m_updateBtn = new ScanButton(QIcon(QStringLiteral(":/vsicons/refresh.svg")),
                                   QStringLiteral("&Next Scan"),
-                                  ScanButton::Primary, this);
+                                  ScanButton::Secondary, this);
     m_updateBtn->setToolTip(QStringLiteral(
         "Narrow existing results with the current condition.  (Alt+N)"));
     m_updateBtn->setEnabled(false);
@@ -302,7 +375,7 @@ ScannerPanel::ScannerPanel(QWidget* parent)
 
     m_undoBtn = new ScanButton(QIcon(QStringLiteral(":/vsicons/arrow-left.svg")),
                                 QStringLiteral("&Undo Scan"),
-                                ScanButton::Secondary, this);
+                                ScanButton::Flat, this);
     m_undoBtn->setToolTip(QStringLiteral(
         "Revert to the previous result list (use after a Next Scan that "
         "narrowed too aggressively).  (Alt+U / Ctrl+Z)"));
@@ -320,23 +393,23 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_stageLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     m_stageLabel->setMinimumWidth(0);
 
-    // Secondary (not Subtle) — Subtle uses theme.textDim which on most
-    // themes reads as "disabled" because it's only a hair away from
-    // theme.textMuted. Reset is a real action; users were assuming it
-    // was greyed out.
+    // Flat (text-only until hover). Reset is a real action but a quiet one —
+    // Flat keeps full-strength text (theme.text), so it never reads as the
+    // greyed-disabled look the old Subtle/textDim style produced.
     m_newScanBtn = new ScanButton(QIcon(QStringLiteral(":/vsicons/clear-all.svg")),
                                    QStringLiteral("&Reset"),
-                                   ScanButton::Secondary, this);
+                                   ScanButton::Flat, this);
     m_newScanBtn->setToolTip(QStringLiteral(
         "Discard current results and start over.  (Alt+R)"));
     m_newScanBtn->setVisible(false);
-    // Reset gets a fixed natural width so the breadcrumb can never crowd
-    // it off-screen; sizePolicy(Fixed) plus the explicit ordering
-    // guarantees Reset always reserves its slot first.
     m_newScanBtn->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    actionRow->addWidget(m_newScanBtn, 0, Qt::AlignRight);
+    // A stretch separates the primary cluster (First/Next/Undo) from Reset,
+    // pushing Reset to the right edge cleanly — the old AlignRight-without-a-
+    // stretch let it crowd the others and clip.
+    actionRow->addStretch(1);
+    actionRow->addWidget(m_newScanBtn);
 
-    mainLayout->addLayout(actionRow);
+    scanContent->addLayout(actionRow);
     updateStageLabel();
 
     // Skinny progress strip — invisible until a scan is in flight.
@@ -345,7 +418,7 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_progressBar->setTextVisible(false);
     m_progressBar->setFixedHeight(2);
     m_progressBar->hide();
-    mainLayout->addWidget(m_progressBar);
+    scanContent->addWidget(m_progressBar);
 
     // ═══════════════════════════════════════════════════════════════════
     // FORM GRID — Value / Scan Type / Value Type, aligned in two columns
@@ -505,10 +578,12 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_typeCombo->setToolTip(QStringLiteral("Bit width / signedness"));
     form->addWidget(m_typeCombo, 2, 1);
 
-    mainLayout->addLayout(form);
+    // Criteria form goes into the collapsible body — the SCAN FOR group header
+    // already labels it, so no redundant "Scan for" sub-header here.
+    bodyContent->addLayout(form);
 
     // ═══════════════════════════════════════════════════════════════════
-    // SECTION — FAST SCAN ALIGNMENT (above "Where to scan")
+    // SECTION — FAST SCAN ALIGNMENT (inside the SCAN FOR body)
     // ═══════════════════════════════════════════════════════════════════
     // Cheat-Engine convention: higher alignment = faster scan but skips
     // values stored at unusual offsets. 4 (dword) is the default that
@@ -536,14 +611,13 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         fastScanRow->addWidget(m_fastScanCombo);
 
         fastScanRow->addStretch();
-        mainLayout->addLayout(fastScanRow);
+        bodyContent->addLayout(fastScanRow);
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // SECTION — WHERE TO SCAN
+    // FILTER CHIPS — region constraints, folded into the SCAN FOR body
     // ═══════════════════════════════════════════════════════════════════
-    mainLayout->addWidget(makeSectionHeader(QStringLiteral("Where to scan")));
-
+    // (No standalone "Where to scan" header — these are part of SCAN FOR.)
     auto* filterRow = new QHBoxLayout;
     // [iter 9] Chip row gets 4 px sibling spacing matching action row.
     filterRow->setSpacing(4);
@@ -580,12 +654,14 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_skipSystemCheck->hide();
 
     filterRow->addStretch();
-    mainLayout->addLayout(filterRow);
+    bodyContent->addLayout(filterRow);
+
+    // Mount the collapsible body under the action row / progress strip.
+    scanContent->addWidget(m_scanBody);
 
     // ═══════════════════════════════════════════════════════════════════
-    // SECTION 4 — RESULTS
+    // SECTION — RESULTS  (fills the resultsSection panel)
     // ═══════════════════════════════════════════════════════════════════
-    mainLayout->addWidget(makeSectionHeader(QStringLiteral("Results")));
 
     // Stage label (the breadcrumb with the colored circle dot, e.g.
     // "● First scan: 47 results — change condition and click Next Scan")
@@ -596,13 +672,13 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         m_stageLabel->setMinimumHeight(fm.height() + 4);
     }
     m_stageLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    mainLayout->addWidget(m_stageLabel);
+    resultsContent->addWidget(m_stageLabel);
 
     // m_statusLabel kept as a hidden sibling so existing call sites that
     // write transient status (errors, copy/write feedback, live filter
     // "X of Y match") don't crash. Mirrored into the stage label by
     // updateScanStatusLine() so the user actually sees them.
-    m_statusLabel = new QLabel(QString(), this);
+    m_statusLabel = new QLabel(QStringLiteral("Ready"), this);
     m_statusLabel->setProperty("scannerStatus", true);
     m_statusLabel->setTextFormat(Qt::AutoText);
     m_statusLabel->setWordWrap(true);
@@ -620,13 +696,13 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     // shortcut isn't a hidden affordance.
     m_resultFilter->setToolTip(QStringLiteral(
         "Filter the rows currently shown.  Ctrl+L to focus, Esc to clear."));
-    mainLayout->addWidget(m_resultFilter);
+    resultsContent->addWidget(m_resultFilter);
 
     // Truncation banner — only visible when display is capped.
     m_truncBanner = new QLabel(this);
     m_truncBanner->setVisible(false);
     m_truncBanner->setContentsMargins(6, 3, 6, 3);
-    mainLayout->addWidget(m_truncBanner);
+    resultsContent->addWidget(m_truncBanner);
 
     // ── Results table ──
     m_resultTable = new QTableWidget(this);
@@ -682,14 +758,17 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     // Address column delegate for dimmed leading zeros
     m_addrDelegate = new AddressDelegate(this);
     m_resultTable->setItemDelegateForColumn(0, m_addrDelegate);
-    mainLayout->addWidget(m_resultTable, 1);
+    // Value column: editor inherits the cell's (right-aligned, for numerics)
+    // alignment so double-click editing doesn't jump the text to the left.
+    m_resultTable->setItemDelegateForColumn(1, new AlignedEditorDelegate(this));
+    resultsContent->addWidget(m_resultTable, 1);
 
     // ── Bottom strip: per-row actions ──
     // Status line moved up under the Results header — this row only carries
     // the per-selection actions now.
     auto* selectionRow = new QHBoxLayout;
     selectionRow->setSpacing(6);
-    selectionRow->setContentsMargins(0, 2, 0, 0);
+    selectionRow->setContentsMargins(0, 4, 0, 0);   // snug under the table
     selectionRow->addStretch(1);
 
     m_gotoBtn = new ScanButton(QIcon(QStringLiteral(":/vsicons/arrow-right.svg")),
@@ -709,7 +788,7 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     selectionRow->addWidget(m_copyBtn);
     selectionRow->addSpacing(20);  // room for resize grip when floating
 
-    mainLayout->addLayout(selectionRow);
+    resultsContent->addLayout(selectionRow);
 
     // ── Initial state: VALUE mode + Exact Value ──
     // Value scans are the more common starting point (find a number in
@@ -745,10 +824,17 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         bool hasInput = isSig
             ? !m_patternEdit->text().trimmed().isEmpty()
             : (!needsValue || !m_valueEdit->text().trimmed().isEmpty());
+        // Between needs BOTH bounds — don't enable First Scan with only the
+        // lower bound (it would fire a request that errors on the upper bound).
+        if (!isSig && hasInput
+            && (ScanCondition)m_condCombo->currentData().toInt() == ScanCondition::Between
+            && m_value2Edit->text().trimmed().isEmpty())
+            hasInput = false;
         m_scanBtn->setEnabled(hasInput);
     };
     connect(m_patternEdit, &QLineEdit::textChanged, this, syncScanEnabled);
     connect(m_valueEdit,   &QLineEdit::textChanged, this, syncScanEnabled);
+    connect(m_value2Edit,  &QLineEdit::textChanged, this, syncScanEnabled);
     connect(m_modeCombo,   QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, syncScanEnabled);
     connect(m_condCombo,   QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -841,11 +927,6 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     connect(rescanShortcut, &QShortcut::activated, this, [this]() {
         if (m_updateBtn->isEnabled()) onUpdateClicked();
     });
-    // [iter 21] Esc inside the result-filter clears it (matches the
-    // editor's find bar behaviour).
-    auto* clearFilterShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), m_resultFilter);
-    clearFilterShortcut->setContext(Qt::WidgetShortcut);
-    connect(clearFilterShortcut, &QShortcut::activated, m_resultFilter, &QLineEdit::clear);
     // [iter 22] Ctrl+L focuses the result filter — common "jump to
     // search" muscle memory from terminals/browsers.
     auto* focusFilter = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_L), this);
@@ -854,12 +935,16 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         m_resultFilter->setFocus();
         m_resultFilter->selectAll();
     });
-    // [iter 23] Esc on the panel cancels a running scan instead of
-    // forcing the user to find the Cancel button.
+    // [iter 23] A single Esc handler avoids the ambiguous-shortcut conflict of
+    // having two Esc shortcuts: if the result filter is focused with text,
+    // clear it (find-bar behaviour); otherwise cancel a running scan.
     auto* cancelShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     cancelShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(cancelShortcut, &QShortcut::activated, this, [this]() {
-        if (m_engine->isRunning()) m_engine->abort();
+        if (m_resultFilter->hasFocus() && !m_resultFilter->text().isEmpty())
+            m_resultFilter->clear();
+        else if (m_engine->isRunning())
+            m_engine->abort();
     });
     // [iter 24] Ctrl+Z = Undo Scan; Ctrl+Shift+Z disabled (CE doesn't
     // have a redo concept). Activates only when Undo Scan is enabled.
@@ -1039,6 +1124,34 @@ ScannerPanel::ScannerPanel(QWidget* parent)
             m_statusLabel->setText(cur);
         }
     });
+
+    // Suppress only the result-table CELL tooltips — Qt auto-shows a tooltip
+    // with the full cell text when an item is elided, and those flickered/
+    // fought with the hover UI. We scope the swallow to the table VIEWPORT so
+    // the genuinely useful tooltips elsewhere still show: the column-header
+    // hints (sort/edit), the per-condition dropdown help, and button/checkbox
+    // tooltips. (Previously the filter was installed on the whole subtree and
+    // killed all of them.)
+    if (m_resultTable && m_resultTable->viewport())
+        m_resultTable->viewport()->installEventFilter(this);
+
+    // Sync chevron + body visibility to the initial (default-expanded) state.
+    setScanForCollapsed(m_scanForCollapsed);
+}
+
+void ScannerPanel::setScanForCollapsed(bool c) {
+    m_scanForCollapsed = c;
+    if (m_scanBody) m_scanBody->setVisible(!c);
+    if (m_scanForHeader)
+        m_scanForHeader->setText(c ? QString::fromUtf8("\xE2\x96\xB8  SCAN FOR")    // ▸
+                                   : QString::fromUtf8("\xE2\x96\xBE  SCAN FOR")); // ▾
+}
+
+bool ScannerPanel::eventFilter(QObject* obj, QEvent* event) {
+    if (event->type() == QEvent::ToolTip
+        && m_resultTable && obj == m_resultTable->viewport())
+        return true;  // swallow elided-cell auto-tooltips in the result grid
+    return QWidget::eventFilter(obj, event);
 }
 
 void ScannerPanel::setProviderGetter(ProviderGetter getter) {
@@ -1180,6 +1293,13 @@ void ScannerPanel::onConditionChanged(int /*index*/) {
     m_valueLabel->setEnabled(needsValue);
     m_value2Edit->setVisible(needsRange);
     m_value2Label->setVisible(needsRange);
+    // Drop the upper-bound field from the tab chain when it's hidden, so Tab
+    // doesn't stop on an invisible widget on non-Between conditions.
+    m_value2Edit->setFocusPolicy(needsRange ? Qt::StrongFocus : Qt::NoFocus);
+    // Make the panel's focus proxy follow the visible primary input — focusing
+    // the dock (Ctrl+Shift+S / title click) should land on the field the user
+    // can actually type into, which is the pattern field in signature mode.
+    setFocusProxy(isSig ? m_patternEdit : m_valueEdit);
 
     // The value-type combo only applies to value scans.
     m_typeLabel->setEnabled(!isSig);
@@ -1436,6 +1556,252 @@ QVector<ScanResult> ScannerPanel::runPatternScanAndWait(std::shared_ptr<Provider
     return results;
 }
 
+QVector<ScanResult> ScannerPanel::runValueScanAndWait(ValueType valueType, ScanCondition condition,
+                                                      const QString& value, const QString& value2,
+                                                      bool filterExecutable, bool filterWritable,
+                                                      bool skipSystemModules,
+                                                      const QVector<AddressRange>& constrainRegions,
+                                                      int timeoutMs) {
+    QVector<ScanResult> results;
+    QString err;
+    ScanRequest req;
+    req.valueType = valueType;
+    req.valueSize = valueSizeForType(valueType);
+    req.alignment = naturalAlignment(valueType);
+    req.condition = condition;
+    req.filterExecutable  = filterExecutable;
+    req.filterWritable    = filterWritable;
+    req.skipSystemModules = skipSystemModules;
+    req.constrainRegions  = constrainRegions;
+
+    // Condition handling mirrors buildRequest()'s value-mode branch.
+    if (condition == ScanCondition::Changed   || condition == ScanCondition::Unchanged ||
+        condition == ScanCondition::Increased || condition == ScanCondition::Decreased ||
+        condition == ScanCondition::IncreasedBy || condition == ScanCondition::DecreasedBy) {
+        // No baseline on a first scan — capture every aligned address; the real
+        // comparison happens on the following runRescanAndWait.
+        req.condition  = ScanCondition::UnknownValue;
+    }
+
+    if (req.condition == ScanCondition::UnknownValue) {
+        req.maxResults = 10000000;   // capture all aligned addresses
+    } else if (req.condition == ScanCondition::BiggerThan ||
+               req.condition == ScanCondition::SmallerThan ||
+               req.condition == ScanCondition::Between) {
+        QByteArray dummyMask;
+        if (!serializeValue(valueType, value, req.pattern, dummyMask, &err)) {
+            m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
+            return results;
+        }
+        if (req.condition == ScanCondition::Between &&
+            !serializeValue(valueType, value2, req.pattern2, dummyMask, &err)) {
+            m_statusLabel->setText(QStringLiteral("Upper bound error: %1").arg(err));
+            return results;
+        }
+        req.mask.fill('\xFF', req.pattern.size());
+    } else {
+        // ExactValue
+        if (!serializeValue(valueType, value, req.pattern, req.mask, &err)) {
+            m_statusLabel->setText(QStringLiteral("Value error: %1").arg(err));
+            return results;
+        }
+    }
+
+    auto provider = m_providerGetter ? m_providerGetter() : nullptr;
+    if (!provider) {
+        m_statusLabel->setText(QStringLiteral("No provider (attach to a process or open a file first)"));
+        return results;
+    }
+    if (m_engine->isRunning()) {
+        m_statusLabel->setText(QStringLiteral("Scan already in progress"));
+        return results;
+    }
+
+    // Set first-scan state BEFORE start() so onScanFinished (permanently connected)
+    // writes m_results with the right condition/pattern — that shared result set is
+    // what runRescanAndWait then narrows.
+    m_lastScanMode  = 1;
+    m_lastValueType = valueType;
+    m_lastCondition = req.condition;
+    m_lastPattern   = req.pattern;
+    m_scanGeneration  = 1;
+    m_lastResultCount = 0;
+    m_progressBar->setValue(0);
+    m_progressBar->show();
+    m_statusLabel->setText(QStringLiteral("Scanning..."));
+
+    bool timedOut = false;
+    QEventLoop loop;
+    connect(m_engine, &ScanEngine::finished, this, [&results, &loop](const QVector<ScanResult>& r) {
+        results = r;
+        loop.quit();
+    }, Qt::SingleShotConnection);
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(&timer, &QTimer::timeout, this, [this, &timedOut, &loop]() {
+        timedOut = true;
+        m_engine->abort();   // runScan checks m_abort and returns partial results via finished()
+        loop.quit();         // safety net if the scan never started / never emits
+    });
+    timer.start(qMax(1000, timeoutMs));
+    m_engine->start(provider, req);
+    loop.exec();
+    timer.stop();
+    // onScanFinished has already populated m_results + the table from finished().
+    if (timedOut)
+        m_statusLabel->setText(QStringLiteral("Scan timed out — %1 partial result(s)").arg(m_results.size()));
+    return results;
+}
+
+QVector<ScanResult> ScannerPanel::runRescanAndWait(ScanCondition condition, const QString& value,
+                                                   const QString& value2, const QString& delta,
+                                                   int timeoutMs) {
+    if (m_results.isEmpty()) {
+        m_statusLabel->setText(QStringLiteral("No current scan to narrow"));
+        return m_results;
+    }
+    if (m_engine->isRunning()) {
+        m_statusLabel->setText(QStringLiteral("Scan already in progress"));
+        return m_results;
+    }
+    std::shared_ptr<Provider> prov = m_providerGetter ? m_providerGetter() : nullptr;
+    if (!prov) {
+        m_statusLabel->setText(QStringLiteral("No source attached"));
+        return m_results;
+    }
+
+    int readSize = (m_lastScanMode == 1) ? valueSize() : 16;
+    // Matrix-scan candidates carry a 64-byte window. Re-read all 64 bytes AND
+    // compare them byte-wise (valueType HexBytes -> memcmp in compareTyped), so
+    // a Changed/Unchanged rescan sees the WHOLE matrix incl. the translation at
+    // bytes 48-59 — not just the first float. This is the find_matrix ->
+    // rescan-changed "confirm the live matrix" flow.
+    const bool matrixResults =
+        (m_lastScanMode == 0 && !m_results.isEmpty() && m_results[0].scanValue.size() == 64);
+    if (matrixResults)
+        readSize = 64;
+    ScanCondition cond = condition;
+    // UnknownValue on rescan = "just re-read values, no filter" (mirrors onUpdateClicked).
+    if (cond == ScanCondition::UnknownValue)
+        cond = ScanCondition::ExactValue;   // with empty filter pattern = update-only
+
+    // Build filter patterns from args, mirroring buildRequest()'s typed-condition handling.
+    QByteArray filterPattern, filterMask, filterPattern2;
+    QString err;
+    const ValueType vt = m_lastValueType;
+    // Full-window byte compare for matrix candidates (see matrixResults above).
+    const ValueType rescanVt = matrixResults ? ValueType::HexBytes : vt;
+    auto fail = [&](const QString& m) { m_statusLabel->setText(m); return m_results; };
+    if (cond == ScanCondition::ExactValue) {
+        if (!value.trimmed().isEmpty() &&
+            !serializeValue(vt, value, filterPattern, filterMask, &err))
+            return fail(QStringLiteral("Value error: %1").arg(err));
+    } else if (cond == ScanCondition::BiggerThan || cond == ScanCondition::SmallerThan) {
+        QByteArray m;
+        if (!serializeValue(vt, value, filterPattern, m, &err))
+            return fail(QStringLiteral("Value error: %1").arg(err));
+    } else if (cond == ScanCondition::Between) {
+        QByteArray m;
+        if (!serializeValue(vt, value, filterPattern, m, &err) ||
+            !serializeValue(vt, value2, filterPattern2, m, &err))
+            return fail(QStringLiteral("Bound error: %1").arg(err));
+    } else if (cond == ScanCondition::IncreasedBy || cond == ScanCondition::DecreasedBy) {
+        QByteArray m;
+        if (!serializeValue(vt, delta, filterPattern, m, &err))
+            return fail(QStringLiteral("Delta error: %1").arg(err));
+    }
+    // Changed/Unchanged/Increased/Decreased need no filter pattern.
+
+    if (!filterPattern.isEmpty())
+        m_lastPattern = filterPattern;
+    m_preRescanCount  = m_results.size();
+    m_lastResultCount = m_preRescanCount;
+    m_scanGeneration  = qMax(2, m_scanGeneration + 1);
+    pushUndoSnapshot();   // so an over-narrowing rescan can be rolled back
+    m_progressBar->setValue(0);
+    m_progressBar->show();
+
+    bool timedOut = false;
+    QEventLoop loop;
+    connect(m_engine, &ScanEngine::rescanFinished, this, [&loop](const QVector<ScanResult>&) {
+        loop.quit();
+    }, Qt::SingleShotConnection);
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(&timer, &QTimer::timeout, this, [this, &timedOut, &loop]() {
+        timedOut = true;
+        m_engine->abort();   // -> runScan returns early -> finished/rescanFinished fires
+        loop.quit();         // safety net if the scan never started / never emits
+    });
+    timer.start(qMax(1000, timeoutMs));
+    m_engine->startRescan(prov, m_results, readSize, cond, rescanVt,
+                          filterPattern, filterMask, filterPattern2);
+    loop.exec();
+    timer.stop();
+    // onRescanFinished has already narrowed m_results + repopulated the table.
+    if (timedOut)
+        m_statusLabel->setText(QStringLiteral("Re-scan timed out — %1 partial result(s)").arg(m_results.size()));
+    return m_results;
+}
+
+QVector<ScanResult> ScannerPanel::runMatrixScanAndWait(const MatrixScanParams& params,
+                                                       bool filterExecutable, bool filterWritable,
+                                                       bool skipSystemModules, int maxCandidates,
+                                                       const QVector<AddressRange>& constrainRegions,
+                                                       int timeoutMs) {
+    QVector<ScanResult> results;
+    ScanRequest req;
+    req.matrixScan        = true;
+    req.matrixParams      = params;
+    req.alignment         = 4;
+    req.filterExecutable  = filterExecutable;
+    req.filterWritable    = filterWritable;
+    req.skipSystemModules = skipSystemModules;
+    req.maxResults        = qMax(1, maxCandidates);
+    req.constrainRegions  = constrainRegions;
+
+    auto provider = m_providerGetter ? m_providerGetter() : nullptr;
+    if (!provider) {
+        m_statusLabel->setText(QStringLiteral("No provider (attach to a process or open a file first)"));
+        return results;
+    }
+    if (m_engine->isRunning()) {
+        m_statusLabel->setText(QStringLiteral("Scan already in progress"));
+        return results;
+    }
+
+    // Treat as signature mode (0) for panel state so onScanFinished keeps the
+    // 64-byte matrix scanValue intact (mode 1 + ExactValue would overwrite it).
+    m_lastScanMode  = 0;
+    m_lastPattern.clear();
+    m_scanGeneration  = 1;
+    m_lastResultCount = 0;
+    m_progressBar->setValue(0);
+    m_progressBar->show();
+    m_statusLabel->setText(QStringLiteral("Scanning for matrices..."));
+
+    bool timedOut = false;
+    QEventLoop loop;
+    connect(m_engine, &ScanEngine::finished, this, [&results, &loop](const QVector<ScanResult>& r) {
+        results = r;
+        loop.quit();
+    }, Qt::SingleShotConnection);
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(&timer, &QTimer::timeout, this, [this, &timedOut, &loop]() {
+        timedOut = true;
+        m_engine->abort();   // -> runScan returns early -> finished/rescanFinished fires
+        loop.quit();         // safety net if the scan never started / never emits
+    });
+    timer.start(qMax(1000, timeoutMs));
+    m_engine->start(provider, req);
+    loop.exec();
+    timer.stop();
+    if (timedOut)
+        m_statusLabel->setText(QStringLiteral("Matrix scan timed out — %1 partial candidate(s)").arg(results.size()));
+    return results;
+}
+
 void ScannerPanel::onScanFinished(QVector<ScanResult> results) {
     m_scanBtn->setText(QStringLiteral("&First Scan"));
     // [iter 44] Drop the cancel-style mark so the button paints as a
@@ -1455,7 +1821,11 @@ void ScannerPanel::onScanFinished(QVector<ScanResult> results) {
     }
 
     m_updateBtn->setEnabled(!m_results.isEmpty());
-    m_newScanBtn->setVisible(!m_results.isEmpty());
+    // Reset becomes available after ANY completed first scan (even a 0-result
+    // one) — it clears the scan state / filters so the user can start over.
+    // It's a real action, so make sure it's enabled, not just visible.
+    m_newScanBtn->setVisible(true);
+    m_newScanBtn->setEnabled(true);
     {
         QElapsedTimer pt;
         pt.start();
@@ -1484,7 +1854,8 @@ void ScannerPanel::onScanFinished(QVector<ScanResult> results) {
     constexpr int kMaxRows = 10000;
     if (n > kMaxRows) {
         m_truncBanner->setText(QStringLiteral(
-            "Displaying %1 of %2 — narrow results with Next Scan or filter.")
+            "Showing the first %1 of %2 results (all %2 are scanned) — "
+            "narrow with Next Scan or the filter box.")
             .arg(loc.toString(kMaxRows)).arg(nFmt));
         m_truncBanner->setVisible(true);
     } else {
@@ -1524,8 +1895,13 @@ void ScannerPanel::populateTable(bool showPrevious) {
     // [iter 51] Header items get tooltips advertising the click-to-sort
     // affordance — sortable headers are easy to miss when their visual
     // chrome is identical to read-only label rows.
-    auto makeHeader = [](const QString& title, const QString& tip) {
+    auto makeHeader = [this](const QString& title, const QString& tip) {
         auto* h = new QTableWidgetItem(title);
+        // Set the font on the header ITEM (FontRole) — applying a stylesheet to
+        // the table makes QHeaderView ignore setFont() on the header view, so
+        // the column titles otherwise fell back to the system Sans default
+        // instead of the monospaced editor font.
+        h->setFont(m_resultTable->font());
         h->setToolTip(tip);
         return h;
     };
@@ -1537,10 +1913,10 @@ void ScannerPanel::populateTable(bool showPrevious) {
         QStringLiteral("Click to sort by current value. Double-click a cell to edit it.")));
     if (showPrevious)
         m_resultTable->setHorizontalHeaderItem(2, makeHeader(
-            QStringLiteral("Previous → Δ"),
-            QStringLiteral("Value at the previous scan, followed by the signed delta. "
-                           "Increase = green, decrease = red. The Value column foreground is "
-                           "tinted the same way for fast scanning.")));
+            QStringLiteral("Previous"),
+            QStringLiteral("The value at the previous scan (for reference, de-emphasized). The "
+                           "current Value to the left is tinted and arrowed ↑/↓ to show "
+                           "which way it moved.")));
     if (anyModule)
         m_resultTable->setHorizontalHeaderItem(baseCols, makeHeader(
             QStringLiteral("Module"),
@@ -1559,45 +1935,53 @@ void ScannerPanel::populateTable(bool showPrevious) {
         addrItem->setData(Qt::UserRole, i);
         m_resultTable->setItem(i, 0, addrItem);
 
-        // Value column. Foreground colour is direction-coded when a
-        // previous-value diff is available: green for increase, red for
-        // decrease, default theme.text otherwise. The delta text itself
-        // lives in the Previous column for compactness.
-        auto* valItem = new QTableWidgetItem(formatValue(r.scanValue));
-        valItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
+        // Numeric values read far better right-aligned — digits line up by
+        // magnitude instead of the previous left-aligned "mishmash of
+        // lengths". Signature/hex byte strings stay left-aligned.
+        const bool numeric = (m_lastScanMode != 0);
+        const Qt::Alignment numAlign = numeric
+            ? (Qt::AlignRight | Qt::AlignVCenter)
+            : (Qt::AlignLeft  | Qt::AlignVCenter);
+
+        // Value column = the CURRENT value. Tinted green/red when it moved up
+        // or down vs the previous scan. (The direction is ALSO shown as a ↑/↓
+        // glyph in the read-only Previous column below, so color-blind users
+        // get the cue without color — we can't append it here because this
+        // cell is editable and the glyph would corrupt the parsed value.)
         DeltaInfo delta;
         if (showPrevious && !r.previousValue.isEmpty())
             delta = computeDelta(m_lastValueType, r.previousValue, r.scanValue);
+        auto* valItem = new QTableWidgetItem(formatValue(r.scanValue));
+        valItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
+        valItem->setTextAlignment(numAlign);
+        const auto& dt = ThemeManager::instance().current();
         if (delta.direction > 0)
-            valItem->setForeground(QColor("#7BC97B"));   // increase — green
+            valItem->setForeground(dt.indDataChanged);   // increase
         else if (delta.direction < 0)
-            valItem->setForeground(QColor("#E07B7B"));   // decrease — red
+            valItem->setForeground(dt.markerPtr);         // decrease
         m_resultTable->setItem(i, 1, valItem);
 
-        // Previous column. Format: "<prev> → <delta>" so the user sees
-        // the old value and the magnitude/direction of change at a
-        // glance. For non-numeric (Signature) or unchanged values, the
-        // delta text degrades to a simple "→" arrow or nothing.
+        // Previous column = just the prior value (e.g. "46"). The old
+        // "<prev> → <delta>" form (e.g. "46 → -2") read as "previous →
+        // delta", which was confusing: users expect "old → new", and the
+        // new value is already right there in the Value column. Showing the
+        // bare previous value (de-emphasized) next to the tinted current
+        // value is the clear, non-redundant read.
         if (showPrevious) {
-            QString prevText;
-            if (!r.previousValue.isEmpty()) {
-                prevText = formatValue(r.previousValue);
-                if (delta.ok) {
-                    prevText += QStringLiteral("  →  ") + delta.text;
-                } else if (r.previousValue != r.scanValue) {
-                    prevText += QStringLiteral("  →");  // changed but non-numeric
-                }
+            QString prevText = r.previousValue.isEmpty()
+                ? QString() : formatValue(r.previousValue);
+            // Prefix a direction glyph so the up/down move reads WITHOUT color
+            // (color-blind safe). This cell is read-only, so the glyph is safe
+            // here (unlike the editable Value cell). e.g. "↑ 46" = value rose
+            // from 46; "↓ 46" = fell from 46.
+            if (!prevText.isEmpty()) {
+                if (delta.direction > 0)      prevText = QStringLiteral("↑ ") + prevText;
+                else if (delta.direction < 0) prevText = QStringLiteral("↓ ") + prevText;
             }
             auto* prevItem = new QTableWidgetItem(prevText);
             prevItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
-            // Delta direction colors — pull from theme so a switch picks
-            // up the right hue (was hardcoded #7BC97B / #E07B7B which
-            // looked fine in dark VS but ignored every other theme).
-            const auto& dt = ThemeManager::instance().current();
-            if (delta.direction > 0)
-                prevItem->setForeground(dt.indDataChanged);
-            else if (delta.direction < 0)
-                prevItem->setForeground(dt.markerPtr);
+            prevItem->setTextAlignment(numAlign);
+            prevItem->setForeground(dt.textDim);  // reference, not the live value
             m_resultTable->setItem(i, 2, prevItem);
         }
 
@@ -1907,9 +2291,11 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     // adjacent addresses are easier to scan visually. Also style the header
     // explicitly so the column titles match the editor's monospaced font
     // and dim color.
-    // [iter 15] Selection uses theme.selection (richer than hover) so a
-    // selected row stands out from a hovered one — multi-select reads
-    // unambiguously now.
+    // Selection matches the EDITOR's selection language: theme.selected (the
+    // grey M_SELECTED row background) for a selected row and theme.hover (the
+    // grey M_HOVER) for a hovered one — the same two greys the editor uses, so
+    // the scanner doesn't introduce a stray blue selection (theme.selection)
+    // that's inconsistent with the rest of the app.
     // [iter 16] Selected items get bright text color, hovered items keep
     // default text color — visual hierarchy: selected > hovered > idle.
     // [iter 17] Top border on the table — separates it from the result
@@ -1920,16 +2306,21 @@ void ScannerPanel::applyTheme(const Theme& theme) {
         "  alternate-background-color: %6; gridline-color: transparent; }"
         "QTableWidget::item { padding: 2px 6px; border: none; }"
         "QTableWidget::item:hover { background: %3; padding: 2px 6px; border: none; }"
+        // Row selection = grey theme.selected (matches the editor's M_SELECTED).
         "QTableWidget::item:selected { background: %5; color: %2; padding: 2px 6px; border: none; }"
+        // In-cell editor TEXT selection = blue theme.selection — text selection
+        // (selecting characters) is blue everywhere in the app (the Scintilla
+        // editor, rename inputs); only ROW selection is grey. Keeping these
+        // distinct matches the editor exactly.
         "QTableWidget QLineEdit { background: %1; color: %2; border: 1px solid %4;"
-        "  padding: 1px 4px; selection-background-color: %5; }"
+        "  padding: 1px 4px; selection-background-color: %9; }"
         "QHeaderView::section { background: %1; color: %7; border: none;"
         "  border-bottom: 1px solid %8; padding: 4px 6px; }"
         "QHeaderView::section:hover { color: %2; }")
         .arg(theme.background.name(), theme.text.name(), theme.hover.name(),
-             theme.borderFocused.name(), theme.selection.name(),
+             theme.borderFocused.name(), theme.selected.name(),
              theme.backgroundAlt.name(), theme.textMuted.name(),
-             theme.border.name()));
+             theme.border.name(), theme.selection.name()));
 
     // Input fields
     QString lineEditStyle = QStringLiteral(
@@ -2005,23 +2396,14 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     m_writeCheck->setPalette(cp);
     m_structOnlyCheck->setPalette(cp);
 
-    // Buttons — ScanButton owns its own theme-aware chrome. Re-apply by
-    // round-tripping the variant so each picks up the new theme colors.
-    // ScanButton isn't Q_OBJECT (no signals/slots beyond QPushButton's), so
-    // we rely on a property tag instead of qobject_cast for the variant.
+    // Buttons — ScanButton owns its own theme-aware chrome and remembers its
+    // own Style (m_style). Just re-run applyChrome() so each picks up the new
+    // theme colors at its existing style. (The old code re-derived the style
+    // from variant_* properties, which silently forced Reset back to the grey
+    // Subtle look on every theme apply — that was the "greyed Reset" bug.)
     auto refreshBtn = [](QPushButton* b) {
-        // dynamic_cast works fine on RTTI-enabled builds; ScanButton has a
-        // virtual dtor via QPushButton so RTTI is present.
-        if (auto* sb = dynamic_cast<ScanButton*>(b)) {
-            sb->setVariant(sb->property("variant_primary").toBool()
-                ? ScanButton::Primary
-                : (sb->property("variant_subtle").toBool()
-                   ? ScanButton::Subtle : ScanButton::Secondary));
-        }
+        if (auto* sb = dynamic_cast<ScanButton*>(b)) sb->refreshChrome();
     };
-    m_scanBtn->setProperty("variant_primary", true);
-    m_updateBtn->setProperty("variant_primary", true);
-    m_newScanBtn->setProperty("variant_subtle", true);
     refreshBtn(m_scanBtn);
     refreshBtn(m_updateBtn);
     refreshBtn(m_newScanBtn);
@@ -2048,8 +2430,21 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     // [iter 14] Result count uses default text color when populated, dim
     // padding when empty — handled in the count setter, see iter 32+.
     QString sectionStyle = QStringLiteral(
-        "QLabel[scannerHeader=\"true\"] { color:%1; padding:6px 0 3px 0;"
+        // No box / no rounded corners — the app delineates groups with a header
+        // + a thin full-width underline divider (square), not a bordered panel.
+        // The section frame is just an invisible grouping container.
+        "QFrame#scanSection { background: transparent; border: none; }"
+        // Section header: dimmer than its content, with a hairline divider under
+        // it spanning the panel width — matches the main window's section style.
+        "QLabel[scannerHeader=\"true\"] { color:%1; padding:1px 0 3px 0;"
         "   border-bottom:1px solid %2; margin-bottom:2px; }"
+        // Collapsible SCAN FOR header: same look as scannerHeader but a clickable
+        // QToolButton — left-aligned, no button chrome, brightens on hover so the
+        // toggle affordance is felt.
+        "QPushButton[scanForHeader=\"true\"] { color:%1; padding:1px 0 3px 0;"
+        "   border:none; border-bottom:1px solid %2; margin-bottom:2px;"
+        "   background:transparent; text-align:left; }"
+        "QPushButton[scanForHeader=\"true\"]:hover { color:%3; }"
         "QLabel[scannerSection=\"true\"] { color:%1; padding:0 4px 0 0; }"
         "QLabel[scannerStatus=\"true\"] { color:%3; padding:2px 4px; }")
         .arg(theme.textDim.name(), theme.border.name(), theme.text.name());
@@ -2063,8 +2458,7 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     // not an inert label.
     if (m_truncBanner) {
         m_truncBanner->setStyleSheet(QStringLiteral(
-            "QLabel { background:%1; color:%2; border-left: 2px solid %3;"
-            " border-radius: 2px; }")
+            "QLabel { background:%1; color:%2; border-left: 2px solid %3; }")
             .arg(theme.backgroundAlt.name(),
                  theme.text.name(),
                  theme.indHeatWarm.isValid()
@@ -2074,7 +2468,7 @@ void ScannerPanel::applyTheme(const Theme& theme) {
     if (m_resultFilter) {
         m_resultFilter->setStyleSheet(QStringLiteral(
             "QLineEdit { background:%1; color:%2; border:1px solid %3;"
-            " border-radius:2px; padding:3px 6px; }"
+            " padding:3px 6px; }"
             "QLineEdit:focus { border-color:%4; }")
             .arg(theme.background.name(), theme.text.name(),
                  theme.border.name(), theme.borderFocused.name()));
@@ -2170,8 +2564,13 @@ QString ScannerPanel::formatValue(const QByteArray& bytes) const {
     case ValueType::UInt32: if (sz >= 4) { uint32_t v; memcpy(&v, d, 4); return QString::number(v); } break;
     case ValueType::Int64:  if (sz >= 8) { int64_t v; memcpy(&v, d, 8); return QString::number(v); } break;
     case ValueType::UInt64: if (sz >= 8) { uint64_t v; memcpy(&v, d, 8); return QString::number(v); } break;
-    case ValueType::Float:  if (sz >= 4) { float v; memcpy(&v, d, 4); return QString::number(v, 'g', 9); } break;
-    case ValueType::Double: if (sz >= 8) { double v; memcpy(&v, d, 8); return QString::number(v, 'g', 17); } break;
+    // Display precision is intentionally short — the SCAN matches raw bytes,
+    // so trimming visible digits is purely cosmetic and keeps the column
+    // readable. 'g',9 / 'g',17 produced noisy round-trip artifacts like
+    // "3.1400001" and absurdly long doubles that made the table a wall of
+    // mismatched lengths.
+    case ValueType::Float:  if (sz >= 4) { float v; memcpy(&v, d, 4); return QString::number(v, 'g', 7); } break;
+    case ValueType::Double: if (sz >= 8) { double v; memcpy(&v, d, 8); return QString::number(v, 'g', 10); } break;
     default: break;
     }
     return QStringLiteral("??");
@@ -2217,7 +2616,7 @@ void ScannerPanel::onNewScanClicked() {
     m_updateBtn->setEnabled(false);
     m_newScanBtn->setVisible(false);
     m_truncBanner->setVisible(false);
-    m_statusLabel->setText(QString());  // silent until the next scan
+    updateScanStatusLine();             // back to the resting "Ready" line
     m_resultFilter->clear();
     m_engine->invalidateRegionCache();
     m_scanGeneration  = 0;
@@ -2265,8 +2664,10 @@ void ScannerPanel::updateStageLabel(const QString& phase) {
 
     // QLabel ignores setFont for RichText — embed font in the spans.
     QFont f = m_stageLabel->font();
+    // resolvedPointSize so a pixel-sized base font doesn't embed "font-size:1pt"
+    // (pointSize()==-1 → qMax(-1,1)==1) and render the breadcrumb invisibly tiny.
     QString fontCss = QStringLiteral("font-family:'%1'; font-size:%2pt;")
-        .arg(f.family()).arg(qMax(f.pointSize(), 1));
+        .arg(f.family()).arg(resolvedPointSize(f));
 
     auto dot = [&](const QColor& c) {
         return QStringLiteral(
@@ -2385,8 +2786,15 @@ void ScannerPanel::updateModuleColumnVisibility() {
 }
 
 void ScannerPanel::updateScanStatusLine() {
-    // Reserved for future use — the engine's regionsResolved signal already
-    // handles the live "Scanning N regions" string.
+    // Restore the resting result-count status (used when the post-scan filter
+    // is cleared, so the user doesn't keep seeing a stale "12 of 47 match").
+    QLocale loc;
+    const int n = m_results.size();
+    if (n == 0)
+        m_statusLabel->setText(QStringLiteral("Ready"));
+    else
+        m_statusLabel->setText(QStringLiteral("%1 result%2")
+            .arg(loc.toString(n)).arg(n == 1 ? "" : "s"));
 }
 
 bool ScannerPanel::saveResultsTo(const QString& path) const {
@@ -2436,6 +2844,7 @@ bool ScannerPanel::loadResultsFrom(const QString& path) {
     populateTable(false);
     m_updateBtn->setEnabled(!m_results.isEmpty());
     m_newScanBtn->setVisible(!m_results.isEmpty());
+    m_newScanBtn->setEnabled(true);
     m_statusLabel->setText(QStringLiteral("Loaded %1 result%2 from %3")
         .arg(m_results.size()).arg(m_results.size() == 1 ? "" : "s")
         .arg(QFileInfo(path).fileName()));
@@ -2447,26 +2856,40 @@ void ScannerPanel::saveSettings(const QString& key) const {
     s.beginGroup(key);
     s.setValue("mode",         m_modeCombo->currentIndex());
     s.setValue("valueType",    m_typeCombo->currentIndex());
-    s.setValue("condition",    m_condCombo->currentIndex());
+    // Persist the condition by its DATA (ScanCondition enum int, or -1 for the
+    // Exact-Sig sentinel), not the row index — the combo has separators, so an
+    // index would silently point at the wrong condition if items shift.
+    s.setValue("conditionData", m_condCombo->currentData().toInt());
     s.setValue("filterExec",   m_execCheck->isChecked());
     s.setValue("filterWrite",  m_writeCheck->isChecked());
     s.setValue("privateOnly",  m_privateOnlyCheck->isChecked());
     s.setValue("skipSystem",   m_skipSystemCheck->isChecked());
     s.setValue("userMode",     m_userModeOnlyCheck->isChecked());
+    s.setValue("scanForCollapsed", m_scanForCollapsed);
     s.endGroup();
 }
 
 void ScannerPanel::loadSettings(const QString& key) {
     QSettings s("Reclass", "Reclass");
     s.beginGroup(key);
-    if (s.contains("mode"))         m_modeCombo->setCurrentIndex(s.value("mode").toInt());
-    if (s.contains("valueType"))    m_typeCombo->setCurrentIndex(s.value("valueType").toInt());
-    if (s.contains("condition"))    m_condCombo->setCurrentIndex(s.value("condition").toInt());
+    auto clampIndex = [](QComboBox* c, int idx) {
+        if (idx >= 0 && idx < c->count()) c->setCurrentIndex(idx);
+    };
+    if (s.contains("mode"))         clampIndex(m_modeCombo, s.value("mode").toInt());
+    if (s.contains("valueType"))    clampIndex(m_typeCombo, s.value("valueType").toInt());
+    if (s.contains("conditionData")) {
+        int idx = m_condCombo->findData(s.value("conditionData").toInt());
+        if (idx >= 0) m_condCombo->setCurrentIndex(idx);
+    } else if (s.contains("condition")) {           // legacy index-based value
+        clampIndex(m_condCombo, s.value("condition").toInt());
+    }
     if (s.contains("filterExec"))   m_execCheck->setChecked(s.value("filterExec").toBool());
     if (s.contains("filterWrite"))  m_writeCheck->setChecked(s.value("filterWrite").toBool());
     if (s.contains("privateOnly"))  m_privateOnlyCheck->setChecked(s.value("privateOnly").toBool());
     if (s.contains("skipSystem"))   m_skipSystemCheck->setChecked(s.value("skipSystem").toBool());
     if (s.contains("userMode"))     m_userModeOnlyCheck->setChecked(s.value("userMode").toBool());
+    if (s.contains("scanForCollapsed"))
+        setScanForCollapsed(s.value("scanForCollapsed").toBool());
     s.endGroup();
 }
 

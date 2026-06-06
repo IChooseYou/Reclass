@@ -1,4 +1,5 @@
 #include "titlebar.h"
+#include "svgicon.h"
 #include "themes/thememanager.h"
 #include <QButtonGroup>
 #include <QMenu>
@@ -201,6 +202,22 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
         "QToolButton { background: transparent; border: none; }"
         "QToolButton:hover { background: %1; }").arg(closeWarn.name()));
 
+    // Re-tint all chrome SVG icons to theme.text so light-theme chrome
+    // (gray) still shows the controls. Source SVGs hard-fill #C5C5C5
+    // which was invisible on the new XP Luna gray. Pass our dpr so the
+    // glyphs render crisp on HiDPI rather than upscaled from 32x32 logical.
+    const qreal dpr = devicePixelRatioF();
+    if (m_btnLayoutOff)
+        m_btnLayoutOff->setIcon(themedVsIcon(":/vsicons/layout-sidebar-left-off.svg", theme.text, 32, dpr));
+    if (m_btnLayoutOn)
+        m_btnLayoutOn->setIcon(themedVsIcon(":/vsicons/layout-sidebar-left.svg", theme.text, 32, dpr));
+    if (m_btnMin)
+        m_btnMin->setIcon(themedVsIcon(":/vsicons/chrome-minimize.svg", theme.text, 32, dpr));
+    if (m_btnMax)
+        m_btnMax->setIcon(themedVsIcon(":/vsicons/chrome-maximize.svg", theme.text, 32, dpr));
+    if (m_btnClose)
+        m_btnClose->setIcon(themedVsIcon(":/vsicons/chrome-close.svg", theme.text, 32, dpr));
+
     update();
 }
 
@@ -299,10 +316,13 @@ bool TitleBarWidget::eventFilter(QObject* obj, QEvent* event) {
 }
 
 void TitleBarWidget::updateMaximizeIcon() {
-    if (window()->isMaximized())
-        m_btnMax->setIcon(QIcon(":/vsicons/chrome-restore.svg"));
-    else
-        m_btnMax->setIcon(QIcon(":/vsicons/chrome-maximize.svg"));
+    // Theme-tint like the other chrome icons (applyTheme re-tints max/restore
+    // too, but maximize<->restore toggles here independently of theme changes);
+    // a plain QIcon keeps the baked #C5C5C5 ink, invisible on the light theme.
+    const qreal dpr = devicePixelRatioF();
+    const char* path = window()->isMaximized()
+        ? ":/vsicons/chrome-restore.svg" : ":/vsicons/chrome-maximize.svg";
+    m_btnMax->setIcon(themedVsIcon(QString::fromLatin1(path), m_theme.text, 32, dpr));
 }
 
 void TitleBarWidget::toggleMaximize() {

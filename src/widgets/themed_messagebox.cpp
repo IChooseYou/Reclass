@@ -5,7 +5,6 @@
 #include <QListWidget>
 #include <QPainter>
 #include <QFontMetrics>
-#include <QSvgRenderer>
 
 namespace rcx {
 

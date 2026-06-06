@@ -599,6 +599,75 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_scanner COMMAND test_scanner)
 
+    # Structure-aware matrix-scan predicate + engine + rescan-narrowing loop
+    # (the logic the MCP scanner.find_matrix / scanner.rescan tools drive).
+    add_executable(test_matrixscan tests/test_matrixscan.cpp src/scanner.cpp)
+    target_include_directories(test_matrixscan PRIVATE src)
+    target_link_libraries(test_matrixscan PRIVATE ${QT}::Core ${QT}::Concurrent ${QT}::Test)
+    if(WIN32)
+        target_link_libraries(test_matrixscan PRIVATE psapi)
+    endif()
+    add_test(NAME test_matrixscan COMMAND test_matrixscan)
+
+    # Offscreen render harness for the Memory Scanner panel — grabs the panel
+    # to a PNG under `-platform offscreen` for deterministic visual checks of
+    # the UI (no display / session needed). Not a ctest; run manually.
+    add_executable(scanner_render EXCLUDE_FROM_ALL tools/scanner_render.cpp
+        src/scanner.cpp src/scannerpanel.cpp src/addressparser.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS}
+        src/resources.qrc)   # so :/vsicons render in the grab (representative)
+    target_include_directories(scanner_render PRIVATE src)
+    target_link_libraries(scanner_render PRIVATE
+        ${QT}::Widgets ${QT}::Concurrent ${QT}::Svg)
+    if(WIN32)
+        target_link_libraries(scanner_render PRIVATE psapi)
+    endif()
+
+    # UI regression tests for the ScannerPanel widget — first enabled CI coverage
+    # of the panel (test_scanner_ui is disabled/stale). Construct-only + assert,
+    # no modal/wait, so it won't hang the suite. Same link set as scanner_render.
+    add_executable(test_scanner_panel tests/test_scanner_panel.cpp
+        src/scanner.cpp src/scannerpanel.cpp src/addressparser.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS}
+        src/resources.qrc)   # so :/vsicons load (silences svg-not-found warnings)
+    target_include_directories(test_scanner_panel PRIVATE src)
+    target_link_libraries(test_scanner_panel PRIVATE
+        ${QT}::Widgets ${QT}::Concurrent ${QT}::Svg ${QT}::Test)
+    if(WIN32)
+        target_link_libraries(test_scanner_panel PRIVATE psapi)
+    endif()
+    add_test(NAME test_scanner_panel COMMAND test_scanner_panel)
+
+    # Offscreen render harness for the custom window title bar — grabs the
+    # chrome buttons + icons to a PNG so vertical-centering of the SVG glyphs
+    # can be verified deterministically. qrc linked so :/vsicons resolve.
+    add_executable(titlebar_render EXCLUDE_FROM_ALL tools/titlebar_render.cpp
+        src/titlebar.cpp src/themes/theme.cpp src/themes/thememanager.cpp
+        src/resources.qrc)
+    target_include_directories(titlebar_render PRIVATE src)
+    target_link_libraries(titlebar_render PRIVATE
+        ${QT}::Widgets ${QT}::Svg)
+
+    # Offscreen render harness for the RcxEditor — grabs the structure view
+    # to a PNG so a multi-row byte selection (grey M_SELECTED rows + accent
+    # IND_BYTE_SEL digits coexisting) can be verified deterministically, and
+    # prints the controller's selectedIds() count to prove the byte→row sync.
+    # Same heavy link set as the editor integration tests. Not a ctest.
+    add_executable(editor_render EXCLUDE_FROM_ALL tools/editor_render.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
+        src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
+        src/resources.qrc)
+    target_include_directories(editor_render PRIVATE src third_party/fadec)
+    target_link_libraries(editor_render PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Svg
+        QScintilla::QScintilla)
+    if(WIN32)
+        target_link_libraries(editor_render PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+    endif()
+
     # Non-UI combinatorial sweep — exercises every (mode, condition,
     # value type, alignment, region filter) tuple that the panel can
     # produce, against a synthetic provider, asserting the engine

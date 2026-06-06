@@ -1275,10 +1275,10 @@ private slots:
     }
 
     void newConditions_inCombo() {
-        // Lowercase shorthand condition labels in the redesigned combo.
+        // Condition labels in the combo (title-case, full names).
         QStringList expected = {
-            "bigger than", "smaller than", "between",
-            "inc by", "dec by"
+            "Bigger Than", "Smaller Than", "Between",
+            "Increased By", "Decreased By"
         };
         for (const QString& label : expected) {
             int idx = m_panel->condCombo()->findText(label);
@@ -1290,14 +1290,14 @@ private slots:
         // Switch to Value mode + Between → upper-bound field becomes visible.
         m_panel->modeCombo()->setCurrentIndex(1);
         QApplication::processEvents();
-        int idx = m_panel->condCombo()->findText("between");
+        int idx = m_panel->condCombo()->findText("Between");
         m_panel->condCombo()->setCurrentIndex(idx);
         QApplication::processEvents();
         QVERIFY(m_panel->value2Edit()->isVisible());
 
         // Switch to Exact Value → upper-bound hidden again.
         m_panel->condCombo()->setCurrentIndex(
-            m_panel->condCombo()->findText("equals"));
+            m_panel->condCombo()->findText("Exact Value"));
         QApplication::processEvents();
         QVERIFY(!m_panel->value2Edit()->isVisible());
     }
@@ -1402,7 +1402,7 @@ private slots:
         // Pick a non-default valueType + condition we can verify after reload.
         m_panel->typeCombo()->setCurrentIndex(7);  // uint64
         m_panel->condCombo()->setCurrentIndex(
-            m_panel->condCombo()->findText("bigger than"));
+            m_panel->condCombo()->findText("Bigger Than"));
         QApplication::processEvents();
 
         const QString key = "scanner_test_persist";
@@ -1423,7 +1423,7 @@ private slots:
         QVERIFY(m_panel->skipSystemCheck()->isChecked());
         QVERIFY(m_panel->userModeOnlyCheck()->isChecked());
         QCOMPARE(m_panel->typeCombo()->currentIndex(), 7);
-        QCOMPARE(m_panel->condCombo()->currentText(), QStringLiteral("bigger than"));
+        QCOMPARE(m_panel->condCombo()->currentText(), QStringLiteral("Bigger Than"));
 
         // Clean up the test settings group.
         QSettings s("Reclass", "Reclass");
