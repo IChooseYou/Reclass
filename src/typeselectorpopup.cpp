@@ -1762,33 +1762,23 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 appendSection(QString::fromLatin1(kGroupLabels[gi]),
                               QString::fromLatin1(kGroupOrder[gi]), items);
             }
-            // Inline expand/collapse affordance at the very bottom. In
-            // simple mode it reveals the hidden count; when expanded it
-            // offers a way back to the common set. Activating it toggles
-            // m_showAllTypes (handled in acceptIndex), not a type pick.
-            int hiddenCount = 0;
-            for (const auto& t : m_allTypes) {
-                if (t.entryKind == TypeEntry::Section) continue;
-                if (t.kindGroup == QStringLiteral("Common")
-                    || (t.entryKind == TypeEntry::Primitive && !isCommonKind(t.primitiveKind)))
-                    hiddenCount++;
-            }
-            if (m_showAllTypes || hiddenCount > 0) {
-                TypeEntry tog;
-                tog.entryKind = TypeEntry::Primitive;  // selectable (not a Section)
-                tog.isExpandToggle = true;
-                tog.enabled = true;
-                tog.displayName = m_showAllTypes
-                    ? QStringLiteral("− Show common types only")
-                    : QStringLiteral("+ Show all types (%1)").arg(hiddenCount);
-                m_filteredTypes.append(tog);
-                m_matchPositions.append(QVector<int>());
-                displayStrings << tog.displayName;
-            }
         } else {
             // Flat sorted list (no sections) — name/size/align
             QVector<TypeEntry> all;
             for (auto& items : buckets) all += items;
+            // Simple mode applies in the flat sorts too (else switching to
+            // name/size/align would silently reveal everything with no way
+            // back): drop the std-lib "Common Types" + long-tail primitives,
+            // exactly as the grouped view does.
+            if (!m_showAllTypes) {
+                QVector<TypeEntry> keep;
+                keep.reserve(all.size());
+                for (const auto& it : all)
+                    if (it.kindGroup != QStringLiteral("Common")
+                        && (it.entryKind != TypeEntry::Primitive || isCommonKind(it.primitiveKind)))
+                        keep.append(it);
+                all = keep;
+            }
             int dir = m_sortDir;
             switch (m_sortMode) {
             case SortName:
@@ -1815,6 +1805,32 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 m_matchPositions.append(QVector<int>());
                 displayStrings << makeLabel(c);
             }
+        }
+
+        // Inline expand/collapse affordance at the bottom of the unfiltered
+        // view — in BOTH the grouped and flat sorts, so simple mode stays
+        // consistent and always reversible regardless of sort. In simple
+        // mode it shows the hidden count; when expanded it offers the way
+        // back. Activating it toggles m_showAllTypes (handled in acceptIndex),
+        // not a type pick.
+        int hiddenCount = 0;
+        for (const auto& t : m_allTypes) {
+            if (t.entryKind == TypeEntry::Section) continue;
+            if (t.kindGroup == QStringLiteral("Common")
+                || (t.entryKind == TypeEntry::Primitive && !isCommonKind(t.primitiveKind)))
+                hiddenCount++;
+        }
+        if (m_showAllTypes || hiddenCount > 0) {
+            TypeEntry tog;
+            tog.entryKind = TypeEntry::Primitive;  // selectable (not a Section)
+            tog.isExpandToggle = true;
+            tog.enabled = true;
+            tog.displayName = m_showAllTypes
+                ? QStringLiteral("− Show common types only")
+                : QStringLiteral("+ Show all types (%1)").arg(hiddenCount);
+            m_filteredTypes.append(tog);
+            m_matchPositions.append(QVector<int>());
+            displayStrings << tog.displayName;
         }
     }
 
