@@ -490,6 +490,73 @@ private slots:
         QCOMPARE(createSpy.count(), 1);
     }
 
+    // ── Simple-by-default type list + "show all" + filter-finds-all ──
+    // Default (simple) mode shows only the common primitive set + user
+    // structs, hiding long-tail primitives and the std-lib "Common Types"
+    // section behind a bottom expand toggle. Crucially, typing in the
+    // filter still surfaces hidden types (the fuzzy path searches all),
+    // so nothing is ever unreachable.
+    void testSimpleModeHidesLongTailButFilterFindsAll() {
+        TypeSelectorPopup popup;
+        popup.setMode(TypePopupMode::FieldType);
+
+        auto prim = [](NodeKind k, const QString& name) {
+            TypeEntry e;
+            e.entryKind = TypeEntry::Primitive;
+            e.primitiveKind = k;
+            e.displayName = name;
+            e.sizeBytes = sizeForKind(k);
+            return e;
+        };
+        QVector<TypeEntry> types;
+        types << prim(NodeKind::Hex64, "hex64")       // common
+              << prim(NodeKind::UInt32, "uint32_t")   // common
+              << prim(NodeKind::Vec3, "vec3");        // long-tail (hidden)
+        TypeEntry stdlib;                             // std-lib "Common" (hidden)
+        stdlib.entryKind = TypeEntry::Composite;
+        stdlib.displayName = "UNICODE_STRING";
+        stdlib.classKeyword = "struct";
+        stdlib.kindGroup = "Common";
+        types << stdlib;
+        TypeEntry userStruct;                         // user struct (always shown)
+        userStruct.entryKind = TypeEntry::Composite;
+        userStruct.structId = 7;
+        userStruct.displayName = "MyStruct";
+        userStruct.classKeyword = "struct";
+        types << userStruct;
+
+        popup.setTypes(types, nullptr);  // default = simple, empty filter
+
+        auto names = [&]() {
+            QStringList out;
+            for (const auto& e : popup.filteredTypes())
+                if (e.entryKind != TypeEntry::Section && !e.isExpandToggle)
+                    out << e.displayName;
+            return out;
+        };
+
+        QStringList simple = names();
+        QVERIFY(simple.contains("hex64"));
+        QVERIFY(simple.contains("uint32_t"));
+        QVERIFY(simple.contains("MyStruct"));          // user structs always shown
+        QVERIFY(!simple.contains("vec3"));             // long-tail hidden
+        QVERIFY(!simple.contains("UNICODE_STRING"));   // std-lib section hidden
+
+        // The expand toggle row is present in simple mode.
+        bool hasToggle = false;
+        for (const auto& e : popup.filteredTypes())
+            if (e.isExpandToggle) { hasToggle = true; break; }
+        QVERIFY2(hasToggle, "expected a 'Show all types' toggle row");
+
+        // Filtering surfaces hidden types even though we're in simple mode.
+        auto* filterEdit = popup.findChild<QLineEdit*>();
+        QVERIFY(filterEdit);
+        filterEdit->setText("vec3");
+        QApplication::processEvents();
+        QVERIFY2(names().contains("vec3"),
+                 "filter must search ALL types regardless of simple mode");
+    }
+
     // ── Full GUI integration ──
     // Single test method to avoid QScintilla reinit issues.
 

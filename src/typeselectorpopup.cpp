@@ -1379,7 +1379,8 @@ void TypeSelectorPopup::updateDetailPane() {
     int row = idx.isValid() ? idx.row() : -1;
 
     if (row < 0 || row >= m_filteredTypes.size()
-        || m_filteredTypes[row].entryKind == TypeEntry::Section) {
+        || m_filteredTypes[row].entryKind == TypeEntry::Section
+        || m_filteredTypes[row].isExpandToggle) {
         m_detailContent->setText(QStringLiteral(
             "<div style='color:%1;padding:6px'>No selection</div>").arg(t.textFaint.name()));
         return;
@@ -1723,6 +1724,21 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 QString g = QString::fromLatin1(kGroupOrder[gi]);
                 auto& items = buckets[g];
                 if (items.isEmpty()) continue;
+                // Simple (default) mode: hide the std-lib "Common Types"
+                // section entirely and drop long-tail primitives, keeping
+                // only the common set + user structs. The "Show all types"
+                // row below flips m_showAllTypes; the filter box still
+                // searches everything regardless.
+                if (!m_showAllTypes) {
+                    if (g == QStringLiteral("Common")) continue;
+                    QVector<TypeEntry> keep;
+                    keep.reserve(items.size());
+                    for (const auto& it : items)
+                        if (it.entryKind != TypeEntry::Primitive || isCommonKind(it.primitiveKind))
+                            keep.append(it);
+                    items = keep;
+                    if (items.isEmpty()) continue;
+                }
                 // Same-size-first sorting for the matching group — except
                 // the Hex group, where the user reads it as a fixed size
                 // ladder (hex128 → hex64 → hex32 → hex16 → hex8). When the
@@ -1745,6 +1761,29 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 }
                 appendSection(QString::fromLatin1(kGroupLabels[gi]),
                               QString::fromLatin1(kGroupOrder[gi]), items);
+            }
+            // Inline expand/collapse affordance at the very bottom. In
+            // simple mode it reveals the hidden count; when expanded it
+            // offers a way back to the common set. Activating it toggles
+            // m_showAllTypes (handled in acceptIndex), not a type pick.
+            int hiddenCount = 0;
+            for (const auto& t : m_allTypes) {
+                if (t.entryKind == TypeEntry::Section) continue;
+                if (t.kindGroup == QStringLiteral("Common")
+                    || (t.entryKind == TypeEntry::Primitive && !isCommonKind(t.primitiveKind)))
+                    hiddenCount++;
+            }
+            if (m_showAllTypes || hiddenCount > 0) {
+                TypeEntry tog;
+                tog.entryKind = TypeEntry::Primitive;  // selectable (not a Section)
+                tog.isExpandToggle = true;
+                tog.enabled = true;
+                tog.displayName = m_showAllTypes
+                    ? QStringLiteral("− Show common types only")
+                    : QStringLiteral("+ Show all types (%1)").arg(hiddenCount);
+                m_filteredTypes.append(tog);
+                m_matchPositions.append(QVector<int>());
+                displayStrings << tog.displayName;
             }
         } else {
             // Flat sorted list (no sections) — name/size/align
@@ -1779,10 +1818,12 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         }
     }
 
-    // Empty state
+    // Empty state — the expand/collapse toggle row is not a real type, so
+    // it must not inflate the "N types" status count or suppress the
+    // empty-state placeholder.
     int resultCount = 0;
     for (const auto& f : m_filteredTypes)
-        if (f.entryKind != TypeEntry::Section) resultCount++;
+        if (f.entryKind != TypeEntry::Section && !f.isExpandToggle) resultCount++;
 
     if (resultCount == 0) {
         TypeEntry empty;
@@ -1873,6 +1914,13 @@ void TypeSelectorPopup::acceptIndex(int row) {
     // re-enter applyFilter(), which clears m_filteredTypes — a reference into
     // it would dangle mid-emit.
     const TypeEntry entry = m_filteredTypes[row];
+    // Expand/collapse row: flip the simple/all view and re-render in place.
+    // Never emits a selection and never hides the popup.
+    if (entry.isExpandToggle) {
+        m_showAllTypes = !m_showAllTypes;
+        applyFilter(m_filterEdit ? m_filterEdit->text() : QString());
+        return;
+    }
     if (entry.entryKind == TypeEntry::Section) return;
     if (!entry.enabled) return;
 

@@ -668,6 +668,24 @@ if(BUILD_TESTING)
         target_link_libraries(editor_render PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
     endif()
 
+    # Offscreen render harness for the TypeSelectorPopup — grabs the popup in
+    # its default SIMPLE view to a PNG so the common-by-default list + "Show
+    # all types" toggle row can be verified. Same heavy link set. Not a ctest.
+    add_executable(typeselector_render EXCLUDE_FROM_ALL tools/typeselector_render.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
+        src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
+        src/resources.qrc)
+    target_include_directories(typeselector_render PRIVATE src third_party/fadec)
+    target_link_libraries(typeselector_render PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Svg
+        QScintilla::QScintilla)
+    if(WIN32)
+        target_link_libraries(typeselector_render PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+    endif()
+
     # Non-UI combinatorial sweep — exercises every (mode, condition,
     # value type, alignment, region filter) tuple that the panel can
     # produce, against a synthetic provider, asserting the engine

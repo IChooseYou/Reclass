@@ -159,6 +159,26 @@ inline constexpr bool isContainerKind(NodeKind k) {
 inline constexpr bool isStringKind(NodeKind k) {
     return k == NodeKind::UTF8 || k == NodeKind::UTF16;
 }
+// The everyday "common" primitive set shown by default in the type chooser
+// (the rest are reachable via the chooser's "Show all" toggle, or by typing
+// in its filter which always searches every type). Chosen from a frequency
+// sweep of the bundled example .rcx files: this set covers ~99% of real
+// nodes while keeping the default list short.
+inline constexpr bool isCommonKind(NodeKind k) {
+    switch (k) {
+    case NodeKind::Hex8:  case NodeKind::Hex16: case NodeKind::Hex32:
+    case NodeKind::Hex64: case NodeKind::Hex128:
+    case NodeKind::UInt8: case NodeKind::UInt16:
+    case NodeKind::UInt32: case NodeKind::UInt64:
+    case NodeKind::Int32: case NodeKind::Int64:
+    case NodeKind::Pointer64:
+    case NodeKind::Float: case NodeKind::Double:
+    case NodeKind::Bool:
+        return true;
+    default:
+        return false;
+    }
+}
 // Hex types, pointer types, function pointers, and containers are not meaningful
 // primitive-pointer targets — dereferencing them produces the same output as void*.
 inline constexpr bool isValidPrimitivePtrTarget(NodeKind k) {

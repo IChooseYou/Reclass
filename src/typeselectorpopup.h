@@ -52,6 +52,11 @@ struct TypeEntry {
 
     // Kind-group for visual grouping + coloring (Hex/Int/UInt/Float/Ptr/Vec/Str/Ctr)
     QString     kindGroup;
+
+    // Synthetic, selectable "Show all types / Show common only" row appended
+    // to the bottom of the unfiltered grouped view. Activating it toggles
+    // m_showAllTypes and re-filters instead of emitting a type selection.
+    bool        isExpandToggle = false;
 };
 
 // Kind-group string for a NodeKind (Hex/Int/UInt/Float/Ptr/Vec/Str/Ctr)
@@ -147,6 +152,12 @@ private:
     QToolButton*      m_detailBtn    = nullptr;  // toggle button in sort toolbar
     bool              m_showDetail   = false;
     bool              m_compact      = false;
+    // When false (default), the unfiltered grouped view shows only the
+    // common primitive set (isCommonKind) + user structs; the std-lib
+    // "Common Types" section and long-tail primitives are hidden behind a
+    // bottom "Show all types" toggle row. Typing a filter always searches
+    // every type regardless. Persists for the cached popup's lifetime.
+    bool              m_showAllTypes = false;
 
     QVector<TypeEntry> m_allTypes;
     QVector<TypeEntry> m_filteredTypes;
