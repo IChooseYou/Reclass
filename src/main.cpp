@@ -5156,17 +5156,11 @@ void MainWindow::applyTheme(const Theme& theme) {
                  theme.hover.name()));
     }
 
-    // Workspace tab bar + separator theme update
+    // Workspace separator theme update. (A "workspaceTabBar" lookup used to
+    // live here from the pre-dock-unification layout, but no widget carries
+    // that objectName anymore — the dock content is just the search box +
+    // tree + separators — so the block never executed and was removed.)
     if (m_workspaceDock) {
-        if (auto* tabBar = m_workspaceDock->findChild<QWidget*>("workspaceTabBar")) {
-            for (auto* btn : tabBar->findChildren<QToolButton*>()) {
-                btn->setStyleSheet(QStringLiteral(
-                    "QToolButton { color: %1; border: none; border-bottom: 2px solid transparent;"
-                    " padding: 4px 0; }"
-                    "QToolButton:checked { color: %2; border-bottom: 2px solid %3; }")
-                    .arg(theme.textMuted.name(), theme.text.name(), theme.borderFocused.name()));
-            }
-        }
         if (auto* sep = m_workspaceDock->findChild<QFrame*>("workspaceSep")) {
             sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
         }
