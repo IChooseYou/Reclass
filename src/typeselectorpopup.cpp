@@ -1894,6 +1894,16 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             m_statusLabel->setText(QStringLiteral("%1 types").arg(resultCount));
     }
 
+    // While a text filter is active the result list is fuzzy-rank ordered and
+    // the sort mode is ignored, so grey out the sort buttons to signal they
+    // have no effect. (The group chips DO still filter the fuzzy results, so
+    // they stay enabled.)
+    {
+        const bool filtering = !filterBase.isEmpty();
+        for (auto* b : m_sortBtns)
+            if (b) b->setEnabled(!filtering);
+    }
+
     // Restore the previously-selected entry if it survived the rebuild;
     // otherwise fall back to the first selectable row.
     int target = -1;
