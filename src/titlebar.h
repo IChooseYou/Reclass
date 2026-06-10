@@ -8,10 +8,12 @@
 
 namespace rcx {
 
-// Two-mode layout toggle: the chrome button is a plain checkable button
-// — checked = workspace dock shown, unchecked = hidden. No dropdown.
-// Values kept as an enum so callers stay self-documenting and to leave
-// room for future presets without changing the signal signature.
+// Workspace layout presets, consumed by MainWindow::applyLayoutPreset.
+// (The title-bar toggle buttons that used to emit these are gone — the
+// Project dock's own close button and the collapsed rail replaced them —
+// but the rail click, doc-tab context menu, and --screenshot still use
+// the enum.) Kept as an enum so callers stay self-documenting and to
+// leave room for future presets.
 enum LayoutPreset {
     Layout_NoWorkspace = 0,  // workspace hidden
     Layout_Workspace   = 1,  // workspace visible
@@ -31,15 +33,6 @@ public:
 
     void updateMaximizeIcon();
 
-    // Sync the toggle button's checked state when workspace visibility
-    // changes via other paths (View menu, dock close button, etc.).
-    void setWorkspaceChecked(bool on);
-
-signals:
-    // Emitted when the user clicks the layout toggle button.
-    // Value is Layout_Workspace or Layout_NoWorkspace.
-    void layoutPresetSelected(int preset);
-
 protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
@@ -51,10 +44,6 @@ private:
     QMenuBar*    m_menuBar    = nullptr;
     QHBoxLayout* m_menuBtnLayout = nullptr;
     QVector<QToolButton*> m_menuButtons;
-    // Side-by-side workspace mode toggles. Exactly one checked at a time.
-    // Off = editor-only icon, On = editor + sidebar icon.
-    QToolButton* m_btnLayoutOff = nullptr;
-    QToolButton* m_btnLayoutOn  = nullptr;
     QToolButton* m_btnMin     = nullptr;
     QToolButton* m_btnMax     = nullptr;
     QToolButton* m_btnClose   = nullptr;

@@ -1,6 +1,7 @@
 #include "processpicker.h"
 #include "ui_processpicker.h"
 #include "widgets/themed_messagebox.h"
+#include "themes/thememanager.h"
 #include <QTableWidgetItem>
 #include <QHeaderView>
 #include <QMessageBox>
@@ -82,8 +83,6 @@ void ProcessPicker::initUi()
     // input focus rings so the focus state is actually visible.
     QString focusBorder = pal.color(QPalette::Link).name();
     QString border   = pal.color(QPalette::Mid).darker(120).name();
-    QString mutedText= pal.color(QPalette::Disabled, QPalette::WindowText).name();
-    QString hoverDk  = pal.color(QPalette::Mid).darker(130).name();
 
     ui->processTable->setStyleSheet(QStringLiteral(
         "QTableWidget { background: %1; color: %2; border: none; }"
@@ -103,29 +102,40 @@ void ProcessPicker::initUi()
         "QLineEdit:focus { border-color: %4; }")
         .arg(bg, text, border, focusBorder));
 
-    // Match DialogButton chrome: 28 px fixed height, hairline border,
-    // optional 2 px accent stripe on top for the primary action. Done
-    // via QSS so the .ui-defined QPushButtons stay in place.
-    const QString accent = pal.color(QPalette::Link).name();
-    auto btnStyle = [&](bool primary) {
-        return QStringLiteral(
-            "QPushButton { background: transparent; color: %1;"
-            "  border: 1px solid %2; border-top: 2px solid %3;"
-            "  border-radius: 2px; padding: 2px 14px;"
-            "  min-width: 72px; min-height: 24px; }"
-            "QPushButton:hover { background: %4; }"
-            "QPushButton:pressed { background: %5; }"
-            "QPushButton:disabled { color: %6; border-top-color: %2; }")
-            .arg(text, border,
-                 primary ? accent : QStringLiteral("transparent"),
-                 hover, hoverDk, mutedText);
-    };
-    ui->refreshButton->setStyleSheet(btnStyle(false));
-    ui->attachButton ->setStyleSheet(btnStyle(true));
-    ui->cancelButton ->setStyleSheet(btnStyle(false));
-    ui->refreshButton->setMinimumHeight(28);
-    ui->attachButton ->setMinimumHeight(28);
-    ui->cancelButton ->setMinimumHeight(28);
+    // Use the SAME chrome as rcx::DialogButton (the unsaved-changes /
+    // message-box buttons): outline-only, square corners, NO accent stripe.
+    // The old style emphasised only Attach with a 2 px top accent + rounded
+    // corners, which reads out-of-style. Attach = Primary (border in
+    // borderFocused), Refresh/Cancel = Secondary. Replicated as QSS so the
+    // .ui-defined QPushButtons stay in place (DialogButton has no default ctor
+    // for .ui promotion). Mirrors src/widgets/dialog_button.cpp.
+    {
+        const auto& t = rcx::ThemeManager::instance().current();
+        auto dialogBtn = [&](bool primary) {
+            const QString fg = primary ? t.text.name() : t.textDim.name();
+            const QString bd = primary ? t.borderFocused.name() : t.border.name();
+            return QStringLiteral(
+                "QPushButton { background: transparent; color: %1;"
+                "  border: 1px solid %2; border-radius: 0px;"
+                "  padding: 5px 16px; min-width: 88px; font-weight: 500; }"
+                "QPushButton:hover { background: %3; color: %4; }"
+                "QPushButton:pressed { background: %5; color: %4; }"
+                "QPushButton:focus { border: 1px solid %6; }"
+                "QPushButton:default { border: 1px solid %6; }"
+                "QPushButton:disabled { background: transparent; color: %7;"
+                "  border-color: %8; }")
+                .arg(fg, bd, t.hover.name(), t.text.name(),
+                     t.hover.darker(115).name(), t.borderFocused.name(),
+                     t.textMuted.name(), t.border.name());
+        };
+        ui->refreshButton->setStyleSheet(dialogBtn(false));
+        ui->attachButton ->setStyleSheet(dialogBtn(true));
+        ui->cancelButton ->setStyleSheet(dialogBtn(false));
+        ui->refreshButton->setFixedHeight(30);
+        ui->attachButton ->setFixedHeight(30);
+        ui->cancelButton ->setFixedHeight(30);
+        ui->attachButton ->setDefault(true);  // Primary = Enter target
+    }
 
     // Right-click context menu
     ui->processTable->setContextMenuPolicy(Qt::CustomContextMenu);

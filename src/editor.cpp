@@ -190,136 +190,6 @@ public:
     }
 };
 
-// ── Value history popup ──
-
-class ValueHistoryPopup : public HoverPopup {
-    bool     m_hasButtons = false;
-    QStringList m_values;
-    QVector<QLabel*> m_labels;
-    std::function<void(const QString&)> m_onSet;
-public:
-    explicit ValueHistoryPopup(QWidget* parent) : HoverPopup(parent) {}
-
-    bool hasButtons() const { return m_hasButtons; }
-    void setOnSet(std::function<void(const QString&)> fn) { m_onSet = std::move(fn); }
-
-protected:
-    void mouseMoveEvent(QMouseEvent* e) override {
-        if (!m_hasButtons && m_onMouseMove)
-            m_onMouseMove(e);
-        else
-            QFrame::mouseMoveEvent(e);
-    }
-
-public:
-    void populate(uint64_t nodeId, const ValueHistory& hist, const QFont& font,
-                  bool showButtons = false) {
-        QStringList vals;
-        hist.forEach([&](const QString& v) { vals.append(v); });
-
-        if (nodeId == m_nodeId && vals == m_values
-            && showButtons == m_hasButtons && isVisible())
-            return;
-
-        // In-place label update when structure unchanged (avoids flicker)
-        if (nodeId == m_nodeId && vals.size() == m_values.size()
-            && vals.size() == m_labels.size()
-            && showButtons == m_hasButtons && isVisible()) {
-            for (int i = 0; i < vals.size(); i++)
-                m_labels[i]->setText(vals[i]);
-            m_values = vals;
-            return;
-        }
-
-        m_nodeId = nodeId;
-        m_values = vals;
-        m_hasButtons = showButtons;
-        m_labels.clear();
-
-        delete layout();
-        qDeleteAll(findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly));
-
-        const auto& theme = ThemeManager::instance().current();
-        applyThemePalette(theme);
-
-        auto* vbox = new QVBoxLayout(this);
-        vbox->setContentsMargins(8, 6, 8, 6);
-        vbox->setSpacing(2);
-
-        auto* title = new QLabel(QStringLiteral("Previous Values"));
-        QFont bold = font;
-        bold.setBold(true);
-        title->setFont(bold);
-        title->setStyleSheet(QStringLiteral("color: %1;").arg(theme.text.name()));
-        vbox->addWidget(title);
-
-        auto* sep = new QFrame;
-        sep->setFrameShape(QFrame::HLine);
-        sep->setFrameShadow(QFrame::Plain);
-        sep->setFixedHeight(1);
-        QPalette sp; sp.setColor(QPalette::WindowText, theme.border);
-        sep->setPalette(sp);
-        vbox->addWidget(sep);
-
-        qint64 now = QDateTime::currentMSecsSinceEpoch();
-        hist.forEachWithTime([&](const QString& v, qint64 msec) {
-            auto* row = new QHBoxLayout;
-            row->setContentsMargins(0, 1, 0, 1);
-            row->setSpacing(8);
-
-            auto* label = new QLabel(v);
-            label->setFont(font);
-            label->setStyleSheet(QStringLiteral("color: %1;").arg(theme.syntaxNumber.name()));
-            row->addWidget(label, 1);
-            m_labels.append(label);
-
-            if (msec > 0) {
-                qint64 elapsed = now - msec;
-                QString timeStr;
-                if (elapsed < 1000)
-                    timeStr = QStringLiteral("now");
-                else if (elapsed < 60000)
-                    timeStr = QStringLiteral("%1s ago").arg(elapsed / 1000);
-                else if (elapsed < 3600000)
-                    timeStr = QStringLiteral("%1m ago").arg(elapsed / 60000);
-                else
-                    timeStr = QStringLiteral("%1h ago").arg(elapsed / 3600000);
-
-                auto* timeLabel = new QLabel(timeStr);
-                timeLabel->setFont(font);
-                timeLabel->setStyleSheet(QStringLiteral("color: %1;").arg(theme.textDim.name()));
-                row->addWidget(timeLabel);
-            }
-
-            if (showButtons) {
-                auto* setBtn = new QToolButton;
-                setBtn->setText(QStringLiteral("Set"));
-                setBtn->setAutoRaise(true);
-                setBtn->setCursor(Qt::PointingHandCursor);
-                setBtn->setFont(font);
-                setBtn->setStyleSheet(QStringLiteral(
-                    "QToolButton { color: %1; border: none; padding: 1px 4px; }"
-                    "QToolButton:hover { color: %2; background: %3; }")
-                    .arg(theme.textDim.name(), theme.text.name(), theme.hover.name()));
-                QString val = v;
-                QObject::connect(setBtn, &QToolButton::clicked, [this, val]() {
-                    if (m_onSet) m_onSet(val);
-                });
-                row->addWidget(setBtn);
-            }
-            vbox->addLayout(row);
-        });
-
-        adjustSize();
-    }
-
-    void dismiss() override {
-        HoverPopup::dismiss();
-        m_values.clear();
-        m_labels.clear();
-    }
-};
-
 // ── Body-widget builders (shared between previews) ──
 
 // Build a QLabel-only body widget for text-block previews (hex dump,
@@ -336,8 +206,9 @@ static QWidget* buildTextBodyWidget(const QString& body, const QFont& font,
     return lbl;
 }
 
-// Build the value-history rows widget (no "Set" buttons — those live
-// on the inline-edit path which uses ValueHistoryPopup directly).
+// Build the value-history rows widget. "Set" buttons (per row) are
+// added only on the inline-edit path (showButtons); the read-only
+// dwell-hover path passes showButtons=false.
 //
 // Layout per row (newest first):
 //   [▸ |  value (mono)            12s |
@@ -356,7 +227,9 @@ static QWidget* buildTextBodyWidget(const QString& body, const QFont& font,
 //   the eye can lock onto "current vs previous" at a glance.
 static QWidget* buildValueHistoryBody(const ValueHistory& hist,
                                        const QFont& font, const Theme& theme,
-                                       QWidget* parent) {
+                                       QWidget* parent,
+                                       bool showButtons = false,
+                                       std::function<void(const QString&)> onSet = {}) {
     auto* container = new QWidget;
     auto* vbox = new QVBoxLayout(container);
     // 4 px bottom margin so the last row / overflow footer doesn't
@@ -953,6 +826,25 @@ static QWidget* buildValueHistoryBody(const ValueHistory& hist,
             row->addWidget(spacer);
         }
 
+        // Inline-edit "Set" button — click a previous value to write it into
+        // the active edit span. Edit-mode only (showButtons); read-only hover
+        // never gets it.
+        if (showButtons) {
+            auto* setBtn = new QToolButton(rowFrame);
+            setBtn->setText(QStringLiteral("Set"));
+            setBtn->setAutoRaise(true);
+            setBtn->setCursor(Qt::PointingHandCursor);
+            setBtn->setFont(font);
+            setBtn->setStyleSheet(QStringLiteral(
+                "QToolButton { color: %1; border: none; padding: 1px 6px; }"
+                "QToolButton:hover { color: %2; background: %3; }")
+                .arg(theme.textDim.name(), theme.text.name(), theme.hover.name()));
+            const QString rowVal = v;
+            QObject::connect(setBtn, &QToolButton::clicked, setBtn,
+                             [onSet, rowVal]() { if (onSet) onSet(rowVal); });
+            row->addWidget(setBtn);
+        }
+
         vbox->addWidget(rowFrame);
         ++idx;
 
@@ -1108,9 +1000,8 @@ static QWidget* buildValueHistoryBody(const ValueHistory& hist,
 // conditions, and the popup never shrinks below a comfortable read.
 static constexpr int kHostCols    = 64;
 static constexpr int kHostRows    = 8;
-// Match the editor's existing popup chrome exactly: every other
-// HoverPopup subclass (TitleBodyPopup, ValueHistoryPopup) uses
-// (8, 6, 8, 6) inner margins with 2 px between widgets. The hover
+// Match the editor's existing popup chrome exactly: the TitleBodyPopup
+// uses (8, 6, 8, 6) inner margins with 2 px between widgets. The hover
 // host must match so the popup doesn't visually drift left/right
 // relative to the row when the user previously expected the old
 // popups' indent.
@@ -1267,11 +1158,16 @@ public:
         m_content->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         vbox->addWidget(m_content);
 
-        // ── Footer: plain text with bold-colored key letters ──
+        // ── Footer: plain text with bold-colored key letters + a clickable
+        //    "✕ Hide popups" link (href='hide') that disables value popups.
         m_footerHint = new QLabel(this);
         m_footerHint->setTextFormat(Qt::RichText);
         m_footerHint->setFont(contentFont);
         m_footerHint->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_footerHint->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
+        m_footerHint->setOpenExternalLinks(false);
+        connect(m_footerHint, &QLabel::linkActivated, this,
+                [this](const QString&) { if (m_onHidePopups) m_onHidePopups(); });
         vbox->addWidget(m_footerHint);
 
         // 1 px themed border on the whole popup — no rounding, no
@@ -1283,6 +1179,11 @@ public:
     }
 
     void setOnActiveChanged(ActiveChangedFn fn) { m_onActiveChanged = std::move(fn); }
+    void setOnHidePopups(std::function<void()> fn) { m_onHidePopups = std::move(fn); }
+    // Invoke the "hide popups for good" action — same as clicking the footer
+    // link, but the link is unreachable by mouse (the popup is see-through, so
+    // mousing onto it dismisses it), so the editor binds a key (H) to this.
+    void triggerHidePopups() { if (m_onHidePopups) m_onHidePopups(); }
 
     int  eligibleCount() const { return m_eligible.size(); }
     int  activeIndex()  const  { return m_active; }
@@ -1296,32 +1197,35 @@ public:
     void setEligible(QVector<HoverPreview*> eligible,
                      const LineMeta& lm, const Node& node,
                      const HoverContext& ctx, int activeIdx) {
-        // Fingerprint: nodeId + eligible-id-list + ValueHistory count.
-        // If the hover tick lands on the same row with the same
-        // eligible slate AND no new value was recorded in the history,
-        // skip the rebuild — the popup is already showing the right
-        // thing, and a rebuild would flicker the size when ValueHistory
-        // and a wider preview (HexDump, Disasm) coexist in the stack.
-        // Using history.count (not heatLevel, which saturates at 3)
-        // means new values past the saturation point still refresh the
-        // popup content.
+        // Fingerprint: nodeId + eligible-id-list + edit-mode flag.
+        // If the hover tick lands on the same row with the same eligible
+        // slate, skip the rebuild — the popup already shows the right
+        // thing, and a rebuild tears down + recreates the content stack
+        // (and the value-history list), which flickers.
+        //
+        // Deliberately NOT keyed on the live ValueHistory count: the whole
+        // point of this popup is hovering/editing an *updating* address, so
+        // its count ticks up several times a second. Folding it into the
+        // fingerprint meant every micro-jitter of the mouse over a live row
+        // rebuilt the popup — visible as the popup "fighting" the text
+        // underneath. We accept a stable snapshot for the dwell instead:
+        // the list reflects the row at first-dwell (or at edit start) and
+        // only refreshes when the row / slate / hover↔edit mode changes.
         QString fp;
         fp.reserve(64);
         fp += QString::number(lm.nodeId);
-        if (ctx.history) {
-            auto it = ctx.history->find(lm.nodeId);
-            if (it != ctx.history->end()) {
-                fp += '|';
-                fp += QString::number(it->count);
-            }
-        }
         for (auto* p : eligible) { fp += '|'; fp += p->id(); }
+        // Edit-mode is part of the slate: a hover→edit transition on the SAME
+        // row + same history count must still rebuild (read-only rows → rows
+        // with Set buttons), so fold it into the fingerprint.
+        if (ctx.editMode) fp += QStringLiteral("|E");
         if (fp == m_lastFingerprint && isVisible()
             && m_eligible.size() == eligible.size()) {
             // Same slate — just keep showing what we have.
             return;
         }
         m_lastFingerprint = fp;
+        m_editMode = ctx.editMode;
 
         // Clear previous widgets — preview-owned but we deleteLater so
         // they're gone before the next setEligible reuses the stack.
@@ -1354,6 +1258,20 @@ public:
         // Lock to the standard formula size. No shadow margin — the
         // popup is the frame itself (boxy 1 px border, no rounding).
         setFixedSize(m_standardSize);
+    }
+
+    // Inline-edit entry point: show ONLY the value-history page, with
+    // interactive Set buttons, in edit-mode chrome (no dots, edit footer).
+    // The caller passes the registered ValueHistoryPreview instance.
+    void showValueHistoryForEdit(HoverPreview* vhPreview,
+                                 const LineMeta& lm, const Node& node,
+                                 HoverContext ctx,
+                                 std::function<void(const QString&)> onSet) {
+        if (!vhPreview) return;
+        ctx.editMode   = true;
+        ctx.onValueSet = std::move(onSet);
+        QVector<HoverPreview*> only{ vhPreview };
+        setEligible(only, lm, node, ctx, 0);
     }
 
     void setActiveIndex(int idx) {
@@ -1433,12 +1351,25 @@ private:
         const bool multi = m_eligible.size() > 1;
         QString html = QStringLiteral("<span style='color:%1;'>")
                            .arg(t.textMuted.name());
-        if (multi) {
-            html += keyTagHtml(QStringLiteral("Tab"), t);
-            html += QStringLiteral(" cycle &nbsp; ");
+        if (m_editMode) {
+            html += keyTagHtml(QStringLiteral("Esc"), t);
+            html += QStringLiteral(" cancel &nbsp; ");
+            html += keyTagHtml(QStringLiteral("Set"), t);
+            html += QStringLiteral(" applies");
+        } else {
+            if (multi) {
+                html += keyTagHtml(QStringLiteral("Tab"), t);
+                html += QStringLiteral(" cycle &nbsp; ");
+            }
+            html += keyTagHtml(QStringLiteral("Esc"), t);
+            html += QStringLiteral(" close all &nbsp; ");
+            // "Hide for good" is a KEY (H), not a click: the popup is
+            // see-through (mousing onto it dismisses it), so a footer link can
+            // never be reached. H disables value popups until they're
+            // re-enabled via View ▸ Value Popups.
+            html += keyTagHtml(QStringLiteral("H"), t);
+            html += QStringLiteral(" hide popups");
         }
-        html += keyTagHtml(QStringLiteral("Esc"), t);
-        html += QStringLiteral(" close all");
         html += QStringLiteral("</span>");
         m_footerHint->setText(html);
     }
@@ -1477,6 +1408,8 @@ private:
     ActiveChangedFn   m_onActiveChanged;
     QSize             m_standardSize;
     QString           m_lastFingerprint;
+    bool              m_editMode = false;       // edit (Set buttons) vs hover
+    std::function<void()> m_onHidePopups;       // footer "✕ Hide" → editor
 };
 
 // ── Concrete previews ──
@@ -1504,7 +1437,8 @@ public:
         if (!ctx.history) return nullptr;
         auto it = ctx.history->find(lm.nodeId);
         if (it == ctx.history->end()) return nullptr;
-        return buildValueHistoryBody(*it, ctx.editorFont, *ctx.theme, parent);
+        return buildValueHistoryBody(*it, ctx.editorFont, *ctx.theme, parent,
+                                     ctx.editMode, ctx.onValueSet);
     }
 };
 
@@ -1759,6 +1693,13 @@ static constexpr int IND_BYTE_SEL     = 26; // Foreground recolor (TEXTFORE) on 
                                             // IND_HEX_DIM means selection wins over heat on
                                             // overlapping bytes — selection is an explicit user
                                             // action and should be the dominant visual signal.
+static constexpr int IND_UNREADABLE   = 28; // Strike-through (INDIC_STRIKE) in theme.markerError
+                                            // over the value span of a row whose bytes the
+                                            // provider couldn't read (bad page / freed region).
+                                            // The shown value is a zero-fill placeholder, so the
+                                            // strike marks it as "not real data" without flooding
+                                            // the whole row red. Set from LineMeta::unreadable;
+                                            // painted by applyUnreadableHighlight.
 
 static QString g_fontName = "IBM Plex Mono";
 
@@ -1906,6 +1847,13 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         emit marginClicked(margin, line, mods);
     });
 
+    // Zoom (Ctrl+wheel or the corner slider) scales the glyphs but not the
+    // offset margin's fixed pixel width — re-fit it so high zoom doesn't clip
+    // the offset column on the left.
+    connect(m_sci, &QsciScintillaBase::SCN_ZOOM, this, [this]() {
+        updateOffsetMarginWidth();
+    });
+
     m_sci->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_sci, &QWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
@@ -2032,15 +1980,22 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     m_previewRegistry->add(std::make_unique<StructTargetPreview>());
     m_previewRegistry->add(std::make_unique<DisasmPreview>());
     m_previewRegistry->add(std::make_unique<HexDumpPreview>());
-    m_previewRegistry->add(std::make_unique<ValueHistoryPreview>());
+    {
+        auto vh = std::make_unique<ValueHistoryPreview>();
+        m_valueHistoryPreview = vh.get();   // raw alias for the edit-mode show
+        m_previewRegistry->add(std::move(vh));
+    }
 
     auto* host = new HoverPopupHost(this, editorFont());
     m_popupHost = host;
-    // When cursor enters the host's geometry, forward move events back
-    // into the editor's hover state so the popup doesn't dismiss while
-    // the user moves over it. Same pattern as the three previous popups
-    // (their identical setOnMouseMove handlers used to live inline in
-    // editor.cpp lines 5268, 5365, 5441 — now consolidated here).
+    // See-through forwarding: when the cursor moves onto the popup, forward
+    // the global position back into the editor's hover state so a read-only
+    // preview that the user is mousing *past* (to reach a row underneath)
+    // dismisses instead of blocking the view. During inline edit we skip the
+    // hover re-resolve so the popup stays put and its Set buttons remain
+    // clickable (applyHoverCursor's edit branch keeps it shown). The footer
+    // "Hide popups" link / dots are reachable in edit mode and via View ▸
+    // Value Popups + Tab for read-only hovers.
     host->setOnMouseMove([this](QMouseEvent* e) {
         QPoint gp = e->globalPosition().toPoint();
         QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
@@ -2064,6 +2019,12 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         QSettings("Reclass","Reclass").setValue(
             QStringLiteral("hoverPreview/kind/") + QString::fromLatin1(km->name),
             id);
+    });
+    // Footer "✕ Hide popups" → dismiss now, disable + persist + propagate.
+    host->setOnHidePopups([this]() {
+        if (m_popupHost) static_cast<HoverPopup*>(m_popupHost)->dismiss();
+        setValuePopupsEnabled(false);
+        emit valuePopupsDisableRequested();
     });
 }
 
@@ -2129,6 +2090,11 @@ void RcxEditor::setupScintilla() {
     // Hex node dim indicator — overrides text color
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HEX_DIM, 17 /*INDIC_TEXTFORE*/);
+
+    // Unreadable-value indicator — strike-through over the value span so a
+    // failed read reads as "not real data" rather than a silent zero-fill.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_UNREADABLE, 4 /*INDIC_STRIKE*/);
 
     // Tree connector dim — same INDIC_TEXTFORE but at theme.textDim (not
     // textFaint like IND_HEX_DIM) so the ├ │ └ glyphs are clearly
@@ -2330,6 +2296,19 @@ void RcxEditor::setupMarkers() {
     m_sci->markerDefine(QsciScintilla::Background, M_FOCUS);
 }
 
+void RcxEditor::updateOffsetMarginWidth() {
+    // RVA mode uses half width since relative offsets are much shorter.
+    // setMarginWidth(margin, text) measures the sizer at the current style
+    // font INCLUDING zoom, so calling this on SCN_ZOOM keeps the margin wide
+    // enough that high zoom levels don't clip the offset column.
+    int marginDigits = m_relativeOffsets
+        ? qMax(m_layout.offsetHexDigits / 2, 4)
+        : m_layout.offsetHexDigits;
+    if (marginDigits <= 0) marginDigits = 8;  // before first applyDocument
+    QString marginSizer = QString("  %1  ").arg(QString(marginDigits, '0'));
+    m_sci->setMarginWidth(0, marginSizer);
+}
+
 void RcxEditor::allocateMarginStyles() {
     static constexpr int MSTYLE_NORMAL = 0;  // default dim — used by most rows
     static constexpr int MSTYLE_CONT   = 1;  // continuation rows
@@ -2360,9 +2339,7 @@ void RcxEditor::applyTheme(const Theme& theme) {
     //     and XP Notepad always had. The darker(115) formula on a pale
     //     chrome produces dirty khaki paper that fights the rest of the
     //     UI, so we bypass it once chrome reaches near-paper lightness.
-    const QColor editorBg = (theme.background.lightnessF() > 0.78)
-        ? QColor(QStringLiteral("#FFFFFF"))
-        : theme.background.darker(115);
+    const QColor editorBg = rcx::editorPaperColor(theme);
 
     // Paper and text
     m_sci->setPaper(editorBg);
@@ -2372,6 +2349,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
     // Indicator colors
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HEX_DIM, theme.textFaint);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_UNREADABLE, theme.markerError);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_TREE_CONN, theme.textDim);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
@@ -2526,6 +2505,14 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     m_meta = result.meta;
     m_layout = result.layout;
 
+    // The deferred single-click (set on press at the "already-selected" branch,
+    // fired on release) caches a LINE index. A refresh/re-layout between press
+    // and release — e.g. a type change that splits a field (hex64→hex32 inserts
+    // a pad node, shifting every following line) — invalidates that cached line.
+    // Clear it so a stale deferred click can't fire on the wrong (shifted) line.
+    m_pendingClickNodeId = 0;
+    m_pendingClickLine = -1;
+
     // Build nodeId → display-line index for O(1) hover/selection lookup
     m_nodeLineIndex.clear();
     m_nodeLineIndex.reserve(m_meta.size());
@@ -2534,15 +2521,8 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             m_nodeLineIndex[m_meta[i].nodeId].append(i);
     }
 
-    // Dynamically resize margin to fit the current hex digit tier
-    // RVA mode uses half width since relative offsets are much shorter
-    {
-        int marginDigits = m_relativeOffsets
-            ? qMax(m_layout.offsetHexDigits / 2, 4)
-            : m_layout.offsetHexDigits;
-        QString marginSizer = QString("  %1  ").arg(QString(marginDigits, '0'));
-        m_sci->setMarginWidth(0, marginSizer);
-    }
+    // Dynamically resize margin to fit the current hex digit tier (and zoom).
+    updateOffsetMarginWidth();
 
     bool didPatch = false;
     long patchByteStart = 0;
@@ -2739,6 +2719,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                 && a.lineByteCount == b.lineByteCount
                 && a.effectiveTypeW == b.effectiveTypeW
                 && a.effectiveNameW == b.effectiveNameW
+                && a.unreadable == b.unreadable
                 && a.pointerTargetName == b.pointerTargetName;
         };
         int first = 0;
@@ -2771,7 +2752,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                         IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
                         IND_HEAT_HOT, IND_TYPE_HINT, IND_RTTI_HINT, IND_CHIP_BG,
                         IND_CHIP_HOVER, IND_CHIP_PRESSED, IND_TREE_CONN,
-                        IND_BYTE_SEL, IND_EDIT_BOUNDS}) {
+                        IND_BYTE_SEL, IND_EDIT_BOUNDS, IND_UNREADABLE}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
             m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
         }
@@ -2806,6 +2787,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // above). Cheap — tens of microseconds even on 1000-line structs.
     applyHeatmapHighlight(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
     applySymbolColoring(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
+    applyUnreadableHighlight(result.meta, lineTexts);
 
     applyCommandRowPills();
 
@@ -3043,9 +3025,7 @@ void RcxEditor::reformatMargins(int firstLine, int lastLine) {
     int end = full ? m_meta.size() : qMin(lastLine + 1, (int)m_meta.size());
 
     // Resize margin: RVA offsets are much shorter than full addresses
-    int marginDigits = m_relativeOffsets ? qMax(hexDigits / 2, 4) : hexDigits;
-    QString marginSizer = QString("  %1  ").arg(QString(marginDigits, '0'));
-    m_sci->setMarginWidth(0, marginSizer);
+    updateOffsetMarginWidth();
 
     // ── Pass 1: margin text (global offset only) ──
     if (full) {
@@ -3246,6 +3226,27 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta, int firstLine, in
     }
 }
 
+void RcxEditor::applyUnreadableHighlight(const QVector<LineMeta>& meta,
+                                         const QVector<QString>& lineTexts) {
+    PROFILE_SCOPE("applyUnreadableHighlight");
+    // Strike-through the value column on rows whose bytes the provider
+    // couldn't read. compose set LineMeta::unreadable (provider valid but
+    // isReadable() false); the displayed value is a zero-fill placeholder,
+    // so the strike marks it as not-real without flooding the row red.
+    // Forced full-doc like the other indicator passes (cheap; the clear
+    // loop in applyDocument already wiped IND_UNREADABLE).
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_UNREADABLE);
+    const int n = qMin(meta.size(), lineTexts.size());
+    for (int i = 0; i < n; i++) {
+        const LineMeta& lm = meta[i];
+        if (!lm.unreadable) continue;
+        ColumnSpan vs = valueSpan(lm, lineTexts[i].size(),
+                                  lm.effectiveTypeW, lm.effectiveNameW);
+        if (vs.valid && vs.end > vs.start)
+            fillIndicatorCols(IND_UNREADABLE, i, vs.start, vs.end);
+    }
+}
+
 void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     PROFILE_SCOPE("applySelectionOverlay");
     // Skip when nothing changed since the last call AND the previous
@@ -3253,8 +3254,25 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     // range are still intact). Saves ~22 µs/refresh during rapid editing
     // when selection holds steady. Full-replace path always invalidates.
     const bool selChanged = (selIds != m_currentSelIds);
-    if (!selChanged && m_lastApplyWasPatch)
+    // A genuine selection change cancels the one-shot "don't reopen the type
+    // picker" guard. The same-selection recompose after a type change keeps
+    // selIds identical (selChanged == false), so the guard survives until the
+    // user's next click on the just-changed node — exactly what we want.
+    if (selChanged) m_suppressTypePickerForNode = 0;
+    if (!selChanged && m_lastApplyWasPatch) {
+        // Selection markers survive the text patch (they're outside the
+        // patched range or move with their line), so skip re-applying them.
+        // BUT the hover highlight must still be restored every tick: on a
+        // live refresh the line under the cursor is exactly the one being
+        // text-patched, and SCI_REPLACETARGET clears that line's
+        // IND_HOVER_SPAN. Returning here without re-painting made the hover
+        // highlight blink off on every refresh and "fight" the cursor on any
+        // updating field. applyHoverCursor() re-paints the span (and keeps
+        // the popup, which is now fingerprint-guarded, from flickering).
+        applyHoverHighlight();
+        applyHoverCursor();
         return;
+    }
     m_currentSelIds = selIds;
     m_sci->markerDeleteAll(M_SELECTED);
     m_sci->markerDeleteAll(M_ACCENT);
@@ -3276,8 +3294,7 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
         bool isMemberSel = sk == SelKind::Member;
         int arrayElemIdx = isArrayElemSel ? arrayElemIdxFromSelId(selId) : -1;
         int memberSubLine = isMemberSel ? memberSubFromSelId(selId) : -1;
-        uint64_t nodeId = selId & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                    | kMemberBit | kMemberSubMask);
+        uint64_t nodeId = baseNodeIdFromSelId(selId);
         auto it = m_nodeLineIndex.constFind(nodeId);
         if (it == m_nodeLineIndex.constEnd()) continue;
         for (int ln : *it) {
@@ -4086,17 +4103,25 @@ void RcxEditor::showFindBar() {
 }
 
 void RcxEditor::dismissHistoryPopup() {
-    if (m_historyPopup)
-        static_cast<HoverPopup*>(m_historyPopup)->dismiss();
+    // Value history is now a page of the unified hover host.
+    if (m_popupHost)
+        static_cast<HoverPopup*>(m_popupHost)->dismiss();
 }
 
 void RcxEditor::dismissAllPopups() {
-    if (m_historyPopup)    static_cast<HoverPopup*>(m_historyPopup)->dismiss();
     if (m_popupHost)       static_cast<HoverPopup*>(m_popupHost)->dismiss();
     if (m_arrowTooltip)    static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
 }
 
 QWidget* RcxEditor::hoverPopup() const { return m_popupHost; }
+QWidget* RcxEditor::historyPopup() const { return m_popupHost; }  // unified
+
+void RcxEditor::setValuePopupsEnabled(bool on) {
+    if (m_valuePopupsEnabled == on) return;
+    m_valuePopupsEnabled = on;
+    if (!on && m_popupHost && m_popupHost->isVisible())
+        static_cast<HoverPopup*>(m_popupHost)->dismiss();
+}
 
 QString RcxEditor::hoverPopupActiveId() const {
     if (!m_popupHost || !m_popupHost->isVisible()) return {};
@@ -5270,7 +5295,17 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 if (alreadySelected && plain) {
                     if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                         m_pendingClickNodeId = 0;
-                        return beginInlineEdit(t, tLine, tCol);
+                        // One-shot: the click right after a picker-driven type
+                        // change must NOT reopen the picker on the same node —
+                        // consume it as a plain re-select and fall through.
+                        if (t == EditTarget::Type
+                            && h.nodeId == m_suppressTypePickerForNode) {
+                            m_suppressTypePickerForNode = 0;
+                        } else {
+                            if (t == EditTarget::Type)
+                                m_suppressTypePickerForNode = h.nodeId;  // arm for next click
+                            return beginInlineEdit(t, tLine, tCol);
+                        }
                     }
                 }
 
@@ -5503,12 +5538,10 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_lastHoverPos = static_cast<QMouseEvent*>(event)->pos();
             m_hoverInside = true;
         } else if (event->type() == QEvent::Leave) {
-            // Don't dismiss if cursor moved onto one of our own popups
+            // Don't dismiss if cursor moved onto our hover/value popup
+            // (the unified host now owns the value-history case too).
             QPoint globalCursor = QCursor::pos();
             bool onPopup = false;
-            if (m_historyPopup && m_historyPopup->isVisible()
-                && m_historyPopup->geometry().contains(globalCursor))
-                onPopup = true;
             if (m_popupHost && m_popupHost->isVisible()
                 && m_popupHost->geometry().contains(globalCursor))
                 onPopup = true;
@@ -5577,6 +5610,16 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
                 if (ke->key() == Qt::Key_Tab) host->cycleNext();
                 else                          host->cyclePrev();
             }
+            return true;
+        }
+        if (ke->key() == Qt::Key_H && ke->modifiers() == Qt::NoModifier) {
+            // Hide value popups for good (until re-enabled via View ▸ Value
+            // Popups). The footer's "Hide popups" affordance is unreachable by
+            // mouse — the popup is see-through, so mousing toward it dismisses
+            // it — so this key is the way to turn them off. Only active while a
+            // popup is showing (we're inside the isVisible() guard), so it
+            // never shadows a plain 'h' elsewhere.
+            host->triggerHidePopups();
             return true;
         }
         if (ke->key() == Qt::Key_Escape) {
@@ -7236,46 +7279,42 @@ void RcxEditor::applyHoverCursor() {
                 m_sci->viewport()->setCursor(Qt::ArrowCursor);
             }
         }
-        // Value history popup — only during inline value editing on a heated node
+        // Value history — show the UNIFIED host's "Previous Values" page (with
+        // interactive Set buttons) during inline value editing on a heated
+        // node. Gated on the "Value Popups" toggle. This replaces the old
+        // standalone ValueHistoryPopup; the host now owns the edit case too,
+        // so the previous unconditional "dismiss the host during edit" is gone.
         {
             bool showPopup = false;
-            if (m_valueHistory && m_editState.target == EditTarget::Value
+            if (m_valuePopupsEnabled && m_valueHistory && m_popupHost
+                && m_disasmTree && m_valueHistoryPreview
+                && m_editState.target == EditTarget::Value
                 && m_editState.line >= 0 && m_editState.line < m_meta.size()) {
                 const LineMeta& lm = m_meta[m_editState.line];
-                if (lm.heatLevel > 0 && lm.nodeId != 0) {
+                if (lm.heatLevel > 0 && lm.nodeId != 0
+                    && lm.nodeIdx >= 0 && lm.nodeIdx < m_disasmTree->nodes.size()) {
                     auto it = m_valueHistory->find(lm.nodeId);
                     if (it != m_valueHistory->end() && it->uniqueCount() > 1) {
-                        if (!m_historyPopup) {
-                            m_historyPopup = new ValueHistoryPopup(this);
-                            static_cast<ValueHistoryPopup*>(m_historyPopup)->setOnMouseMove([this](QMouseEvent* e) {
-                                QPoint gp = e->globalPosition().toPoint();
-                                QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
-                                m_lastHoverPos = vp;
-                                m_hoverInside = m_sci->viewport()->rect().contains(vp);
-                                if (!m_editState.active) {
-                                    auto h2 = hitTest(m_lastHoverPos);
-                                    uint64_t nid = (m_hoverInside && h2.line >= 0) ? h2.nodeId : 0;
-                                    int nln = (m_hoverInside && h2.line >= 0) ? h2.line : -1;
-                                    if (nid != m_hoveredNodeId || nln != m_hoveredLine) {
-                                        m_hoveredNodeId = nid;
-                                        m_hoveredLine = nln;
-                                        applyHoverHighlight();
-                                    }
-                                }
-                                applyHoverCursor();
+                        const Node& node = m_disasmTree->nodes[lm.nodeIdx];
+                        HoverContext ctx;
+                        ctx.editorFont   = editorFont();
+                        ctx.theme        = &ThemeManager::instance().current();
+                        ctx.dataProvider = m_disasmProvider;
+                        ctx.codeProvider = m_disasmRealProv ? m_disasmRealProv : m_disasmProvider;
+                        ctx.tree         = m_disasmTree;
+                        ctx.history      = m_valueHistory;
+                        auto* host = static_cast<HoverPopupHost*>(m_popupHost);
+                        host->showValueHistoryForEdit(
+                            m_valueHistoryPreview, lm, node, ctx,
+                            [this](const QString& val) {
+                                if (!m_editState.active) return;
+                                long endPos = posFromCol(m_sci, m_editState.line, editEndCol());
+                                m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL,
+                                                     m_editState.posStart, endPos);
+                                QByteArray utf8 = val.toUtf8();
+                                m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
+                                                     (uintptr_t)0, utf8.constData());
                             });
-                        }
-                        auto* popup = static_cast<ValueHistoryPopup*>(m_historyPopup);
-                        popup->setOnSet([this](const QString& val) {
-                            if (!m_editState.active) return;
-                            long endPos = posFromCol(m_sci, m_editState.line, editEndCol());
-                            m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL,
-                                                 m_editState.posStart, endPos);
-                            QByteArray utf8 = val.toUtf8();
-                            m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
-                                                 (uintptr_t)0, utf8.constData());
-                        });
-                        popup->populate(lm.nodeId, *it, editorFont(), true);
                         int px = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION,
                                                            (unsigned long)0, m_editState.posStart);
                         int py = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION,
@@ -7283,18 +7322,14 @@ void RcxEditor::applyHoverCursor() {
                         int lh = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT,
                                                            (unsigned long)m_editState.line);
                         QPoint anchor = m_sci->viewport()->mapToGlobal(QPoint(px, py + lh));
-                        popup->showAt(anchor, lh);
+                        host->showAt(anchor, lh);
                         showPopup = true;
                     }
                 }
             }
-            if (!showPopup && m_historyPopup && m_historyPopup->isVisible())
-                static_cast<HoverPopup*>(m_historyPopup)->dismiss();
+            if (!showPopup && m_popupHost && m_popupHost->isVisible())
+                static_cast<HoverPopup*>(m_popupHost)->dismiss();
         }
-        // Always dismiss the hover host during inline editing — inline
-        // edit uses m_historyPopup (the buttons-enabled variant) and
-        // owns the hover slot exclusively.
-        if (m_popupHost) static_cast<HoverPopup*>(m_popupHost)->dismiss();
         return;
     }
 
@@ -7470,7 +7505,8 @@ void RcxEditor::applyHoverCursor() {
     // call in setupScintilla — no edits here.
     {
         bool showHost = false;
-        if (m_popupHost && m_previewRegistry && m_disasmTree && m_disasmProvider
+        if (m_valuePopupsEnabled
+            && m_popupHost && m_previewRegistry && m_disasmTree && m_disasmProvider
             && h.line >= 0 && h.line < m_meta.size() && m_hoverDwellElapsed) {
             const LineMeta& lm = m_meta[h.line];
             if (lm.nodeIdx >= 0 && lm.nodeIdx < m_disasmTree->nodes.size()) {
@@ -7505,11 +7541,6 @@ void RcxEditor::applyHoverCursor() {
                             m_sci, h.line, anchorSpan.start, lineText, &lh);
                         host->showAt(anchor, lh);
                         showHost = true;
-                        // Inline-edit history popup is a separate widget
-                        // (m_historyPopup) — dismiss it if it lingers
-                        // since we now own the hover slot.
-                        if (m_historyPopup && m_historyPopup->isVisible())
-                            static_cast<HoverPopup*>(m_historyPopup)->dismiss();
                     }
                 }
             }
@@ -7920,14 +7951,7 @@ void RcxEditor::setEditorFont(const QString& fontName) {
     // Re-apply margin styles and width with new font metrics
     allocateMarginStyles();
     applyTheme(ThemeManager::instance().current());
-    {
-        int marginDigits = m_relativeOffsets
-            ? qMax(m_layout.offsetHexDigits / 2, 4)
-            : m_layout.offsetHexDigits;
-        QString marginSizer = QString("  %1  ").arg(QString(marginDigits, '0'));
-        m_sci->setMarginWidth(0, marginSizer);
-    }
-
+    updateOffsetMarginWidth();
 }
 
 void RcxEditor::setGlobalFontName(const QString& fontName) {

@@ -4,6 +4,7 @@
 #include "providers/provider.h"
 #include <QtTest/QTest>
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <cstring>
 
 using namespace rcx;
@@ -111,14 +112,28 @@ public:
         ++m_enumCalls;
         return { ModuleEntry{ QStringLiteral("synthetic.dll"),
                               QStringLiteral("synthetic.dll"),
-                              kImageBase, 0x10000 } };
+                              m_modBase, m_modSize } };
     }
 
+    bool read(uint64_t addr, void* buf, int len) const override {
+        ++m_readCalls;
+        return BufferProvider::read(addr, buf, len);
+    }
+
+    // Override the synthetic module's extent (default mirrors the small RTTI
+    // fixture). A wider module lets many DISTINCT candidate values land inside
+    // it, exercising the per-candidate findOwningModule path.
+    void setModule(uint64_t base, uint64_t size) const { m_modBase = base; m_modSize = size; }
+
     int enumCalls() const { return m_enumCalls; }
-    void resetEnumCount() const { m_enumCalls = 0; }
+    int readCalls() const { return m_readCalls; }
+    void resetCounts() const { m_enumCalls = 0; m_readCalls = 0; }
 
 private:
     mutable int m_enumCalls = 0;
+    mutable int m_readCalls = 0;
+    mutable uint64_t m_modBase = kImageBase;
+    mutable uint64_t m_modSize = 0x10000;
 };
 
 // Build a minimal NodeTree with `nFields` Hex64 fields in a root struct.
@@ -229,7 +244,7 @@ private slots:
         FakeModuleProvider prov(std::move(data), QStringLiteral("synthetic"));
         NodeTree tree = buildTreeWithHexFields(kStructBase, kFieldCount);
 
-        prov.resetEnumCount();
+        prov.resetCounts();
         ComposeResult r = compose(tree, prov);
         Q_UNUSED(r);
         // Must be O(1) in field count — assert generously (≤ 4) so future
@@ -238,6 +253,60 @@ private slots:
             qPrintable(QStringLiteral("enumerateModules called %1× for %2 fields — should be O(1)")
                 .arg(prov.enumCalls()).arg(kFieldCount)));
         QVERIFY(prov.enumCalls() < kFieldCount);
+    }
+
+    // ── DayZ attach-stall regression ──
+    // The killer case: MANY pointer fields with DISTINCT values that all land
+    // inside a module but are NOT valid vtables. Each distinct value misses
+    // the per-pass rttiCache (keyed by value) and drives walkRtti +
+    // walkRttiItanium, each of which calls findOwningModule. Pre-fix that hit
+    // the UNCACHED prov.enumerateModules() — a Toolhelp module snapshot — up
+    // to ~4× per field, EVERY refresh. On a game with hundreds of DLLs that
+    // stalled attach for seconds (kernel providers used a different module
+    // path, hence "no lag"). With Provider::modulesCached() the syscall runs
+    // at most once per provider instance, across all candidates and refreshes.
+    void distinctCandidatesDoNotReEnumerateModules() {
+        constexpr uint64_t kImg       = 0x10000;
+        constexpr uint64_t kModSize   = 0x100000;   // 1 MB — holds many candidates
+        constexpr uint64_t kStructBase = 0x130000;  // past the module
+        constexpr int kFieldCount = 48;
+
+        QByteArray data(kStructBase + 0x1000, '\0');
+        // Fill the module with a non-zero in-module pointer so every
+        // [candidate-8] read yields a plausible meta/type_info pointer —
+        // this pushes walkRtti past its null-check into findOwningModule,
+        // then COL validation fails and the Itanium fallback runs (more
+        // findOwningModule calls). Exactly the real-process shape.
+        const uint64_t fill = kImg + 0x500;
+        for (uint64_t off = kImg; off + 8 <= kImg + kModSize; off += 8)
+            std::memcpy(data.data() + off, &fill, 8);
+        // DISTINCT candidate value per field, all inside the module.
+        for (int i = 0; i < kFieldCount; i++) {
+            uint64_t cand = kImg + 0x1000 + (uint64_t)i * 0x40;
+            std::memcpy(data.data() + kStructBase + i * 8, &cand, 8);
+        }
+
+        FakeModuleProvider prov(std::move(data), QStringLiteral("syn"));
+        prov.setModule(kImg, kModSize);
+        NodeTree tree = buildTreeWithHexFields(kStructBase, kFieldCount);
+
+        prov.resetCounts();
+        QElapsedTimer timer; timer.start();
+        constexpr int kPasses = 5;   // simulate auto-refresh ticks
+        for (int p = 0; p < kPasses; p++) {
+            ComposeResult r = compose(tree, prov);
+            Q_UNUSED(r);
+        }
+        const qint64 us = timer.nsecsElapsed() / 1000;
+
+        qInfo("PROFILE: %d distinct candidates × %d passes → enumerateModules=%d, reads=%d, %lld us",
+              kFieldCount, kPasses, prov.enumCalls(), prov.readCalls(), (long long)us);
+
+        // The whole point: the expensive module syscall is cached per provider
+        // instance, so it runs at most once total — NOT per candidate per pass.
+        QVERIFY2(prov.enumCalls() <= 1,
+            qPrintable(QStringLiteral("enumerateModules called %1× for %2 distinct candidates over %3 passes — must be cached (was the DayZ stall)")
+                .arg(prov.enumCalls()).arg(kFieldCount).arg(kPasses)));
     }
 
     void itaniumAutoDetectFallsBack() {

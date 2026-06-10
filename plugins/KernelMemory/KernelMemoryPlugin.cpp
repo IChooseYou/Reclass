@@ -750,3 +750,7 @@ extern "C" RCX_PLUGIN_EXPORT IPlugin* CreatePlugin()
 {
     return new KernelMemoryPlugin();
 }
+
+// ABI guard token — lets the host reject this DLL if it was built against an
+// incompatible rcx::Provider layout instead of crashing. See iplugin.h.
+RCX_DEFINE_PLUGIN_ABI()

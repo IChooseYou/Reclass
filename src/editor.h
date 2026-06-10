@@ -19,6 +19,7 @@ class QsciLexerCPP;
 namespace rcx {
 
 class HoverPreviewRegistry;  // src/widgets/hover_preview.h
+class HoverPreview;          // src/widgets/hover_preview.h
 
 class RcxEditor : public QWidget {
     Q_OBJECT
@@ -32,11 +33,11 @@ public:
     void restoreViewState(const ViewState& vs);
 
     QsciScintilla* scintilla() const { return m_sci; }
-    // m_historyPopup is the inline-edit value-history popup (with "Set"
-    // buttons); m_popupHost is the unified hover preview host. Tests
-    // and external observers query whichever is relevant via the
-    // accessors below.
-    QWidget* historyPopup() const { return m_historyPopup; }
+    // The value-history popup is now unified into m_popupHost (the hover
+    // preview host shows the "Previous Values" page with Set buttons during
+    // inline edit too). historyPopup() is kept as an alias to m_popupHost so
+    // existing tests/observers still resolve to the live popup.
+    QWidget* historyPopup() const;        // returns m_popupHost (unified)
     QWidget* hoverPopup() const;          // returns m_popupHost
     QString  hoverPopupActiveId() const;  // active preview's id (empty if host not visible)
     const LineMeta* metaForLine(int line) const;
@@ -49,6 +50,10 @@ public:
     void setPresentationMode(bool on) { m_presentationMode = on; }
     void setHoverEffects(bool on);
     bool hoverEffects() const { return m_hoverEffects; }
+    // Value/hover preview popups on/off (persisted as "valuePopups"). Gates
+    // BOTH the dwell-hover preview host AND the inline-edit value history.
+    void setValuePopupsEnabled(bool on);
+    bool valuePopupsEnabled() const { return m_valuePopupsEnabled; }
     void showFindBar();
     void dismissHistoryPopup();
     void dismissAllPopups();
@@ -145,6 +150,9 @@ signals:
     void insertAboveRequested(int nodeIdx, NodeKind kind);
     void commentEditRequested();
     void relativeOffsetsChanged(bool relative);
+    // Footer "✕ Hide popups" clicked — MainWindow persists "valuePopups"=false,
+    // unchecks the View ▸ Value Popups item, and propagates to all panes.
+    void valuePopupsDisableRequested();
     // Tail-chip click signals.
     //
     // RTTI chip click — extended to carry the demangled class name and
@@ -326,6 +334,16 @@ private:
     int      m_pendingClickLine = -1;
     Qt::KeyboardModifiers m_pendingClickMods = Qt::NoModifier;
 
+    // One-shot guard: when the type picker is opened by clicking the type
+    // cell of an already-selected node, the changed node stays selected, so
+    // the very next click on its type column would re-open the picker. After
+    // a hex64→hex32 split that reads as the chooser "auto-opening on any
+    // click." We arm this with the node's id when opening the picker; the
+    // next type-cell click on the SAME node is consumed as a plain re-select
+    // (clearing the guard) instead of reopening. A deliberate second click
+    // reopens as normal.
+    uint64_t m_suppressTypePickerForNode = 0;
+
     // ── Inline edit state ──
     struct InlineEditState {
         bool       active    = false;
@@ -392,7 +410,6 @@ private:
     const QHash<uint64_t, ValueHistory>* m_valueHistory = nullptr;
     std::function<QString(const QString&)> m_exprEvaluator;
     QLabel* m_exprResultLabel = nullptr;
-    QWidget* m_historyPopup = nullptr;  // inline-edit ValueHistoryPopup (file-local in editor.cpp)
     // The unified hover preview host (HoverPopupHost, file-local in
     // editor.cpp) replaces the old m_disasmPopup + m_structPreviewPopup
     // pair. It hosts whichever HoverPreview is eligible for the row
@@ -405,6 +422,10 @@ private:
     // call there. Stored as unique_ptr<HoverPreviewRegistry> in the
     // impl; the header keeps it forward-declared.
     std::unique_ptr<HoverPreviewRegistry> m_previewRegistry;
+    // Raw alias to the registered ValueHistoryPreview, captured at setup, so
+    // the inline-edit path can show JUST that page (with Set buttons) via the
+    // host's showValueHistoryForEdit(). Owned by m_previewRegistry.
+    HoverPreview* m_valueHistoryPreview = nullptr;
     QWidget* m_arrowTooltip = nullptr;       // RcxTooltip (arrow callout)
     const Provider* m_disasmProvider = nullptr;   // snapshot or real — for reading tree data
     const Provider* m_disasmRealProv = nullptr;   // real process provider — for reading code at arbitrary addresses
@@ -426,6 +447,9 @@ private:
 
     // ── Hover effects toggle ──
     bool m_hoverEffects = true;
+    // Value/hover preview popups (value history, hex, disasm, struct). When
+    // off, neither the hover host's value page nor the inline-edit history show.
+    bool m_valuePopupsEnabled = true;
 
     // ── Hover dwell for preview popups ──
     // Value-history / disasm / struct-preview popups wait this long
@@ -457,6 +481,10 @@ private:
     void setupFolding();
     void setupMarkers();
     void allocateMarginStyles();
+    // Size the offset margin (margin 0) to fit the widest offset at the
+    // CURRENT font + zoom. Must be re-run on zoom changes or the larger
+    // glyphs overflow the fixed pixel width and the offset gets clipped.
+    void updateOffsetMarginWidth();
 
     // Optional [first, last] line range. When set (>=0), the per-line pass
     // operates only on those lines; markers/indicators on lines outside
@@ -469,6 +497,8 @@ private:
                                 int firstLine = -1, int lastLine = -1);
     void applySymbolColoring(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,
                               int firstLine = -1, int lastLine = -1);
+    void applyUnreadableHighlight(const QVector<LineMeta>& meta,
+                                  const QVector<QString>& lineTexts);
     void applyBaseAddressColoring(const QVector<LineMeta>& meta);
     void applyCommandRowPills();
 

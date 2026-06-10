@@ -100,6 +100,16 @@ struct ComposeState {
     QVector<Provider::ModuleEntry>    rttiModules;
     QHash<uint64_t, RttiInfo>         rttiCache;
 
+    // ── Type-hint memo (per compose pass) ──
+    // inferTypes() is a pure function of (bytes,len); within one compose pass an
+    // address has fixed bytes (immutable snapshot + synchronous compose), so
+    // keying by (addr,size) is stale-free. Caches the post-threshold decision
+    // (chip text + kinds, INCLUDING the negative "no chip"), so re-visited nodes
+    // — array elements over identical bytes, re-viewed pointer targets — skip
+    // inferTypes' candidate-generation/ranking. Lifetime == this ComposeState.
+    struct TypeHintResult { bool has = false; QString hint; QVector<NodeKind> kinds; };
+    QHash<uint64_t, TypeHintResult>   typeHintCache;
+
     // Precomputed for O(1) lookups
     QHash<uint64_t, QVector<int>> childMap;
     mutable QSet<uint64_t>        childMapSorted;  // tracks which entries are sorted
@@ -272,7 +282,9 @@ static const RttiInfo& rttiForVtable(ComposeState& state, const Provider& prov,
     if (it != state.rttiCache.end()) return it.value();
 
     if (!state.rttiModulesCached) {
-        state.rttiModules = prov.enumerateModules();
+        // modulesCached() persists across refreshes (per Provider instance),
+        // so the module syscall doesn't re-run every compose pass.
+        state.rttiModules = prov.modulesCached();
         state.rttiModulesCached = true;
     }
 
@@ -368,6 +380,25 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         lm.ptrBase         = state.currentPtrBase;
         lm.parentAddr      = parentAbsAddr;
         lm.markerMask      = computeMarkers(node, prov, absAddr, isCont, depth);
+        // Distinct rendering for unreadable memory: provider valid but the
+        // value's bytes can't be read (bad page / freed region). Guard on
+        // isValid() so a detached/no-source provider (everything unreadable)
+        // and the intentional NullProvider zero-fill of null pointer targets
+        // don't light up. The editor strikes the value span when set.
+        {
+            int valSz = node.byteSize();
+            if (valSz <= 0) valSz = sizeForKind(node.kind);
+            // For string kinds byteSize() is the declared display WIDTH (strLen,
+            // default 64), usually far longer than the actual NUL-terminated
+            // text. Probing the whole window false-strikes a perfectly readable
+            // short string whose declared width merely overshoots the mapped
+            // page; probe just the first element so the strike means "the
+            // address itself is unreadable", matching the displayed value.
+            if (isStringKind(node.kind))
+                valSz = (node.kind == NodeKind::UTF16) ? 2 : 1;
+            if (valSz > 0 && prov.isValid() && !prov.isReadable(absAddr, valSz))
+                lm.unreadable = true;
+        }
         lm.foldLevel       = computeFoldLevel(depth, false);
         lm.effectiveTypeW  = lineTypeW;
         lm.effectiveNameW  = nameW;
@@ -497,11 +528,15 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                     && prov.isReadable(absAddr, 8)) {
                     uint64_t candidate = prov.readU64(absAddr);
                     if (candidate == 0
+                        && prov.isLive()
                         && (node.kind == NodeKind::Pointer64
                             || node.kind == NodeKind::Pointer32)) {
                         // Null vtable slot — chip becomes a "name this class"
-                        // call-to-action. Excluded for raw Hex64 because every
-                        // zero-byte row would otherwise sprout a chip.
+                        // call-to-action. Only on a LIVE memory source: on a
+                        // flat file (all zeros) every pointer would sprout it.
+                        // Excluded for raw Hex64 because every zero-byte row
+                        // would otherwise sprout a chip. (Resolved RTTI below
+                        // stays ungated — it works on file buffers too.)
                         isNullPointer = true;
                     } else if (candidate != 0 && candidate != UINT64_MAX) {
                         const RttiInfo& info = rttiForVtable(state, prov, candidate);
@@ -545,16 +580,36 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             //     type (handled in MainWindow). Only fires when inference
             //     confidence is strong (strength >= 3), so stable zero-byte
             //     runs and randomness don't bait users into wrong conversions.
-            if (isHexNode(node.kind)) {
+            //     Gated on state.typeHints (default OFF): inferTypes runs per
+            //     hex node per refresh, so on a big struct / module-heavy target
+            //     it's pure per-tick overhead when the chips aren't wanted.
+            if (state.typeHints && isHexNode(node.kind)) {
                 const int sz = sizeForKind(node.kind);
-                QByteArray b = prov.isReadable(absAddr, sz)
-                    ? prov.readBytes(absAddr, sz) : QByteArray(sz, '\0');
-                auto suggestions = inferTypes(
-                    reinterpret_cast<const uint8_t*>(b.constData()), sz);
-                if (!suggestions.isEmpty() && suggestions[0].strength >= 3) {
-                    QString hint = formatHint(suggestions[0]);
-                    QVector<NodeKind> kinds = suggestions[0].kinds;
-                    pushChip(ChipKind::TypeHint, hint, [&](LineChip& c) {
+                // Memoize the inference decision by (addr,size) — bytes are
+                // fixed within a compose pass, so a cache hit is identical to
+                // recomputing. 48-bit address + 16-bit size is non-lossy.
+                const uint64_t key = (absAddr & 0x0000FFFFFFFFFFFFULL)
+                                     | ((uint64_t)(uint16_t)sz << 48);
+                auto cit = state.typeHintCache.constFind(key);
+                const ComposeState::TypeHintResult* r;
+                if (cit != state.typeHintCache.constEnd()) {
+                    r = &cit.value();
+                } else {
+                    QByteArray b = prov.isReadable(absAddr, sz)
+                        ? prov.readBytes(absAddr, sz) : QByteArray(sz, '\0');
+                    auto suggestions = inferTypes(
+                        reinterpret_cast<const uint8_t*>(b.constData()), sz);
+                    ComposeState::TypeHintResult nr;
+                    if (!suggestions.isEmpty() && suggestions[0].strength >= 3) {
+                        nr.has   = true;
+                        nr.hint  = formatHint(suggestions[0]);
+                        nr.kinds = suggestions[0].kinds;
+                    }
+                    r = &state.typeHintCache.insert(key, nr).value();
+                }
+                if (r->has) {
+                    QVector<NodeKind> kinds = r->kinds;
+                    pushChip(ChipKind::TypeHint, r->hint, [&](LineChip& c) {
                         c.typeHintKinds = kinds;
                     });
                 }
@@ -1096,7 +1151,11 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 if (prov.isReadable(absAddr, 8)) {
                     uint64_t candidate = prov.readU64(absAddr);
                     if (candidate == 0) {
-                        if (state.showRtti) isNullPointer = true;
+                        // Null-pointer "name this class" CTA only makes sense on
+                        // a live memory source — on a flat file (all zeros) it
+                        // would sprout on every pointer. isLive() round-trips
+                        // through SnapshotProvider so a frozen process keeps it.
+                        if (state.showRtti && prov.isLive()) isNullPointer = true;
                     } else if (candidate != UINT64_MAX) {
                         if (state.showRtti) {
                             const RttiInfo& info = rttiForVtable(state, prov, candidate);

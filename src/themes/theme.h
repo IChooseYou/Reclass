@@ -63,6 +63,25 @@ struct Theme {
     static Theme fromJson(const QJsonObject& obj);
 };
 
+// The editor "paper" colour: intentionally a touch darker than the chrome
+// `background` on dark themes (pure white on light themes), giving the editor
+// body visual depth. Panels that should read as the SAME surface as the editor
+// (e.g. the Project workspace tree) must use this — not raw `background` — or
+// they look jarringly lighter. Single source of truth for both editor.cpp and
+// the workspace styling in main.cpp.
+inline QColor editorPaperColor(const Theme& t) {
+    return (t.background.lightnessF() > 0.78)
+        ? QColor(QStringLiteral("#FFFFFF"))
+        : t.background.darker(115);
+}
+
+// The main-menu / title-bar strip: ~25% darker than the editor paper
+// (user-tuned: 10%, then another 15%) so the chrome reads as a clearly
+// distinct band instead of bleeding into the document.
+inline QColor menuBarColor(const Theme& t) {
+    return editorPaperColor(t).darker(127);
+}
+
 // ── Shared field metadata (serialization + editor UI) ──
 
 struct ThemeFieldMeta {

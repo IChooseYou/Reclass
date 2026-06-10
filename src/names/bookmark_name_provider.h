@@ -9,7 +9,7 @@ class RcxController;
 
 // Surfaces the active tab's per-document bookmarks (RcxDocument::tree.bookmarks)
 // in the unified Symbols panel. Bookmarks are user-created labels — typed in
-// via "Add Bookmark" dialog or the editor's right-click "Label this address..."
+// via "Add Bookmark" dialog or the editor's right-click "Bookmark this address..."
 // — and they live in the .rcx project file across sessions.
 //
 // Because bookmarks are per-document, the provider takes a callback that

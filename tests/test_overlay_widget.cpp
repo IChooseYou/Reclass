@@ -76,6 +76,14 @@ public:
     }
 };
 
+// The null-pointer "(Name class…)" CTA is gated on Provider::isLive() so it
+// never shows on a flat file. The null-chip test needs a live source.
+class LiveBufferProvider : public BufferProvider {
+public:
+    using BufferProvider::BufferProvider;
+    bool isLive() const override { return true; }
+};
+
 // Tree with one Hex64 field whose value is the synthetic vtable.
 NodeTree buildTreeWithVtable() {
     NodeTree tree;
@@ -189,7 +197,7 @@ private slots:
     //    Pointer64 whose backing memory reads as 0x00. ──
     void nullRttiChipAppearsInline() {
         QByteArray data(kStructBase + 64, '\0');
-        BufferProvider prov(std::move(data), QStringLiteral("synthetic"));
+        LiveBufferProvider prov(std::move(data), QStringLiteral("synthetic"));
 
         NodeTree tree = buildTreeWithNullPointer();
         uint64_t hostId = 0;

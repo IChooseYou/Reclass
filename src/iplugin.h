@@ -3,6 +3,7 @@
 #include <QIcon>
 #include <memory>
 #include <string>
+#include <cstdint>
 
 #ifdef _WIN32
     #define RCX_PLUGIN_EXPORT __declspec(dllexport)
@@ -143,3 +144,46 @@ public:
 typedef IPlugin* (*CreatePluginFunc)();
 
 #define IPLUGIN_IID "com.reclass.IPlugin/1.0"
+
+// ── Provider ABI guard ──
+// Provider plugins derive from rcx::Provider, a *fragile base class*: adding a
+// data member to it (as modulesCached()'s cache did) changes sizeof(Provider)
+// and shifts every plugin-side subclass member. A plugin built against a
+// different provider.h than the host then disagrees on object layout and
+// corrupts memory the first time the host touches a base-class member — an
+// access violation deep in the RTTI/module path with no obvious culprit.
+//
+// To turn that silent crash into a graceful, diagnosable refusal, every
+// provider plugin exports an ABI token (RcxPluginAbiToken) and the host
+// (PluginManager) compares it to its own before instantiating the plugin.
+// A missing or mismatched token means "rebuild this plugin"; the host logs it
+// and skips the plugin instead of loading a memory-corrupting one.
+//
+// The token folds the two ABI surfaces a plugin can disagree with the host on:
+//   * low 32 bits = sizeof(rcx::Provider) — auto-captures DATA-MEMBER changes
+//     (the layout shift that caused the original crash);
+//   * high 32 bits = RCX_PROVIDER_ABI_VERSION — a hand-bumped counter for
+//     changes sizeof can't see, i.e. Provider VTABLE/semantic changes (adding,
+//     removing, or reordering a virtual leaves sizeof unchanged but mis-routes
+//     every virtual call). Bump it whenever you touch Provider's virtual
+//     interface or change the meaning of an existing method.
+// The build also enforces a rebuild on ANY provider.h change via
+// add_dependencies(Reclass <plugins>) in CMakeLists; this token is the
+// belt-and-suspenders that catches an out-of-band / hand-copied stale DLL.
+//
+// Place RCX_DEFINE_PLUGIN_ABI() once at file scope in each plugin's .cpp,
+// where providers/provider.h is fully included (alongside CreatePlugin()).
+#define RCX_PROVIDER_ABI_VERSION 1u
+
+// Both sides MUST compute the token identically. Keep this in one place so the
+// plugin macro and the host check can't drift apart.
+#define RCX_PROVIDER_ABI_TOKEN \
+    ((static_cast<uint64_t>(RCX_PROVIDER_ABI_VERSION) << 32) \
+     | static_cast<uint64_t>(sizeof(::rcx::Provider)))
+
+typedef uint64_t (*RcxPluginAbiTokenFunc)();
+
+#define RCX_DEFINE_PLUGIN_ABI() \
+    extern "C" RCX_PLUGIN_EXPORT uint64_t RcxPluginAbiToken() { \
+        return RCX_PROVIDER_ABI_TOKEN; \
+    }

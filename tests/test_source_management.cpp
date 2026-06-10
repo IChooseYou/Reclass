@@ -322,6 +322,66 @@ private slots:
 
         ProviderRegistry::instance().unregisterProvider(kFakeId);
     }
+
+    // ── removeSavedSource: deleting the *active* source detaches the view
+    //    (NullProvider) but does not auto-jump to another source ──
+    void testRemoveActiveSourceDetaches() {
+        const QString kId = QStringLiteral("fakeremoveprov");
+        FakeProviderPlugin fake(0x140000000ull, QStringLiteral("7:foo.exe"));
+        ProviderRegistry::instance().registerProvider(
+            QStringLiteral("FakeRemoveProv"), kId, &fake);
+
+        m_ctrl->selectSource(QStringLiteral("Fake Remove Prov"));
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->savedSources().size(), 1);
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QVERIFY(m_doc->provider->isValid());
+
+        m_ctrl->removeSavedSource(0);
+        QApplication::processEvents();
+
+        QCOMPARE(m_ctrl->savedSources().size(), 0);
+        QCOMPARE(m_ctrl->activeSourceIndex(), -1);
+        QVERIFY(!m_doc->provider->isValid());   // detached to NullProvider
+
+        ProviderRegistry::instance().unregisterProvider(kId);
+    }
+
+    // ── removeSavedSource: deleting a *non-active* source leaves the active
+    //    one attached and shifts m_activeSourceIdx to track it ──
+    void testRemoveNonActiveKeepsActive() {
+        FakeProviderPlugin fa(0x1000ull, QStringLiteral("1:a.exe"));
+        FakeProviderPlugin fb(0x2000ull, QStringLiteral("2:b.exe"));
+        ProviderRegistry::instance().registerProvider(
+            QStringLiteral("FakeA"), QStringLiteral("fakea"), &fa);
+        ProviderRegistry::instance().registerProvider(
+            QStringLiteral("FakeB"), QStringLiteral("fakeb"), &fb);
+
+        m_ctrl->selectSource(QStringLiteral("Fake A"));   // idx 0, active
+        m_ctrl->selectSource(QStringLiteral("Fake B"));   // idx 1, active
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->savedSources().size(), 2);
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);
+
+        m_ctrl->removeSavedSource(0);                     // remove non-active
+        QApplication::processEvents();
+
+        QCOMPARE(m_ctrl->savedSources().size(), 1);
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);         // 1 -> 0
+        QVERIFY(m_doc->provider->isValid());              // still attached to B
+
+        ProviderRegistry::instance().unregisterProvider(QStringLiteral("fakea"));
+        ProviderRegistry::instance().unregisterProvider(QStringLiteral("fakeb"));
+    }
+
+    // ── removeSavedSource with an out-of-range index is a safe no-op ──
+    void testRemoveInvalidIndexNoOp() {
+        m_ctrl->removeSavedSource(-1);
+        m_ctrl->removeSavedSource(999);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->savedSources().size(), 0);
+        QCOMPARE(m_ctrl->activeSourceIndex(), -1);
+    }
 };
 
 QTEST_MAIN(TestSourceManagement)

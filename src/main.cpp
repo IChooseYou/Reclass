@@ -22,12 +22,14 @@
 #include "rttibrowser.h"
 #include "rcxtooltip.h"
 #include "tooltip_bridge.h"
+#include "paintutil.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QMenuBar>
 #include <QToolBar>
 #include <QStatusBar>
 #include <QLabel>
+#include <QSlider>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTabBar>
@@ -58,6 +60,7 @@
 #include <QProgressDialog>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qscilexercpp.h>
+#include "code_highlight.h"
 #include <QProxyStyle>
 #include <QDesktopServices>
 #include <QClipboard>
@@ -76,6 +79,7 @@
 #include "widgets/themed_dialog.h"
 #include "widgets/dialog_button.h"
 #include "widgets/unified_symbol_panel.h"
+#include "widgets/empty_overlay.h"
 #include "names/name_registry.h"
 #include "names/pdb_name_provider.h"
 #include "names/pdb_type_provider.h"
@@ -88,6 +92,55 @@
 #include <dbghelp.h>
 #include <shellapi.h>
 #include <cstdio>
+#include <io.h>      // _get_osfhandle / _fileno — detect redirected std streams
+
+// ── On-demand console (backs View ▸ Show Console) ──
+// Reclass is a GUI (windows) subsystem app — see WIN32_EXECUTABLE in
+// CMakeLists — so launching pops NO console and there is no startup flash;
+// there is simply nothing to hide. stderr still reaches an inheriting
+// terminal or the test harness's pipe (crash dumps, --screenshot/--profile,
+// QT_FORCE_STDERR_LOGGING) because the CRT wires fd 1/2 to inherited handles
+// regardless of subsystem. We only conjure a console when the user asks for
+// one (the menu) via AllocConsole, and we remember that WE created it so we
+// never tear down a console inherited from a parent shell.
+static bool g_rcxConsoleAllocated = false;
+
+// True if the CRT stream's fd is bound to a pipe or disk file — i.e. the user
+// or a harness redirected it (`2> log`, or the --screenshot test pipe). We must
+// NOT freopen such a stream onto CONOUT$: that would steal already-captured
+// output (e.g. the --profile dump) into a throwaway console window.
+static bool rcxStreamRedirected(FILE* stream) {
+    intptr_t osf = _get_osfhandle(_fileno(stream));
+    if (osf == -1 || osf == -2) return false;            // not associated
+    DWORD ft = GetFileType(reinterpret_cast<HANDLE>(osf));
+    return ft == FILE_TYPE_PIPE || ft == FILE_TYPE_DISK;
+}
+
+static void rcxSetConsoleVisible(bool visible) {
+    if (visible) {
+        if (!GetConsoleWindow() && AllocConsole()) {
+            g_rcxConsoleAllocated = true;
+            // Disable the console's [X] button: closing the console window
+            // sends CTRL_CLOSE_EVENT, which by default TERMINATES the app
+            // (losing unsaved work). Users dismiss it via View > Show Console.
+            if (HWND con = GetConsoleWindow())
+                if (HMENU sys = GetSystemMenu(con, FALSE))
+                    DeleteMenu(sys, SC_CLOSE, MF_BYCOMMAND);
+            // Point stdout/stderr at the new console so fprintf/qDebug land in
+            // it — but ONLY for streams that weren't already redirected to a
+            // pipe/file, so a `2> log` or the --screenshot capture pipe keeps
+            // receiving output instead of having it stolen into the console.
+            if (!rcxStreamRedirected(stdout)) { FILE* f = freopen("CONOUT$", "w", stdout); (void)f; }
+            if (!rcxStreamRedirected(stderr)) { FILE* f = freopen("CONOUT$", "w", stderr); (void)f; }
+        }
+        if (HWND h = GetConsoleWindow())
+            ShowWindow(h, SW_SHOW);
+    } else if (g_rcxConsoleAllocated) {
+        // Only close a console we created — never an inherited shell/pipe.
+        FreeConsole();
+        g_rcxConsoleAllocated = false;
+    }
+}
 
 static void setDarkTitleBar(QWidget* widget) {
     // One-bit "please use the dark chrome" hint to DWM. Nothing more.
@@ -119,7 +172,10 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
-    // Phase 1: always-safe output (no allocations, no complex APIs)
+    // Phase 1: always-safe output (no allocations, no complex APIs).
+    // GUI-subsystem build: if launched console-less this stderr goes nowhere,
+    // but the full minidump below is still written next to the exe — that's
+    // the authoritative crash artifact. A terminal/Show-Console run sees this.
     fprintf(stderr, "\n=== UNHANDLED EXCEPTION ===\n");
     fprintf(stderr, "Code : 0x%08lX\n", ep->ExceptionRecord->ExceptionCode);
     fprintf(stderr, "Addr : %p\n", ep->ExceptionRecord->ExceptionAddress);
@@ -373,6 +429,31 @@ public:
     }
 };
 
+// Height of a document-dock tab (set in MenuBarStyle::sizeFromContents,
+// CT_TabBarTab). The Project dock's DockTitleBar is a SEPARATE control sitting
+// beside these tabs, but their bottom separator lines must line up to the
+// pixel — so createWorkspaceDock derives the header height from this same
+// constant (a QTabBar renders one extra pixel below the tab content, hence the
+// +1 there). Single source of truth so the two never drift again.
+// 31 = 37 shrunk ~15% (user-tuned); the Project header tracks it automatically.
+static constexpr int kDocTabBarHeight = 31;
+
+// The start-page "splash" is a centered card; the main window launches 33%
+// LARGER than it in both width and height (window = 1.33 × splash). Both sizes
+// derive from this one canonical splash size so the proportion is exact on the
+// first show: window 1277×904, splash 960×680. The splash size is chosen to
+// fully show the start page's content (title + search + 5 "Get started" cards
+// ≈ 790×640). (Logical pixels — DPI-correct.)
+static constexpr int    kSplashW          = 960;
+static constexpr int    kSplashH          = 680;
+static constexpr double kWindowOverSplash = 1.33;
+
+// Device-pixel-exact edge fills — see src/paintutil.h for the clip-rounding
+// rules (and tests/test_hairline_dpr.cpp for the phase-sweep regression pin).
+using rcx::fillBottomDeviceRowOfRect;
+using rcx::fillLeftDeviceColOfRect;
+using rcx::fillRightDeviceColOfRect;
+
 class MenuBarStyle : public QProxyStyle {
 public:
     using QProxyStyle::QProxyStyle;
@@ -417,11 +498,11 @@ public:
         if (type == CT_TabBarTab) {
             if (auto* tabBar = qobject_cast<const QTabBar*>(w)) {
                 if (tabBar->parent() && qobject_cast<const QMainWindow*>(tabBar->parent())) {
-                    s.setHeight(37);
+                    s.setHeight(kDocTabBarHeight);
                     // Sentinel "+" tab: compact icon-only width
                     if (auto* tab = qstyleoption_cast<const QStyleOptionTab*>(opt))
                         if (tab->text == QStringLiteral("\u200B"))
-                            return QSize(32, 37);
+                            return QSize(32, kDocTabBarHeight);
                     // Reserve room for:
                     //   right: DockTabButtons (close x) ≈ 24px
                     //   left:  inline source icon painted in CE_TabBarTabLabel ≈ 20px
@@ -551,10 +632,10 @@ public:
             return;
         // Suppress every PE_FrameTabBarBase paint. The dock-tab variant
         // used to draw a 1-px line at the tab bar's bottom edge as a
-        // visual separator with the editor; the editor now has its own
-        // QSS border (rcxEditorContainer), so painting another line
-        // here just produced a double-line artifact at the editor's
-        // top edge. The pane-tab variant (Reclass/Code/Debug at the
+        // visual separator with the editor; the editor now paints its own
+        // device-exact border (EditorContainer::paintEvent), so painting
+        // another line here just produced a double-line artifact at the
+        // editor's top edge. The pane-tab variant (Reclass/Code/Debug at the
         // bottom) never wanted a base line either — its selected tab
         // gets a 3-px QSS accent. Killing the whole primitive is the
         // cleanest fix.
@@ -657,11 +738,25 @@ public:
                     // Fill the entire tab rect. We used to leave the
                     // bottom 1 px unfilled so PE_FrameTabBarBase could
                     // paint through, but that primitive is now killed
-                    // (the editorContainer has its own QSS border). The
+                    // (the editorContainer hand-paints its own device-exact
+                    // border — see EditorContainer::paintEvent). The
                     // unfilled strip otherwise showed the chrome bg as
                     // a stray line just above the editor border — the
                     // "double line" at the top of the editor.
                     p->fillRect(tab->rect, bg);
+                    // Side borders ONLY (no top/bottom): device-exact 1px in
+                    // theme.border. Right edge on every tab → single
+                    // separators between adjacent tabs; left edge only on the
+                    // first tab closes the outer edge. Sentinel "+" stays
+                    // border-free so the last real tab's right line is the
+                    // lone divider before it.
+                    if (!sentinel) {
+                        const QColor side = tab->palette.color(QPalette::Dark); // theme.border
+                        if (tab->position == QStyleOptionTab::Beginning
+                            || tab->position == QStyleOptionTab::OnlyOneTab)
+                            fillLeftDeviceColOfRect(*p, QRectF(tab->rect), side);
+                        fillRightDeviceColOfRect(*p, QRectF(tab->rect), side);
+                    }
                     // Selected accent line on top (2px) — not for sentinel "+" tab
                     if (selected && !sentinel) {
                         p->fillRect(QRect(tab->rect.left(), tab->rect.top(),
@@ -917,6 +1012,42 @@ public:
     }
 };
 
+// Diagonal-hatched "empty workspace" background. Used as the QMainWindow
+// central widget; it is height-pinned to 0 (invisible) while any document
+// tab is open and lifted to fill the empty band only when the last tab is
+// closed (see MainWindow::updateEmptyWorkspaceVisibility). The 45° hatch +
+// centered hint reads as "no document here", clearly distinct from a real
+// editor surface so the user knows the workspace is intentionally empty.
+class WorkspaceHatch : public QWidget {
+public:
+    explicit WorkspaceHatch(QWidget* parent) : QWidget(parent) {
+        setAttribute(Qt::WA_NoSystemBackground);  // paintEvent owns every pixel
+    }
+    void paintEvent(QPaintEvent*) override {
+        const auto& t = rcx::ThemeManager::instance().current();
+        QPainter p(this);
+        // Base = editor "paper" surface so the band reads as workspace, not
+        // chrome; the diagonal hatch on top marks it as a non-document area.
+        // t.border at ~30% alpha over the paper surface: visible enough to
+        // read as "intentionally not a document", subtle enough not to
+        // distract. Tune the alpha (44=whisper … 110=loud) or `gap` to taste.
+        p.fillRect(rect(), rcx::editorPaperColor(t));
+        QColor stripe = t.border;
+        stripe.setAlpha(78);
+        p.setPen(QPen(stripe, 1));
+        const int gap = 12;
+        for (int x = -height(); x < width(); x += gap)
+            p.drawLine(x, height(), x + height(), 0);  // 45° stripes
+        p.setPen(t.textMuted);
+        QFont f = font();
+        f.setPointSize(13);
+        p.setFont(f);
+        p.drawText(rect(), Qt::AlignCenter,
+                   QStringLiteral("No document open\n\n"
+                                  "File ▸ New Class    (Ctrl+N)"));
+    }
+};
+
 namespace rcx {
 
 #ifdef __APPLE__
@@ -957,20 +1088,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // against the lookup ever failing).
     m_titleBar->setObjectName(QStringLiteral("TitleBarWidget"));
     m_titleBar->applyTheme(ThemeManager::instance().current());
-    connect(m_titleBar, &TitleBarWidget::layoutPresetSelected,
-            this, &MainWindow::applyLayoutPreset);
     setMenuWidget(m_titleBar);
     m_menuBar = m_titleBar->menuBar();
-    // Sync the title bar toggle when workspace visibility changes through any
-    // other path (View menu item, dock close button, etc.) so the button's
-    // checked state always reflects reality. Deferred until after docks exist.
-    QTimer::singleShot(0, this, [this]() {
-        if (m_workspaceDock && m_titleBar) {
-            m_titleBar->setWorkspaceChecked(m_workspaceDock->isVisible());
-            connect(m_workspaceDock, &QDockWidget::visibilityChanged,
-                    m_titleBar, &TitleBarWidget::setWorkspaceChecked);
-        }
-    });
 #ifdef __linux__
     m_menuBar->setNativeMenuBar(false);
 #endif
@@ -1014,13 +1133,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     //     grow → splitter snapped right back → drag "fought" the user.
     //     With horizontal unbounded, central absorbs the freed pixels
     //     and the splitter moves freely.
-    // Size policy is Ignored,Fixed: horizontally Qt is free to allocate
-    // any leftover width to central; vertically central is fixed at the
-    // sizeHint (which is 0,0 by default for an empty QWidget).
-    m_centralPlaceholder = new QWidget(this);
+    // Size policy is Ignored,Ignored: Qt allocates whatever leftover space
+    // is available on both axes, bounded only by min/max. While any doc tab
+    // is open the maximumHeight stays pinned to 0 (top dock fills the strip);
+    // when the last tab closes updateEmptyWorkspaceVisibility() lifts the cap
+    // and the WorkspaceHatch fills the empty band (Ignored vertical lets it
+    // grow — a Fixed policy would clamp to the 0 sizeHint and stay invisible).
+    m_centralPlaceholder = new WorkspaceHatch(this);
     m_centralPlaceholder->setMinimumSize(0, 0);
     m_centralPlaceholder->setMaximumHeight(0);
-    m_centralPlaceholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    m_centralPlaceholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     setCentralWidget(m_centralPlaceholder);
     setDockNestingEnabled(true);
     // Give left/right docks full height (corners belong to left/right, not top/bottom)
@@ -1157,6 +1279,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             }
         }
     });
+
+    // Auto-size the window every launch instead of restoring a saved position.
+    // A persisted geometry goes stale the moment the user changes resolution,
+    // DPI, or monitor layout (the window can land off-screen or mis-sized);
+    // computing fresh from the CURRENT primary screen avoids all of that.
+    //
+    // Position the edge/grip resize zones for the initial (default-resized) size.
+    repositionResizeWidgets();
 }
 
 QIcon MainWindow::makeIcon(const QString& svgPath) {
@@ -1316,6 +1446,22 @@ void MainWindow::createMenus() {
                     makeIcon(":/vsicons/search.svg"), this,
                     &MainWindow::showFindFieldDialog);
     edit->addSeparator();
+    // Break the current selection (byte range, or selected nodes) off into a
+    // new embedded class — the same op as the node menu's "Break Class", but
+    // reachable from the menu bar. Auto-detects bytes vs node selection.
+    Qt5Qt6AddAction(edit, "Break into &Class",
+                    QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_B),
+                    makeIcon(":/vsicons/symbol-structure.svg"), this, [this]() {
+        auto* c = activeController();
+        if (!c) return;
+        auto region = c->regionFromCurrentSelection(c->primaryEditor());
+        if (!region) {
+            setAppStatus(QStringLiteral("Break: select bytes or fields first"));
+            return;
+        }
+        c->extractByteSelectionToNewClass(region->first, region->second);
+    });
+    edit->addSeparator();
     Qt5Qt6AddAction(edit, "Add &Bookmark...", QKeySequence(Qt::CTRL | Qt::Key_B), QIcon(),
                     this, &MainWindow::promptAddBookmark);
     // Quick bookmark — captures the current address with an auto-generated
@@ -1343,6 +1489,21 @@ void MainWindow::createMenus() {
 
     // View
     auto* view = m_menuBar->addMenu("&View");
+#ifdef _WIN32
+    // Top of View: a checkbox to summon a console window on demand. The app
+    // is GUI-subsystem (no console by default) — see rcxSetConsoleVisible.
+    {
+        auto* actConsole = view->addAction(QStringLiteral("Show &Console"));
+        actConsole->setCheckable(true);
+        actConsole->setChecked(
+            QSettings("Reclass", "Reclass").value("showConsole", false).toBool());
+        connect(actConsole, &QAction::triggered, this, [](bool checked) {
+            rcxSetConsoleVisible(checked);
+            QSettings("Reclass", "Reclass").setValue("showConsole", checked);
+        });
+        view->addSeparator();
+    }
+#endif
     Qt5Qt6AddAction(view, "&Reset Windows", QKeySequence::UnknownKey, QIcon(), this, [this](bool) {
         // Safety button — force every dock back to its canonical area
         // regardless of how mangled the current layout is. Steps in
@@ -1499,10 +1660,11 @@ void MainWindow::createMenus() {
     // pretend to control something broader (e.g. "Comments" used to be
     // ambiguous about user comments vs. PDB symbol annotations).
     view->addSeparator();
-    auto* chipsHeader = view->addAction(QStringLiteral("Tail Chips"));
-    chipsHeader->setEnabled(false);
+    auto* hints = view->addMenu(QStringLiteral("Visual hints"));
+    hints->setToolTipsVisible(true);   // QMenu tooltips are off by default
 
-    auto* actComments = view->addAction(QStringLiteral("Show Comment chips  ( / note )"));
+    auto* actComments = hints->addAction(QStringLiteral("Comment chips"));
+    actComments->setToolTip(QStringLiteral("Show the  / note  marker in a field's value tail"));
     actComments->setCheckable(true);
     actComments->setChecked(settings.value("showComments", false).toBool());
     connect(actComments, &QAction::triggered, this, [this](bool checked) {
@@ -1516,16 +1678,26 @@ void MainWindow::createMenus() {
     // RcxController::setTypeHints API survives as a no-op so saved
     // settings / MCP clients don't break, but there's no UI exposure.
 
-    auto* actRttiChips = view->addAction(QStringLiteral("Show RTTI chips  ( {RTTI: ClassName} )"));
+    // Auto-RTTI walks every non-null pointer/Hex64 candidate's vtable -> RTTI
+    // chain (several cross-process reads each) on EVERY refresh — rttiForVtable's
+    // cache is per-compose-pass, so it re-walks from scratch every tick. On a
+    // module-heavy target (DayZ etc.) that's hundreds of reads per refresh and
+    // makes the view barely usable. OFF by default; opt in here when you want
+    // the {RTTI: ClassName} chips and can afford the per-refresh scan cost.
+    auto* actRttiChips = hints->addAction(QStringLiteral("Auto-detect RTTI"));
+    actRttiChips->setToolTip(QStringLiteral(
+        "Show {RTTI: ClassName} chips by walking pointer vtables — scans every "
+        "refresh, can lag on module-heavy targets"));
     actRttiChips->setCheckable(true);
-    actRttiChips->setChecked(settings.value("showRttiChips", true).toBool());
+    actRttiChips->setChecked(settings.value("showRttiChips", false).toBool());
     connect(actRttiChips, &QAction::triggered, this, [this](bool checked) {
         QSettings("Reclass", "Reclass").setValue("showRttiChips", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setShowRtti(checked);
     });
 
-    auto* actEnumChips = view->addAction(QStringLiteral("Show Enum-value chips  ( (MEMBER) )"));
+    auto* actEnumChips = hints->addAction(QStringLiteral("Enum value chips"));
+    actEnumChips->setToolTip(QStringLiteral("Show (MEMBER) on int fields that match an enum"));
     actEnumChips->setCheckable(true);
     actEnumChips->setChecked(settings.value("showEnumChips", true).toBool());
     connect(actEnumChips, &QAction::triggered, this, [this](bool checked) {
@@ -1543,6 +1715,22 @@ void MainWindow::createMenus() {
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
                 if (pane.editor) pane.editor->setHoverEffects(checked);
+    });
+
+    // Value popups — the hover/inline-edit "Previous Values" + preview host.
+    // The popup's own "✕ Hide popups" footer link flips this off (see the
+    // per-editor valuePopupsDisableRequested wiring); re-enable here.
+    m_actValuePopups = view->addAction("Value &Popups");
+    m_actValuePopups->setToolTip(QStringLiteral(
+        "Hover/edit previews for changing values (previous-value history, "
+        "hex dump, disasm, struct target)"));
+    m_actValuePopups->setCheckable(true);
+    m_actValuePopups->setChecked(settings.value("valuePopups", true).toBool());
+    connect(m_actValuePopups, &QAction::triggered, this, [this](bool checked) {
+        QSettings("Reclass", "Reclass").setValue("valuePopups", checked);
+        for (auto& tab : m_tabs)
+            for (auto& pane : tab.panes)
+                if (pane.editor) pane.editor->setValuePopupsEnabled(checked);
     });
 
     // Minimap: narrow read-only Scintilla mirror on the right of each editor.
@@ -1692,9 +1880,7 @@ void MainWindow::createMenus() {
             setAppStatus(QStringLiteral("Select a hex/pointer field first"));
             return;
         }
-        uint64_t nid = (*sel.begin())
-            & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                | kMemberBit | kMemberSubMask);
+        uint64_t nid = baseNodeIdFromSelId(*sel.begin());
         int idx = ctrl->document()->tree.indexOfId(nid);
         if (idx < 0) return;
         const auto& n = ctrl->document()->tree.nodes[idx];
@@ -1797,6 +1983,55 @@ private:
     QColor m_color;
 };
 
+// ── Invisible resize zones along the frameless window's edges + corners ──
+// The custom-chrome window is frameless (no native border), so without these
+// only the bottom-right ResizeGrip could resize it — edges/other corners were
+// dead. Each zone hands the drag to the window manager via
+// QWindow::startSystemResize (supported on Windows, X11 and Wayland — i.e.
+// every platform where we go frameless; macOS keeps its native frame, so these
+// are not created there). The zones paint nothing (no paintEvent, no opaque
+// background) so they're invisible; they exist purely to set the edge cursor
+// and start a native resize, which preserves OS snap/aero behaviour.
+class ResizeEdge : public QWidget {
+public:
+    ResizeEdge(Qt::Edges edges, Qt::CursorShape cursor, QWidget* parent)
+        : QWidget(parent), m_edges(edges) {
+        setCursor(cursor);
+        setAttribute(Qt::WA_NoSystemBackground);   // stay see-through
+    }
+    Qt::Edges edges() const { return m_edges; }
+protected:
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton && window()->windowHandle()) {
+            window()->windowHandle()->startSystemResize(m_edges);
+            e->accept();
+            return;
+        }
+        QWidget::mousePressEvent(e);
+    }
+private:
+    Qt::Edges m_edges;
+};
+
+// Geometry of a resize zone for the given edge(s) within a w×h window.
+// We expose only the BOTTOM + SIDES (and bottom corners) — the top edge is the
+// custom title bar (move + its min/max/close buttons), so a top resize zone
+// there would steal those clicks. The side strips start below the title bar
+// for the same reason.
+static QRect resizeEdgeRect(Qt::Edges e, int w, int h) {
+    constexpr int E   = 5;    // edge strip thickness
+    constexpr int C   = 12;   // corner square size
+    constexpr int TOP = 34;   // keep side strips clear of the title bar
+    const bool L = e & Qt::LeftEdge,  R = e & Qt::RightEdge;
+    const bool B = e & Qt::BottomEdge;
+    if ((L || R) && B)                                   // bottom corner
+        return QRect(L ? 0 : w - C, h - C, C, C);
+    if (L) return QRect(0,     TOP, E, h - TOP - C);     // left strip
+    if (R) return QRect(w - E, TOP, E, h - TOP - C);     // right strip
+    if (B) return QRect(C, h - E,  w - 2 * C, E);        // bottom strip
+    return {};
+}
+
 // ── Dock title-bar grip (VS2022-style dot pattern) ──
 class DockGripWidget : public QWidget {
 public:
@@ -1830,6 +2065,31 @@ private:
 // ── Custom-painted dock title bar ──
 // Used as QDockWidget::setTitleBarWidget(). Paints its own background so Fusion
 // can't insert frames or steal pixels. Qt handles drag/dock natively.
+// Widget-rect wrappers over the device-exact edge fills defined above
+// MenuBarStyle (see the comment there for the why).
+static void fillBottomDeviceRow(QPainter& p, const QWidget* w, const QColor& c) {
+    fillBottomDeviceRowOfRect(p, QRectF(w->rect()), c);
+}
+static void fillRightDeviceCol(QPainter& p, const QWidget* w, const QColor& c) {
+    fillRightDeviceColOfRect(p, QRectF(w->rect()), c);
+}
+
+// 1-logical-px horizontal separator that always renders as exactly ONE
+// device pixel row (its bottom one), unlike a stylesheet'd QFrame.
+class HairlineSeparator : public QWidget {
+    Q_OBJECT
+    QColor m_color;
+public:
+    explicit HairlineSeparator(const QColor& c, QWidget* parent = nullptr)
+        : QWidget(parent), m_color(c) { setFixedHeight(1); }
+    void setColor(const QColor& c) { m_color = c; update(); }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        fillBottomDeviceRow(p, this, m_color);
+    }
+};
+
 class DockTitleBar : public QWidget {
     Q_OBJECT
     int m_h;
@@ -1851,8 +2111,93 @@ protected:
         QPainter p(this);
         p.fillRect(rect(), m_bg);
         if (m_borderRight.isValid())
-            p.fillRect(width() - 1, 0, 1, height(), m_borderRight);
+            fillRightDeviceCol(p, this, m_borderRight);
     }
+};
+
+// Workspace dock content surface: custom-painted background + optional
+// device-exact right edge line, replacing the old stylesheet background so
+// the docked-only border doesn't have QSS and custom paint fighting.
+class WorkspacePanel : public QWidget {
+    Q_OBJECT
+    QColor m_bg;
+    QColor m_rightLine;
+public:
+    explicit WorkspacePanel(const QColor& bg, QWidget* parent = nullptr)
+        : QWidget(parent), m_bg(bg) {}
+    void setBackground(const QColor& c) { m_bg = c; update(); }
+    void setRightLine(const QColor& c)  { m_rightLine = c; update(); }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), m_bg);
+        if (m_rightLine.isValid())
+            fillRightDeviceCol(p, this, m_rightLine);
+    }
+};
+
+// ── Collapsed left-edge rail to re-open the hidden Workspace tree ──
+// A thin chrome strip shown ONLY while the workspace dock is hidden, so there
+// is always a discoverable handle to bring the "Project" tree back. Pure-Qt
+// custom paint (no stylesheets, no platform APIs) — identical on every OS.
+class WorkspaceRail : public QWidget {
+    Q_OBJECT
+public:
+    explicit WorkspaceRail(QWidget* parent = nullptr) : QWidget(parent) {
+        setFixedWidth(32);  // wide enough to read as a clickable handle
+        setCursor(Qt::PointingHandCursor);
+        setToolTip(QStringLiteral("Show Project workspace"));
+    }
+signals:
+    void clicked();
+protected:
+    void enterEvent(QEnterEvent*) override { m_hover = true;  update(); }
+    void leaveEvent(QEvent*)      override { m_hover = false; update(); }
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton) emit clicked();
+    }
+    void paintEvent(QPaintEvent*) override {
+        const auto& t = rcx::ThemeManager::instance().current();
+        QPainter p(this);
+        // Match the editor "paper" surface so the collapsed Project rail reads
+        // as the SAME background as the editor (no jarring lighter chrome). The
+        // chevron and vertical "PROJECT" label keep it legible as a clickable
+        // handle without a contrasting fill.
+        const QColor railBg = rcx::editorPaperColor(t);
+        p.fillRect(rect(), m_hover ? railBg.lighter(135) : railBg);
+        // No right edge line of our own — the editor container immediately to
+        // the right paints its device-exact left border, and a rail-side line
+        // next to it read as a double line.
+
+        const QColor fg = m_hover ? t.text : t.textDim;
+        const double cx = width() / 2.0;
+
+        // Chevron ▸ near the top (right-pointing arrow → "expand").
+        p.setRenderHint(QPainter::Antialiasing);
+        QPen pen(fg, 1.8);
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setJoinStyle(Qt::RoundJoin);
+        p.setPen(pen);
+        const double cy = 18.0;
+        p.drawLine(QPointF(cx - 3.0, cy - 6.0), QPointF(cx + 3.5, cy));
+        p.drawLine(QPointF(cx + 3.5, cy), QPointF(cx - 3.0, cy + 6.0));
+
+        // Vertical "PROJECT" label, reading bottom-to-top, centered on the
+        // rail so it doesn't float against the bottom edge.
+        p.save();
+        QFont f = font();
+        f.setPixelSize(13);
+        f.setLetterSpacing(QFont::AbsoluteSpacing, 2.0);
+        p.setFont(f);
+        p.setPen(fg);
+        p.translate(cx, height() / 2.0);
+        p.rotate(-90.0);
+        p.drawText(QRectF(-height() / 2.0, -width() / 2.0, height(), width()),
+                   Qt::AlignCenter, QStringLiteral("PROJECT"));
+        p.restore();
+    }
+private:
+    bool m_hover = false;
 };
 
 // ── Custom-painted view tab button (no CSS) ──
@@ -2034,10 +2379,83 @@ private:
 // We bypass it entirely: children are placed manually in resizeEvent,
 // and addWidget() is NOT used. Instead, create children as direct
 // children and call manualLayout() to position them.
+// Right-anchored status-bar chip: a liveness dot (green=live / amber=stale /
+// red=disconnected / grey=static file) plus the active data-source label
+// "Process:notepad.exe". Combines the source-status badge and the "which
+// source am I on" indicator into one painted widget (no stylesheet — matches
+// the flat status bar). Hidden when there is no source.
+class SourceStatusChip : public QWidget {
+    Q_OBJECT
+public:
+    explicit SourceStatusChip(QWidget* parent = nullptr) : QWidget(parent) {
+        setVisible(false);
+    }
+    void setState(RcxController::SourceStatus st, const QString& label) {
+        if (st == m_st && label == m_label) return;
+        m_st = st; m_label = label;
+        const bool vis = (st != RcxController::SourceStatus::None) && !label.isEmpty();
+        setVisible(vis);
+        setToolTip(vis ? tooltipFor(st, label) : QString());
+        updateGeometry();
+        update();
+        emit needsRelayout();
+    }
+    QSize sizeHint() const override {
+        if (m_st == RcxController::SourceStatus::None || m_label.isEmpty())
+            return QSize(0, 0);
+        const QFontMetrics fm(font());
+        return QSize(kPadL + kDot + kGap + fm.horizontalAdvance(m_label) + kPadR,
+                     fm.height());
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+signals:
+    void needsRelayout();
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (m_st == RcxController::SourceStatus::None || m_label.isEmpty()) return;
+        const auto& th = ThemeManager::instance().current();
+        QColor dot, fg = th.textDim;
+        switch (m_st) {
+            case RcxController::SourceStatus::Live:  dot = th.indHintGreen; break;
+            case RcxController::SourceStatus::Stale: dot = th.focusGlow;    break;
+            case RcxController::SourceStatus::Disconnected:
+                dot = th.markerError; fg = th.textMuted; break;
+            default: dot = th.textMuted; break;   // Static
+        }
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const qreal cy = height() / 2.0;
+        p.setPen(Qt::NoPen);
+        p.setBrush(dot);
+        p.drawEllipse(QPointF(kPadL + kDot / 2.0, cy), kDot / 2.0, kDot / 2.0);
+        p.setPen(fg);
+        const QRect tr(kPadL + kDot + kGap, 0,
+                       width() - (kPadL + kDot + kGap), height());
+        p.drawText(tr, Qt::AlignVCenter | Qt::AlignLeft, m_label);
+    }
+private:
+    static QString tooltipFor(RcxController::SourceStatus st, const QString& label) {
+        QString s;
+        switch (st) {
+            case RcxController::SourceStatus::Live:  s = QStringLiteral("Live — reading"); break;
+            case RcxController::SourceStatus::Stale: s = QStringLiteral("Stale — read failing"); break;
+            case RcxController::SourceStatus::Disconnected: s = QStringLiteral("Disconnected"); break;
+            default: s = QStringLiteral("Static file"); break;
+        }
+        return label + QStringLiteral("  ·  ") + s;
+    }
+    static constexpr int kDot = 8, kGap = 6, kPadL = 8, kPadR = 10;
+    RcxController::SourceStatus m_st = RcxController::SourceStatus::None;
+    QString m_label;
+};
+
 class FlatStatusBar : public QStatusBar {
 public:
-    QWidget*       tabRow = nullptr;   // set by createStatusBar
-    ShimmerLabel*  label  = nullptr;   // set by createStatusBar
+    QWidget*       tabRow     = nullptr;   // set by createStatusBar
+    ShimmerLabel*  label      = nullptr;   // set by createStatusBar
+    QWidget*       sourceChip = nullptr;   // right-anchored source chip; set by createStatusBar
+    QWidget*       grip       = nullptr;   // resize grip pinned to the far bottom-right corner
+    void refreshLayout() { manualLayout(); }
 
     void setDividerColor(const QColor& c) { m_div = c; update(); }
     void setTopLineColor(const QColor& c) { m_top = c; update(); }
@@ -2087,18 +2505,84 @@ private:
         if (!label) return;
         const int h = height();
         const int gutter = 6;
+        // Resize grip pinned to the far bottom-right corner — laid out HERE (in
+        // the status bar) rather than as a free MainWindow child, so QMainWindow's
+        // layout can't reclaim it back to (0,0). Reserve its width on the right.
+        int gripReserve = 0;
+        if (grip) {
+            const int gs = grip->height();
+            grip->move(width() - gs - 2, qMax(0, h - gs - 2));
+            grip->raise();
+            gripReserve = gs + 4;
+        }
+        // Reserve right-side space for the source chip when it's visible, so
+        // the status text never runs underneath it.
+        int rightReserve = gripReserve;
+        if (sourceChip && sourceChip->isVisible()) {
+            const int cw = sourceChip->sizeHint().width();
+            const int edge = 8;
+            sourceChip->setGeometry(qMax(0, width() - cw - edge - gripReserve), 0, cw, h);
+            sourceChip->raise();
+            rightReserve = cw + edge + gripReserve + gutter;
+        }
         if (tabRow) {
             const int tw = tabRow->sizeHint().width();
             tabRow->setGeometry(0, 0, tw, h);
             m_divX = tw;
             label->setGeometry(tw + 1 + gutter, 0,
-                               qMax(0, width() - (tw + 1 + gutter)), h);
+                               qMax(0, width() - (tw + 1 + gutter) - rightReserve), h);
         } else {
             m_divX = -1;
-            label->setGeometry(gutter, 0, qMax(0, width() - gutter), h);
+            label->setGeometry(gutter, 0, qMax(0, width() - gutter - rightReserve), h);
         }
         label->setContentsMargins(0, 0, 0, 0);
         label->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    }
+};
+
+// paintEmptyOverlay lives in widgets/empty_overlay.h (shared with the scanner's
+// EmptyResultsTable).
+
+// QTreeView with a centered placeholder when its model is empty (the Workspace
+// "Project" types tree). Distinguishes "no types yet" from "no filter matches".
+class EmptyHintTreeView : public QTreeView {
+public:
+    using QTreeView::QTreeView;
+    QString placeholder, hint;
+protected:
+    void paintEvent(QPaintEvent* e) override {
+        QTreeView::paintEvent(e);
+        if (model() && model()->rowCount(rootIndex()) > 0) return;
+        // This tree's model is always the WorkspaceProxyModel (set in
+        // createWorkspaceDock); static_cast matches the existing call sites
+        // (WorkspaceProxyModel has no Q_OBJECT, so qobject_cast can't refine it).
+        bool filtered = false;
+        if (auto* pm = static_cast<rcx::WorkspaceProxyModel*>(model()))
+            filtered = pm->hasFilter();
+        paintEmptyOverlay(viewport(), font(),
+            filtered ? QStringLiteral("No types match the filter") : placeholder,
+            filtered ? QString() : hint);
+    }
+};
+
+// QListWidget with a centered placeholder when empty (the Bookmarks panel). Its
+// filter hides rows rather than removing them, so "no visible rows" with a
+// non-zero count means "no filter matches".
+class EmptyHintListWidget : public QListWidget {
+public:
+    using QListWidget::QListWidget;
+    QString placeholder, hint;
+protected:
+    void paintEvent(QPaintEvent* e) override {
+        QListWidget::paintEvent(e);
+        bool anyVisible = false;
+        for (int i = 0; i < count(); ++i)
+            if (!item(i)->isHidden()) { anyVisible = true; break; }
+        if (anyVisible) return;
+        const bool filtered = count() > 0;  // items exist but all hidden
+        paintEmptyOverlay(viewport(), font(),
+            filtered ? QStringLiteral("No bookmarks match the filter") : placeholder,
+            filtered ? QString() : hint);
     }
 };
 
@@ -2123,11 +2607,26 @@ void MainWindow::createStatusBar() {
     sb->tabRow = nullptr;
     sb->label  = m_statusLabel;
 
-    // Grip is a direct child of the main window, NOT in the status bar layout.
-    // Positioned via reposition() in resizeEvent — immune to font/margin changes.
-    auto* grip = new ResizeGrip(this);
+    // Resize grip lives IN the status bar (child of sb) and is pinned to the
+    // bottom-right by FlatStatusBar::manualLayout — robust against QMainWindow's
+    // layout (a free MainWindow child kept getting reclaimed to 0,0).
+    auto* grip = new ResizeGrip(sb);
     grip->setObjectName("resizeGrip");
-    grip->raise();
+    sb->grip = grip;
+
+#ifndef __APPLE__
+    // Bottom + side resize zones (the visible grip already covers bottom-right).
+    // Positioned/raised in resizeEvent. Frameless platforms only; macOS keeps
+    // its native frame, which already resizes from every edge.
+    struct { Qt::Edges e; Qt::CursorShape c; } kEdges[] = {
+        { Qt::BottomEdge,                  Qt::SizeVerCursor   },
+        { Qt::LeftEdge,                    Qt::SizeHorCursor   },
+        { Qt::RightEdge,                   Qt::SizeHorCursor   },
+        { Qt::BottomEdge | Qt::LeftEdge,   Qt::SizeBDiagCursor },
+    };
+    for (auto& z : kEdges)
+        (new ResizeEdge(z.e, z.c, this))->raise();
+#endif
 
     {
         const auto& t = ThemeManager::instance().current();
@@ -2177,6 +2676,19 @@ void MainWindow::createStatusBar() {
             "QProgressBar::chunk { background: %3; }")
             .arg(t.background.name(), t.border.name(), t.indHoverSpan.name()));
         m_progressBar->setVisible(false);
+    }
+
+    // Source-status chip — right-anchored liveness dot + "[kind:name]" of the
+    // active data source. Updated via RcxController::sourceStatusChanged.
+    {
+        QSettings s("Reclass", "Reclass");
+        QFont f(s.value("font", "IBM Plex Mono").toString(), 9);
+        f.setFixedPitch(true);
+        m_sourceChip = new SourceStatusChip(sb);
+        m_sourceChip->setFont(f);
+        sb->sourceChip = m_sourceChip;
+        connect(m_sourceChip, &SourceStatusChip::needsRelayout, sb,
+                [sb]() { sb->refreshLayout(); });
     }
 }
 
@@ -2341,19 +2853,25 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         const auto& t = ThemeManager::instance().current();
         QSettings s("Reclass", "Reclass");
         QString editorFont = s.value("font", "IBM Plex Mono").toString();
+        // Flat tabs: background matches the editor paper (no bg emphasis on
+        // selection — user-validated). Each tab has a right-border separator
+        // and a 1px bottom baseline; the SELECTED tab is marked only by a 2px
+        // accent on the BOTTOM edge (an underline), not a fill or a top line.
+        const QString paper = rcx::editorPaperColor(t).name();
         pane.tabWidget->setStyleSheet(QStringLiteral(
             "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
             "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 26px;"
-            "  font-family: '%7'; font-size: 10pt;"
+            "  background: %1; color: %2; padding: 0px 16px; border: none;"
+            "  border-right: 1px solid %6; border-bottom: 1px solid %6;"
+            "  border-radius: 0px; height: 26px;"
+            "  font-family: '%5'; font-size: 10pt;"
             "}"
-            "QTabBar::tab:selected { color: %3; background: %4;"
-            "  border-top: 3px solid %6; padding-top: -3px; }"
-            "QTabBar::tab:hover { color: %3; background: %5; }")
-            .arg(t.background.name(), t.textMuted.name(), t.text.name(),
-                 t.backgroundAlt.name(), t.hover.name(), t.indHoverSpan.name(),
-                 editorFont));
+            "QTabBar::tab:first { border-left: 1px solid %6; }"
+            "QTabBar::tab:selected { color: %3; border-bottom: 2px solid %4; }"
+            "QTabBar::tab:hover { color: %3; }")
+            .arg(paper, t.textMuted.name(), t.text.name(),
+                 t.indHoverSpan.name(), editorFont, t.border.name()));
     }
 
     // Create editor via controller (parent = tabWidget for ownership)
@@ -2362,6 +2880,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         QSettings s("Reclass", "Reclass");
         pane.editor->setRelativeOffsets(s.value("relativeOffsets", true).toBool());
         pane.editor->setHoverEffects(s.value("hoverEffects", true).toBool());
+        pane.editor->setValuePopupsEnabled(s.value("valuePopups", true).toBool());
     }
     pane.editor->setPresentationMode(m_presentationMode);
     // RTTI chip click is intentionally not wired — the chip is visual
@@ -2377,6 +2896,17 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         if (kinds.isEmpty()) return;
         if (auto* c = activeController())
             c->changeNodeKind(nodeIdx, kinds.first());
+    });
+
+    // The popup footer's "✕ Hide popups" link disables value popups for the
+    // emitting editor + emits this. Mirror it to the View-menu checkbox, the
+    // persisted setting, and every other editor so the choice is global.
+    connect(pane.editor, &RcxEditor::valuePopupsDisableRequested, this, [this]() {
+        QSettings("Reclass", "Reclass").setValue("valuePopups", false);
+        if (m_actValuePopups) m_actValuePopups->setChecked(false);
+        for (auto& tab : m_tabs)
+            for (auto& p : tab.panes)
+                if (p.editor) p.editor->setValuePopupsEnabled(false);
     });
 
     // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
@@ -2412,19 +2942,20 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
             QColor borderColor = property("borderColor").value<QColor>();
             if (!borderColor.isValid()) return;
             QPainter p(this);
-            qreal t = 1.0 / devicePixelRatioF();  // 1 device pixel
-            qreal w = width(), h = height();
-            // Top border pushed DOWN by one device pixel so the chrome
-            // shows through at y=0..t and the border lands at y=t —
-            // gives the "lighter chrome on top, darker border below"
-            // sequence under the dock tab strip.
-            // Bottom + sides flush against the editor's own edges, no
-            // chrome strip — a single line at the bottom touches the
-            // pane tab strip directly.
-            p.fillRect(QRectF(0,         t,         w, t), borderColor);  // top
-            p.fillRect(QRectF(0,         h - t,     w, t), borderColor);  // bottom
-            p.fillRect(QRectF(0,         t,         t, h - t), borderColor);  // left
-            p.fillRect(QRectF(w - t,     t,         t, h - t), borderColor);  // right
+            // Flush 1px box on all four edges, each a device-exact single
+            // pixel via the shared paintutil helpers (same selection the doc
+            // tabs' side borders use, so the seams line up to the device px at
+            // any DPR — no double line, no vanish at fractional scaling). The
+            // top is FLUSH (not pushed down): that's what lets the first/last
+            // tab's side borders run straight into the editor's left/right
+            // borders as one continuous outline; the dock tabs fill their full
+            // rect (CE_TabBarTabShape) + setDrawBase(false), so nothing else
+            // draws a line at the seam.
+            const QRectF r(rect());
+            rcx::fillTopDeviceRowOfRect(p, r, borderColor);
+            rcx::fillBottomDeviceRowOfRect(p, r, borderColor);
+            rcx::fillLeftDeviceColOfRect(p, r, borderColor);
+            rcx::fillRightDeviceColOfRect(p, r, borderColor);
         }
     };
     {
@@ -2463,7 +2994,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     {
         const auto& tt = ThemeManager::instance().current();
         mm->setColor(tt.text);
-        mm->setPaper(tt.background);
+        mm->setPaper(rcx::editorPaperColor(tt));  // mirror the editor's paper
         // Wipe Scintilla's per-style overrides so STYLE_DEFAULT wins.
         mm->SendScintilla(QsciScintillaBase::SCI_STYLECLEARALL);
         mm->setSelectionForegroundColor(tt.text);
@@ -2528,12 +3059,28 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         edSci->ensureLineVisible(line);
     });
 
-    pane.tabWidget->addTab(pane.editorContainer, "Reclass");  // index 0
+    // Host the editor in a thin container page so "Both" can REPARENT the
+    // editorContainer into a side-by-side splitter and back without disturbing
+    // the tab itself (the page stays; only its child moves).
+    pane.reclassPage = new QWidget;
+    auto* reclassPageLay = new QVBoxLayout(pane.reclassPage);
+    reclassPageLay->setContentsMargins(0, 0, 0, 0);
+    reclassPageLay->setSpacing(0);
+    reclassPageLay->addWidget(pane.editorContainer);
+    pane.tabWidget->addTab(pane.reclassPage, "Reclass");  // index 0
 
-    // Create per-pane rendered C++ view with find bar
-    pane.renderedContainer = new QWidget;
+    // Create per-pane rendered C++ view with find bar. Same device-exact
+    // outline as the hex editor (EditorContainer) so the Code view reads as a
+    // peer pane, especially side-by-side in "Both".
+    {
+        auto* rc = new EditorContainer;
+        rc->setObjectName(QStringLiteral("rcxCodeContainer"));
+        rc->setProperty("borderColor",
+                        ThemeManager::instance().current().border);
+        pane.renderedContainer = rc;
+    }
     auto* rvLayout = new QVBoxLayout(pane.renderedContainer);
-    rvLayout->setContentsMargins(0, 0, 0, 0);
+    rvLayout->setContentsMargins(1, 1, 1, 1);   // room for the 1px border
     rvLayout->setSpacing(0);
     pane.rendered = new QsciScintilla;
     setupRenderedSci(pane.rendered);
@@ -2630,12 +3177,28 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         sci->setFocus();
     });
 
-    pane.tabWidget->addTab(pane.renderedContainer, "Code");     // index 1
+    // Host the rendered Code view in a page too (same reparent reason as Reclass).
+    pane.codePage = new QWidget;
+    auto* codePageLay = new QVBoxLayout(pane.codePage);
+    codePageLay->setContentsMargins(0, 0, 0, 0);
+    codePageLay->setSpacing(0);
+    codePageLay->addWidget(pane.renderedContainer);
+    pane.tabWidget->addTab(pane.codePage, "Code");              // index 1
 
     // Create Debug view: plain-text Scintilla showing composed text with visible special chars
     pane.debugView = new QsciScintilla;
     setupDebugSci(pane.debugView);
     pane.tabWidget->addTab(pane.debugView, "Debug");            // index 2
+
+    // "Both" — index 3 — a real view that shows the hex editor (Reclass, 67%)
+    // and the generated Code (33%) side by side IN THIS pane. The single tab
+    // bar + corner (zoom, format/scope/gear) drive both. On entering/leaving
+    // the tab the editorContainer/renderedContainer are reparented between
+    // their own pages and bothSplitter (see the currentChanged handler).
+    pane.bothSplitter = new QSplitter(Qt::Horizontal);
+    pane.bothSplitter->setHandleWidth(1);
+    pane.bothSplitter->setChildrenCollapsible(false);
+    pane.tabWidget->addTab(pane.bothSplitter, "Both");          // index 3
 
     // Corner widget: format combo + gear icon
     {
@@ -2644,6 +3207,12 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         QString ef = cs.value("font", "IBM Plex Mono").toString();
 
         auto* cornerWidget = new QWidget;
+        // Pin the corner strip to the SAME height as the tabs (26px, set in
+        // the QTabBar::tab stylesheet above) so AlignVCenter on its children
+        // actually centers them against the Reclass/Code/Debug tab text —
+        // otherwise QTabWidget gives the shorter corner widget its own height
+        // and the row floats above the tab baseline.
+        cornerWidget->setFixedHeight(26);
         auto* cornerLayout = new QHBoxLayout(cornerWidget);
         cornerLayout->setContentsMargins(0, 0, 4, 0);
         cornerLayout->setSpacing(2);
@@ -2686,13 +3255,61 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         cornerLayout->addWidget(pane.fmtCombo);
         cornerLayout->addWidget(pane.scopeCombo);
         cornerLayout->addWidget(pane.fmtGear);
+
+        // ── Zoom — a discoverable handle for the EXISTING Scintilla zoom
+        // (the same thing Ctrl+wheel drives). Always visible, separated to the
+        // right of the Code-only controls. A slider over the zoom level (point
+        // delta) plus a "%" readout. Bidirectional: the slider drives zoomTo()
+        // and SCN_ZOOM (Ctrl+wheel) drives the slider.
+        cornerLayout->addSpacing(10);
+        // Match the rendered tab text: the tabs use font-size 10pt + the editor
+        // font family via the QTabBar stylesheet above (NOT tabBar()->font(),
+        // which returns the smaller default widget font). Mirror that here so
+        // "Zoom 100%" reads at the same size as Reclass/Code/Debug.
+        const QFont tabFont(ef, 10);
+        auto* zoomCap = new QLabel(QStringLiteral("Zoom"), cornerWidget);
+        zoomCap->setFont(tabFont);
+        zoomCap->setStyleSheet(QStringLiteral(
+            "color: %1; padding-right: 2px;").arg(ct.textMuted.name()));
+        pane.zoomSlider = new QSlider(Qt::Horizontal);
+        pane.zoomSlider->setRange(-8, 24);   // ~4pt..36pt over the 12pt base
+        pane.zoomSlider->setFixedWidth(90);
+        pane.zoomSlider->setFixedHeight(18);   // fit within the 26px tab strip
+        pane.zoomSlider->setToolTip(QStringLiteral("Zoom (also Ctrl+scroll)"));
+        pane.zoomSlider->setStyleSheet(QStringLiteral(
+            "QSlider::groove:horizontal { height: 3px; background: %1; border-radius: 1px; }"
+            "QSlider::handle:horizontal { background: %2; width: 9px; margin: -4px 0;"
+            " border-radius: 4px; }"
+            "QSlider::handle:horizontal:hover { background: %3; }")
+            .arg(ct.border.name(), ct.textMuted.name(), ct.text.name()));
+        pane.zoomLabel = new QLabel(QStringLiteral("100%"), cornerWidget);
+        pane.zoomLabel->setFont(tabFont);
+        pane.zoomLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+        pane.zoomLabel->setStyleSheet(QStringLiteral(
+            "color: %1; padding-left: 4px;").arg(ct.textMuted.name()));
+        pane.zoomLabel->setMinimumWidth(34);
+        cornerLayout->addWidget(zoomCap, 0, Qt::AlignVCenter);
+        cornerLayout->addWidget(pane.zoomSlider, 0, Qt::AlignVCenter);
+        cornerLayout->addWidget(pane.zoomLabel, 0, Qt::AlignVCenter);
+
+        // Code-only controls (format/scope/gear) hidden until the Code tab is
+        // selected; the zoom control stays visible on every tab.
+        pane.fmtCombo->setVisible(false);
+        pane.scopeCombo->setVisible(false);
+        pane.fmtGear->setVisible(false);
         pane.tabWidget->setCornerWidget(cornerWidget, Qt::BottomRightCorner);
-        cornerWidget->setVisible(false);  // hidden until Code tab selected
+
+        // Apply the saved zoom level to this pane's views + slider/readout,
+        // before wiring change signals (so this doesn't bounce).
+        {
+            int savedLevel = cs.value("viewZoomLevel", 0).toInt();
+            applyPaneZoom(pane, savedLevel);
+        }
 
         auto refreshAllRendered = [this]() {
             for (auto& tab : m_tabs)
                 for (auto& p : tab.panes)
-                    if (p.viewMode == VM_Rendered)
+                    if (p.viewMode == VM_Rendered || p.viewMode == VM_Both)
                         updateRenderedView(tab, p);
         };
 
@@ -2714,6 +3331,24 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
                     if (p.scopeCombo && p.scopeCombo->currentIndex() != idx)
                         p.scopeCombo->setCurrentIndex(idx);
         });
+        // Slider → drive Scintilla zoom on this pane's views.
+        QTabWidget* zw = pane.tabWidget;
+        connect(pane.zoomSlider, &QSlider::valueChanged, this, [this, zw](int level) {
+            if (SplitPane* p = findPaneByTabWidget(zw)) applyPaneZoom(*p, level);
+        });
+        // Ctrl+wheel (SCN_ZOOM) on any view → mirror its level back to the
+        // slider + the pane's other views. applyPaneZoom blocks the views'
+        // signals while zooming, so this can't recurse.
+        auto wireZoomSync = [this, zw](QsciScintilla* s) {
+            if (!s) return;
+            connect(s, &QsciScintillaBase::SCN_ZOOM, this, [this, zw, s]() {
+                if (SplitPane* p = findPaneByTabWidget(zw))
+                    applyPaneZoom(*p, (int)s->SendScintilla(QsciScintillaBase::SCI_GETZOOM));
+            });
+        };
+        wireZoomSync(pane.editor ? pane.editor->scintilla() : nullptr);
+        wireZoomSync(pane.rendered);
+        wireZoomSync(pane.debugView);
         connect(pane.fmtGear, &QToolButton::clicked, this, [this]() {
             showOptionsDialog(2); // Generator page
         });
@@ -2758,12 +3393,28 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         SplitPane* p = findPaneByTabWidget(tw);
         if (!p) return;
 
-        // Show/hide corner controls (format combo, scope combo, gear) — Code tab only
-        if (auto* cw = tw->cornerWidget(Qt::BottomRightCorner))
-            cw->setVisible(index == 1);
+        // Reparent the shared editor / rendered views for the selected layout.
+        // (addWidget reparents; for Both the two addWidget calls always leave
+        // the order [editor, rendered] regardless of where they were before.)
+        if (index == 0 && p->reclassPage && p->editorContainer) {
+            p->reclassPage->layout()->addWidget(p->editorContainer);
+        } else if (index == 1 && p->codePage && p->renderedContainer) {
+            p->codePage->layout()->addWidget(p->renderedContainer);
+        } else if (index == 3 && p->bothSplitter) {
+            if (p->editorContainer)   p->bothSplitter->addWidget(p->editorContainer);
+            if (p->renderedContainer) p->bothSplitter->addWidget(p->renderedContainer);
+            p->bothSplitter->setSizes({ 67, 33 });  // Reclass 67% | Code 33%
+        }
+
+        // Format/scope/gear belong to the Code render — show for Code AND Both.
+        const bool codeish = (index == 1 || index == 3);
+        if (p->fmtCombo)   p->fmtCombo->setVisible(codeish);
+        if (p->scopeCombo) p->scopeCombo->setVisible(codeish);
+        if (p->fmtGear)    p->fmtGear->setVisible(codeish);
 
         if (index == 0)      p->viewMode = VM_Reclass;
         else if (index == 1) p->viewMode = VM_Rendered;
+        else if (index == 3) p->viewMode = VM_Both;
         else                 p->viewMode = VM_Debug;
 
         // Sync status bar buttons if this is the active pane
@@ -2772,14 +3423,14 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
             && &tab->panes[tab->activePaneIdx] == p)
             syncViewButtons(p->viewMode);
 
-        if (index == 1 || index == 2) {
+        // Refresh the views the new layout shows: Code render for Code/Both,
+        // debug text for Debug. (The editor/Reclass side is always live.)
+        if (index == 1 || index == 2 || index == 3) {
             for (auto& tab : m_tabs) {
                 for (auto& pane : tab.panes) {
                     if (&pane == p) {
-                        if (index == 1)
-                            updateRenderedView(tab, pane);
-                        else
-                            updateDebugView(tab, pane);
+                        if (index == 2) updateDebugView(tab, pane);
+                        else            updateRenderedView(tab, pane);  // Code or Both
                         break;
                     }
                 }
@@ -3040,7 +3691,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
     ctrl->setTypeHints(QSettings("Reclass", "Reclass").value("typeHints", false).toBool());
     ctrl->setShowComments(QSettings("Reclass", "Reclass").value("showComments", false).toBool());
-    ctrl->setShowRtti(QSettings("Reclass", "Reclass").value("showRttiChips", true).toBool());
+    ctrl->setShowRtti(QSettings("Reclass", "Reclass").value("showRttiChips", false).toBool());
     ctrl->setShowEnumChips(QSettings("Reclass", "Reclass").value("showEnumChips", true).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
@@ -3060,6 +3711,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                     syncViewButtons(tab.panes[tab.activePaneIdx].viewMode);
             }
             refreshBookmarksDock();
+            updateSourceChip();
         }
         // Keep border overlay on top after dock rearrangements
         if (m_borderOverlay) m_borderOverlay->raise();
@@ -3074,7 +3726,12 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     // controller's existing 660ms refresh tick — no new timers.
     connect(ctrl, &RcxController::sourceLivenessChanged, this, [this, dock](bool) {
         refreshDocTabSourceIcon(dock);
-        if (m_activeDocDock == dock) updateScannerTitle();
+        if (m_activeDocDock == dock) { updateScannerTitle(); updateSourceChip(); }
+    });
+    // Tri-state source status → status-bar badge/chip (transition-only).
+    connect(ctrl, &RcxController::sourceStatusChanged, this,
+            [this, dock](RcxController::SourceStatus) {
+        if (m_activeDocDock == dock) updateSourceChip();
     });
 
     // Cleanup on close
@@ -3103,10 +3760,24 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         rebuildWorkspaceModel();
         updateWindowTitle();
         if (m_tabs.isEmpty() && !m_closingAll) {
-            // Clean up stale sentinels before creating fresh tab
+            // Zero tabs is a valid state. Purge the now-orphaned sentinels
+            // (which kept solo-dock tab strips alive) and reveal the empty-
+            // workspace hatch instead of force-opening a fresh class.
             qDeleteAll(m_sentinelDocks);
             m_sentinelDocks.clear();
-            project_new();
+            updateEmptyWorkspaceVisibility();
+        } else if (!m_closingAll) {
+            // Closing a tabified doc dock was the ONE layout event that ran
+            // no tab-bar maintenance: Qt re-syncs / pools the surviving
+            // dock-area tab bar (a dissolving group's bar is stripped to zero
+            // tabs and recycled, deleting its close buttons; a re-inserted
+            // tab comes back buttonless), and nothing reinstalled them.
+            // Reconcile so every surviving tab keeps a working close button
+            // and orphaned sentinels are purged. Deferred one tick so Qt has
+            // finished settling the tab bar before we walk it.
+            QTimer::singleShot(0, this, [this]() {
+                if (!m_closingAll) reconcileDockTabBars();
+            });
         }
     });
 
@@ -3332,10 +4003,15 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 if (!dockGuard) return;
                 auto it2 = m_tabs.find(dockGuard);
                 if (it2 != m_tabs.end()) {
-                    // Only regenerate rendered/debug panes if any are actually visible
+                    // Only regenerate rendered/debug panes if any are actually visible.
+                    // This undo-stack path is the ONLY rendered refresh for edits +
+                    // undo/redo (applyCommand→refresh() emits no documentChanged), so
+                    // it MUST include VM_Both or the Code half of "Both" goes stale on
+                    // every edit/undo/redo.
                     bool hasRendered = false, hasDebug = false;
                     for (const auto& pane : it2->panes) {
-                        if (pane.viewMode == VM_Rendered && pane.rendered && pane.rendered->isVisible())
+                        if ((pane.viewMode == VM_Rendered || pane.viewMode == VM_Both)
+                            && pane.rendered && pane.rendered->isVisible())
                             hasRendered = true;
                         if (pane.viewMode == VM_Debug && pane.debugView && pane.debugView->isVisible())
                             hasDebug = true;
@@ -3397,6 +4073,10 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     // Install context menu + pin/close buttons on dock tab bars
     // (deferred — tab bar created after tabification)
     reconcileDockTabBars();
+
+    // A document is open again — re-pin the central widget to 0 height so the
+    // doc-dock area reclaims the full strip and the empty-workspace hatch hides.
+    updateEmptyWorkspaceVisibility();
 
     return dock;
 }
@@ -3787,10 +4467,35 @@ void MainWindow::setupDockTabBars() {
                 // a distinctly contrasting shade that paints visibly on
                 // top of the already-hovered tab.
                 btns->applyTheme(theme.text, theme.selected);
-                if (target) {
-                    connect(btns->closeBtn, &QToolButton::clicked,
-                            target, &QDockWidget::close);
-                }
+                // Resolve the dock at CLICK time by the button's CURRENT tab
+                // text — never bind the dock pointer at install time. Doc
+                // docks are destroyed on close (WA_DeleteOnClose) and Qt
+                // re-syncs / pools the dock-area tab bar underneath us: an
+                // install-time binding either goes dead (receiver destroyed →
+                // Qt auto-disconnect) or ends up under a shifted tab, which is
+                // why the X stopped working after closing a sibling tab while
+                // middle-click (which resolves at click time) kept working.
+                // This mirrors the middle-click path exactly.
+                connect(btns->closeBtn, &QToolButton::clicked, this,
+                        [this, btns, findDockByTitle]() {
+                    // Derive the tab bar from the button itself, not a captured
+                    // pointer: Qt pools/destroys dock-area tab bars, so a
+                    // captured QTabBar* could dangle. The button only emits
+                    // clicked while alive, and a live tab button lives inside
+                    // its current (live) tab bar — walk up to find it (robust
+                    // to whatever intermediate widget Qt reparents through).
+                    QTabBar* bar = nullptr;
+                    for (QWidget* w = btns->parentWidget(); w; w = w->parentWidget())
+                        if ((bar = qobject_cast<QTabBar*>(w))) break;
+                    if (!bar) return;
+                    for (int j = 0; j < bar->count(); ++j) {
+                        if (bar->tabButton(j, QTabBar::RightSide) == btns) {
+                            if (QDockWidget* d = findDockByTitle(bar->tabText(j)))
+                                d->close();
+                            return;
+                        }
+                    }
+                });
                 tabBar->setTabButton(i, QTabBar::RightSide, btns);
             }
 
@@ -3877,6 +4582,20 @@ void MainWindow::setupDockTabBars() {
             menu.addAction(target->isFloating() ? "Dock" : "Float", [target]() {
                 target->setFloating(!target->isFloating());
             });
+
+            // Show / Hide the Project workspace (on document tabs). Label is
+            // rebuilt with the menu on every right-click, so it always reflects
+            // the workspace's current visibility.
+            if (isDocDock && m_workspaceDock) {
+                menu.addSeparator();
+                const bool wsVisible = m_workspaceDock->isVisible();
+                menu.addAction(makeIcon(":/vsicons/layout-sidebar-left.svg"),
+                               wsVisible ? "Hide Workspace" : "Show Workspace",
+                               [this, wsVisible]() {
+                    applyLayoutPreset(wsVisible ? Layout_NoWorkspace
+                                                : Layout_Workspace);
+                });
+            }
 
             // New Document Groups (doc tabs only, >1 visible tab)
             if (isDocDock) {
@@ -4523,9 +5242,7 @@ void MainWindow::removeNode() {
     QSet<uint64_t> ids = ctrl->selectedIds();
     QVector<int> indices;
     for (uint64_t id : ids) {
-        int idx = ctrl->document()->tree.indexOfId(
-            id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                   | kMemberBit | kMemberSubMask));
+        int idx = ctrl->document()->tree.indexOfId(baseNodeIdFromSelId(id));
         if (idx >= 0) indices.append(idx);
     }
     if (indices.size() > 1)
@@ -4579,6 +5296,63 @@ void MainWindow::unsplitView() {
     tab->ctrl->removeSplitEditor(pane.editor);
     pane.tabWidget->deleteLater();
     tab->activePaneIdx = qBound(0, tab->activePaneIdx, tab->panes.size() - 1);
+}
+
+void MainWindow::previewBothSplit() {
+    auto* tab = activeTab();
+    if (!tab || tab->panes.isEmpty()) return;
+    tab->panes.first().tabWidget->setCurrentIndex(3);  // select the "Both" view
+}
+
+void MainWindow::previewCodeView() {
+    auto* tab = activeTab();
+    if (!tab || tab->panes.isEmpty()) return;
+    tab->panes.first().tabWidget->setCurrentIndex(1);  // select the "Code" view
+}
+
+void MainWindow::previewCloseViaX() {
+    // The --screenshot handler already opened one tab; add two more so there
+    // are three (UnnamedClass0/1/2). Then close two of them via the REAL
+    // close-X — the path the bug report is about ("close one, the X stops
+    // working on the rest"). Verified: both closes land, leaving one tab, so
+    // closing a sibling does not break the survivors' X buttons.
+    project_new();
+    project_new();
+
+    auto clickActiveX = [this]() {
+        QDockWidget* active = m_activeDocDock;
+        if (!active && !m_docDocks.isEmpty()) active = m_docDocks.last();
+        if (!active) return;
+        for (auto* tabBar : findChildren<QTabBar*>()) {
+            if (tabBar->parent() != this) continue;
+            for (int i = 0; i < tabBar->count(); ++i) {
+                if (tabBar->tabText(i) == active->windowTitle()) {
+                    if (auto* b = qobject_cast<DockTabButtons*>(
+                            tabBar->tabButton(i, QTabBar::RightSide)))
+                        b->closeBtn->click();
+                    return;
+                }
+            }
+        }
+    };
+
+    const int startCount = m_docDocks.size();   // 3 (handler's project_new + 2 here)
+    clickActiveX();   // close the active (3rd) tab
+    // Let the close + deferred reconcile settle, then click a survivor's X.
+    QTimer::singleShot(500, this, [this, clickActiveX, startCount]() {
+        clickActiveX();   // close a survivor — the click-time-resolution path
+        // After the second close + its deferred reconcile settle, emit a
+        // machine-checkable result for the `closetest` harness: two X-closes
+        // from three tabs must leave exactly one. A stale install-time binding
+        // (the original bug) would no-op the survivor's X and leave two.
+        QTimer::singleShot(400, this, [this, startCount]() {
+            const int remaining = m_docDocks.size();
+            std::fprintf(stderr, "CLOSEX_RESULT started=%d remaining=%d expected=%d %s\n",
+                         startCount, remaining, startCount - 2,
+                         remaining == startCount - 2 ? "PASS" : "FAIL");
+            std::fflush(stderr);
+        });
+    });
 }
 
 void MainWindow::undo() {
@@ -4959,6 +5733,9 @@ void MainWindow::toggleMcp() {
 void MainWindow::applyTheme(const Theme& theme) {
     applyGlobalTheme(theme);
 
+    // Empty-workspace hatch repaints itself from the new theme colours.
+    if (m_centralPlaceholder) m_centralPlaceholder->update();
+
     // Theme-level font override. When the theme JSON declares a `font`
     // field, switching to it pushes that family through the standard
     // setEditorFont() path — which iterates every editor, every pane,
@@ -5090,15 +5867,16 @@ void MainWindow::applyTheme(const Theme& theme) {
                     pane.scopeCombo->setStyleSheet(comboStyle);
                 if (pane.fmtGear)
                     pane.fmtGear->setStyleSheet(gearStyle);
-                if (pane.editorContainer) {
-                    // Refresh the dynamic property the custom
-                    // EditorContainer::paintEvent reads, then trigger a
-                    // repaint. Do NOT install a QSS border here — Qt
-                    // would draw it as a Fusion bevel (2-pixel light/
-                    // dark double line) on top of the custom paint.
-                    pane.editorContainer->setProperty(
-                        "borderColor", theme.border);
-                    pane.editorContainer->update();
+                // Refresh the dynamic property the custom
+                // EditorContainer::paintEvent reads, then trigger a repaint.
+                // Do NOT install a QSS border here — Qt would draw it as a
+                // Fusion bevel (2-pixel light/dark double line) on top of the
+                // custom paint. Both the hex editor and the Code view use it.
+                for (QWidget* ec : { pane.editorContainer, pane.renderedContainer }) {
+                    if (ec) {
+                        ec->setProperty("borderColor", theme.border);
+                        ec->update();
+                    }
                 }
             }
         }
@@ -5128,11 +5906,19 @@ void MainWindow::applyTheme(const Theme& theme) {
     // Workspace tree: delegate colors, palette, stylesheet
     if (m_workspaceDelegate)
         m_workspaceDelegate->setThemeColors(theme);
+    // Match the editor body's "paper" colour (a touch darker than chrome) so
+    // the Project workspace reads as the SAME surface as the editor, not a
+    // jarringly lighter panel. Single source of truth: rcx::editorPaperColor.
+    const QColor wsPaper = rcx::editorPaperColor(theme);
+    if (auto* cont = m_workspaceDock
+            ? m_workspaceDock->findChild<WorkspacePanel*>("workspaceContainer") : nullptr)
+        cont->setBackground(wsPaper);
     if (m_workspaceTree) {
         QPalette tp = m_workspaceTree->palette();
         tp.setColor(QPalette::Text, theme.textDim);
         tp.setColor(QPalette::Highlight, theme.selected);
         tp.setColor(QPalette::HighlightedText, theme.text);
+        tp.setColor(QPalette::Base, wsPaper);   // item-row bg → editor paper
         m_workspaceTree->setPalette(tp);
         m_workspaceTree->setStyleSheet(QStringLiteral(
             "QTreeView { background: %1; border: none; padding-left: 4px; }"
@@ -5142,7 +5928,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             "QAbstractScrollArea::corner { background: %1; border: none; }"
             "QHeaderView { background: %1; border: none; }"
             "QHeaderView::section { background: %1; border: none; }")
-            .arg(theme.background.name()));
+            .arg(wsPaper.name()));
         m_workspaceTree->viewport()->update();
     }
     if (m_workspaceSearch) {
@@ -5152,20 +5938,23 @@ void MainWindow::applyTheme(const Theme& theme) {
             " padding: 4px 8px 4px 2px; }"
             "QLineEdit QToolButton { padding: 0px 8px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(theme.background.name(), theme.textDim.name(),
+            .arg(wsPaper.name(), theme.textDim.name(),
                  theme.hover.name()));
     }
+
+    // Bookmarks panel shares the editor-paper surface (same as the workspace).
+    themeBookmarksContent();
 
     // Workspace separator theme update. (A "workspaceTabBar" lookup used to
     // live here from the pre-dock-unification layout, but no widget carries
     // that objectName anymore — the dock content is just the search box +
     // tree + separators — so the block never executed and was removed.)
     if (m_workspaceDock) {
-        if (auto* sep = m_workspaceDock->findChild<QFrame*>("workspaceSep")) {
-            sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
+        if (auto* sep = m_workspaceDock->findChild<HairlineSeparator*>("workspaceSep")) {
+            sep->setColor(theme.border);
         }
-        if (auto* sep = m_workspaceDock->findChild<QFrame*>("workspaceSepTop")) {
-            sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(theme.border.name()));
+        if (auto* sep = m_workspaceDock->findChild<HairlineSeparator*>("workspaceSepTop")) {
+            sep->setColor(theme.border);
         }
     }
 
@@ -5176,6 +5965,7 @@ void MainWindow::applyTheme(const Theme& theme) {
     if (auto* header = m_workspaceDock ? m_workspaceDock->findChild<DockTitleBar*>("workspaceHeader") : nullptr) {
         header->setBackground(theme.background);
     }
+    updateWorkspaceDockEdge();  // re-arm the docked-only right hairline in the new theme
     if (m_dockCloseBtn)
         m_dockCloseBtn->setStyleSheet(QStringLiteral(
             "QToolButton { border: none; padding: 0px; }"
@@ -5254,40 +6044,29 @@ void MainWindow::applyTheme(const Theme& theme) {
         }
     }
 
-    // Rendered Code views: update lexer colors, paper, margins
+    // Rendered Code views: re-theme the per-language lexer, paper, margins.
     for (auto& tab : m_tabs) {
         for (auto& pane : tab.panes) {
             auto* sci = pane.rendered;
             if (!sci) continue;
-            if (auto* lexer = qobject_cast<QsciLexerCPP*>(sci->lexer())) {
-                lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::Keyword);
-                lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::KeywordSet2);
-                lexer->setColor(theme.syntaxNumber, QsciLexerCPP::Number);
-                lexer->setColor(theme.syntaxString, QsciLexerCPP::DoubleQuotedString);
-                lexer->setColor(theme.syntaxString, QsciLexerCPP::SingleQuotedString);
-                lexer->setColor(theme.syntaxComment, QsciLexerCPP::Comment);
-                lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentLine);
-                lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentDoc);
-                lexer->setColor(theme.text, QsciLexerCPP::Default);
-                lexer->setColor(theme.text, QsciLexerCPP::Identifier);
-                lexer->setColor(theme.syntaxPreproc, QsciLexerCPP::PreProcessor);
-                lexer->setColor(theme.text, QsciLexerCPP::Operator);
-                const QColor editorBg = theme.background.darker(115);
-                for (int i = 0; i <= 127; i++)
-                    lexer->setPaper(editorBg, i);
-            }
-            sci->setPaper(theme.background.darker(115));
+            // Re-theme whatever lexer the current output format uses. The
+            // format the user last viewed governs which lexer is attached;
+            // re-apply for it so a theme switch recolors all languages.
+            const CodeFormat fmt = static_cast<CodeFormat>(
+                QSettings("Reclass", "Reclass").value("codeFormat", 0).toInt());
+            applyCodeLexer(sci, fmt, theme, sci->font());
+            sci->setPaper(rcx::editorPaperColor(theme));
             sci->setColor(theme.text);
             sci->setCaretForegroundColor(theme.text);
             sci->setCaretLineBackgroundColor(theme.hover);
             sci->setSelectionBackgroundColor(theme.selection);
             sci->setSelectionForegroundColor(theme.text);
-            sci->setMarginsBackgroundColor(theme.background.darker(115));
+            sci->setMarginsBackgroundColor(rcx::editorPaperColor(theme));
             sci->setMarginsForegroundColor(theme.textDim);
 
             // Debug view — update paper/caret colors and restyle
             if (pane.debugView) {
-                const QColor dbg = theme.background.darker(115);
+                const QColor dbg = rcx::editorPaperColor(theme);
                 pane.debugView->setPaper(dbg);
                 pane.debugView->setColor(theme.text);
                 pane.debugView->setCaretForegroundColor(theme.text);
@@ -5325,6 +6104,10 @@ void MainWindow::loadPluginsDeferred() {
         PROFILE_SCOPE("PluginManager::LoadPlugins");
         m_pluginManager.LoadPlugins();
     }
+    // Surface ABI-rejected provider plugins (otherwise the reason is stderr-only).
+    if (int n = m_pluginManager.rejectedPlugins().size())
+        setAppStatus(QStringLiteral(
+            "%1 plugin(s) skipped (incompatible) — see Plugins ▸ Manage Plugins").arg(n));
     if (m_mcp && QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool())
         m_mcp->start();
 }
@@ -5488,6 +6271,15 @@ MainWindow::TabState* MainWindow::tabByIndex(int index) {
     return nullptr;
 }
 
+void MainWindow::updateEmptyWorkspaceVisibility() {
+    // Central widget is pinned to 0 height so the doc-dock area fills the
+    // window; with no document tab open we lift that cap so the WorkspaceHatch
+    // fills the empty band and signals "no document open".
+    if (m_centralPlaceholder)
+        m_centralPlaceholder->setMaximumHeight(
+            m_tabs.isEmpty() ? QWIDGETSIZE_MAX : 0);
+}
+
 void MainWindow::updateWindowTitle() {
 #ifdef __APPLE__
     setWindowTitle(QStringLiteral("Reclass"));
@@ -5507,6 +6299,7 @@ void MainWindow::updateWindowTitle() {
     // Keep the scanner's title bar in sync with the editor's active tab so
     // the user can see which source the next scan will run against.
     updateScannerTitle();
+    updateSourceChip();
 }
 
 void MainWindow::updateScannerTitle() {
@@ -5553,6 +6346,32 @@ void MainWindow::updateScannerTitle() {
     if (m_scannerDock) m_scannerDock->setToolTip(tip);
 }
 
+void MainWindow::updateSourceChip() {
+    if (!m_sourceChip) return;
+    RcxController::SourceStatus st = RcxController::SourceStatus::None;
+    QString label;
+    if (m_activeDocDock && m_tabs.contains(m_activeDocDock)) {
+        auto& tab = m_tabs[m_activeDocDock];
+        if (tab.ctrl) st = tab.ctrl->sourceStatus();
+        if (tab.doc && tab.doc->provider) {
+            const QString name = tab.doc->provider->name();
+            const QString kind = tab.doc->provider->kind();
+            if (!name.isEmpty())
+                label = kind.isEmpty() ? name
+                                       : QStringLiteral("%1:%2").arg(kind, name);
+        }
+    }
+    if (label.isEmpty()) {
+        m_sourceChip->setState(RcxController::SourceStatus::None, QString());
+        return;
+    }
+    // A named source always shows; a None status (provider name present but no
+    // active saved-source index) falls back to a neutral "Static" dot.
+    if (st == RcxController::SourceStatus::None)
+        st = RcxController::SourceStatus::Static;
+    m_sourceChip->setState(st, label);
+}
+
 // ── Rendered view setup ──
 
 void MainWindow::setupRenderedSci(QsciScintilla* sci) {
@@ -5573,7 +6392,7 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     sci->setMarginType(0, QsciScintilla::NumberMargin);
     sci->setMarginWidth(0, "0000000 ");  // room for large line counts + right padding
     const auto& theme = ThemeManager::instance().current();
-    sci->setMarginsBackgroundColor(theme.background.darker(115));
+    sci->setMarginsBackgroundColor(rcx::editorPaperColor(theme));
     sci->setMarginsForegroundColor(theme.textDim);
     sci->setMarginsFont(f);
     // Left padding between margin numbers and code content
@@ -5583,28 +6402,15 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     sci->setMarginWidth(1, 0);
     sci->setMarginWidth(2, 0);
 
-    // C++ lexer for syntax highlighting — must be set BEFORE colors below,
-    // because setLexer() resets caret line, selection, and paper colors.
-    auto* lexer = new QsciLexerCPP(sci);
-    lexer->setFont(f);
-    lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::Keyword);
-    lexer->setColor(theme.syntaxKeyword, QsciLexerCPP::KeywordSet2);
-    lexer->setColor(theme.syntaxNumber, QsciLexerCPP::Number);
-    lexer->setColor(theme.syntaxString, QsciLexerCPP::DoubleQuotedString);
-    lexer->setColor(theme.syntaxString, QsciLexerCPP::SingleQuotedString);
-    lexer->setColor(theme.syntaxComment, QsciLexerCPP::Comment);
-    lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentLine);
-    lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentDoc);
-    lexer->setColor(theme.text, QsciLexerCPP::Default);
-    lexer->setColor(theme.text, QsciLexerCPP::Identifier);
-    lexer->setColor(theme.syntaxPreproc, QsciLexerCPP::PreProcessor);
-    lexer->setColor(theme.text, QsciLexerCPP::Operator);
-    const QColor editorBg = theme.background.darker(115);
-    for (int i = 0; i <= 127; i++) {
-        lexer->setPaper(editorBg, i);
-        lexer->setFont(f, i);
-    }
-    sci->setLexer(lexer);
+    // Attach + theme the per-language code lexer. setLexer (inside
+    // applyCodeLexer) must run BEFORE the caret/selection/paper colors below,
+    // because it resets them. The lexer is swapped per output format by
+    // updateRenderedView; here we attach the one for the saved format so the
+    // view is correctly coloured before the first render.
+    const CodeFormat initialFmt = static_cast<CodeFormat>(
+        QSettings("Reclass", "Reclass").value("codeFormat", 0).toInt());
+    applyCodeLexer(sci, initialFmt, theme, f);
+    const QColor editorBg = rcx::editorPaperColor(theme);
     sci->setBraceMatching(QsciScintilla::NoBraceMatch);
 
     // Colors applied AFTER setLexer() — the lexer resets these on attach
@@ -5635,7 +6441,7 @@ void MainWindow::setupDebugSci(QsciScintilla* sci) {
     sci->setMarginType(0, QsciScintilla::NumberMargin);
     sci->setMarginWidth(0, "0000000 ");
     const auto& theme = ThemeManager::instance().current();
-    sci->setMarginsBackgroundColor(theme.background.darker(115));
+    sci->setMarginsBackgroundColor(rcx::editorPaperColor(theme));
     sci->setMarginsForegroundColor(theme.textDim);
     sci->setMarginsFont(f);
     sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINLEFT, 0, (long)6);
@@ -5645,7 +6451,7 @@ void MainWindow::setupDebugSci(QsciScintilla* sci) {
     // Container lexer — we style manually per-character in updateDebugView
     sci->SendScintilla(QsciScintillaBase::SCI_SETLEXER, 2 /*SCLEX_CONTAINER*/);
 
-    const QColor editorBg = theme.background.darker(115);
+    const QColor editorBg = rcx::editorPaperColor(theme);
     sci->setPaper(editorBg);
     sci->setColor(theme.text);
     sci->setCaretForegroundColor(theme.text);
@@ -5659,7 +6465,7 @@ void MainWindow::setupDebugSci(QsciScintilla* sci) {
 
 void MainWindow::applyDebugStyles(QsciScintilla* sci) {
     const auto& theme = ThemeManager::instance().current();
-    const QColor editorBg = theme.background.darker(115);
+    const QColor editorBg = rcx::editorPaperColor(theme);
 
     QSettings settings("Reclass", "Reclass");
     QString fontName = settings.value("font", "IBM Plex Mono").toString();
@@ -5704,7 +6510,8 @@ void MainWindow::setViewMode(ViewMode mode) {
     auto* pane = findActiveSplitPane();
     if (!pane) return;
     pane->viewMode = mode;
-    int idx = (mode == VM_Debug) ? 2 : (mode == VM_Rendered) ? 1 : 0;
+    int idx = (mode == VM_Both) ? 3 : (mode == VM_Debug) ? 2
+            : (mode == VM_Rendered) ? 1 : 0;
     pane->tabWidget->setCurrentIndex(idx);
     syncViewButtons(mode);
 }
@@ -5733,19 +6540,43 @@ uint64_t MainWindow::findRootStructForNode(const NodeTree& tree, uint64_t nodeId
     return lastStruct;
 }
 
+void MainWindow::applyPaneZoom(SplitPane& p, int level) {
+    level = qBound(-8, level, 24);
+    QSettings("Reclass", "Reclass").setValue("viewZoomLevel", level);
+    // Drive Scintilla's own zoom (the same SCI_SETZOOM that Ctrl+wheel uses) on
+    // all three views so the pane stays consistent across tab switches. Block
+    // each view's signals while zooming so the SCN_ZOOM sync can't bounce back.
+    auto setZoom = [level](QsciScintilla* s) {
+        if (!s) return;
+        QSignalBlocker block(s);
+        s->zoomTo(level);
+    };
+    setZoom(p.editor ? p.editor->scintilla() : nullptr);
+    setZoom(p.rendered);
+    setZoom(p.debugView);
+
+    if (p.zoomSlider && p.zoomSlider->value() != level) {
+        QSignalBlocker block(p.zoomSlider);
+        p.zoomSlider->setValue(level);
+    }
+    if (p.zoomLabel) {
+        // Approximate % off the 12pt base for a familiar readout.
+        int pct = qRound((12.0 + level) / 12.0 * 100.0);
+        p.zoomLabel->setText(QStringLiteral("%1%").arg(pct));
+    }
+}
+
 // ── Update the rendered view for a single pane ──
 
 void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
-    if (pane.viewMode != VM_Rendered) return;
+    if (pane.viewMode != VM_Rendered && pane.viewMode != VM_Both) return;
     if (!pane.rendered) return;
 
     // Determine which struct to render based on selection
     uint64_t rootId = 0;
     QSet<uint64_t> selIds = tab.ctrl->selectedIds();
     if (selIds.size() >= 1) {
-        uint64_t selId = *selIds.begin();
-        selId &= ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                   | kMemberBit | kMemberSubMask);
+        uint64_t selId = baseNodeIdFromSelId(*selIds.begin());
         rootId = findRootStructForNode(tab.doc->tree, selId);
     }
 
@@ -5810,6 +6641,16 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     }
     pane.lastRenderedRootId = rootId;
 
+    // Attach the per-language lexer. Only needed when the generated text was
+    // actually re-rendered (format/structure change) or no lexer is attached
+    // yet — on a value-only refresh tick the cached text keeps its existing
+    // lexer styling. Theme switches re-theme the lexer separately in
+    // applyTheme(), so calling it every tick here was ~270 redundant Scintilla
+    // style mutations per refresh while the Code pane is visible.
+    if (!cacheHit || !pane.rendered->lexer())
+        applyCodeLexer(pane.rendered, fmt, ThemeManager::instance().current(),
+                       pane.rendered->font());
+
     // Set text
     pane.rendered->setText(text);
 
@@ -5843,7 +6684,7 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
 
 void MainWindow::updateAllRenderedPanes(TabState& tab) {
     for (auto& pane : tab.panes) {
-        if (pane.viewMode == VM_Rendered)
+        if (pane.viewMode == VM_Rendered || pane.viewMode == VM_Both)
             updateRenderedView(tab, pane);
     }
 }
@@ -7104,13 +7945,35 @@ void MainWindow::applyLayoutPreset(int preset) {
     // Re-install tab bar buttons — a newly revealed tab bar needs them.
     reconcileDockTabBars();
 
-    QSettings("Reclass", "Reclass").setValue("layoutPreset", preset);
     setAppStatus(showWorkspace ? QStringLiteral("Workspace shown")
                                : QStringLiteral("Workspace hidden"));
 }
 
 
 // ── Workspace Dock ──
+
+// Right-edge hairline on the Project dock — shown ONLY while it sits docked
+// in the main window (a floating dock has its own window chrome instead).
+// Spans the header (DockTitleBar) and the content panel (WorkspacePanel);
+// both paint a device-exact 1px column so it stays a single crisp line at
+// fractional display scaling. The content layout frees its right-most
+// logical px while the line is on so the search box / tree don't cover it.
+void MainWindow::updateWorkspaceDockEdge() {
+    if (!m_workspaceDock) return;
+    const bool docked = !m_workspaceDock->isFloating();
+    const auto& t = ThemeManager::instance().current();
+    const QColor edge = docked ? t.border : QColor();
+    if (auto* header = m_workspaceDock->findChild<DockTitleBar*>("workspaceHeader"))
+        header->setBorderRight(edge);
+    if (auto* cont = m_workspaceDock->findChild<WorkspacePanel*>("workspaceContainer")) {
+        cont->setRightLine(edge);
+        if (auto* lay = cont->layout()) {
+            QMargins m = lay->contentsMargins();
+            m.setRight(docked ? 1 : 0);
+            lay->setContentsMargins(m);
+        }
+    }
+}
 
 void MainWindow::createWorkspaceDock() {
     m_workspaceDock = new QDockWidget("Project", this);
@@ -7121,7 +7984,13 @@ void MainWindow::createWorkspaceDock() {
     // Custom titlebar — Qt handles drag/dock natively via setTitleBarWidget
     const auto& t = ThemeManager::instance().current();
     {
-        auto* titleBar = new DockTitleBar(36, t.background, m_workspaceDock);
+        // Height must match the editor's document tabs so the separator line
+        // under "Project" lines up to the pixel with the line under the editor
+        // tab — they're separate controls. Empirically the left dock's title bar
+        // starts 1px lower than the central tab bar, which exactly cancels the
+        // 1px a QTabBar renders below its tab content, so the header matches at
+        // precisely kDocTabBarHeight. Verified by pixel scan (both borders y=87).
+        auto* titleBar = new DockTitleBar(kDocTabBarHeight, t.background, m_workspaceDock);
         titleBar->setObjectName(QStringLiteral("workspaceHeader"));
         auto* headerLayout = new QHBoxLayout(titleBar);
         headerLayout->setContentsMargins(6, 0, 4, 0);
@@ -7133,8 +8002,9 @@ void MainWindow::createWorkspaceDock() {
         m_dockTitleLabel = new QLabel("Project", titleBar);
         m_dockTitleLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
         // CRITICAL: the label's natural minimumSizeHint is the full text
-        // width ("Project — 12 structs · 3 enums" ≈ 250 px in IBM Plex
-        // Mono 10pt). QHBoxLayout sums this into the title bar's
+        // width (harmless for the short "Project" title today, but this
+        // bit us when the title carried struct/enum counts ≈ 250 px in
+        // IBM Plex Mono 10pt). QHBoxLayout sums this into the title bar's
         // minimumSize, which propagates UP to the QDockWidget as its
         // effective minimum width — silently outranking the explicit
         // setMinimumWidth(180) on the dock. That's why the separator
@@ -7173,20 +8043,22 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceDock->setTitleBarWidget(titleBar);
     }
 
-    // Content container: search + tree
-    auto* dockContainer = new QWidget(m_workspaceDock);
+    // Content container: search + tree. Custom-painted (editor-paper bg +
+    // optional device-exact right edge) instead of QSS so the docked-only
+    // right border isn't a stylesheet/custom-paint fight.
+    auto* dockContainer = new WorkspacePanel(rcx::editorPaperColor(t), m_workspaceDock);
     dockContainer->setObjectName(QStringLiteral("workspaceContainer"));
     auto* dockLayout = new QVBoxLayout(dockContainer);
     dockLayout->setContentsMargins(0, 0, 0, 0);
     dockLayout->setSpacing(0);
 
-    // Separator above search
+    // Separator above search — hairline (exactly ONE device px at any DPR).
+    // A 1-logical-px QFrame rendered as TWO device rows at 125% scaling,
+    // reading as a double line next to the editor's device-exact tab-bar
+    // border (EditorContainer paints in device pixels; this must match).
     {
-        auto* sep = new QFrame(dockContainer);
+        auto* sep = new HairlineSeparator(t.border, dockContainer);
         sep->setObjectName(QStringLiteral("workspaceSepTop"));
-        sep->setFrameShape(QFrame::HLine);
-        sep->setFixedHeight(1);
-        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
         dockLayout->addWidget(sep);
     }
 
@@ -7236,24 +8108,26 @@ void MainWindow::createWorkspaceDock() {
             " padding: 2px 8px 2px 2px; }"
             "QLineEdit QToolButton { padding: 0px 8px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(t.background.name(), t.textDim.name(),
+            .arg(rcx::editorPaperColor(t).name(), t.textDim.name(),
                  t.hover.name()));
     }
     m_workspaceSearch->setFixedHeight(26);
     m_workspaceSearch->setContentsMargins(4, 0, 4, 0);
     dockLayout->addWidget(m_workspaceSearch);
-    // Separator below search
+    // Separator below search — same device-exact hairline as the one above
+    // it, or the two lines framing the search box render different weights
+    // at fractional DPR (1 vs 2 device rows).
     {
         const auto& t = ThemeManager::instance().current();
-        auto* sep = new QFrame(dockContainer);
+        auto* sep = new HairlineSeparator(t.border, dockContainer);
         sep->setObjectName(QStringLiteral("workspaceSep"));
-        sep->setFrameShape(QFrame::HLine);
-        sep->setFixedHeight(1);
-        sep->setStyleSheet(QStringLiteral("background: %1; border: none;").arg(t.border.name()));
         dockLayout->addWidget(sep);
     }
 
-    m_workspaceTree = new QTreeView(dockContainer);
+    auto* wsTree = new EmptyHintTreeView(dockContainer);
+    wsTree->placeholder = QStringLiteral("No types yet");
+    wsTree->hint        = QStringLiteral("File ▸ New Class, or import a PDB");
+    m_workspaceTree = wsTree;
     m_workspaceModel = new QStandardItemModel(this);
     m_workspaceModel->setHorizontalHeaderLabels({"Name"});
 
@@ -7298,10 +8172,16 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceDelegate->setThemeColors(t);
         m_workspaceTree->setItemDelegate(m_workspaceDelegate);
 
+        // Construction defaults must match applyTheme()'s runtime values
+        // (QPalette::Base + the editor-"paper" surface) so the tree is the
+        // editor's dark paper from the FIRST paint — not the lighter chrome
+        // background, which read as a "light" panel until a theme reapply.
+        const QColor wsPaper0 = rcx::editorPaperColor(t);
         QPalette tp = m_workspaceTree->palette();
         tp.setColor(QPalette::Text, t.textDim);
         tp.setColor(QPalette::Highlight, t.selected);
         tp.setColor(QPalette::HighlightedText, t.text);
+        tp.setColor(QPalette::Base, wsPaper0);
         m_workspaceTree->setPalette(tp);
 
         m_workspaceTree->setStyleSheet(QStringLiteral(
@@ -7312,7 +8192,7 @@ void MainWindow::createWorkspaceDock() {
             "QAbstractScrollArea::corner { background: %1; border: none; }"
             "QHeaderView { background: %1; border: none; }"
             "QHeaderView::section { background: %1; border: none; }")
-            .arg(t.background.name()));
+            .arg(wsPaper0.name()));
     }
 
     m_workspaceTree->setIndentation(12);
@@ -7677,10 +8557,38 @@ void MainWindow::createWorkspaceDock() {
     // Defer the resize one tick so it runs after Qt's own layout pass
     // settles — calling resizeDocks() inline at this point gets
     // silently overridden by the show's size-hint resolution.
+    // Collapsed left-edge rail — a discoverable handle to re-open the
+    // workspace when it's hidden (it's hidden by default). A thin fixed-width
+    // dock in the LEFT area so it RESERVES its own column: the editor and its
+    // north/south tab bars sit to its right instead of being overlaid. No
+    // title bar, not movable/closable.
+    {
+        auto* rail = new WorkspaceRail(this);
+        rail->setFixedWidth(22);
+        connect(rail, &WorkspaceRail::clicked, this,
+                [this]() { applyLayoutPreset(Layout_Workspace); });
+        m_workspaceRailDock = new QDockWidget(this);
+        m_workspaceRailDock->setObjectName(QStringLiteral("WorkspaceRailDock"));
+        m_workspaceRailDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
+        m_workspaceRailDock->setAllowedAreas(Qt::LeftDockWidgetArea);
+        auto* emptyTitle = new QWidget(m_workspaceRailDock);
+        emptyTitle->setFixedHeight(0);                 // no title-bar chrome
+        m_workspaceRailDock->setTitleBarWidget(emptyTitle);
+        m_workspaceRailDock->setWidget(rail);
+        addDockWidget(Qt::LeftDockWidgetArea, m_workspaceRailDock);
+        m_workspaceRailDock->setVisible(!m_workspaceDock->isVisible());
+    }
     connect(m_workspaceDock, &QDockWidget::visibilityChanged, this,
             [this](bool visible) {
         if (visible) rebuildWorkspaceModel();
+        // The rail reserves the left column only while the dock is hidden.
+        if (m_workspaceRailDock) m_workspaceRailDock->setVisible(!visible);
     });
+
+    // Right hairline only while docked — drop it the moment the dock floats.
+    connect(m_workspaceDock, &QDockWidget::topLevelChanged, this,
+            [this](bool) { updateWorkspaceDockEdge(); });
+    updateWorkspaceDockEdge();
 
     connect(m_workspaceTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& index) {
         if (!index.data(rcx::RoleSectionHeader).toString().isEmpty()) return;
@@ -7715,7 +8623,8 @@ void MainWindow::createWorkspaceDock() {
                 auto& t = m_tabs[dockRef];
                 if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
                     auto& p = t.panes[t.activePaneIdx];
-                    if (p.viewMode == VM_Rendered) updateRenderedView(t, p);
+                    if (p.viewMode == VM_Rendered || p.viewMode == VM_Both)
+                        updateRenderedView(t, p);
                 }
             });
             return;
@@ -7783,7 +8692,8 @@ void MainWindow::createWorkspaceDock() {
                 auto& t = m_tabs[dockRef];
                 if (t.activePaneIdx >= 0 && t.activePaneIdx < t.panes.size()) {
                     auto& p = t.panes[t.activePaneIdx];
-                    if (p.viewMode == VM_Rendered) updateRenderedView(t, p);
+                    if (p.viewMode == VM_Rendered || p.viewMode == VM_Both)
+                        updateRenderedView(t, p);
                 }
             });
         } else {
@@ -8194,34 +9104,15 @@ int MainWindow::loadPdbAndCacheTypes(const QString& pdbPath) {
 // ── Bookmarks dock ──
 
 void MainWindow::createBookmarksDock() {
+    // Shell only — kept cheap so createMenus()' toggleViewAction() and Reset
+    // Windows work immediately. The CONTENT is built lazily off the critical
+    // path (populateBookmarksDock): its first setWidget() was a ~300 ms hit —
+    // the first stylesheet'd widgets in the app (the DialogButtons) get their
+    // QSS style resolved during that polish — and the dock is hidden by
+    // default, so paying it before first paint was pure waste.
     m_bookmarksDock = new QDockWidget("Bookmarks", this);
     m_bookmarksDock->setObjectName("BookmarksDock");
     m_bookmarksDock->setAllowedAreas(Qt::AllDockWidgetAreas);
-
-    auto* container = new QWidget(m_bookmarksDock);
-    auto* layout = new QVBoxLayout(container);
-    layout->setContentsMargins(4, 4, 4, 4);
-    layout->setSpacing(4);
-
-    m_bookmarksFilter = new QLineEdit(container);
-    m_bookmarksFilter->setPlaceholderText("Filter bookmarks...");
-    layout->addWidget(m_bookmarksFilter);
-
-    m_bookmarksList = new QListWidget(container);
-    m_bookmarksList->setContextMenuPolicy(Qt::CustomContextMenu);
-    layout->addWidget(m_bookmarksList, 1);
-
-    auto* btnRow = new QHBoxLayout();
-    auto* addBtn = new rcx::DialogButton(QStringLiteral("Add"),
-        rcx::DialogButton::Primary, container);
-    auto* removeBtn = new rcx::DialogButton(QStringLiteral("Remove"),
-        rcx::DialogButton::Secondary, container);
-    btnRow->addWidget(addBtn);
-    btnRow->addWidget(removeBtn);
-    btnRow->addStretch();
-    layout->addLayout(btnRow);
-
-    m_bookmarksDock->setWidget(container);
     // Minimum width stops Qt's splitter from crushing the dock below the
     // point where content is readable when other docks share the area.
     m_bookmarksDock->setMinimumWidth(180);
@@ -8237,8 +9128,45 @@ void MainWindow::createBookmarksDock() {
     connect(m_bookmarksDock, &QDockWidget::visibilityChanged, this,
             [this](bool visible) {
         if (!visible || m_placingSidebar) return;
+        // Revealed before the deferred populate ran? Build it now so the user
+        // never sees an empty dock (the populate guard makes this idempotent).
+        if (!m_bookmarksList) populateBookmarksDock();
         placeSidebarDock(m_bookmarksDock, Qt::LeftDockWidgetArea, 240);
     });
+}
+
+void MainWindow::populateBookmarksDock() {
+    if (m_bookmarksList) return;  // already built (deferred tick or first show)
+    PROFILE_SCOPE("MainWindow::populateBookmarksDock");
+
+    auto* container = new QWidget(m_bookmarksDock);
+    container->setObjectName(QStringLiteral("bookmarksContainer"));
+    auto* layout = new QVBoxLayout(container);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(4);
+
+    m_bookmarksFilter = new QLineEdit(container);
+    m_bookmarksFilter->setPlaceholderText("Filter bookmarks...");
+    layout->addWidget(m_bookmarksFilter);
+
+    auto* bmList = new EmptyHintListWidget(container);
+    bmList->placeholder = QStringLiteral("No bookmarks");
+    bmList->hint        = QStringLiteral("Right-click a field ▸ Bookmark this address…");
+    m_bookmarksList = bmList;
+    m_bookmarksList->setContextMenuPolicy(Qt::CustomContextMenu);
+    layout->addWidget(m_bookmarksList, 1);
+
+    auto* btnRow = new QHBoxLayout();
+    auto* addBtn = new rcx::DialogButton(QStringLiteral("Add"),
+        rcx::DialogButton::Primary, container);
+    auto* removeBtn = new rcx::DialogButton(QStringLiteral("Remove"),
+        rcx::DialogButton::Secondary, container);
+    btnRow->addWidget(addBtn);
+    btnRow->addWidget(removeBtn);
+    btnRow->addStretch();
+    layout->addLayout(btnRow);
+
+    m_bookmarksDock->setWidget(container);
 
     connect(addBtn, &QPushButton::clicked, this, &MainWindow::promptAddBookmark);
     connect(removeBtn, &QPushButton::clicked, this, [this]() {
@@ -8270,6 +9198,36 @@ void MainWindow::createBookmarksDock() {
         });
         menu.exec(m_bookmarksList->viewport()->mapToGlobal(pos));
     });
+
+    // Fill with the active document's bookmarks — refreshBookmarksDock has
+    // been a no-op until now (it early-returns while m_bookmarksList is null).
+    refreshBookmarksDock();
+    // Lazily-built content missed the startup applyTheme — colour it now (and
+    // applyTheme re-runs this on theme change).
+    themeBookmarksContent();
+}
+
+// Match the Bookmarks panel to the editor "paper" surface, same as the
+// workspace — it's a side panel that sits beside the editor (and tabifies with
+// the workspace), so the lighter chrome background reads as jarring. No-op
+// until the lazily-built content exists.
+void MainWindow::themeBookmarksContent() {
+    if (!m_bookmarksList) return;
+    const rcx::Theme& theme = rcx::ThemeManager::instance().current();
+    const QColor paper = rcx::editorPaperColor(theme);
+    if (auto* cont = m_bookmarksDock
+            ? m_bookmarksDock->findChild<QWidget*>("bookmarksContainer") : nullptr)
+        cont->setStyleSheet(QStringLiteral(
+            "QWidget#bookmarksContainer { background: %1; }").arg(paper.name()));
+    QPalette lp = m_bookmarksList->palette();
+    lp.setColor(QPalette::Base, paper);                 // item rows → editor paper
+    m_bookmarksList->setPalette(lp);
+    m_bookmarksList->setStyleSheet(QStringLiteral(
+        "QListWidget { background: %1; border: none; }").arg(paper.name()));
+    if (m_bookmarksFilter)
+        m_bookmarksFilter->setStyleSheet(QStringLiteral(
+            "QLineEdit { background: %1; color: %2; border: none; padding: 4px 8px; }")
+            .arg(paper.name(), theme.textDim.name()));
 }
 
 void MainWindow::refreshBookmarksDock() {
@@ -8723,30 +9681,15 @@ void MainWindow::rebuildWorkspaceModelNow() {
     }
 
     if (m_dockTitleLabel) {
-        int structs = 0, enums = 0;
-        for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
-            auto* item = m_workspaceModel->item(i);
-            if (!item) continue;
-            if (!item->data(rcx::RoleSectionHeader).toString().isEmpty()) continue;
-            if (item->data(Qt::UserRole + 2).toBool())
-                ++enums;
-            else
-                ++structs;
-        }
         bool anyDirty = false;
         for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
             if (it->doc->modified) { anyDirty = true; break; }
+        // Just "Project" (+ dirty dot) \u2014 no struct/enum tallies; the tree is
+        // rarely tall enough for the counts to be worth the header noise.
         QString title;
         if (anyDirty)
             title = QStringLiteral("\u2022 ");
         title += QStringLiteral("Project");
-        if (structs || enums) {
-            title += QStringLiteral(" \u2014 %1 struct%2")
-                .arg(structs).arg(structs != 1 ? "s" : "");
-            if (enums)
-                title += QStringLiteral(" \u00b7 %1 enum%2")
-                    .arg(enums).arg(enums != 1 ? "s" : "");
-        }
         m_dockTitleLabel->setText(title);
     }
 
@@ -9011,6 +9954,26 @@ void MainWindow::showPluginsDialog() {
         if (m_pluginManager.plugins().isEmpty()) {
             list->addItem("No plugins loaded");
         }
+
+        // Skipped/incompatible provider plugins (ABI guard) — show the reason so
+        // the user knows to rebuild rather than wondering where the plugin went.
+        const auto& rejected = m_pluginManager.rejectedPlugins();
+        if (!rejected.isEmpty()) {
+            const auto& th = ThemeManager::instance().current();
+            auto* head = new QListWidgetItem(
+                QStringLiteral("⚠  %1 plugin(s) skipped:").arg(rejected.size()));
+            head->setFlags(Qt::NoItemFlags);
+            head->setForeground(th.markerError);
+            list->addItem(head);
+            for (const auto& r : rejected) {
+                auto* item = new QListWidgetItem(
+                    QStringLiteral("   %1\n     %2")
+                        .arg(QFileInfo(r.path).fileName(), r.reason));
+                item->setFlags(Qt::NoItemFlags);
+                item->setForeground(th.textMuted);
+                list->addItem(item);
+            }
+        }
     };
 
     refreshList();
@@ -9086,6 +10049,12 @@ void MainWindow::showPluginsDialog() {
     dialog.exec();
 }
 
+bool MainWindow::event(QEvent* e) {
+    // (LayoutRequest→repositionResizeWidgets removed — suspected startup
+    // layout churn. resizeEvent still repositions the zones.)
+    return QMainWindow::event(e);
+}
+
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
     if (event->type() == QEvent::ActivationChange) {
@@ -9117,17 +10086,22 @@ void MainWindow::changeEvent(QEvent* event) {
     }
 }
 
+void MainWindow::repositionResizeWidgets() {
+    // The resize grip now lives in the status bar (FlatStatusBar pins it).
+    // Here we only keep the frameless edge/corner zones glued to the border.
+    for (auto* re : findChildren<ResizeEdge*>()) {
+        re->setGeometry(resizeEdgeRect(re->edges(), width(), height()));
+        re->raise();
+    }
+}
+
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     if (m_borderOverlay) {
         m_borderOverlay->setGeometry(rect());
         m_borderOverlay->raise();
     }
-    if (auto* w = findChild<QWidget*>("resizeGrip")) {
-        auto* grip = static_cast<ResizeGrip*>(w);
-        grip->reposition();
-        grip->raise();
-    }
+    repositionResizeWidgets();
 }
 
 void MainWindow::updateBorderColor(const QColor& color) {
@@ -9136,6 +10110,10 @@ void MainWindow::updateBorderColor(const QColor& color) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    // Window geometry is intentionally NOT persisted — every launch auto-sizes
+    // to 40% of the primary screen, centered (see the ctor). Saving it caused
+    // stale off-screen/mis-sized restores after a resolution/DPI/monitor change.
+
     // Collect unique dirty docs (multiple tabs CAN share a document —
     // project_new() reuses the active doc and adds a new root struct, so
     // UnnamedClass0 + UnnamedClass1 typically live in the *same* doc).
@@ -9647,6 +10625,13 @@ int main(int argc, char* argv[]) {
 #ifdef Q_OS_MACOS
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
 #endif
+#ifdef _WIN32
+    // GUI-subsystem build: no console at launch (no flash). If the user left
+    // the console toggled on (View ▸ Show Console persists the choice),
+    // summon one now. QSettings with explicit org/app works pre-QApplication.
+    if (QSettings("Reclass", "Reclass").value("showConsole", false).toBool())
+        rcxSetConsoleVisible(true);
+#endif
 
     DarkApp app(argc, argv);
     app.setApplicationName("Reclass");
@@ -9670,10 +10655,14 @@ int main(int argc, char* argv[]) {
     // forward. The early-enable + auto-pop is kept here strictly for
     // measuring init-path costs that happen before the user can click.
     // --screenshot also disables it so captures stay clean.
-    const bool autoProfile =
-        app.arguments().contains(QStringLiteral("--profile"))
-        && !app.arguments().contains(QStringLiteral("--screenshot"));
-    if (autoProfile)
+    const bool hasProfile    = app.arguments().contains(QStringLiteral("--profile"));
+    const bool hasScreenshot = app.arguments().contains(QStringLiteral("--screenshot"));
+    const bool autoProfile   = hasProfile && !hasScreenshot;  // GUI dialog auto-pop
+    // `--profile --screenshot <path>`: headless mode — record the init path,
+    // then dump scope timings to stderr at the screenshot-exit (below) instead
+    // of popping the dialog. Lets the startup profile be captured by a pipe.
+    const bool profileDump   = hasProfile &&  hasScreenshot;
+    if (autoProfile || profileDump)
         rcx::Profiler::instance().setEnabled(true);
 
     // Load embedded fonts
@@ -9735,6 +10724,13 @@ int main(int argc, char* argv[]) {
     QTimer::singleShot(0, &window, [&window]() {
         window.ensureScannerPanel();
     });
+    // Same lazy-fill pattern for the Bookmarks dock — its first setWidget()
+    // polish was ~300 ms on the critical path (first stylesheet'd widgets get
+    // styled there) for a dock that's hidden by default. Shell already built
+    // in the ctor; visibilityChanged populates it if the user opens it first.
+    QTimer::singleShot(0, &window, [&window]() {
+        window.populateBookmarksDock();
+    });
     // Symbols/Modules dock is also lazy. Same idea: hidden at startup,
     // ~360 ms of QTreeView/QTabWidget/QStandardItemModel construction
     // moved off the path-to-first-paint. The View > Modules action
@@ -9757,8 +10753,10 @@ int main(int argc, char* argv[]) {
         });
     }
 
-    // --screenshot <path> [scanner]: open default project (optionally also
-    // show the scanner dock), grab the window, save, exit.
+    // --screenshot <path> [scanner|workspace|both]: open default project
+    // (optionally also show the scanner dock, expand the Project workspace
+    // dock, or lay out the "Both" Reclass|Code split), grab the window,
+    // save, exit.
     {
         QStringList args = app.arguments();
         int ssIdx = args.indexOf("--screenshot");
@@ -9766,15 +10764,51 @@ int main(int argc, char* argv[]) {
             QString ssPath = args[ssIdx + 1];
             bool showScanner = (ssIdx + 2 < args.size()
                                  && args[ssIdx + 2] == "scanner");
-            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner]() {
-                window.project_new();
-                if (showScanner && window.scannerDock())
-                    window.scannerDock()->show();
+            bool showWorkspace = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "workspace");
+            bool showBoth = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "both");
+            bool closeTest = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "closetest");
+            bool showCode = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "code");
+            bool showSplash = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "splash");
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash]() {
+                if (showSplash) {
+                    // Capture the start page itself — skip project_new so it
+                    // shows the no-tabs landing.
+                    QMetaObject::invokeMethod(&window, "showStartPage", Qt::QueuedConnection);
+                } else {
+                    window.project_new();
+                    if (showScanner && window.scannerDock())
+                        window.scannerDock()->show();
+                    if (showWorkspace)
+                        window.applyLayoutPreset(rcx::Layout_Workspace);
+                    if (showBoth)
+                        window.previewBothSplit();
+                    if (showCode)
+                        window.previewCodeView();
+                    if (closeTest)
+                        window.previewCloseViaX();
+                }
                 // Defer the grab so the dock layout settles + the panel
                 // paints its initial state before we capture.
-                QTimer::singleShot(1500, &window, [&window, ssPath]() {
-                    QPixmap px = window.grab();
+                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash]() {
+                    QPixmap px;
+                    if (showSplash) {
+                        if (auto* sp = window.findChild<rcx::StartPageWidget*>())
+                            px = sp->grab();   // the splash is a top-level dialog
+                        else
+                            px = window.grab();
+                    } else {
+                        px = window.grab();
+                    }
                     px.save(ssPath);
+                    // `--profile --screenshot`: emit the init-path timings we
+                    // recorded (no-op if profiling wasn't enabled).
+                    if (rcx::Profiler::instance().isEnabled())
+                        rcx::Profiler::instance().dumpToStderr();
                     qApp->quit();
                 });
             }, Qt::QueuedConnection);

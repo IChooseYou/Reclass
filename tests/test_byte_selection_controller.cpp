@@ -476,6 +476,32 @@ private slots:
         QApplication::processEvents();
         QVERIFY(m_ctrl->selectedIds().isEmpty());
     }
+
+    // ── Deleting nodes must clear the byte selection ──
+    // The byte selection is address-based and survives a refresh by design
+    // (so memory-poll ticks don't drop it). But a node DELETE is a structural
+    // change: the addresses it covered now hold different node content. If the
+    // selection lingers, applyByteSelectionOverlay re-paints those bytes onto
+    // whatever node shifted into that address range (user-reported: "deleted
+    // the end nodes but the top row shows selected bytes"). Deleting must
+    // clear it.
+    void testDeleteClearsByteSelection() {
+        // Select bytes across the first two hex rows, then delete every node.
+        QVERIFY(m_editor->setByteSelection(0, 8));
+        QApplication::processEvents();
+        QVERIFY(m_editor->byteSelection().has_value());
+
+        QVector<int> indices;
+        for (int i = 0; i < m_doc->tree.nodes.size(); ++i)
+            if (m_doc->tree.nodes[i].parentId != 0) indices.append(i);
+        QVERIFY(indices.size() >= 2);
+        m_ctrl->batchRemoveNodes(indices);
+        QApplication::processEvents();
+
+        QVERIFY2(!m_editor->byteSelection().has_value(),
+            "byte selection lingered after deleting the nodes it covered");
+        QVERIFY(m_ctrl->selectedIds().isEmpty());
+    }
 };
 
 QTEST_MAIN(TestByteSelController)

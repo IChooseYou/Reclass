@@ -7,6 +7,7 @@
 #include "hextoolbarpopup.h"
 #include "commontypes.h"
 #include "clipboard.h"
+#include "diffutil.h"
 #include <cmath>
 #include <cstring>
 #include "providerregistry.h"
@@ -642,6 +643,15 @@ void RcxController::onByteSelectionRows(const QSet<uint64_t>& selIds) {
 
 void RcxController::addByteSubmenu(QMenu& menu, RcxEditor* editor) {
     if (!editor || !editor->hasByteSelection()) return;
+    // Headline byte-selection action — promoted to the very top of the menu
+    // (above the "Selected bytes ▸" submenu) so breaking a byte range into a
+    // new class is always one click away whenever bytes are selected, not
+    // buried. Mirrors the node menu's top-level "Break Class".
+    menu.addAction(QIcon(QStringLiteral(":/vsicons/symbol-structure.svg")),
+                   tr("Break into Class"), [this, editor]() {
+        auto r = editor->byteSelectionRange();
+        extractByteSelectionToNewClass(r.first, r.second);
+    });
     QMenu* sub = menu.addMenu(
         tr("Selected bytes (%1)").arg(editor->byteSelectionByteCount()));
     sub->addAction(tr("Copy as hex"),           [this, editor]() { byteCopyHex(editor); });
@@ -651,10 +661,6 @@ void RcxController::addByteSubmenu(QMenu& menu, RcxEditor* editor) {
     sub->addAction(tr("Zero-fill"),             [this, editor]() { byteZeroFill(editor); });
     sub->addAction(tr("Paste hex"),             [this, editor]() { bytePasteHex(editor); });
     sub->addAction(tr("Save bytes as binary…"), [this, editor]() { byteSaveAsFile(editor); });
-    sub->addAction(tr("Break into new class"),  [this, editor]() {
-        auto r = editor->byteSelectionRange();
-        extractByteSelectionToNewClass(r.first, r.second);
-    });
     menu.addSeparator();
 }
 
@@ -702,9 +708,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         QSet<uint64_t> ids = m_selIds;
         QVector<int> indices;
         for (uint64_t id : ids) {
-            int idx = m_doc->tree.indexOfId(
-                id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                       | kMemberBit | kMemberSubMask));
+            int idx = m_doc->tree.indexOfId(baseNodeIdFromSelId(id));
             if (idx >= 0) indices.append(idx);
         }
         if (indices.size() > 1)
@@ -718,9 +722,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             this, [this]() {
         QSet<uint64_t> ids = m_selIds;
         for (uint64_t id : ids) {
-            int idx = m_doc->tree.indexOfId(
-                id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                       | kMemberBit | kMemberSubMask));
+            int idx = m_doc->tree.indexOfId(baseNodeIdFromSelId(id));
             if (idx >= 0) duplicateNode(idx);
         }
     });
@@ -730,13 +732,22 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // plain-text dump for external pastes. Cut = copy + delete. Paste wires
     // pasted nodes into the current view-root via a single undo macro.
     auto selectedRootIds = [this]() -> QVector<uint64_t> {
-        QVector<uint64_t> out;
+        // m_selIds is a QSet (hash-bucket order) — collect with each node's
+        // absolute offset and sort, so copied/cut nodes serialize in struct
+        // order rather than a scrambled order on paste / external text dump.
+        QVector<QPair<int64_t, uint64_t>> rows;  // (offset, nodeId)
         for (uint64_t id : m_selIds) {
-            uint64_t nodeId = id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                      | kMemberBit | kMemberSubMask);
-            if (nodeId != 0 && m_doc->tree.indexOfId(nodeId) >= 0)
-                out.append(nodeId);
+            uint64_t nodeId = baseNodeIdFromSelId(id);
+            int idx = m_doc->tree.indexOfId(nodeId);
+            if (nodeId != 0 && idx >= 0)
+                rows.append({m_doc->tree.computeOffset(idx), nodeId});
         }
+        std::sort(rows.begin(), rows.end(),
+                  [](const QPair<int64_t, uint64_t>& a,
+                     const QPair<int64_t, uint64_t>& b) { return a.first < b.first; });
+        QVector<uint64_t> out;
+        out.reserve(rows.size());
+        for (const auto& r : rows) out.append(r.second);
         return out;
     };
 
@@ -784,8 +795,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         uint64_t targetParent = m_viewRootId;
         int anchorEnd = -1;
         for (uint64_t sid : m_selIds) {
-            uint64_t nid = sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                   | kMemberBit | kMemberSubMask);
+            uint64_t nid = baseNodeIdFromSelId(sid);
             int ai = m_doc->tree.indexOfId(nid);
             if (ai < 0) continue;
             const Node& a = m_doc->tree.nodes[ai];
@@ -948,16 +958,13 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (m_selIds.size() > 1) {
             QVector<int> indices;
             for (uint64_t sid : m_selIds) {
-                uint64_t nid = sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                       | kMemberBit | kMemberSubMask);
+                uint64_t nid = baseNodeIdFromSelId(sid);
                 int ni = m_doc->tree.indexOfId(nid);
                 if (ni >= 0) indices.append(ni);
             }
             if (indices.size() > 1) {
                 batchChangeKind(indices, targetKind);
-                int ni = m_doc->tree.indexOfId(
-                    *m_selIds.begin() & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                          | kMemberBit | kMemberSubMask));
+                int ni = m_doc->tree.indexOfId(baseNodeIdFromSelId(*m_selIds.begin()));
                 if (ni >= 0) emit nodeSelected(ni);
                 return;
             }
@@ -1040,8 +1047,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
             QVector<QPair<uint64_t, NodeKind>> jobs;  // (nodeId, targetKind)
             int skipped = 0;
             for (uint64_t sid : m_selIds) {
-                uint64_t nid = sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                       | kMemberBit | kMemberSubMask);
+                uint64_t nid = baseNodeIdFromSelId(sid);
                 int ni = m_doc->tree.indexOfId(nid);
                 if (ni < 0) { skipped++; continue; }
                 NodeKind curK = m_doc->tree.nodes[ni].kind;
@@ -1066,9 +1072,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     emit statusHint(
                         QStringLiteral("Cycled %1 nodes (%2 skipped: container or only variant)")
                             .arg(jobs.size()).arg(skipped));
-                int ni = m_doc->tree.indexOfId(
-                    *m_selIds.begin() & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                          | kMemberBit | kMemberSubMask));
+                int ni = m_doc->tree.indexOfId(baseNodeIdFromSelId(*m_selIds.begin()));
                 if (ni >= 0) emit nodeSelected(ni);
                 return;
             }
@@ -1201,8 +1205,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         // Strip footer/array/member bits to get real node IDs
         QSet<uint64_t> nodeIds;
         for (uint64_t id : ids) {
-            uint64_t nid = id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                  | kMemberBit | kMemberSubMask);
+            uint64_t nid = baseNodeIdFromSelId(id);
             if (m_doc->tree.indexOfId(nid) >= 0)
                 nodeIds.insert(nid);
         }
@@ -2073,8 +2076,7 @@ void RcxController::refresh() {
     // Prune stale selections (nodes removed by undo/redo/delete)
     QSet<uint64_t> valid;
     for (uint64_t id : m_selIds) {
-        uint64_t nodeId = id & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                  | kMemberBit | kMemberSubMask);
+        uint64_t nodeId = baseNodeIdFromSelId(id);
         if (m_doc->tree.indexOfId(nodeId) >= 0)
             valid.insert(id);  // Keep original ID (with footer/array/member bits if present)
     }
@@ -2221,7 +2223,19 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
 
         m_doc->undoStack.endMacro();
         m_suppressRefresh = wasSuppressed;
-        if (!m_suppressRefresh) refresh();
+        if (!m_suppressRefresh) {
+            // A shrink splits the field into the new kind + a fresh hex pad.
+            // Clear the selection: leaving the shrunk node selected made a
+            // single click on its type cell immediately re-open the type
+            // chooser (user: "auto-highlights the two emitted nodes / triggers
+            // the typechooser too easily"). The pad is brand-new and shouldn't
+            // be selected either; a deliberate click re-selects when wanted.
+            // Suppressed callers (batch cycle/change) manage their own
+            // selection restore, so only clear on the top-level path.
+            m_selIds.clear();
+            emit selectionChanged(0);
+            refresh();   // recompose + applySelectionOverlays(empty)
+        }
     } else {
         // Same size or larger: adjust sibling offsets as before
         int delta = newSize - oldSize;
@@ -2307,11 +2321,12 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
     };
 
     // Pass 1: determine the single parent struct from the first
-    // intersected LEAF child. Containers (Struct / Array) are skipped
-    // here because their span includes their children — picking them
-    // up would conflate "the root struct intersects" with "any of its
-    // children intersect" and falsely refuse with cross-parent. Pass 2
-    // re-checks container-vs-selection intersection explicitly.
+    // intersected field. We skip only ROOT containers (parentId==0): a
+    // root struct's span covers everything and would conflate "the root
+    // intersects" with "a field intersects". But an EMBEDDED struct/array
+    // FIELD (parentId!=0) is a real field we want to break off — including
+    // it lets a selection covering only an embedded struct find its parent.
+    // Pass 2 re-checks container-vs-selection intersection explicitly.
     uint64_t parentId = 0;
     bool parentSet = false;
     auto nodeSize = [&tree](const Node& n) {
@@ -2320,7 +2335,9 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
     };
     for (int i = 0; i < tree.nodes.size(); ++i) {
         const Node& n = tree.nodes[i];
-        if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array) continue;
+        if ((n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+            && n.parentId == 0)
+            continue;
         if (!isInView(n.id)) continue;
         int sz = nodeSize(n);
         if (sz <= 0) continue;
@@ -2348,11 +2365,16 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
         int rowLo = sib.offset, rowHi = rowLo + sz;
         if (rowHi <= relLo || rowLo >= relHi) continue;
         const bool fullyContained = (rowLo >= relLo && rowHi <= relHi);
+        // A fully-contained Struct/Array is moved into the new class intact —
+        // it's just a refId/metadata connection, so the whole hierarchy comes
+        // along for free (the referenced root class is untouched). Only a node
+        // that STRADDLES the boundary is a real collision we can't resolve.
         if (sib.kind == NodeKind::Struct || sib.kind == NodeKind::Array) {
-            emit statusHint(QStringLiteral("Selection crosses a Struct/Array — refusing extract"));
-            return;
-        }
-        if (!fullyContained && !isHexPreview(sib.kind)) {
+            if (!fullyContained) {
+                emit statusHint(QStringLiteral("Selection crosses a Struct/Array boundary — refusing break"));
+                return;
+            }
+        } else if (!fullyContained && !isHexPreview(sib.kind)) {
             emit statusHint(QStringLiteral("Selection partially crosses a typed field — refusing"));
             return;
         }
@@ -2519,6 +2541,86 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
 
     emit statusHint(QStringLiteral("Extracted %1 byte%2 into %3")
         .arg(extractSize).arg(extractSize == 1 ? "" : "s").arg(typeName));
+}
+
+// True if `nodeId`'s ancestor chain reaches the current view root — i.e. the
+// node is a field of the viewed class, not one shown inside an embedded class
+// (whose fields belong to a different definition). Mirrors the isInView guard
+// in extractByteSelectionToNewClass. With no view root (0) there is no
+// constraint, so everything is "in view".
+bool RcxController::nodeInView(uint64_t nodeId) const {
+    if (!m_viewRootId) return true;
+    uint64_t id = nodeId;
+    while (id != 0) {
+        if (id == m_viewRootId) return true;
+        int idx = m_doc->tree.indexOfId(id);
+        if (idx < 0) return false;
+        id = m_doc->tree.nodes[idx].parentId;
+    }
+    return false;
+}
+
+// True only when `nodeId` is a DIRECT field of the view frame. The break scan
+// (extractByteSelectionToNewClass) compares each field's PARENT-relative
+// n.offset against a root-relative selection; those frames coincide only for a
+// direct child of the viewed class. A union member (createUnion reparents it to
+// offset 0) or an inline-struct field passes nodeInView() — its chain reaches
+// the root — yet sits in a nested frame, so its raw offset would resolve to the
+// wrong region. Breaking those is the separate "break inside a nested struct"
+// feature; refuse here rather than mangle the wrong field.
+bool RcxController::isDirectViewFrameChild(uint64_t nodeId) const {
+    const int idx = m_doc->tree.indexOfId(nodeId);
+    if (idx < 0) return false;
+    const uint64_t pid = m_doc->tree.nodes[idx].parentId;
+    if (m_viewRootId) return pid == m_viewRootId;
+    // No explicit view root: the frame is a top-level root class, so a valid
+    // direct field's parent must itself be a root (parentId == 0).
+    if (pid == 0) return false;  // a root container is not itself a field
+    const int pidx = m_doc->tree.indexOfId(pid);
+    return pidx >= 0 && m_doc->tree.nodes[pidx].parentId == 0;
+}
+
+std::optional<QPair<uint64_t, uint64_t>>
+RcxController::regionFromCurrentSelection(RcxEditor* editor) const {
+    auto& tree = m_doc->tree;
+
+    // 1. An active byte selection wins (on the passed editor, or any split).
+    if (editor && editor->hasByteSelection() && editor->byteSelectionByteCount() > 0)
+        return editor->byteSelectionRange();
+    for (auto* ed : m_editors)
+        if (ed && ed->hasByteSelection() && ed->byteSelectionByteCount() > 0)
+            return ed->byteSelectionRange();
+
+    // 2. Otherwise union the offset spans of the selected nodes. selIds are
+    //    encoded (footer/array-elem/member high bits) — decode to the base
+    //    node id, same as the delete path.
+    bool any = false;
+    int minOff = 0, maxOff = 0;
+    for (uint64_t sid : m_selIds) {
+        uint64_t nid = baseNodeIdFromSelId(sid);
+        int idx = tree.indexOfId(nid);
+        if (idx < 0) continue;
+        // The node-span region is built from PARENT-relative n.offset; that
+        // frame coincides with the root-relative selection only for a DIRECT
+        // field of the view frame. A union member (reparented to offset 0) or an
+        // inline-struct field would resolve to the wrong bytes — the exact case
+        // extractByteSelectionToNewClass mangles. The context-menu break paths
+        // pre-check each node, but the menu-bar / Ctrl+Shift+B "Break into Class"
+        // action calls this directly, so guard at the shared chokepoint: refuse
+        // the whole region if any contributing node is nested. (Byte selections
+        // returned above are root-relative and unaffected.)
+        if (!isDirectViewFrameChild(nid)) return std::nullopt;
+        const Node& n = tree.nodes[idx];
+        int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                 ? tree.structSpan(n.id) : n.byteSize();
+        if (sz <= 0) continue;
+        const int lo = n.offset, hi = n.offset + sz;
+        if (!any)      { minOff = lo; maxOff = hi; any = true; }
+        else           { minOff = qMin(minOff, lo); maxOff = qMax(maxOff, hi); }
+    }
+    if (!any || maxOff <= minOff) return std::nullopt;
+    const uint64_t base = tree.baseAddress;
+    return QPair<uint64_t, uint64_t>(base + (uint64_t)minOff, base + (uint64_t)maxOff);
 }
 
 void RcxController::insertNode(uint64_t parentId, int offset, NodeKind kind, const QString& name) {
@@ -3612,14 +3714,26 @@ void RcxController::showHexToolbar(RcxEditor* editor, int nodeIdx) {
 
     // Multi-select info
     if (m_selIds.size() > 1) {
+        // m_selIds is a QSet — collect the selected node indices and sort by
+        // offset before the contiguity scan. Iterating in hash order would
+        // make the "each node's offset == previous node's end" adjacency test
+        // spuriously fail on a genuinely contiguous selection, which wrongly
+        // disables the "merge into one typed field" affordance (hextoolbar).
+        QVector<int> sel;
+        for (uint64_t sid : m_selIds) {
+            int si = m_doc->tree.indexOfId(sid);
+            if (si >= 0) sel.append(si);
+        }
+        std::sort(sel.begin(), sel.end(), [this](int a, int b) {
+            return m_doc->tree.nodes[a].offset < m_doc->tree.nodes[b].offset;
+        });
         int count = 0, bytes = 0;
         bool contiguous = true;
         NodeKind commonKind = NodeKind::Hex8;
         int lastOff = -1;
         uint64_t commonParent = 0;
-        for (uint64_t sid : m_selIds) {
-            int si = m_doc->tree.indexOfId(sid);
-            if (si < 0 || !isHexNode(m_doc->tree.nodes[si].kind)) { contiguous = false; continue; }
+        for (int si : sel) {
+            if (!isHexNode(m_doc->tree.nodes[si].kind)) { contiguous = false; continue; }
             const auto& sn = m_doc->tree.nodes[si];
             if (count == 0) { commonKind = sn.kind; commonParent = sn.parentId; }
             else {
@@ -3952,6 +4066,33 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     if (hasNode && m_selIds.size() > 1) {
         QMenu menu;
         addByteSubmenu(menu, editor);  // "Selected bytes (N) ▸" at top, if any
+        // Break the multi-node selection into a new class. Only when there's no
+        // byte selection — addByteSubmenu already added the top-level action in
+        // that case. regionFromCurrentSelection unions the selected rows' spans.
+        if (!editor || !editor->hasByteSelection()) {
+            menu.addAction(icon("symbol-structure.svg"), "Break into Class", [this, editor]() {
+                // Refuse if any selected row is inside an embedded class (its
+                // offset is relative to that class's def → wrong region).
+                for (uint64_t sid : m_selIds) {
+                    uint64_t nid = baseNodeIdFromSelId(sid);
+                    if (!nodeInView(nid)) {
+                        emit statusHint(QStringLiteral(
+                            "Can't break a selection that includes a field inside "
+                            "an embedded class."));
+                        return;
+                    }
+                    if (!isDirectViewFrameChild(nid)) {
+                        emit statusHint(QStringLiteral(
+                            "Can't break a selection that includes a field nested "
+                            "in a union or inline struct."));
+                        return;
+                    }
+                }
+                auto region = regionFromCurrentSelection(editor);
+                if (region) extractByteSelectionToNewClass(region->first, region->second);
+            });
+            menu.addSeparator();
+        }
         int count = m_selIds.size();
         QSet<uint64_t> ids = m_selIds;
 
@@ -4199,15 +4340,22 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         QMenu* copyMenu = menu.addMenu(icon("clippy.svg"), "Copy");
         copyMenu->addAction(icon("link.svg"), "Copy &Address", [this, ids]() {
-            QStringList addrs;
+            // m_selIds is a QSet — iterate into (offset, text) pairs and sort
+            // by offset so the copied list is in struct order, not hash order.
+            QVector<QPair<int64_t, QString>> rows;
             for (uint64_t id : ids) {
                 int ni = m_doc->tree.indexOfId(id);
                 if (ni < 0) continue;
                 int64_t off = m_doc->tree.computeOffset(ni);
                 if (off < 0) continue;
                 uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
-                addrs << QStringLiteral("0x") + QString::number(addr, 16).toUpper();
+                rows.append({off, QStringLiteral("0x") + QString::number(addr, 16).toUpper()});
             }
+            std::sort(rows.begin(), rows.end(),
+                      [](const QPair<int64_t, QString>& a,
+                         const QPair<int64_t, QString>& b) { return a.first < b.first; });
+            QStringList addrs;
+            for (const auto& r : rows) addrs << r.second;
             QApplication::clipboard()->setText(addrs.join('\n'));
         });
 
@@ -4397,77 +4545,51 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // ── New Class / Ptr to New Class (promoted near top) ──
         if (node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
             int nodeSz = node.byteSize();
-            // "New Class" — convert this node to an embedded struct referencing a new root class
-            menu.addAction(icon("symbol-structure.svg"), "New Class", [this, nodeId, nodeSz]() {
+            // "Break Class" — break the active selection (byte range or
+            // selected nodes), or failing that this node's own bytes, off
+            // into a new embedded class sized EXACTLY to the region, moving
+            // any fully-contained structs/typed fields in intact. Replaces
+            // the old fixed-64-byte "New Class"; the legacy "make a class of
+            // sample hex" behavior lives on in "Ptr to New Class" below.
+            // With a byte selection active, the promoted top-level "Break into
+            // Class" (see addByteSubmenu) already covers it — skip this
+            // node-level duplicate; keep it for the no-byte-selection cases
+            // (the clicked node's own span, or multi-node selections).
+            if (!editor || !editor->hasByteSelection())
+            menu.addAction(icon("symbol-structure.svg"), "Break Class", [this, editor, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni < 0) return;
-                const uint64_t parentId = m_doc->tree.nodes[ni].parentId;
-                const int nodeOffset = m_doc->tree.nodes[ni].offset;
-
-                // Create new root struct
-                QString baseName = QStringLiteral("NewClass");
-                QString typeName = baseName;
-                int counter = 2;
-                QSet<QString> existing;
-                for (const auto& nd : m_doc->tree.nodes)
-                    if (nd.kind == NodeKind::Struct && !nd.structTypeName.isEmpty())
-                        existing.insert(nd.structTypeName);
-                while (existing.contains(typeName))
-                    typeName = QStringLiteral("%1_%2").arg(baseName).arg(counter++);
-
-                m_suppressRefresh = true;
-                m_doc->undoStack.beginMacro(QStringLiteral("New Class"));
-
-                // 1. Create the root class definition (8 × Hex64 = 64 bytes)
-                Node root;
-                root.kind = NodeKind::Struct;
-                root.structTypeName = typeName;
-                root.name = QStringLiteral("instance");
-                root.classKeyword = QStringLiteral("class");
-                root.parentId = 0;
-                root.offset = 0;
-                root.id = m_doc->tree.reserveId();
-                m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{root}));
-                constexpr int kDefaultFields = 8;
-                for (int i = 0; i < kDefaultFields; i++)
-                    insertNode(root.id, i * 8, NodeKind::Hex64,
-                               QString("field_%1").arg(i * 8, 2, 16, QChar('0')));
-
-                // 2. Convert this node to Struct with refId
-                ni = m_doc->tree.indexOfId(nodeId);
-                if (ni >= 0) {
-                    changeNodeKind(ni, NodeKind::Struct);
-                    ni = m_doc->tree.indexOfId(nodeId);
-                    if (ni >= 0) {
-                        auto& n = m_doc->tree.nodes[ni];
-                        if (n.structTypeName != typeName)
-                            m_doc->undoStack.push(new RcxCommand(this,
-                                cmd::ChangeStructTypeName{nodeId, n.structTypeName, typeName}));
-                        if (n.refId != root.id)
-                            m_doc->undoStack.push(new RcxCommand(this,
-                                cmd::ChangePointerRef{nodeId, n.refId, root.id}));
-                    }
+                // A field shown INSIDE an embedded class stores its offset
+                // relative to that class's OWN definition, so breaking it would
+                // resolve to the wrong region in the viewed class and wrap the
+                // wrong field. Refuse rather than do the wrong thing — breaking
+                // inside an embedded class proper is a separate feature.
+                if (!nodeInView(nodeId)) {
+                    emit statusHint(QStringLiteral(
+                        "Can't break a field inside an embedded class — open that "
+                        "class as its own view first."));
+                    return;
                 }
-
-                // 3. Shift siblings to make room for the embedded struct
-                int newSpan = m_doc->tree.structSpan(root.id);
-                int delta = newSpan - nodeSz;
-                if (delta > 0) {
-                    int oldEnd = nodeOffset + nodeSz;
-                    auto siblings = m_doc->tree.childrenOf(parentId);
-                    for (int si : siblings) {
-                        auto& sib = m_doc->tree.nodes[si];
-                        if (sib.id == nodeId) continue;
-                        if (sib.offset >= oldEnd) {
-                            m_doc->undoStack.push(new RcxCommand(this,
-                                cmd::ChangeOffset{sib.id, sib.offset, sib.offset + delta}));
-                        }
-                    }
+                // A union member / inline-struct field reaches the root (passes
+                // nodeInView) but its offset is relative to its own container,
+                // so the break scan would resolve it to the wrong region.
+                if (!isDirectViewFrameChild(nodeId)) {
+                    emit statusHint(QStringLiteral(
+                        "Can't break a field nested in a union or inline struct — "
+                        "break it from that struct's own view."));
+                    return;
                 }
-
-                m_doc->undoStack.endMacro();
-                m_suppressRefresh = false;
-                refresh();
+                auto region = regionFromCurrentSelection(editor);
+                if (!region) {
+                    // No selection — break just the clicked node's own span.
+                    const Node& n = m_doc->tree.nodes[ni];
+                    int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                             ? m_doc->tree.structSpan(n.id) : n.byteSize();
+                    if (sz <= 0) return;
+                    const uint64_t lo = m_doc->tree.baseAddress + (uint64_t)n.offset;
+                    region = QPair<uint64_t, uint64_t>(lo, lo + (uint64_t)sz);
+                }
+                extractByteSelectionToNewClass(region->first, region->second);
             });
             // "Ptr to New Class" — convert to typed pointer + create new root class
             if (nodeSz == 8 || nodeSz == 4) {
@@ -4844,9 +4966,14 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             int ni = m_doc->tree.indexOfId(nodeId);
             if (ni >= 0) duplicateNode(ni);
         });
-        menu.addAction(icon("trash.svg"), "&Delete\tDelete", [this, nodeId]() {
+        menu.addAction(icon("trash.svg"), "&Delete\tDelete", [this, nodeId, editor]() {
             int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni >= 0) removeNode(ni);
+            if (ni < 0) return;
+            // A delete is a structural change: drop any active byte selection
+            // so it doesn't re-paint onto the node that shifts up (see
+            // batchRemoveNodes). No-op when nothing is byte-selected.
+            if (editor) editor->clearByteSelection();
+            removeNode(ni);
         });
 
 
@@ -4886,10 +5013,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
     }
 
-    // ── Label this address (user-defined symbol via bookmark) ──
+    // ── Bookmark this address (user-defined symbol via bookmark) ──
     if (hasNode) {
         uint64_t labelNodeId = m_doc->tree.nodes[nodeIdx].id;
-        menu.addAction(icon("symbol-key.svg"), "Label this address...",
+        menu.addAction(icon("symbol-key.svg"), "Bookmark this address...",
                        [this, labelNodeId]() {
             int ni = m_doc->tree.indexOfId(labelNodeId);
             if (ni < 0) return;
@@ -4897,8 +5024,8 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             if (off < 0) return;
             uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
             auto entered = ThemedInputDialog::getText(nullptr,
-                QStringLiteral("Label this address"),
-                QStringLiteral("Name for 0x%1").arg(addr, 0, 16),
+                QStringLiteral("Bookmark this address"),
+                QStringLiteral("Symbol name for 0x%1").arg(addr, 0, 16),
                 {}, QStringLiteral("symbol name"));
             if (!entered || entered->trimmed().isEmpty()) return;
             QString formula;
@@ -5090,7 +5217,14 @@ void RcxController::batchRemoveNodes(const QVector<int>& nodeIndices) {
     idSet = m_doc->tree.normalizePreferAncestors(idSet);
     if (idSet.isEmpty()) return;
 
-    // Clear selection before delete (prevents stale highlight on shifted lines)
+    // Clear selection before delete (prevents stale highlight on shifted lines).
+    // Also clear any active byte selection: it's address-based and survives a
+    // refresh by design, but a delete is a structural change — leaving it set
+    // would re-paint its bytes onto whatever node shifts up into that address
+    // range (user-reported "deleted the end, now the top row shows selected
+    // bytes"). clearByteSelection is a no-op when nothing is selected.
+    for (auto* ed : m_editors)
+        if (ed) ed->clearByteSelection();
     m_selIds.clear();
     m_anchorLine = -1;
 
@@ -5152,6 +5286,15 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
         return;
     }
 
+    // Reject a STALE click whose node was already deleted. A click carries
+    // (line, nodeId) captured at click time; a deferred/queued nodeClicked
+    // can fire AFTER a delete shifted the rows (the clicked node is one of
+    // the deleted ones). effectiveId() derives the selection from the row at
+    // `line`, so such a stale click would otherwise select whatever node
+    // shifted up into that line — the reported "delete auto-selects the node
+    // now in that position" bug. Existing nodes fall through unchanged.
+    if (m_doc->tree.indexOfId(nodeId) < 0) return;
+
     uint64_t selId = effectiveId(line, nodeId);
 
     if (!ctrl && !shift) {
@@ -5198,8 +5341,7 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     if (m_selIds.size() == 1) {
         uint64_t sid = *m_selIds.begin();
         // Strip footer/array/member bits for node lookup
-        int idx = m_doc->tree.indexOfId(sid & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
-                                                | kMemberBit | kMemberSubMask));
+        int idx = m_doc->tree.indexOfId(baseNodeIdFromSelId(sid));
         if (idx >= 0) emit nodeSelected(idx);
     }
 }
@@ -5313,14 +5455,17 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
     }
     auto* popup = ensureSourcePopup(editor);
 
-    // Build entries from saved sources + registered providers
+    // Build entries from saved sources + registered providers. Wrapped in a
+    // lambda so the per-source delete can rebuild the list in place without
+    // closing the popup.
+    auto buildEntries = [this]() -> QVector<SourceEntry> {
     QVector<SourceEntry> entries;
 
-    // Section: saved sources (if any)
+    // Section: bound sources (if any)
     if (!m_savedSources.isEmpty()) {
         SourceEntry hdr;
         hdr.entryKind = SourceEntry::SectionHeader;
-        hdr.displayName = QStringLiteral("Saved Sources");
+        hdr.displayName = QStringLiteral("Connected");
         hdr.enabled = false;
         entries.append(hdr);
 
@@ -5361,7 +5506,7 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
     {
         SourceEntry hdr;
         hdr.entryKind = SourceEntry::SectionHeader;
-        hdr.displayName = QStringLiteral("Providers");
+        hdr.displayName = QStringLiteral("Add Source");
         hdr.enabled = false;
         entries.append(hdr);
 
@@ -5405,6 +5550,9 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
         entries.append(e);
     }
 
+    return entries;
+    };
+
     // Configure and show popup
     QSettings settings("Reclass", "Reclass");
     QString fontName = settings.value("font", "IBM Plex Mono").toString();
@@ -5417,12 +5565,17 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
     font.setPointSize(font.pointSize() - 1);  // slightly smaller than editor
     popup->setFont(font);
     popup->applyTheme(ThemeManager::instance().current());
-    popup->setSources(entries);
+    popup->setSources(buildEntries());
 
     connect(popup, &SourceChooserPopup::sourceSelected,
             this, [this](int idx) { switchToSavedSource(idx); });
     connect(popup, &SourceChooserPopup::providerSelected,
             this, [this](const QString& id) { selectSource(id); });
+    connect(popup, &SourceChooserPopup::removeRequested,
+            this, [this, popup, buildEntries](int savedIdx) {
+                removeSavedSource(savedIdx);
+                popup->setSources(buildEntries());  // refresh in place, stay open
+            });
     connect(popup, &SourceChooserPopup::clearRequested,
             this, [this]() { clearSources(); });
 
@@ -6309,6 +6462,12 @@ void RcxController::switchToSavedSource(int idx) {
         m_doc->loadData(entry.filePath);
         m_doc->tree.baseAddress = entry.baseAddress;
         m_doc->tree.baseAddressFormula = entry.baseAddressFormula;
+        // Drop the prior source's snapshot/pages/value-history. loadData() only
+        // swaps the document's provider; without this, refresh() still composes
+        // against the stale m_snapshotProv (controller.cpp:1959) and renders the
+        // previous (possibly live process) bytes over the file. The provider
+        // paths reset via attachViaPlugin; the File path must do it itself.
+        resetSnapshot();
         refresh();
     } else if (!entry.providerTarget.isEmpty()) {
         // Plugin-based provider (e.g. "processmemory" with target "pid:name")
@@ -6362,6 +6521,9 @@ void RcxController::selectSource(const QString& text) {
             // Notify after m_activeSourceIdx is set so listeners
             // (doc tab source-icon, etc) see the new state.
             emit m_doc->documentChanged();
+            // Drop the prior source's snapshot before composing the file (else
+            // refresh() renders the stale snapshot — see switchToSavedSource).
+            resetSnapshot();
             refresh();
         }
     } else {
@@ -6509,6 +6671,30 @@ void RcxController::clearSources() {
     resetSnapshot();
     pushSavedSourcesToEditors();
     refresh();
+}
+
+void RcxController::removeSavedSource(int idx) {
+    if (idx < 0 || idx >= m_savedSources.size()) return;
+    const bool wasActive = (idx == m_activeSourceIdx);
+    m_savedSources.removeAt(idx);
+
+    // Keep m_activeSourceIdx pointing at the same entry it did before the
+    // removal shifted everything after `idx` down by one.
+    if (wasActive)            m_activeSourceIdx = -1;
+    else if (m_activeSourceIdx > idx) m_activeSourceIdx--;
+
+    if (wasActive) {
+        // Removing the connected source detaches the view — same as Clear All
+        // but leaving the remaining saved sources intact (no auto-activate, so
+        // it behaves like "clicking out of" the source rather than surprising
+        // the user by jumping to a different process/file).
+        m_doc->provider = std::make_shared<NullProvider>();
+        m_doc->dataPath.clear();
+        resetSnapshot();
+    }
+    pushSavedSourcesToEditors();
+    refresh();
+    emit m_doc->documentChanged();
 }
 
 void RcxController::copySavedSources(const QVector<SavedSourceEntry>& sources, int activeIdx) {
@@ -6699,6 +6885,27 @@ void RcxController::onRefreshTick() {
         emit sourceLivenessChanged(nowLive);
     }
 
+    // Tri-state source status for the status-bar badge (transition-only). Runs
+    // before the early-returns so it tracks even when the source isn't live.
+    SourceStatus status;
+    if (!nowLive)
+        // No valid provider bound: None only when there's also no saved source;
+        // otherwise a saved source that has disconnected. (Liveness must win over
+        // the saved-index check — a plugin attach with registerAsSavedSource=false
+        // leaves m_activeSourceIdx == -1 yet is genuinely live: the tutorial
+        // self-attach, kernel/physical provider tab, and the MCP attach tool.
+        // Keying None on m_activeSourceIdx<0 mislabelled those live, polled
+        // processes as None → the chip masked them to a neutral "Static" dot.)
+        status = (m_activeSourceIdx < 0) ? SourceStatus::None
+                                         : SourceStatus::Disconnected;
+    else if (!m_doc->provider->isLive())          status = SourceStatus::Static;
+    else if (!m_lastReadOk)                       status = SourceStatus::Stale;
+    else                                          status = SourceStatus::Live;
+    if (status != m_lastStatus) {
+        m_lastStatus = status;
+        emit sourceStatusChanged(status);
+    }
+
     if (m_readInFlight) return;
     if (!m_doc->provider || !m_doc->provider->isLive()) return;
     if (m_suppressRefresh) return;
@@ -6811,9 +7018,11 @@ void RcxController::onReadComplete() {
         newPages = m_refreshWatcher->result();
     } catch (const std::exception& e) {
         qWarning() << "[Refresh] async read threw:" << e.what();
+        m_lastReadOk = false;
         return;
     } catch (...) {
         qWarning() << "[Refresh] async read threw unknown exception";
+        m_lastReadOk = false;
         return;
     }
 
@@ -6829,12 +7038,14 @@ void RcxController::onReadComplete() {
                 qDebug() << "[Refresh] discarding all-zero page-0, keeping stale snapshot (further occurrences silenced)";
                 m_loggedAllZeroPage0 = true;
             }
+            m_lastReadOk = false;
             return;
         }
     }
     // First successful non-all-zero refresh — re-arm the log latch so a
     // future all-zero burst gets a single line again.
     m_loggedAllZeroPage0 = false;
+    m_lastReadOk = true;
 
     // Compute which byte offsets changed (for change highlighting) and
     // update per-page stability counters.
@@ -6854,13 +7065,11 @@ void RcxController::onReadComplete() {
         }
         const QByteArray& oldPage = oldIt.value();
         int cmpLen = qMin(oldPage.size(), newPage.size());
-        bool pageChanged = false;
-        for (int i = 0; i < cmpLen; ++i) {
-            if (oldPage[i] != newPage[i]) {
-                m_changedOffsets.insert(static_cast<int64_t>(pageAddr) + i);
-                pageChanged = true;
-            }
-        }
+        // Word-strided diff (byte-identical to a per-byte compare; the only
+        // cost on an unchanged page is one memcmp-equivalent per 8 bytes).
+        bool pageChanged = diffPageInto(m_changedOffsets, pageAddr,
+                                        oldPage.constData(), newPage.constData(),
+                                        cmpLen);
         if (pageChanged) {
             m_pageStability[pageAddr] = 0;
             anyChanged = true;
@@ -6943,12 +7152,23 @@ RcxController::viewportAddressRange() const {
 // ── Speedup 4: classify pages whose region is read-only module memory ──
 void RcxController::classifyPermanentPages(const PageMap& fresh) {
     if (!m_snapshotProv || !m_doc->provider) return;
-    // enumerateRegions can be expensive (10-50 ms on a process with
-    // thousands of mappings), but the SnapshotProvider's wrapper
-    // reuses the real provider's already-cached list — so this is
-    // cheap. We still pay one O(regions × pages) classification scan
-    // per refresh; in practice 'fresh' is at most a few dozen pages.
-    auto regions = m_doc->provider->enumerateRegions();
+    // enumerateRegions() is a FULL VirtualQueryEx sweep of the target's address
+    // space — 10s of ms on a process with thousands of mappings (a big game like
+    // DayZ). The old code here re-ran it on EVERY refresh tick on the main thread
+    // (the "already-cached" comment was wrong: ProcessMemoryProvider re-sweeps on
+    // every call, and we ask m_doc->provider, not a cached wrapper), which is what
+    // made module-heavy targets barely usable. Cache the list and refresh it at
+    // most every kRegionRefreshTicks ticks: the executable module regions we mark
+    // permanent are stable, so a slightly stale list only means a just-loaded
+    // module's pages take an extra cycle to be marked permanent — never a
+    // correctness issue.
+    if (!m_classifyRegionsValid
+        || (m_tickCount - m_classifyRegionsTick) >= (uint64_t)kRegionRefreshTicks) {
+        m_classifyRegions = m_doc->provider->enumerateRegions();
+        m_classifyRegionsValid = true;
+        m_classifyRegionsTick = m_tickCount;
+    }
+    const auto& regions = m_classifyRegions;
     if (regions.isEmpty()) return;
     constexpr uint64_t kPageSize = 4096;
     for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) {
@@ -6998,6 +7218,9 @@ void RcxController::resetSnapshot() {
     // both per-attach. Switching processes (resetProvider →
     // resetSnapshot) must drop these or stale data leaks across.
     m_pageStability.clear();
+    m_classifyRegions.clear();
+    m_classifyRegionsValid = false;
+    m_classifyRegionsTick = 0;
     m_idleTicks = 0;
     m_tickCount = 0;
     applyAdaptiveInterval();  // restart timer if it was paused

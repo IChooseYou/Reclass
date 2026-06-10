@@ -199,7 +199,11 @@ private slots:
         std::memcpy(data.data() + kStructBase + 4, &b, 4);
         BufferProvider prov(std::move(data), QStringLiteral("synthetic"));
 
-        ComposeResult r = compose(tree, prov, rootId);
+        // typeHints defaults OFF (the inference scan is gated for perf) — opt
+        // in explicitly to exercise the TypeHint chip.
+        ComposeResult r = compose(tree, prov, rootId,
+            /*compactColumns=*/false, /*treeLines=*/false,
+            /*braceWrap=*/false, /*typeHints=*/true);
         const LineChip* c = firstChipOfKind(r, ChipKind::TypeHint);
         QVERIFY2(c, "type-inference chip should fire on hex node with strong inference");
         // Inline rendering: chip text is appended to lineText, startCol/endCol
@@ -209,6 +213,48 @@ private slots:
         QVERIFY2(!c->text.contains('['),
             qPrintable(QStringLiteral("chip text should be plain (no brackets), got: ") + c->text));
         QVERIFY(!c->typeHintKinds.isEmpty());
+    }
+
+    // ── TypeHint memoization regression: with the per-compose inferTypes
+    //    cache, MULTIPLE hex fields carrying the same strong-inference bytes
+    //    must EACH still emit their own TypeHint chip (the cache stores the
+    //    decision, not the chip placement). Two fields with identical bytes
+    //    yield two identical chips. ──
+    void typeHintMemoizationMultiNode() {
+        NodeTree tree;
+        tree.baseAddress = kStructBase;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = QStringLiteral("Holder");
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node h0; h0.kind = NodeKind::Hex64; h0.name = QStringLiteral("a");
+        h0.parentId = rootId; h0.offset = 0;  tree.addNode(h0);
+        Node h1; h1.kind = NodeKind::Hex64; h1.name = QStringLiteral("b");
+        h1.parentId = rootId; h1.offset = 8;  tree.addNode(h1);
+
+        // Identical int32×2 bytes under each field → both infer the same type.
+        QByteArray data(kStructBase + 24, '\0');
+        int32_t a = 14, b = 20;
+        for (int base : {0, 8}) {
+            std::memcpy(data.data() + kStructBase + base + 0, &a, 4);
+            std::memcpy(data.data() + kStructBase + base + 4, &b, 4);
+        }
+        BufferProvider prov(std::move(data), QStringLiteral("synthetic"));
+
+        ComposeResult r = compose(tree, prov, rootId,
+            /*compactColumns=*/false, /*treeLines=*/false,
+            /*braceWrap=*/false, /*typeHints=*/true);
+
+        QCOMPARE(countChips(r, ChipKind::TypeHint), 2);
+        // Both chips must be fully populated (kinds carried through the cache).
+        for (const auto& lm : r.meta)
+            for (const auto& chip : lm.chips)
+                if (chip.kind == ChipKind::TypeHint)
+                    QVERIFY2(!chip.typeHintKinds.isEmpty(),
+                             "memoized TypeHint chip lost its kinds");
     }
 
     // ── RTTI chip fires when a hex64's value points at a known vtable,

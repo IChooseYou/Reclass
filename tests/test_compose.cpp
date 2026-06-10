@@ -218,6 +218,82 @@ private slots:
         QCOMPARE(result.meta[2].lineKind, LineKind::Footer);
     }
 
+    void testUnreadableValueFlag() {
+        // Provider valid but only the first field's bytes are mapped: a
+        // 4-byte buffer covers Hex32 @0 but not Hex32 @4. The field past the
+        // buffer must set LineMeta::unreadable; the in-bounds one must not.
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "R";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node f0; f0.kind = NodeKind::Hex32; f0.name = "ok";
+        f0.parentId = rootId; f0.offset = 0; tree.addNode(f0);
+        Node f1; f1.kind = NodeKind::Hex32; f1.name = "bad";
+        f1.parentId = rootId; f1.offset = 4; tree.addNode(f1);
+
+        QByteArray data(4, '\0');   // only bytes [0,4) readable
+        BufferProvider prov(data);
+        QVERIFY(prov.isValid());
+        ComposeResult result = compose(tree, prov);
+
+        // CommandRow + 2 fields + footer = 4
+        QCOMPARE(result.meta.size(), 4);
+        QVERIFY(!result.meta[1].unreadable);   // Hex32 @0 — fully readable
+        QVERIFY(result.meta[2].unreadable);    // Hex32 @4 — past the buffer
+    }
+
+    void testUnreadableNotFlaggedForNullProvider() {
+        // NullProvider (size 0 → !isValid()) must NEVER flag unreadable: the
+        // "no source attached" state is distinct from "valid but bad page".
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct; root.name = "R"; root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+        Node f0; f0.kind = NodeKind::Hex32; f0.name = "x";
+        f0.parentId = rootId; f0.offset = 0; tree.addNode(f0);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+        for (const auto& lm : result.meta)
+            QVERIFY(!lm.unreadable);
+    }
+
+    void testUnreadableStringWidthDoesNotFalseStrike() {
+        // A string's byteSize() is its declared display WIDTH (strLen, default
+        // 64), usually larger than the actual NUL-terminated text. Probing the
+        // whole window false-strikes a perfectly readable short string whose
+        // width merely overshoots the mapped page. The strike must mean "the
+        // address itself is unreadable", so only the first element is probed:
+        // a string whose START is mapped is NOT struck even if strLen overshoots;
+        // one whose start is unmapped still IS.
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct; root.name = "R"; root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node s0; s0.kind = NodeKind::UTF8; s0.name = "here"; s0.strLen = 64;
+        s0.parentId = rootId; s0.offset = 0; tree.addNode(s0);   // start mapped
+        Node s1; s1.kind = NodeKind::UTF8; s1.name = "gone"; s1.strLen = 64;
+        s1.parentId = rootId; s1.offset = 8; tree.addNode(s1);   // start unmapped
+
+        QByteArray data(8, 'A');   // only [0,8) mapped; strLen=64 overshoots both
+        BufferProvider prov(data);
+        QVERIFY(prov.isValid());
+        ComposeResult result = compose(tree, prov);
+
+        QCOMPARE(result.meta.size(), 4);       // CommandRow + 2 + footer
+        QVERIFY(!result.meta[1].unreadable);   // start mapped → NOT struck
+        QVERIFY(result.meta[2].unreadable);    // start unmapped → struck
+    }
+
     void testFoldLevels() {
         NodeTree tree;
         tree.baseAddress = 0;

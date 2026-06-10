@@ -3,7 +3,10 @@
 #include <QApplication>
 #include <QSplitter>
 #include <QTemporaryFile>
+#include <QMouseEvent>
+#include <QKeyEvent>
 #include <Qsci/qsciscintilla.h>
+#include <Qsci/qsciscintillabase.h>
 #include "controller.h"
 #include "core.h"
 
@@ -291,6 +294,120 @@ private slots:
         m_doc->undoStack.undo();
         QApplication::processEvents();
         QCOMPARE(m_doc->tree.nodes[idx].kind, NodeKind::UInt32);
+    }
+
+    // ── A shrink-split type change clears the selection (so a single click
+    //    doesn't immediately re-open the type chooser), while a same-size
+    //    change keeps the node selected. User: "auto highlights the two
+    //    emitted nodes ... triggers single-click typechooser too easily". ──
+    void testHexSplitClearsSelection() {
+        auto* doc = new RcxDocument();
+        doc->tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct; root.name = "R"; root.parentId = 0;
+        root.offset = 0;
+        int ri = doc->tree.addNode(root);
+        uint64_t rootId = doc->tree.nodes[ri].id;
+        Node h; h.kind = NodeKind::Hex64; h.name = "blob"; h.parentId = rootId;
+        h.offset = 0;
+        int hi = doc->tree.addNode(h);
+        uint64_t hexId = doc->tree.nodes[hi].id;
+        doc->provider = std::make_unique<BufferProvider>(QByteArray(32, '\0'));
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        auto* ed = ctrl->addSplitEditor(splitter);
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        auto lineOf = [&](uint64_t id) {
+            for (int i = 0; i < 60; ++i) {
+                const LineMeta* lm = ed->metaForLine(i);
+                if (lm && lm->nodeId == id && lm->lineKind == LineKind::Field) return i;
+            }
+            return -1;
+        };
+
+        // Select the Hex64, then shrink to Hex32 (split) → selection cleared.
+        int hexLine = lineOf(hexId);
+        QVERIFY2(hexLine >= 0, "Hex64 row not found");
+        ctrl->handleNodeClick(ed, hexLine, hexId, Qt::NoModifier);
+        QCOMPARE(ctrl->selectedIds().size(), 1);
+
+        int idx = doc->tree.indexOfId(hexId);
+        ctrl->changeNodeKind(idx, NodeKind::Hex32);
+        QApplication::processEvents();
+        QCOMPARE(ctrl->selectedIds().size(), 0);   // split clears selection
+
+        // Re-select the (now Hex32) node, then a SAME-size change keeps it.
+        int hex32Line = lineOf(hexId);
+        QVERIFY2(hex32Line >= 0, "Hex32 row not found after split");
+        ctrl->handleNodeClick(ed, hex32Line, hexId, Qt::NoModifier);
+        QCOMPARE(ctrl->selectedIds().size(), 1);
+        idx = doc->tree.indexOfId(hexId);
+        ctrl->changeNodeKind(idx, NodeKind::Int32);   // 4→4 bytes, no split
+        QApplication::processEvents();
+        QCOMPARE(ctrl->selectedIds().size(), 1);      // same-size keeps selection
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    // ── A shrink-split must NOT spuriously heat the shrunk node + the new
+    //    pad. After the split the value history is reset (new pad id / cleared
+    //    history), so the first read records ONE value (heatLevel 0). On
+    //    static bytes repeated refreshes record nothing further, so heat
+    //    stays 0 — no "two highlighted rows" from false heat. ──
+    void testHexSplitNoFalseHeat() {
+        auto* doc = new RcxDocument();
+        doc->tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct; root.name = "R"; root.parentId = 0;
+        root.offset = 0;
+        int ri = doc->tree.addNode(root);
+        uint64_t rootId = doc->tree.nodes[ri].id;
+        Node h; h.kind = NodeKind::Hex64; h.name = "blob"; h.parentId = rootId;
+        h.offset = 0;
+        int hi = doc->tree.addNode(h);
+        uint64_t hexId = doc->tree.nodes[hi].id;
+        // Non-zero, varied bytes so the value isn't empty (still constant).
+        QByteArray buf(32, '\0');
+        for (int i = 0; i < 16; ++i) buf[i] = char(0x10 + i);
+        doc->provider = std::make_unique<BufferProvider>(buf);
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        auto* ed = ctrl->addSplitEditor(splitter);
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        int idx = doc->tree.indexOfId(hexId);
+        ctrl->changeNodeKind(idx, NodeKind::Hex32);   // split → Hex32 + Hex32 pad
+        QApplication::processEvents();
+        // A couple more refreshes on identical bytes — heat must stay flat.
+        ctrl->refresh(); QApplication::processEvents();
+        ctrl->refresh(); QApplication::processEvents();
+
+        // Every Field row must have heatLevel 0 and dataChanged false on
+        // unchanging bytes (the shrunk node + pad included).
+        for (int i = 0; i < 60; ++i) {
+            const LineMeta* lm = ed->metaForLine(i);
+            if (!lm || lm->lineKind != LineKind::Field) continue;
+            QVERIFY2(lm->heatLevel == 0,
+                     qPrintable(QString("row %1 nodeId %2 heatLevel %3 (expected 0)")
+                                .arg(i).arg(lm->nodeId).arg(lm->heatLevel)));
+            QVERIFY2(!lm->dataChanged,
+                     qPrintable(QString("row %1 dataChanged on static bytes").arg(i)));
+        }
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
     }
 
     // ── Test: insertNode adds a node, removeNode removes it, undo restores ──
@@ -1721,6 +1838,153 @@ private slots:
         QVERIFY(selIdx >= 0);
         QCOMPARE(doc->tree.nodes[selIdx].kind, NodeKind::Hex64);
         QCOMPARE(doc->tree.nodes[selIdx].offset, 0);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    // Repro (REAL mouse+key events — the programmatic path missed this):
+    // click a node row to select it, press Delete → the node is deleted but
+    // the selection must NOT jump to whatever node shifts up into the vacated
+    // slot. User: "it auto-selects after delete; it should deselect entirely."
+    void testDeleteClearsSelection() {
+        rcx::NodeTree tree;
+        tree.baseAddress = 0;
+        rcx::Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "T"; root.name = "t"; root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+        QVector<uint64_t> ids;
+        for (int i = 0; i < 12; ++i) {
+            rcx::Node n; n.kind = NodeKind::Hex32;
+            n.name = QStringLiteral("f%1").arg(i);
+            n.parentId = rootId; n.offset = i * 4;
+            ids.append(tree.nodes[tree.addNode(n)].id);
+        }
+
+        auto doc = new RcxDocument();
+        doc->tree = tree;
+        doc->provider = std::make_unique<BufferProvider>(QByteArray(64, '\0'));
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        auto* editor = ctrl->addSplitEditor(splitter);
+        splitter->resize(900, 400);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        auto* sci = editor->scintilla();
+        auto* vp = sci->viewport();
+
+        auto lineForId = [&](uint64_t id) -> int {
+            for (int i = 0; ; ++i) {
+                const LineMeta* lm = editor->metaForLine(i);
+                if (!lm) return -1;
+                if (lm->nodeId == id && lm->lineKind == LineKind::Field) return i;
+            }
+        };
+        // A point inside the TYPE column of a row (col 12) — left of the hex
+        // value bytes, so the click selects the node without arming a byte
+        // drag-selection.
+        auto rowPoint = [&](int line) -> QPoint {
+            long pos = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                          (unsigned long)line, (long)12);
+            int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
+            int y = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos);
+            return QPoint(x, y + 2);
+        };
+        auto sendPress = [&](QPoint p, Qt::KeyboardModifiers mods) {
+            QMouseEvent press(QEvent::MouseButtonPress, QPointF(p), QPointF(p),
+                              Qt::LeftButton, Qt::LeftButton, mods);
+            QApplication::sendEvent(vp, &press);
+            QApplication::processEvents();
+        };
+        auto sendRelease = [&](QPoint p, Qt::KeyboardModifiers mods) {
+            QMouseEvent rel(QEvent::MouseButtonRelease, QPointF(p), QPointF(p),
+                            Qt::LeftButton, Qt::NoButton, mods);
+            QApplication::sendEvent(vp, &rel);
+            QApplication::processEvents();
+        };
+        auto clickRow = [&](int line, Qt::KeyboardModifiers mods) {
+            QPoint p = rowPoint(line);
+            sendPress(p, mods);
+            sendRelease(p, mods);
+        };
+        auto sendDelete = [&]() {
+            QKeyEvent k(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+            QApplication::sendEvent(sci, &k);
+            QApplication::processEvents();
+        };
+        auto dumpSel = [&](const char* when) {
+            QStringList s;
+            for (uint64_t id : ctrl->selectedIds()) s << QString::number(id, 16);
+            qDebug("%s: %d selected [%s]", when, ctrl->selectedIds().size(),
+                   qPrintable(s.join(',')));
+        };
+
+        // ── Single click + Delete ──
+        uint64_t f2 = ids[2];
+        clickRow(lineForId(f2), Qt::NoModifier);
+        dumpSel("after click f2");
+        QVERIFY2(ctrl->selectedIds().contains(f2),
+            qPrintable(QString("click didn't select f2 (got %1 ids)").arg(ctrl->selectedIds().size())));
+        sendDelete();
+        dumpSel("after delete f2");
+        QCOMPARE(doc->tree.indexOfId(f2), -1);
+        QVERIFY2(ctrl->selectedIds().isEmpty(),
+            qPrintable(QString("single-delete left %1 id(s) selected (auto-reselect bug)")
+                .arg(ctrl->selectedIds().size())));
+
+        // ── Multi-select (shift-click range) + Delete ──
+        ctrl->refresh();
+        QApplication::processEvents();
+        uint64_t g1 = ids[1], g3 = ids[3];   // f1..f3 still exist (f0,f2 deleted? no: only f2 gone)
+        // f2 was deleted above; remaining: f0,f1,f3,f4,f5. Select f1..f4 range.
+        uint64_t r0 = ids[1], r1 = ids[4];
+        clickRow(lineForId(r0), Qt::NoModifier);
+        clickRow(lineForId(r1), Qt::ShiftModifier);
+        dumpSel("after shift-range select");
+        QVERIFY2(ctrl->selectedIds().size() >= 2,
+            qPrintable(QString("shift-range selected only %1").arg(ctrl->selectedIds().size())));
+        sendDelete();
+        dumpSel("after delete range");
+        QVERIFY2(ctrl->selectedIds().isEmpty(),
+            qPrintable(QString("multi-delete left %1 id(s) selected (auto-reselect bug)")
+                .arg(ctrl->selectedIds().size())));
+        (void)g1; (void)g3;
+
+        // ── Stale click after delete must NOT select the shifted node ──
+        // The root defect: a deferred/queued nodeClicked can arrive after a
+        // delete shifted the rows, carrying the deleted node's id + its OLD
+        // line. handleNodeClick's effectiveId() derives the selection from the
+        // row at that line, so without a guard it selects whatever node moved
+        // up into that line. Replay that exact stale click deterministically.
+        ctrl->refresh();
+        QApplication::processEvents();
+        int l0 = -1, l1 = -1; uint64_t id0 = 0;
+        for (int i = 0; ; ++i) {
+            const LineMeta* lm = editor->metaForLine(i);
+            if (!lm) break;
+            if (lm->lineKind == LineKind::Field && lm->nodeId) {
+                if (l0 < 0) { l0 = i; id0 = lm->nodeId; }
+                else { l1 = i; break; }
+            }
+        }
+        QVERIFY(l0 >= 0 && l1 >= 0);     // need a node that will shift up
+        clickRow(l0, Qt::NoModifier);
+        QVERIFY(ctrl->selectedIds().contains(id0));
+        sendDelete();
+        QCOMPARE(doc->tree.indexOfId(id0), -1);
+        QVERIFY(ctrl->selectedIds().isEmpty());
+        // Replay the stale deferred click: deleted id0 + its old line l0,
+        // which now shows the shifted-up node. Must be ignored, not selected.
+        ctrl->handleNodeClick(editor, l0, id0, Qt::NoModifier);
+        dumpSel("after stale click replay");
+        QVERIFY2(ctrl->selectedIds().isEmpty(),
+            qPrintable(QString("stale click after delete auto-selected %1 node(s)")
+                .arg(ctrl->selectedIds().size())));
 
         delete ctrl;
         delete splitter;

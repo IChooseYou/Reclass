@@ -1,6 +1,7 @@
 #include <QtTest/QTest>
 #include <QApplication>
 #include <QSplitter>
+#include <QMenu>
 #include <Qsci/qsciscintilla.h>
 #include "controller.h"
 #include "core.h"
@@ -62,6 +63,37 @@ private:
     }
 
     int countNodes() const { return m_doc->tree.nodes.size(); }
+
+    // Build a tree with an embedded struct field referencing a root class
+    // definition. Returns {mainId, innerRootId, embeddedFieldId}.
+    struct EmbedTree { uint64_t mainId, innerId, embId; };
+    EmbedTree buildEmbeddedTree() {
+        m_doc->tree.nodes.clear();
+        // Referenced root class "Inner" (one Hex64 = 8 bytes).
+        Node inner; inner.kind = NodeKind::Struct; inner.structTypeName = "Inner";
+        inner.parentId = 0; inner.offset = 0;
+        m_doc->tree.addNode(inner);
+        uint64_t innerId = m_doc->tree.nodes.last().id;
+        Node ic; ic.kind = NodeKind::Hex64; ic.parentId = innerId; ic.offset = 0;
+        ic.name = "innerfield";
+        m_doc->tree.addNode(ic);
+        // Main root: hex64@0, embedded Inner@8 (refId), hex64@16.
+        Node main; main.kind = NodeKind::Struct; main.structTypeName = "Main";
+        main.parentId = 0; main.offset = 0;
+        m_doc->tree.addNode(main);
+        uint64_t mainId = m_doc->tree.nodes.last().id;
+        Node h0; h0.kind = NodeKind::Hex64; h0.parentId = mainId; h0.offset = 0;
+        m_doc->tree.addNode(h0);
+        Node emb; emb.kind = NodeKind::Struct; emb.parentId = mainId; emb.offset = 8;
+        emb.structTypeName = "Inner"; emb.name = "inner"; emb.refId = innerId;
+        emb.comment = "keepme";
+        m_doc->tree.addNode(emb);
+        uint64_t embId = m_doc->tree.nodes.last().id;
+        Node h1; h1.kind = NodeKind::Hex64; h1.parentId = mainId; h1.offset = 16;
+        m_doc->tree.addNode(h1);
+        m_ctrl->setViewRootId(mainId);
+        return {mainId, innerId, embId};
+    }
 
 private slots:
     void init() {
@@ -762,6 +794,342 @@ private slots:
         QCOMPARE(countNodes(), before);
         for (const auto& nd : m_doc->tree.nodes)
             QVERIFY(nd.structTypeName != QStringLiteral("UnnamedClass0"));
+    }
+
+    // The headline fix: breaking a region that contains an embedded struct
+    // moves it INTACT (kind/refId/name/comment preserved) into the new class,
+    // and the referenced root class definition is left untouched.
+    void testBreak_MovesContainedStructIntact() {
+        auto t = buildEmbeddedTree();
+
+        m_ctrl->extractByteSelectionToNewClass(8, 16);  // exactly the embedded struct
+        QApplication::processEvents();
+
+        // New class exists, sized exactly to the selection (8 bytes — no bloat).
+        int exIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
+            const auto& n = m_doc->tree.nodes[i];
+            if (n.parentId == 0 && n.kind == NodeKind::Struct
+                && n.structTypeName == "UnnamedClass0") { exIdx = i; break; }
+        }
+        QVERIFY(exIdx >= 0);
+        uint64_t exId = m_doc->tree.nodes[exIdx].id;
+        QCOMPARE(m_doc->tree.structSpan(exId), 8);
+
+        // It contains the moved embedded struct, intact, at relative offset 0.
+        QVector<int> kids = m_doc->tree.childrenOf(exId);
+        QCOMPARE(kids.size(), 1);
+        const Node& moved = m_doc->tree.nodes[kids.first()];
+        QCOMPARE(moved.kind, NodeKind::Struct);
+        QCOMPARE(moved.offset, 0);
+        QCOMPARE(moved.refId, t.innerId);                 // ref connection preserved
+        QCOMPARE(moved.structTypeName, QString("Inner"));
+        QCOMPARE(moved.comment, QString("keepme"));        // metadata preserved
+        QVERIFY(m_doc->tree.childrenOf(moved.id).isEmpty());  // it's a ref, no real kids
+
+        // Referenced root class untouched (still a root, still has its field).
+        int innerIdx = m_doc->tree.indexOfId(t.innerId);
+        QVERIFY(innerIdx >= 0);
+        QCOMPARE(m_doc->tree.nodes[innerIdx].parentId, (uint64_t)0);
+        QCOMPARE(m_doc->tree.childrenOf(t.innerId).size(), 1);
+    }
+
+    // A selection that STRADDLES an embedded struct is still refused (you
+    // can't break off part of a struct from outside it).
+    void testBreak_RefusesStraddlingStruct() {
+        buildEmbeddedTree();
+        int before = countNodes();
+        m_ctrl->extractByteSelectionToNewClass(4, 12);  // cuts the embedded [8,16)
+        QApplication::processEvents();
+        QCOMPARE(countNodes(), before);
+        for (const auto& nd : m_doc->tree.nodes)
+            QVERIFY(nd.structTypeName != QStringLiteral("UnnamedClass0"));
+    }
+
+    // Undo reverts the whole break (incl. the moved embedded struct) in a
+    // single step. Compare the parent's children by offset/kind/refId, which
+    // is order-stable (raw JSON array order isn't preserved across undo).
+    void testBreak_UndoRestores() {
+        auto t = buildEmbeddedTree();
+        int before = countNodes();
+        auto signature = [&](uint64_t parent) {
+            QVector<std::tuple<int, int, uint64_t>> sig;
+            for (int ci : m_doc->tree.childrenOf(parent)) {
+                const Node& n = m_doc->tree.nodes[ci];
+                sig.append({n.offset, (int)n.kind, n.refId});
+            }
+            std::sort(sig.begin(), sig.end());
+            return sig;
+        };
+        auto beforeSig = signature(t.mainId);
+
+        m_ctrl->extractByteSelectionToNewClass(8, 16);
+        QApplication::processEvents();
+        QVERIFY(countNodes() != before);  // something changed
+
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(countNodes(), before);
+        QVERIFY(signature(t.mainId) == beforeSig);
+        // The referenced root class is intact too.
+        QCOMPARE(m_doc->tree.childrenOf(t.innerId).size(), 1);
+    }
+
+    // Reproduces the user's reported scenario ("trim didn't trim all"):
+    // [hex64@0, hex64@8, embedded NewClass@0x10 (64B), hex32@0x50]. Trim must
+    // remove the trailing hex32 and stop at the embedded class — i.e. "trim
+    // right to the last defined class". Confirms Trim needs no change; the
+    // leftover-hex complaint was the old New Class bloat, now fixed at source.
+    void testTrim_StopsAtLastDefinedClass() {
+        m_doc->tree.nodes.clear();
+        // Inner class spanning 64 bytes (mirrors the old fixed New Class).
+        Node inner; inner.kind = NodeKind::Struct; inner.structTypeName = "NewClass";
+        inner.parentId = 0; inner.offset = 0;
+        m_doc->tree.addNode(inner);
+        uint64_t innerId = m_doc->tree.nodes.last().id;
+        for (int i = 0; i < 8; ++i) {
+            Node c; c.kind = NodeKind::Hex64; c.parentId = innerId; c.offset = i * 8;
+            m_doc->tree.addNode(c);
+        }
+        // Main: hex64@0, hex64@8, embedded NewClass@0x10 (→0x50), hex32@0x50.
+        Node main; main.kind = NodeKind::Struct; main.structTypeName = "Main";
+        main.parentId = 0; main.offset = 0;
+        m_doc->tree.addNode(main);
+        uint64_t mainId = m_doc->tree.nodes.last().id;
+        Node a; a.kind = NodeKind::Hex64; a.parentId = mainId; a.offset = 0;
+        m_doc->tree.addNode(a);
+        Node b; b.kind = NodeKind::Hex64; b.parentId = mainId; b.offset = 8;
+        m_doc->tree.addNode(b);
+        Node emb; emb.kind = NodeKind::Struct; emb.parentId = mainId; emb.offset = 0x10;
+        emb.structTypeName = "NewClass"; emb.refId = innerId; emb.name = "newclass";
+        m_doc->tree.addNode(emb);
+        Node tail; tail.kind = NodeKind::Hex32; tail.parentId = mainId; tail.offset = 0x50;
+        m_doc->tree.addNode(tail);
+        m_ctrl->setViewRootId(mainId);
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.structSpan(mainId), 0x54);
+
+        emit m_editor->trimHexRequested(mainId);
+        QApplication::processEvents();
+
+        // Trailing hex32 gone; the two leading hex64 + embedded class remain.
+        QVector<int> kids = m_doc->tree.childrenOf(mainId);
+        QCOMPARE(kids.size(), 3);
+        int maxOff = -1; bool hasEmbed = false;
+        for (int ci : kids) {
+            const Node& n = m_doc->tree.nodes[ci];
+            QVERIFY(n.kind != NodeKind::Hex32);     // trailing hex removed
+            if (n.refId == innerId) hasEmbed = true;
+            maxOff = qMax(maxOff, n.offset);
+        }
+        QVERIFY(hasEmbed);
+        QCOMPARE(maxOff, 0x10);                      // embedded class is now last
+        QCOMPARE(m_doc->tree.structSpan(mainId), 0x50);
+    }
+
+    // regionFromCurrentSelection picks up an active byte selection.
+    void testRegionFromSelection_ByteRange() {
+        auto t = buildEmbeddedTree();
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        QVERIFY(m_editor->setByteSelection(8, 16));
+        QApplication::processEvents();
+        auto region = m_ctrl->regionFromCurrentSelection(m_editor);
+        QVERIFY(region.has_value());
+        QCOMPARE(region->first, (uint64_t)8);
+        QCOMPARE(region->second, (uint64_t)16);
+        Q_UNUSED(t);
+    }
+
+    // The byte-selection "Break into Class" must sit at the TOP of the context
+    // menu (a plain top-level action), NOT inside the "Selected bytes ▸"
+    // submenu. User-directed placement — pin it so a future menu reshuffle
+    // can't re-bury it.
+    void testByteSelection_BreakIntoClassIsTopLevel() {
+        auto t = buildEmbeddedTree();
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        QVERIFY(m_editor->setByteSelection(8, 16));
+        QApplication::processEvents();
+
+        QMenu menu;
+        m_ctrl->addByteSubmenu(menu, m_editor);
+        const auto actions = menu.actions();
+        QVERIFY(!actions.isEmpty());
+
+        // First item is a real (non-submenu) "Break into Class" action.
+        QAction* first = actions.first();
+        QVERIFY2(first->menu() == nullptr,
+                 "top menu item must be a plain action, not a submenu");
+        QVERIFY2(first->text().contains(QStringLiteral("Break into Class")),
+                 qPrintable(QStringLiteral("top action was: ") + first->text()));
+
+        // The "Selected bytes ▸" submenu still exists but no longer carries a
+        // break action (it was promoted out to the top).
+        QMenu* sub = nullptr;
+        for (QAction* a : actions)
+            if (a->menu() && a->text().contains(QStringLiteral("Selected bytes")))
+                sub = a->menu();
+        QVERIFY2(sub != nullptr, "Selected bytes submenu should still exist");
+        for (QAction* a : sub->actions())
+            QVERIFY2(!a->text().contains(QStringLiteral("Break"), Qt::CaseInsensitive),
+                     qPrintable(QStringLiteral("submenu must not contain a break action: ")
+                                + a->text()));
+        Q_UNUSED(t);
+    }
+
+    // nodeInView guards "Break Class" from mangling the wrong field: a field
+    // shown INSIDE an embedded class belongs to that class's own definition
+    // (parent chain doesn't reach the view root), so it must read out-of-view.
+    void testNodeInView_EmbeddedFieldOutOfView() {
+        auto t = buildEmbeddedTree();   // setViewRootId(mainId)
+        QVERIFY2(m_ctrl->nodeInView(t.mainId),
+                 "the view-root class itself is in view");
+        QVERIFY2(m_ctrl->nodeInView(t.embId),
+                 "an embedded struct that is a direct field of the viewed class is in view");
+        int ici = findNode("innerfield");
+        QVERIFY(ici >= 0);
+        QVERIFY2(!m_ctrl->nodeInView(m_doc->tree.nodes[ici].id),
+                 "a field shown inside the embedded class is OUT of view (belongs to the embedded def)");
+        Q_UNUSED(t);
+    }
+
+    // The multi-node "Break into Class" action unions the selected rows' spans
+    // via regionFromCurrentSelection (no byte selection). Pins that path.
+    void testRegionFromSelection_MultiNodeUnion() {
+        m_doc->tree.nodes.clear();
+        m_doc->tree.baseAddress = 0x1000;
+        Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = QStringLiteral("Holder"); root.parentId = 0;
+        m_doc->tree.addNode(root);
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        uint64_t ids[3];
+        for (int i = 0; i < 3; ++i) {
+            Node n; n.kind = NodeKind::Hex64; n.parentId = rootId; n.offset = i * 8;
+            int idx = m_doc->tree.addNode(n);
+            ids[i] = m_doc->tree.nodes[idx].id;
+        }
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        // Select the first two rows as a multi-node selection (no byte sel).
+        m_ctrl->onByteSelectionRows(QSet<uint64_t>{ids[0], ids[1]});
+        auto region = m_ctrl->regionFromCurrentSelection(m_editor);
+        QVERIFY2(region.has_value(), "multi-node selection should yield a region");
+        QCOMPARE(region->first,  (uint64_t)0x1000);          // min offset
+        QCOMPARE(region->second, (uint64_t)0x1010);          // union of [0,8)+[8,16)
+    }
+
+    // isDirectViewFrameChild is stricter than nodeInView: a field nested inside
+    // an inline container (a union member or inline struct field) reaches the
+    // view root — so nodeInView passes — but its offset is relative to that
+    // container, not the view frame. The break scan would resolve it to the
+    // wrong region, so the stricter guard must reject it while still allowing
+    // the container itself and direct fields. Pins the nested-frame refusal.
+    void testDirectViewFrameChild_RejectsNestedField() {
+        m_doc->tree.nodes.clear();
+        m_doc->tree.baseAddress = 0x2000;
+        Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = QStringLiteral("Holder"); root.parentId = 0;
+        m_doc->tree.addNode(root);
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        // Direct hex64 field of the view root.
+        Node h0; h0.kind = NodeKind::Hex64; h0.parentId = rootId; h0.offset = 0;
+        h0.name = "direct";
+        int h0i = m_doc->tree.addNode(h0);
+        uint64_t directId = m_doc->tree.nodes[h0i].id;
+        // An inline container (NOT a refId embed) that IS a direct field, with a
+        // child whose offset is relative to the container — mirrors a union
+        // member (createUnion reparents members to offset 0).
+        Node inner; inner.kind = NodeKind::Struct; inner.parentId = rootId;
+        inner.offset = 8; inner.name = "inner";
+        int inneri = m_doc->tree.addNode(inner);
+        uint64_t innerId = m_doc->tree.nodes[inneri].id;
+        Node nested; nested.kind = NodeKind::Hex64; nested.parentId = innerId;
+        nested.offset = 0; nested.name = "nested";
+        int nestedi = m_doc->tree.addNode(nested);
+        uint64_t nestedId = m_doc->tree.nodes[nestedi].id;
+        m_ctrl->setViewRootId(rootId);
+
+        QVERIFY2(m_ctrl->isDirectViewFrameChild(directId),
+                 "a direct hex field of the view root is breakable");
+        QVERIFY2(m_ctrl->isDirectViewFrameChild(innerId),
+                 "the inline container itself is a direct field — breakable");
+        QVERIFY2(m_ctrl->nodeInView(nestedId),
+                 "a nested field still reaches the view root (nodeInView passes)");
+        QVERIFY2(!m_ctrl->isDirectViewFrameChild(nestedId),
+                 "but the nested field is NOT a direct view-frame child — refused");
+
+        // The corruption guard must live in regionFromCurrentSelection itself,
+        // not just at the context-menu call sites: the menu-bar "Break into
+        // Class" / Ctrl+Shift+B action calls regionFromCurrentSelection +
+        // extractByteSelectionToNewClass directly with NO pre-check. Selecting a
+        // nested field as a node selection must yield NO region (refuse) so that
+        // unguarded path can't resolve the parent-relative offset to the wrong
+        // bytes. A direct field still yields a region.
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        m_ctrl->onByteSelectionRows(QSet<uint64_t>{nestedId});
+        QVERIFY2(!m_ctrl->regionFromCurrentSelection(m_editor).has_value(),
+                 "a nested-field node selection must be refused at the shared "
+                 "region chokepoint, not silently mis-resolved");
+        m_ctrl->onByteSelectionRows(QSet<uint64_t>{directId});
+        QVERIFY2(m_ctrl->regionFromCurrentSelection(m_editor).has_value(),
+                 "a direct view-frame field still yields a breakable region");
+    }
+
+    // B-plan §7: the byte-selection "Break into Class" path is NOT guarded by
+    // isDirectViewFrameChild, but it is also NOT a corruption hazard. A byte
+    // selection arrives as ROOT-relative addresses, so a partial selection
+    // inside a nested inline struct straddles that struct's boundary in the
+    // root frame and hits the existing Pass-2 "crosses a Struct/Array boundary"
+    // refusal — it never mis-extracts a wrong field (unlike the old node-path
+    // bug that base+n.offset caused). Pins the byte path as safe-by-refusal.
+    void testByteBreak_NestedInlineStructPartial_RefusesNotCorrupt() {
+        m_doc->tree.nodes.clear();
+        m_doc->tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = QStringLiteral("Holder"); root.parentId = 0;
+        m_doc->tree.addNode(root);
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        Node h0; h0.kind = NodeKind::Hex64; h0.parentId = rootId; h0.offset = 0; h0.name = "h0";
+        m_doc->tree.addNode(h0);
+        // Inline (non-refId) struct at root offset 16, spanning [16,32).
+        Node inner; inner.kind = NodeKind::Struct; inner.parentId = rootId;
+        inner.offset = 16; inner.name = "inner";
+        int innerIdx = m_doc->tree.addNode(inner);
+        uint64_t innerId = m_doc->tree.nodes[innerIdx].id;
+        Node f0; f0.kind = NodeKind::Hex64; f0.parentId = innerId; f0.offset = 0; f0.name = "f0";
+        m_doc->tree.addNode(f0);
+        Node f1; f1.kind = NodeKind::Hex64; f1.parentId = innerId; f1.offset = 8; f1.name = "f1";
+        m_doc->tree.addNode(f1);
+        Node h1; h1.kind = NodeKind::Hex64; h1.parentId = rootId; h1.offset = 32; h1.name = "h1";
+        m_doc->tree.addNode(h1);
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        const int before = countNodes();
+        // Root-relative [16,24): covers f0's display position but straddles the
+        // inner struct (which spans [16,32)). This is the byte-path equivalent
+        // of "select the first field of an inline struct and Break".
+        m_ctrl->extractByteSelectionToNewClass(16, 24);
+        QApplication::processEvents();
+
+        // It must REFUSE: no UnnamedClass created, tree byte-for-byte unchanged,
+        // inner still intact — i.e. no wrong-field extraction / corruption.
+        bool madeNewClass = false;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.parentId == 0 && n.kind == NodeKind::Struct
+                && n.structTypeName.startsWith(QStringLiteral("UnnamedClass")))
+                madeNewClass = true;
+        QVERIFY2(!madeNewClass,
+                 "partial byte selection inside a nested inline struct must NOT "
+                 "create a class (refused, not corrupted)");
+        QCOMPARE(countNodes(), before);
+        QCOMPARE(m_doc->tree.childrenOf(innerId).size(), 2);
     }
 };
 

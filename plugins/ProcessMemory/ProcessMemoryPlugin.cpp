@@ -1033,6 +1033,10 @@ QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
     PROCESSENTRY32W entry;
     entry.dwSize = sizeof(entry);
 
+    // Shared fallback so every process gets *some* icon even when the exe path
+    // or icon can't be read (system/protected processes, access denied).
+    const QIcon defaultIcon = qApp->style()->standardIcon(QStyle::SP_FileIcon);
+
     if (Process32FirstW(snapshot, &entry)) {
         do {
             PluginProcessInfo info;
@@ -1058,7 +1062,8 @@ QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
 #else
                             QPixmap pixmap = QtWin::fromHICON(sfi.hIcon);
 #endif
-                            info.icon = QIcon(pixmap);
+                            if (!pixmap.isNull())
+                                info.icon = QIcon(pixmap);
                             DestroyIcon(sfi.hIcon);
                         }
                     }
@@ -1071,6 +1076,10 @@ QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
 
                 CloseHandle(hProcess);
             }
+
+            // Fall back to a generic icon when extraction failed for any reason.
+            if (info.icon.isNull())
+                info.icon = defaultIcon;
 
             processes.append(info);
 
@@ -1195,3 +1204,7 @@ extern "C" RCX_PLUGIN_EXPORT IPlugin* CreatePlugin()
 {
     return new ProcessMemoryPlugin();
 }
+
+// ABI guard token — lets the host reject this DLL if it was built against an
+// incompatible rcx::Provider layout instead of crashing. See iplugin.h.
+RCX_DEFINE_PLUGIN_ABI()

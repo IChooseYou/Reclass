@@ -10,6 +10,7 @@
 #include <QStyledItemDelegate>
 #include <QPainter>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QApplication>
 #include <QScreen>
 #include <QScrollBar>
@@ -82,6 +83,16 @@ static QPixmap cachedIcon(const QString& path, int size) {
     return pm;
 }
 
+// ── Per-row delete (×) button geometry ──
+// Shared by the delegate (paints it) and the popup (hit-tests clicks) so the
+// glyph and the clickable area always agree. Right-anchored, vertically
+// centred on the whole card. Only drawn on SavedSource rows.
+static QRect deleteBtnRect(const QRect& itemRect) {
+    constexpr int kSz = 16;
+    return QRect(itemRect.right() - 6 - kSz,
+                 itemRect.top() + (itemRect.height() - kSz) / 2, kSz, kSz);
+}
+
 // ── Custom delegate (two-line card layout) ──
 
 class SourceChooserDelegate : public QStyledItemDelegate {
@@ -103,7 +114,9 @@ public:
         if (entries && row >= 0 && row < entries->size()) {
             const auto& e = (*entries)[row];
             if (e.entryKind == SourceEntry::SectionHeader)
-                return QSize(opt.rect.width(), fm.height() + 8);
+                return QSize(opt.rect.width(), fm.height() + 12);
+            if (e.entryKind == SourceEntry::ClearAction)
+                return QSize(opt.rect.width(), fm.height() + 12 + 9);  // +divider gap
             if (hasSubline(e)) {
                 QFont small = baseFont;
                 small.setPointSize(qMax(7, rcx::resolvedPointSize(baseFont) - 2));
@@ -154,6 +167,11 @@ public:
         // Active accent bar
         if (e.isActive)
             p->fillRect(r.left(), r.top(), 3, r.height(), theme.indHoverSpan);
+
+        // Divider above the destructive "Clear All" so it reads as separate
+        // from the provider list rather than crammed onto its tail.
+        if (e.entryKind == SourceEntry::ClearAction && r.top() > 0)
+            p->fillRect(r.left() + 10, r.top() + 4, r.width() - 20, 1, theme.border);
 
         bool twoLine = hasSubline(e);
         int x = r.left() + 10;
@@ -223,6 +241,16 @@ public:
         // (Provider chevron removed \u2014 implies a submenu that doesn't exist;
         // selecting a provider opens its own dialog/modal directly.)
 
+        // Per-row delete (\u00d7) for saved sources \u2014 lets the user remove a
+        // single bound source instead of only "Clear All". Hit-tested in the
+        // popup's viewport event filter via the shared deleteBtnRect().
+        if (e.entryKind == SourceEntry::SavedSource) {
+            QRect xr = deleteBtnRect(r);
+            p->setFont(baseFont);
+            p->setPen((selected || hovered) ? theme.text : theme.textFaint);
+            p->drawText(xr, Qt::AlignCenter, QStringLiteral("\u00d7"));
+        }
+
         if (!twoLine) return;
 
         // ── Row 2: metadata ──
@@ -289,12 +317,15 @@ public:
                 rightText = e.baseAddress;
 
             if (!rightText.isEmpty()) {
-                int maxW = r.right() - 10 - x - 4;
+                // Reserve a right gutter for the × delete button so the
+                // path/base-address never slides under it.
+                const int rightEdge = r.right() - 28;
+                int maxW = rightEdge - x - 4;
                 if (maxW > 0) {
                     QString elided = sfm.elidedText(rightText, Qt::ElideMiddle, maxW);
                     int tw = sfm.horizontalAdvance(elided);
                     p->setPen(theme.textFaint);
-                    p->drawText(r.right() - 10 - tw, row2Y, elided);
+                    p->drawText(rightEdge - tw, row2Y, elided);
                 }
             }
         }
@@ -556,12 +587,14 @@ void SourceChooserPopup::popup(const QPoint& globalPos) {
 
     int singleRowH = fm.height() + 12;
     int cardRowH = fm.height() + sfm.height() + 14;
-    int sectionH = fm.height() + 8;
+    int sectionH = fm.height() + 12;
     int contentH = 0;
     auto* delegate = static_cast<SourceChooserDelegate*>(m_listView->itemDelegate());
     for (const auto& e : m_filteredEntries) {
         if (e.entryKind == SourceEntry::SectionHeader)
             contentH += sectionH;
+        else if (e.entryKind == SourceEntry::ClearAction)
+            contentH += singleRowH + 9;  // +divider gap (matches sizeHint)
         else if (delegate->hasSubline(e))
             contentH += cardRowH;
         else
@@ -610,6 +643,35 @@ void SourceChooserPopup::hideEvent(QHideEvent* event) {
 }
 
 bool SourceChooserPopup::eventFilter(QObject* obj, QEvent* event) {
+    // Pointing-hand cursor over selectable rows (arrow over section headers),
+    // mirroring how the RcxEditor swaps its viewport cursor on hover. Don't
+    // consume — the hover highlight still needs the move event.
+    if (event->type() == QEvent::MouseMove && obj == m_listView->viewport()) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        QModelIndex idx = m_listView->indexAt(me->pos());
+        bool clickable = false;
+        if (idx.isValid() && idx.row() < m_filteredEntries.size()) {
+            const auto& e = m_filteredEntries[idx.row()];
+            clickable = e.enabled && e.entryKind != SourceEntry::SectionHeader;
+        }
+        m_listView->viewport()->setCursor(clickable ? Qt::PointingHandCursor
+                                                     : Qt::ArrowCursor);
+    }
+
+    // Click on a saved row's × deletes just that source (popup stays open).
+    if (event->type() == QEvent::MouseButtonRelease && obj == m_listView->viewport()) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        QModelIndex idx = m_listView->indexAt(me->pos());
+        if (idx.isValid() && idx.row() < m_filteredEntries.size()) {
+            const auto& e = m_filteredEntries[idx.row()];
+            if (e.entryKind == SourceEntry::SavedSource && e.savedIndex >= 0
+                && deleteBtnRect(m_listView->visualRect(idx)).contains(me->pos())) {
+                emit removeRequested(e.savedIndex);
+                return true;  // consume — don't activate/switch to the row
+            }
+        }
+    }
+
     if (event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
 
@@ -652,6 +714,16 @@ bool SourceChooserPopup::eventFilter(QObject* obj, QEvent* event) {
             if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
                 acceptCurrent();
                 return true;
+            }
+            if (ke->key() == Qt::Key_Delete) {
+                int cur = m_listView->currentIndex().row();
+                if (cur >= 0 && cur < m_filteredEntries.size()) {
+                    const auto& e = m_filteredEntries[cur];
+                    if (e.entryKind == SourceEntry::SavedSource && e.savedIndex >= 0) {
+                        emit removeRequested(e.savedIndex);
+                        return true;
+                    }
+                }
             }
             if (ke->key() == Qt::Key_Backspace) {
                 QString t = m_filterEdit->text();

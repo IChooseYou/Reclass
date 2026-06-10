@@ -12,6 +12,7 @@
 #include <QMenu>
 #include <QInputDialog>
 #include "widgets/themed_inputdialog.h"
+#include "widgets/empty_overlay.h"
 #include <QPainter>
 #include <QEventLoop>
 #include <QFileDialog>
@@ -117,24 +118,9 @@ protected:
     void paintEvent(QPaintEvent* e) override {
         QTableWidget::paintEvent(e);
         if (rowCount() != 0) return;
-        QPainter p(viewport());
-        p.setRenderHint(QPainter::TextAntialiasing);
-        const auto& t = ThemeManager::instance().current();
-        p.setFont(font());
-        // Two-line layout: primary call-to-action centered, smaller hint
-        // beneath. Both clipped to viewport rect with word-wrap so the
-        // placeholder doesn't overflow on narrow docks.
-        QRect r = viewport()->rect();
-        QFontMetrics fm(font());
-        int totalH = fm.height() * 2 + 6;
-        QRect primary  = r;
-        primary.setHeight(r.height()/2 + totalH/2 - fm.height());
-        QRect secondary = r;
-        secondary.setTop(primary.bottom() + 6);
-        p.setPen(t.textMuted);
-        p.drawText(primary,   Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap, placeholder);
-        p.setPen(t.textFaint);
-        p.drawText(secondary, Qt::AlignHCenter | Qt::AlignTop    | Qt::TextWordWrap, hint);
+        // Shared two-line placeholder (primary CTA + dimmer hint), clipped to
+        // the viewport with word-wrap. See widgets/empty_overlay.h.
+        paintEmptyOverlay(viewport(), font(), placeholder, hint);
     }
 };
 
@@ -2317,7 +2303,7 @@ void ScannerPanel::applyTheme(const Theme& theme) {
         "QHeaderView::section { background: %1; color: %7; border: none;"
         "  border-bottom: 1px solid %8; padding: 4px 6px; }"
         "QHeaderView::section:hover { color: %2; }")
-        .arg(theme.background.name(), theme.text.name(), theme.hover.name(),
+        .arg(rcx::editorPaperColor(theme).name(), theme.text.name(), theme.hover.name(),
              theme.borderFocused.name(), theme.selected.name(),
              theme.backgroundAlt.name(), theme.textMuted.name(),
              theme.border.name(), theme.selection.name()));

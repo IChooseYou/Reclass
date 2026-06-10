@@ -1157,6 +1157,97 @@ private slots:
         m_editor->applyDocument(m_result);
     }
 
+    // Regression: on a LIVE process the hovered value's line is exactly the
+    // one being text-patched each refresh, which clears its IND_HOVER_SPAN.
+    // applySelectionOverlay's steady-patch early-return must STILL re-paint
+    // hover, or the blue highlight blinks off every tick ("cursor fights the
+    // highlighted object"). Unlike testCommandRowHoverSurvivesRepeatedRefresh,
+    // we deliberately do NOT re-send the mouse move between refreshes — the
+    // mouse is physically still, so only the refresh-side re-paint can keep
+    // the span alive. We also drive the controller's real refresh order
+    // (applyDocument → applySelectionOverlay) on the patch path.
+    void testValueHoverSpanSurvivesPatchRefreshNoMouseMove() {
+        constexpr int IND_HOVER_SPAN = 11;
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+
+        // Read a line's text as a QString (char count, not bytes) — value
+        // spans are character columns and field lines carry multi-byte tree
+        // glyphs, so a byte length would skew the span.
+        auto lineTextOf = [&](int i) {
+            long len = sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH,
+                                          (unsigned long)i);
+            QByteArray buf(len + 1, '\0');
+            sci->SendScintilla(QsciScintillaBase::SCI_GETLINE,
+                               (uintptr_t)i, static_cast<const char*>(buf.data()));
+            QString t = QString::fromUtf8(buf.left(len));
+            while (t.endsWith('\n') || t.endsWith('\r')) t.chop(1);
+            return t;
+        };
+
+        // Pick a plain scalar value field (pointers narrow their span; hex
+        // values aren't editable tokens) so the hovered column reliably
+        // lands inside the painted hover span.
+        int fieldLine = -1;
+        ColumnSpan vs;
+        for (int i = 0; i < m_result.meta.size(); ++i) {
+            const LineMeta& lm = m_result.meta[i];
+            if (lm.lineKind != LineKind::Field) continue;
+            if (isHexNode(lm.nodeKind) || isPointerKind(lm.nodeKind)
+                || isFuncPtr(lm.nodeKind) || isVectorKind(lm.nodeKind)
+                || isMatrixKind(lm.nodeKind) || lm.isArrayHeader || lm.isArrayElement)
+                continue;
+            QString lt = lineTextOf(i);
+            ColumnSpan cand = m_editor->valueSpan(lm, lt.size(),
+                                                  lm.effectiveTypeW, lm.effectiveNameW);
+            if (cand.valid && cand.end > cand.start) { fieldLine = i; vs = cand; break; }
+        }
+        QVERIFY2(fieldLine >= 0, "No plain scalar value field found in fixture");
+
+        // Count IND_HOVER_SPAN-painted positions across the whole document.
+        // Scanning (rather than probing one computed column) is robust to the
+        // char-column vs byte-position skew on field lines, which carry
+        // multi-byte tree-connector glyphs (├ │ └) ahead of the value.
+        auto hoverSpanCount = [&]() {
+            long docLen = sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+            int c = 0;
+            for (long p = 0; p < docLen; ++p)
+                if (sci->SendScintilla(QsciScintillaBase::SCI_INDICATORVALUEAT,
+                                       (unsigned long)IND_HOVER_SPAN, p))
+                    ++c;
+            return c;
+        };
+
+        // Hover the TYPE column: it's an editable token whose span is always
+        // wide (type names are several chars), so the round-trip
+        // col→viewport→hitTest lands reliably inside it. The scalar VALUE
+        // columns are mostly "0" (1-char) and snap outside on the round-trip.
+        const LineMeta& flm = m_result.meta[fieldLine];
+        ColumnSpan ts = RcxEditor::typeSpan(flm, flm.effectiveTypeW);
+        QVERIFY2(ts.valid && ts.end - ts.start >= 2, "type span too narrow");
+        int hoverCol = ts.start + 1;
+        QPoint hoverPos = colToViewport(sci, fieldLine, hoverCol);
+        sendMouseMove(sci->viewport(), hoverPos);
+        QApplication::processEvents();
+        QVERIFY2(hoverSpanCount() > 0,
+                 "IND_HOVER_SPAN not painted on initial type hover");
+
+        // Live refresh ticks WITHOUT moving the mouse. Re-applying the same
+        // document takes the patch path (m_lastApplyWasPatch=true); the empty,
+        // unchanged selection means applySelectionOverlay early-returns — which
+        // must still restore the hover span.
+        for (int cycle = 0; cycle < 5; ++cycle) {
+            m_editor->applyDocument(m_result);
+            m_editor->applySelectionOverlay(QSet<uint64_t>());
+            QApplication::processEvents();
+            QVERIFY2(hoverSpanCount() > 0,
+                     qPrintable(QString("IND_HOVER_SPAN lost on patch refresh "
+                                        "cycle %1 with no mouse move").arg(cycle)));
+        }
+
+        m_editor->applyDocument(m_result);
+    }
+
     // ── Test: MenuBarStyle gives QMenu items generous click targets ──
     // ── Test: M_ACCENT marker appears on selected rows ──
     void testAccentMarkerOnSelectedRows() {
@@ -2716,6 +2807,81 @@ private slots:
                  "to a non-FuncPtr row underneath (see-through behavior)");
 
         // Restore
+        m_editor->setProviderRef(nullptr, nullptr, nullptr);
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Pressing H while a value popup is showing hides value popups for
+    //    good (the footer link is unreachable because the popup is
+    //    see-through, so the affordance is a key). H must dismiss the popup
+    //    AND disable value popups until re-enabled. ──
+    void testHideValuePopupsKey() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "TestClass";
+        root.name = "TestClass";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+        Node fp;
+        fp.kind = NodeKind::FuncPtr64;
+        fp.name = "VFunc1";
+        fp.parentId = rootId;
+        fp.offset = 0;
+        tree.addNode(fp);
+
+        QByteArray data(512, '\0');
+        uint64_t codeAddr = 256;
+        memcpy(data.data(), &codeAddr, 8);
+        const uint8_t code[] = { 0x55, 0x48, 0x89, 0xE5, 0x90, 0x5D, 0xC3 };
+        memcpy(data.data() + 256, code, sizeof(code));
+        BufferProvider prov(data, "test_hide_key");
+
+        ComposeResult cr = compose(tree, prov);
+        m_editor->applyDocument(cr);
+        m_editor->setProviderRef(&prov, nullptr, &tree);
+        QApplication::processEvents();
+        QVERIFY(m_editor->valuePopupsEnabled());
+
+        int fpLine = -1;
+        for (int i = 0; i < cr.meta.size(); ++i)
+            if (isFuncPtr(cr.meta[i].nodeKind)) { fpLine = i; break; }
+        QVERIFY2(fpLine >= 0, "FuncPtr line not found");
+
+        const LineMeta& lm = cr.meta[fpLine];
+        long len = m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)fpLine);
+        QByteArray buf(len + 1, '\0');
+        m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_GETLINE, (uintptr_t)fpLine,
+            static_cast<const char*>(buf.data()));
+        QString lineText = QString::fromUtf8(buf.left(len));
+        ColumnSpan vs = m_editor->valueSpan(lm, lineText.size(),
+                                            lm.effectiveTypeW, lm.effectiveNameW);
+        QVERIFY(vs.valid);
+        QPoint vpFP = colToViewport(m_editor->scintilla(),
+                                    fpLine, (vs.start + vs.end) / 2);
+        sendMouseMove(m_editor->scintilla()->viewport(), vpFP);
+        QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup() != nullptr, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup()->isVisible(), 2000);
+
+        // Press H — the editor's eventFilter routes it to handleNormalKey,
+        // whose popup-visible block triggers "hide popups".
+        QKeyEvent hKey(QEvent::KeyPress, Qt::Key_H, Qt::NoModifier,
+                       QStringLiteral("h"));
+        QApplication::sendEvent(m_editor->scintilla(), &hKey);
+        QApplication::processEvents();
+
+        QVERIFY2(!m_editor->hoverPopup()->isVisible(),
+                 "H must dismiss the value popup");
+        QVERIFY2(!m_editor->valuePopupsEnabled(),
+                 "H must disable value popups (until View ▸ Value Popups)");
+
+        // Restore for subsequent tests.
+        m_editor->setValuePopupsEnabled(true);
         m_editor->setProviderRef(nullptr, nullptr, nullptr);
         m_editor->applyDocument(m_result);
     }

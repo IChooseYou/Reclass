@@ -124,12 +124,30 @@ public:
     void insertNode(uint64_t parentId, int offset, NodeKind kind, const QString& name);
     void insertNodeAbove(int beforeIdx, NodeKind kind, const QString& name);
     void removeNode(int nodeIdx);
-    // Extract bytes [selLo, selHi) into a new root class, inserting an
+    // Break bytes [selLo, selHi) into a new root class, inserting an
     // embedded Struct field at selLo in the original parent. Splits any
     // partially-overlapped hex siblings into left / right hex pads.
-    // Refuses if the range crosses parents or non-hex / container
-    // siblings. Address-space inputs (not byte offsets).
+    // Fully-contained Struct/Array/typed siblings are moved into the new
+    // class INTACT (preserving refId/metadata — the referenced hierarchy
+    // is untouched). Refuses only when the range crosses parents or
+    // straddles a non-hex / container sibling. Address-space inputs.
     void extractByteSelectionToNewClass(uint64_t selLo, uint64_t selHi);
+    // Compute the break region [lo, hi) (absolute addresses) from the
+    // current selection: the active byte selection if one exists on `editor`,
+    // otherwise the combined offset span of the selected nodes (m_selIds).
+    // Returns nullopt when nothing usable is selected. Shared by the node
+    // "Break Class" action and the Edit ▸ "Break into Class" menu item.
+    std::optional<QPair<uint64_t, uint64_t>>
+    regionFromCurrentSelection(RcxEditor* editor) const;
+    // True if nodeId is a field of the viewed class (its ancestor chain reaches
+    // m_viewRootId), false if it's shown inside an embedded class. Guards the
+    // break ops from resolving an embedded field's relative offset wrongly.
+    bool nodeInView(uint64_t nodeId) const;
+    // Stricter than nodeInView: true only if `nodeId` is a DIRECT field of the
+    // view frame. Union members and inline-struct fields pass nodeInView (their
+    // chain reaches the root) but store offsets relative to their own container,
+    // so the parent-relative break scan would resolve them to the wrong region.
+    bool isDirectViewFrameChild(uint64_t nodeId) const;
     void toggleCollapse(int nodeIdx);
     void materializeRefChildren(int nodeIdx);
     void setNodeValue(int nodeIdx, int subLine, const QString& text,
@@ -247,6 +265,7 @@ public:
     int activeSourceIndex() const { return m_activeSourceIdx; }
     void switchSource(int idx) { switchToSavedSource(idx); }
     void clearSources();
+    void removeSavedSource(int idx);
     void selectSource(const QString& text);
     void copySavedSources(const QVector<SavedSourceEntry>& sources, int activeIdx);
 
@@ -269,6 +288,13 @@ public:
     int  pageStability(uint64_t pageAddr) const { return m_pageStability.value(pageAddr & ~uint64_t(4095), 0); }
     const SnapshotProvider* snapshotProv() const { return m_snapshotProv.get(); }
 
+    // Tri-state status of the active data source (status-bar badge): None = no
+    // source; Static = a non-live file source (fully read); Live = reading;
+    // Stale = live but the last read failed / was rejected; Disconnected = the
+    // provider went invalid (process exited, file vanished).
+    enum class SourceStatus { None, Static, Live, Stale, Disconnected };
+    SourceStatus sourceStatus() const { return m_lastStatus; }
+
 signals:
     void nodeSelected(int nodeIdx);
     void selectionChanged(int count);
@@ -285,6 +311,8 @@ signals:
     // exits, a file vanishes, etc. Fires on transition only, not every
     // refresh tick.
     void sourceLivenessChanged(bool live);
+    // Tri-state source status (transition-only) for the status-bar badge.
+    void sourceStatusChanged(SourceStatus status);
 
 private:
     RcxDocument*       m_doc;
@@ -298,7 +326,7 @@ private:
     bool               m_braceWrap = false;
     bool               m_typeHints = false;
     bool               m_showComments = false;
-    bool               m_showRtti = true;          // chip toggle, default ON (current behavior)
+    bool               m_showRtti = false;         // auto-RTTI scan default OFF (expensive on module-heavy targets; View menu opts in)
     bool               m_showEnumChips = true;     // chip toggle, default ON
     bool               m_readOnlyOverride = false; // tutorial safety; see header
     uint64_t           m_viewRootId = 0;
@@ -307,6 +335,8 @@ private:
     QVector<SavedSourceEntry> m_savedSources;
     int m_activeSourceIdx = -1;
     bool m_lastLive = false;  // last-seen provider->isValid(); diff for sourceLivenessChanged emit
+    bool m_lastReadOk = true;  // last refresh produced a usable (non-rejected) read
+    SourceStatus m_lastStatus = SourceStatus::None;  // diff for sourceStatusChanged emit
 
     // ── Cached type selector popup (avoids ~350ms cold-start on first show) ──
     QPointer<TypeSelectorPopup> m_cachedPopup;
@@ -365,6 +395,17 @@ private:
 
     // Tick counter — used to halve the read cadence for stable pages.
     uint64_t m_tickCount = 0;
+
+    // Cached region list for classifyPermanentPages (Speedup 4). enumerateRegions()
+    // is a full VirtualQueryEx sweep of the target's address space (10s of ms on a
+    // big game like DayZ) and was re-run on EVERY refresh tick, which made
+    // module-heavy targets stutter ("barely usable"). The executable module
+    // regions we classify as permanent are stable, so refresh the list at most
+    // every kRegionRefreshTicks ticks. Reset on resetSnapshot (per-attach).
+    QVector<MemoryRegion> m_classifyRegions;
+    bool                  m_classifyRegionsValid = false;
+    uint64_t              m_classifyRegionsTick = 0;
+    static constexpr int  kRegionRefreshTicks = 64;
 
     // Adaptive refresh: counts back-to-back ticks where no page bytes
     // changed. After kIdleBackoffTicks of these we widen the timer

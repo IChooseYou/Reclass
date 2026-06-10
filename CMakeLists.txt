@@ -208,6 +208,18 @@ if(APPLE)
         PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 endif()
 
+if(WIN32)
+    # GUI (windows) subsystem: the OS allocates NO console for the app, so
+    # there is no console window and no startup flash. A console is conjured
+    # on demand (View > Show Console / on a crash) via AllocConsole. stderr
+    # still reaches an inheriting terminal or the test harness's pipe because
+    # the CRT wires fd 1/2 to inherited handles regardless of subsystem, so
+    # the --screenshot/--profile/QT_FORCE_STDERR_LOGGING flow is intact.
+    # MinGW maps this to -mwindows and keeps main() as the entry point (no
+    # WinMain shim needed).
+    set_target_properties(Reclass PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
 target_include_directories(Reclass PRIVATE src third_party/fadec)
 
 target_link_libraries(Reclass PRIVATE
@@ -464,6 +476,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_overlay_null_rtti PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_overlay_null_rtti COMMAND test_overlay_null_rtti)
 
+    # Workspace project-explorer model (workspace_model.h): empty-state row count
+    # that drives the EmptyHintTreeView overlay + section/type row construction.
+    # Header-only logic, so no extra .cpp sources are needed.
+    add_executable(test_workspace tests/test_workspace.cpp)
+    target_include_directories(test_workspace PRIVATE src)
+    target_link_libraries(test_workspace PRIVATE ${QT}::Widgets ${QT}::Test)
+    add_test(NAME test_workspace COMMAND test_workspace)
+
     # Tooltip-flicker detection. Drives mouse-move events into a live
     # RcxEditor whose first row carries an Rtti chip, then counts show/
     # hide transitions on rcx::sharedRcxTooltip(). A non-flickering chip
@@ -686,6 +706,35 @@ if(BUILD_TESTING)
         target_link_libraries(typeselector_render PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
     endif()
 
+    # Offscreen render harness for the SourceChooserPopup — grabs the data
+    # source popup (Connected/Add Source sections + per-row × delete) to a PNG.
+    # Self-contained (the popup only emits signals), so no controller needed.
+    # Not a ctest. Pass "many" to verify the list scrolls past ~12 sources.
+    add_executable(sourcechooser_render EXCLUDE_FROM_ALL tools/sourcechooser_render.cpp
+        src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp src/resources.qrc)
+    target_include_directories(sourcechooser_render PRIVATE src)
+    target_link_libraries(sourcechooser_render PRIVATE
+        ${QT}::Widgets ${QT}::Svg)
+    if(WIN32)
+        target_link_libraries(sourcechooser_render PRIVATE ${_QT_WINEXTRAS})
+    endif()
+
+    # Offscreen render harness for the "Code" tab syntax highlighting — grabs
+    # generated code (any CodeFormat) with the themed per-language lexer to a
+    # PNG so coloring can be verified per language. Not a ctest.
+    add_executable(coderender EXCLUDE_FROM_ALL tools/coderender.cpp
+        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
+        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp)
+    target_include_directories(coderender PRIVATE src)
+    target_link_libraries(coderender PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Svg
+        QScintilla::QScintilla)
+    if(WIN32)
+        target_link_libraries(coderender PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+    endif()
+
     # Non-UI combinatorial sweep — exercises every (mode, condition,
     # value type, alignment, region filter) tuple that the panel can
     # produce, against a synthetic provider, asserting the engine
@@ -863,6 +912,19 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME test_type_selector COMMAND test_type_selector)
 
+        # SourceChooserPopup interaction tests (× delete click/key). The popup
+        # only emits signals, so the target is lean — no controller/editor.
+        add_executable(test_source_chooser tests/test_source_chooser.cpp
+            src/sourcechooserpopup.cpp
+            src/themes/theme.cpp src/themes/thememanager.cpp src/resources.qrc)
+        target_include_directories(test_source_chooser PRIVATE src)
+        target_link_libraries(test_source_chooser PRIVATE
+            ${QT}::Widgets ${QT}::Test ${QT}::Svg)
+        if(WIN32)
+            target_link_libraries(test_source_chooser PRIVATE ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_source_chooser COMMAND test_source_chooser)
+
         add_executable(test_type_visibility tests/test_type_visibility.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
@@ -903,6 +965,12 @@ if(BUILD_TESTING)
         target_include_directories(test_titlebar_border PRIVATE src)
         target_link_libraries(test_titlebar_border PRIVATE ${QT}::Widgets ${QT}::Test ${QT}::Svg)
         add_test(NAME test_titlebar_border COMMAND test_titlebar_border)
+
+        # ── Device-px hairline phase sweep (real-window grab at forced DPR 1.25) ──
+        add_executable(test_hairline_dpr tests/test_hairline_dpr.cpp)
+        target_include_directories(test_hairline_dpr PRIVATE src)
+        target_link_libraries(test_hairline_dpr PRIVATE ${QT}::Widgets ${QT}::Test)
+        add_test(NAME test_hairline_dpr COMMAND test_hairline_dpr)
 
         add_executable(test_dock_size_tip tests/test_dock_size_tip.cpp)
         target_include_directories(test_dock_size_tip PRIVATE src)
@@ -1041,3 +1109,33 @@ if(WIN32)
     add_subdirectory(plugins/WinDbgMemory)
     add_subdirectory(plugins/RcNetPluginCompatLayer)
 endif()
+
+# ── Keep provider plugins in lockstep with the app (ABI safety) ──
+# Every plugin here derives from rcx::Provider and is loaded at RUNTIME via
+# CreatePlugin(), so there is no link dependency on Reclass. But each plugin
+# COMPILES against providers/provider.h. Provider is a fragile base class:
+# adding a data member to it (e.g. the modulesCached() cache) grows
+# sizeof(Provider) and shifts every plugin-side derived member. If only the
+# Reclass target is rebuilt after such a change (e.g. `cmake --build build
+# --target Reclass`), the stale plugin DLLs become ABI-incompatible: the
+# host reads the new base-class members where the plugin laid out the
+# subclass's own data, producing a garbage QVector<ModuleEntry> and an
+# access-violation crash the first time RTTI module resolution runs.
+# (Symptom: lock-add on a near-null pointer inside rttiForVtable, reproduced
+# by attaching a process source then refreshing.)
+#
+# Making Reclass depend on the plugin targets means building the app ALWAYS
+# (re)builds the plugins first, so a partial app-only build can never leave
+# an ABI-stale plugin behind. The plugins still pick up provider.h changes
+# through Ninja/Make header-dependency tracking — this just guarantees they
+# are considered whenever the app is.
+foreach(_rcx_plugin
+        ProcessMemoryPlugin
+        RemoteProcessMemoryPlugin
+        KernelMemoryPlugin
+        WinDbgMemoryPlugin
+        RcNetCompatPlugin)
+    if(TARGET ${_rcx_plugin})
+        add_dependencies(Reclass ${_rcx_plugin})
+    endif()
+endforeach()

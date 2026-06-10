@@ -34,6 +34,16 @@ int countChips(const ComposeResult& r, ChipKind k) {
     return n;
 }
 
+// The null-pointer "(Name class…)" CTA is intentionally gated on
+// Provider::isLive() so it never sprouts on a flat file (where every pointer
+// reads 0). These tests exercise the live-memory case, so they need a
+// provider that reports live.
+class LiveBufferProvider : public BufferProvider {
+public:
+    using BufferProvider::BufferProvider;
+    bool isLive() const override { return true; }
+};
+
 } // anon
 
 class TestOverlayNullRtti : public QObject {
@@ -70,9 +80,9 @@ private slots:
         ptr.collapsed = true;
         tree.addNode(ptr);
 
-        // Buffer all zeros → pointer reads as 0x00.
+        // Buffer all zeros → pointer reads as 0x00. Live source so the CTA fires.
         QByteArray data(0x2000, '\0');
-        BufferProvider prov(std::move(data), QStringLiteral("synthetic"));
+        LiveBufferProvider prov(std::move(data), QStringLiteral("synthetic"));
 
         ComposeResult r = compose(tree, prov, hostId);
         const LineChip* c = firstChipOfKind(r, ChipKind::Rtti);
@@ -106,7 +116,7 @@ private slots:
         tree.addNode(ptr);
 
         QByteArray data(0x2000, '\0');
-        BufferProvider prov(std::move(data), QStringLiteral("synthetic"));
+        LiveBufferProvider prov(std::move(data), QStringLiteral("synthetic"));
 
         ComposeResult r = compose(tree, prov, hostId);
         const LineChip* c = firstChipOfKind(r, ChipKind::Rtti);
@@ -170,6 +180,32 @@ private slots:
             /*braceWrap=*/false, /*typeHints=*/false,
             /*showComments=*/true, /*symbolLookup=*/{},
             /*showRtti=*/false);
+        QCOMPARE(countChips(r, ChipKind::Rtti), 0);
+    }
+
+    // ── A NON-live source (flat file / BufferProvider) must NOT get the null
+    //    CTA, even with showRtti on — otherwise every pointer of an all-zero
+    //    file sprouts one. Gated on Provider::isLive(). ──
+    void nonLiveSourceSuppressesNullChip() {
+        NodeTree tree;
+        tree.baseAddress = 0x1000;
+        Node host;
+        host.kind = NodeKind::Struct;
+        host.structTypeName = QStringLiteral("H");
+        host.name = QStringLiteral("h");
+        int hi = tree.addNode(host);
+        uint64_t hostId = tree.nodes[hi].id;
+        Node ptr;
+        ptr.kind = NodeKind::Pointer64;
+        ptr.name = QStringLiteral("p");
+        ptr.parentId = hostId;
+        ptr.offset = 0;
+        tree.addNode(ptr);
+
+        QByteArray data(0x2000, '\0');
+        BufferProvider prov(std::move(data), QStringLiteral("file"));  // isLive()==false
+
+        ComposeResult r = compose(tree, prov, hostId);  // showRtti defaults on
         QCOMPARE(countChips(r, ChipKind::Rtti), 0);
     }
 };

@@ -20,6 +20,7 @@
 #include <QHash>
 #include <QString>
 #include <QVector>
+#include <functional>
 #include <memory>
 
 #include "core.h"
@@ -47,6 +48,11 @@ struct HoverContext {
     const NodeTree* tree           = nullptr;
     // Per-nodeId value-history map. nullptr-safe; previews must guard.
     const QHash<uint64_t, ValueHistory>* history = nullptr;
+    // Inline-edit mode: when true, the value-history preview renders an
+    // interactive "Set" button per row that calls onValueSet(value). Both are
+    // unset on the normal read-only dwell-hover path.
+    bool editMode = false;
+    std::function<void(const QString&)> onValueSet;
 };
 
 class HoverPreview {

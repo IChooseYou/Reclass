@@ -410,7 +410,7 @@ extern void (*g_rttiDiscoveryHook)(const QString& name, uint64_t address,
 extern QString (*g_nameLookupHook)(uint64_t address, const Provider* active);
 
 // Named-source-changed nudge — main.cpp wires this to NameRegistry's
-// emitChanged() so that "Label this address..." in the editor refreshes
+// emitChanged() so that "Bookmark this address..." in the editor refreshes
 // the unified Symbols panel without dragging NameRegistry into the core
 // (and test) targets.
 extern void (*g_namesChangedHook)();
@@ -1048,6 +1048,10 @@ struct LineMeta {
     uint64_t ptrBase        = 0;     // Pointer expansion base (non-zero = use for RVA)
     uint32_t markerMask     = 0;
     bool     dataChanged    = false;  // true if any byte in this node changed since last refresh
+    bool     unreadable     = false;  // true when the provider is valid but the value's bytes are
+                                      // not readable (bad page / freed region) — render the value
+                                      // distinctly instead of as a silent "00". NOT set for the
+                                      // intentional NullProvider zero-fill of null pointer targets.
     int      heatLevel      = 0;     // 0=static, 1=cold, 2=warm, 3=hot (from ValueHistory)
     QVector<int> changedByteIndices;  // Hex preview: which byte indices (0-based) changed on this line
     int      lineByteCount  = 0;     // Hex preview: actual data byte count on this line
@@ -1097,6 +1101,16 @@ inline uint64_t selIdForLine(const LineMeta& lm) {
     if (lm.isMemberLine && lm.subLine >= 0)
         return makeMemberSelId(lm.nodeId, lm.subLine);
     return lm.nodeId;
+}
+
+// Decode an encoded selId back to its base node id — the inverse of the high-bit
+// encoding that selIdForLine / makeArrayElemSelId / makeMemberSelId apply. Strips
+// the footer, array-element, and member bits. Routing every decode site through
+// this keeps the mask a single source of truth: adding a new selId flag bit can
+// then never silently corrupt an un-updated hand-written copy of the mask.
+inline uint64_t baseNodeIdFromSelId(uint64_t selId) {
+    return selId & ~(kFooterIdBit | kArrayElemBit | kArrayElemMask
+                     | kMemberBit | kMemberSubMask);
 }
 
 // ── Layout Info ──

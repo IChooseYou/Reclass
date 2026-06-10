@@ -16,3 +16,33 @@ plugins/RcNetPluginCompatLayer/bridge/bin
 .cache
 *.DS_Store
 .claude/
+
+# ── Out-of-tree build cruft (the real build is build/, ignored above) ──
+/build2/
+/build2_clean/
+/CMakeCache.txt
+/CMakeFiles/
+/Testing/
+
+# ── Crash dumps ──
+*.dmp
+
+# ── Scratch screenshots / captures (root-level + the two that leaked into src/).
+#    Root-only & src/*.png is non-recursive, so tracked assets in docs/,
+#    src/icons/, src/examples/ are untouched. ──
+/*.png
+/*.bmp
+src/*.png
+
+# ── Scratch test/run logs (root-level only; CMakeLists.txt etc. are not /*_… ) ──
+/tmp_*
+/test_*.txt
+/ctest_*.txt
+/bench_*.txt
+/ctrl_*.txt
+/debug_*.txt
+/*_out.txt
+/*_err.txt
+/*_stderr.txt
+/*.out
+*.log

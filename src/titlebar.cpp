@@ -1,7 +1,6 @@
 #include "titlebar.h"
 #include "svgicon.h"
 #include "themes/thememanager.h"
-#include <QButtonGroup>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
@@ -48,40 +47,16 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
 
     layout->addStretch();
 
-    // Chrome buttons
-    // Workspace mode toggles — two side-by-side checkable buttons, VS Code
-    // codicons. "Off" shows the editor-only layout (sidebar hidden),
-    // "On" shows the editor-with-sidebar layout (sidebar visible). Mutually
-    // exclusive via QButtonGroup so exactly one is always checked.
-    m_btnLayoutOff = makeChromeButton(":/vsicons/layout-sidebar-left-off.svg");
-    m_btnLayoutOn  = makeChromeButton(":/vsicons/layout-sidebar-left.svg");
-    m_btnLayoutOff->setCheckable(true);
-    m_btnLayoutOn->setCheckable(true);
-    m_btnLayoutOff->setToolTip(QStringLiteral("Editor only"));
-    m_btnLayoutOn->setToolTip(QStringLiteral("Editor + workspace"));
-    // Tighter than chrome buttons — they come in pairs, share the slot.
-    m_btnLayoutOff->setFixedSize(34, 32);
-    m_btnLayoutOn->setFixedSize(34, 32);
-
-    auto* layoutGroup = new QButtonGroup(this);
-    layoutGroup->setExclusive(true);
-    layoutGroup->addButton(m_btnLayoutOff, Layout_NoWorkspace);
-    layoutGroup->addButton(m_btnLayoutOn,  Layout_Workspace);
-    // Default: off (matches the initial workspace-hidden state at startup).
-    m_btnLayoutOff->setChecked(true);
-
+    // Chrome buttons. (The workspace show/hide toggle pair that used to sit
+    // left of these is gone — the Project dock's close button + the
+    // collapsed-rail handle replaced it.)
     m_btnMin   = makeChromeButton(":/vsicons/chrome-minimize.svg");
     m_btnMax   = makeChromeButton(":/vsicons/chrome-maximize.svg");
     m_btnClose = makeChromeButton(":/vsicons/chrome-close.svg");
 
-    layout->addWidget(m_btnLayoutOff);
-    layout->addWidget(m_btnLayoutOn);
     layout->addWidget(m_btnMin);
     layout->addWidget(m_btnMax);
     layout->addWidget(m_btnClose);
-
-    connect(layoutGroup, &QButtonGroup::idClicked,
-            this, [this](int id) { emit layoutPresetSelected(id); });
 
     connect(m_btnMin, &QToolButton::clicked, this, [this]() {
         window()->showMinimized();
@@ -104,24 +79,14 @@ QToolButton* TitleBarWidget::makeChromeButton(const QString& iconPath) {
     return btn;
 }
 
-void TitleBarWidget::setWorkspaceChecked(bool on) {
-    if (!m_btnLayoutOff || !m_btnLayoutOn) return;
-    QToolButton* target = on ? m_btnLayoutOn : m_btnLayoutOff;
-    if (target->isChecked()) return;
-    // Block signals so we don't re-emit layoutPresetSelected and loop
-    // when MainWindow is syncing us from an external visibility change.
-    QSignalBlocker bOff(m_btnLayoutOff);
-    QSignalBlocker bOn(m_btnLayoutOn);
-    target->setChecked(true);
-}
-
 void TitleBarWidget::applyTheme(const Theme& theme) {
     m_theme = theme;
 
-    // Title bar background
+    // Title bar background — menuBarColor (slightly darker than the editor
+    // paper) so the menu strip reads as chrome, not part of the document.
     setAutoFillBackground(true);
     QPalette pal = palette();
-    pal.setColor(QPalette::Window, theme.background);
+    pal.setColor(QPalette::Window, menuBarColor(theme));
     setPalette(pal);
 
     // App label
@@ -134,8 +99,8 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     // once setPalette has been called on a widget).
     {
         QPalette mbPal = m_menuBar->palette();
-        mbPal.setColor(QPalette::Window, theme.background);
-        mbPal.setColor(QPalette::Button, theme.background);
+        mbPal.setColor(QPalette::Window, menuBarColor(theme));
+        mbPal.setColor(QPalette::Button, menuBarColor(theme));
         mbPal.setColor(QPalette::ButtonText, theme.text);
         mbPal.setColor(QPalette::Text, theme.text);
         mbPal.setColor(QPalette::Highlight, theme.selected);
@@ -167,19 +132,6 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
         .arg(theme.hover.name());
     m_btnMin->setStyleSheet(btnStyle);
     m_btnMax->setStyleSheet(btnStyle);
-    // Workspace toggle pair: checked one gets accent underline + subtle fill
-    // so the active mode is obvious at a glance.
-    QString layoutBtnStyle = QStringLiteral(
-        "QToolButton { background: transparent; border: none;"
-        "              border-bottom: 2px solid transparent; }"
-        "QToolButton:hover { background: %1; }"
-        "QToolButton:checked { background: %2;"
-        "                      border-bottom: 2px solid %3; }")
-        .arg(theme.hover.name(),
-             theme.backgroundAlt.name(),
-             theme.indHoverSpan.name());
-    m_btnLayoutOff->setStyleSheet(layoutBtnStyle);
-    m_btnLayoutOn->setStyleSheet(layoutBtnStyle);
 
     // Linux menu tool buttons
     if (m_useToolButtons) {
@@ -207,10 +159,6 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     // which was invisible on the new XP Luna gray. Pass our dpr so the
     // glyphs render crisp on HiDPI rather than upscaled from 32x32 logical.
     const qreal dpr = devicePixelRatioF();
-    if (m_btnLayoutOff)
-        m_btnLayoutOff->setIcon(themedVsIcon(":/vsicons/layout-sidebar-left-off.svg", theme.text, 32, dpr));
-    if (m_btnLayoutOn)
-        m_btnLayoutOn->setIcon(themedVsIcon(":/vsicons/layout-sidebar-left.svg", theme.text, 32, dpr));
     if (m_btnMin)
         m_btnMin->setIcon(themedVsIcon(":/vsicons/chrome-minimize.svg", theme.text, 32, dpr));
     if (m_btnMax)

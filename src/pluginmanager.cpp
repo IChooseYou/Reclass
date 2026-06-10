@@ -1,5 +1,6 @@
 #include "pluginmanager.h"
 #include "providerregistry.h"
+#include "providers/provider.h"   // sizeof(rcx::Provider) for the ABI guard
 #include <QDir>
 #include <QFileInfo>
 #include <QCoreApplication>
@@ -12,6 +13,8 @@ PluginManager::~PluginManager()
 
 void PluginManager::LoadPlugins()
 {
+    m_rejected.clear();  // repopulated below by the ABI guard
+
     // Probe plugin locations relative to the executable.
     QString appDir = QCoreApplication::applicationDirPath();
     QStringList pluginDirs;
@@ -87,7 +90,7 @@ bool PluginManager::LoadPlugin(const QString& path)
         delete library;
         return false;
     }
-    
+
     // Create plugin instance
     IPlugin* plugin = CreateFunc();
     if (!plugin)
@@ -97,7 +100,59 @@ bool PluginManager::LoadPlugin(const QString& path)
         delete library;
         return false;
     }
-    
+
+    // ── Provider ABI guard (provider plugins only) ──
+    // rcx::Provider is a fragile base class shared with plugin DLLs: an ABI-stale
+    // provider plugin (e.g. one not rebuilt after a provider.h data-member
+    // change) corrupts memory the first time the host touches a base-class
+    // member — an access violation deep in the RTTI/module-cache path with no
+    // obvious cause. Require provider plugins to export RcxPluginAbiToken() equal
+    // to the host's RCX_PROVIDER_ABI_TOKEN before registering them, so a stale one
+    // can never create a corrupting Provider. A missing token means the plugin
+    // predates the guard / was built against older headers; a mismatched value
+    // means a layout disagreement. Either way: refuse it, log how to fix it, and
+    // keep the app running with the other plugins. The check runs AFTER
+    // construction (safe: the factory object inherits IPlugin, not Provider — the
+    // Provider is only made later via createProvider) and is gated on Type() so
+    // future non-provider plugins, which never touch Provider, are exempt.
+    // (See iplugin.h RCX_DEFINE_PLUGIN_ABI and the CMake add_dependencies note.)
+    if (plugin->Type() == IPlugin::ProviderPlugin)
+    {
+        const uint64_t hostAbi = RCX_PROVIDER_ABI_TOKEN;
+        auto* abiFunc = reinterpret_cast<RcxPluginAbiTokenFunc>(
+            library->resolve("RcxPluginAbiToken"));
+        if (!abiFunc)
+        {
+            qWarning() << "PluginManager: Provider plugin" << path
+                       << "exports no ABI token - built against older/incompatible"
+                       << "headers. Rebuild it. Skipping to avoid a memory-corruption crash.";
+            m_rejected.push_back({path, QStringLiteral(
+                "No ABI token — built against older/incompatible headers. Rebuild the plugin.")});
+            delete plugin;
+            library->unload();
+            delete library;
+            return false;
+        }
+        const uint64_t pluginAbi = abiFunc();
+        if (pluginAbi != hostAbi)
+        {
+            qWarning() << "PluginManager: Provider plugin" << path
+                       << "ABI mismatch: plugin (ver" << (pluginAbi >> 32)
+                       << "sizeof(Provider)" << (pluginAbi & 0xFFFFFFFFu) << ")"
+                       << "vs host (ver" << (hostAbi >> 32)
+                       << "sizeof(Provider)" << (hostAbi & 0xFFFFFFFFu) << ")"
+                       << "- rebuild the plugin. Skipping to avoid a crash.";
+            m_rejected.push_back({path, QStringLiteral(
+                "ABI mismatch (plugin ver %1 size %2 vs host ver %3 size %4) — rebuild the plugin.")
+                .arg(pluginAbi >> 32).arg(pluginAbi & 0xFFFFFFFFu)
+                .arg(hostAbi >> 32).arg(hostAbi & 0xFFFFFFFFu)});
+            delete plugin;
+            library->unload();
+            delete library;
+            return false;
+        }
+    }
+
     qDebug() << "PluginManager: Loaded plugin:" << plugin->Name().c_str() << plugin->Version().c_str() << "by" << plugin->Author().c_str();
     
     // Store plugin entry

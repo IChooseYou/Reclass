@@ -35,6 +35,7 @@ namespace rcx {
 
 class McpBridge;
 class ShimmerLabel;
+class SourceStatusChip;
 class DockGripWidget;
 class WorkspaceDelegate;
 
@@ -89,11 +90,36 @@ private slots:
     void showProfilerDialog();
 
 public:
+    // Test/preview hook: lay out the "Both" (even Reclass|Code) split on the
+    // active tab's first pane. Used by `--screenshot <png> both` to capture
+    // the split layout headlessly (mirrors the scanner/workspace args).
+    void previewBothSplit();
+    void previewCodeView();   // select the single "Code" view (test/preview)
+
+    // Test hook: with 3 doc tabs open, click the actual close-X on the active
+    // tab, wait a tick, then click the next survivor's X — exercises the real
+    // X-button path (the bug where the X stopped working after closing a
+    // sibling). Used by `--screenshot <png> closetest`.
+    void previewCloseViaX();
+
+    // Pin the bottom-right resize grip + the edge/corner resize zones to the
+    // current window size. Called from resizeEvent AND explicitly after the
+    // ctor sets the geometry — because setting the size before show() means
+    // show() fires no resizeEvent, which would otherwise leave the grip at 0,0.
+    void repositionResizeWidgets();
+
     // Called once from main() via QTimer::singleShot(0, …) after the
     // first paint — runs the synchronous plugin scan and the optional
     // MCP bridge auto-start. Pulled out of MainWindow::ctor so the
     // window appears ~40 ms sooner. Subsequent calls are no-ops.
     void loadPluginsDeferred();
+
+    // Builds the Bookmarks dock's content (filter, list, buttons, setWidget).
+    // Split out of createBookmarksDock() and run from the same deferred tick:
+    // the first setWidget() polish was ~300 ms on the critical path for a dock
+    // that's hidden by default. Idempotent; also fired on first reveal if the
+    // user opens the dock before the deferred tick lands.
+    void populateBookmarksDock();
 
     // Status bar helpers — separate app / MCP channels
     void setAppStatus(const QString& text);
@@ -123,9 +149,9 @@ public:
     bool project_save(QDockWidget* dock = nullptr, bool saveAs = false);
     void project_close(QDockWidget* dock = nullptr);
 
-    // Layout presets — wired from TitleBarWidget::layoutPresetSelected.
-    // Sets visibility of workspace/symbols/scanner docks per preset.
-    // Values match rcx::LayoutPreset enum in titlebar.h.
+    // Layout presets — called from the collapsed-rail click, the doc-tab
+    // context menu, and the --screenshot harness. Sets visibility of the
+    // workspace dock per preset. Values match rcx::LayoutPreset (titlebar.h).
     void applyLayoutPreset(int preset);
 
     // Find-references — scan all open documents for any Node.refId ==
@@ -146,10 +172,11 @@ public:
                                           uint64_t targetStructId) const;
 
 private:
-    enum ViewMode { VM_Reclass, VM_Rendered, VM_Debug };
+    enum ViewMode { VM_Reclass, VM_Rendered, VM_Debug, VM_Both };
 
     QWidget*        m_centralPlaceholder;
     ShimmerLabel*   m_statusLabel;
+    SourceStatusChip* m_sourceChip = nullptr;  // right-anchored source-status + name chip
     QProgressBar*   m_progressBar = nullptr;
     QLabel*         m_progressLabel = nullptr;
     QString         m_appStatus;
@@ -180,6 +207,7 @@ private:
     McpBridge*      m_mcp       = nullptr;
     QAction*        m_mcpAction = nullptr;
     QAction*        m_actRelOfs = nullptr;
+    QAction*        m_actValuePopups = nullptr;
     bool            m_presentationMode = false;
     QAction*        m_actPresentationMode = nullptr;
     QMenu*          m_sourceMenu = nullptr;
@@ -197,6 +225,8 @@ private:
         QComboBox*     fmtCombo   = nullptr;
         QComboBox*     scopeCombo = nullptr;
         QToolButton*   fmtGear    = nullptr;
+        QSlider*       zoomSlider = nullptr;  // drives Scintilla zoom; always shown
+        QLabel*        zoomLabel  = nullptr;  // "%" readout next to the slider
         ViewMode       viewMode  = VM_Reclass;
         uint64_t       lastRenderedRootId = 0;
         // Cached output of the last renderCode* call — keyed on
@@ -213,6 +243,14 @@ private:
         // hidden; visibility toggled via the View menu "Minimap" action.
         QsciScintilla* minimap         = nullptr;
         QWidget*       editorContainer = nullptr;
+        // "Both" view: a single tab whose content is a splitter holding the
+        // editor (Reclass, 67%) and the rendered Code view (33%) side by side.
+        // editorContainer/renderedContainer are REPARENTED between their own
+        // tab pages and bothSplitter as the user switches tabs — so the one
+        // tab bar + corner (zoom, format/scope/gear) control both at once.
+        QSplitter*     bothSplitter = nullptr;
+        QWidget*       reclassPage  = nullptr;  // tab-0 host for editorContainer
+        QWidget*       codePage     = nullptr;  // tab-1 host for renderedContainer
     };
 
     struct TabState {
@@ -285,9 +323,19 @@ private:
     // tab or its provider changes so the user can never confuse which tab
     // their next scan will run against.
     void updateScannerTitle();
+    // Updates the status-bar source chip (dot color + "[kind:name]") from the
+    // active controller's source + the given liveness status.
+    void updateSourceChip();
     void closeAllDocDocks();
+    // Toggle the empty-workspace hatch: lifts the central widget's 0-height
+    // cap when no document tab is open (showing the WorkspaceHatch), re-pins
+    // it to 0 when a tab exists so the doc-dock area fills the window.
+    void updateEmptyWorkspaceVisibility();
 
     void setViewMode(ViewMode mode);
+    // Apply a Scintilla zoom level (point delta, same as Ctrl+wheel) to all
+    // three views in a pane and sync the pane's zoom slider + % readout.
+    void applyPaneZoom(SplitPane& pane, int level);
     void updateRenderedView(TabState& tab, SplitPane& pane);
     void updateAllRenderedPanes(TabState& tab);
     void updateDebugView(TabState& tab, SplitPane& pane);
@@ -317,7 +365,13 @@ private:
     QToolButton*          m_dockCloseBtn    = nullptr;
     DockGripWidget*       m_dockGrip        = nullptr;
     QSet<uint64_t>        m_pinnedIds;
+    // Collapsed left-edge rail shown while the workspace dock is hidden — a
+    // discoverable handle to re-open it. A thin, fixed-width, feature-less dock
+    // in the LEFT area so it RESERVES its own column outside the editor (the
+    // editor + its north/south tab bars sit to its right) rather than overlaying.
+    QDockWidget*          m_workspaceRailDock = nullptr;
     void createWorkspaceDock();
+    void updateWorkspaceDockEdge();     // docked-only right hairline (header + panel)
     void rebuildWorkspaceModel();       // debounced — safe to call frequently
     void rebuildWorkspaceModelNow();    // immediate rebuild
     int  computeWorkspaceDockWidth() const;  // fit to longest type name
@@ -400,6 +454,7 @@ private:
     QLineEdit*   m_bookmarksFilter = nullptr;
     void createBookmarksDock();
     void refreshBookmarksDock();
+    void themeBookmarksContent();   // colour the panel to the editor paper surface
     void promptAddBookmark();
     void navigateBookmark(int idx);
     // Refresh the unified symbol panel from SymbolStore. Idempotent; safe to
@@ -436,6 +491,7 @@ public:
     void showRttiBrowser(uint64_t vtableAddr);
 
 protected:
+    bool event(QEvent* event) override;
     void changeEvent(QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void closeEvent(QCloseEvent* event) override;

@@ -39,6 +39,11 @@ public:
     QHash<QString, ProfileStats> snapshot() const;
     void reset();
 
+    // Headless dump of all buckets to stderr, sorted by total time. Used by
+    // the `--profile --screenshot` mode to surface startup costs without the
+    // GUI dialog (captured by the test harness / a redirected pipe).
+    void dumpToStderr() const;
+
 private:
     Profiler() = default;
     QAtomicInt m_enabled { 0 };

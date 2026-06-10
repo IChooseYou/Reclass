@@ -151,11 +151,18 @@ inline void buildProjectExplorer(QStandardItemModel* model,
         else
             types.push_back(e);
     }
-    model->appendRow(makeSectionItem(QStringLiteral("ALL TYPES")));
-    for (const auto& e : types)
-        model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
-    for (const auto& e : enums)
-        model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
+    // Only emit the header when there's something under it. An unconditional
+    // header left the model permanently non-empty (rowCount >= 1), so the tree's
+    // "No types yet" empty-state overlay (EmptyHintTreeView) could never fire on
+    // a genuinely empty project. (Filtered-to-zero still works — the proxy hides
+    // section headers when a filter is active, so rowCount drops to 0 there.)
+    if (!types.isEmpty() || !enums.isEmpty()) {
+        model->appendRow(makeSectionItem(QStringLiteral("ALL TYPES")));
+        for (const auto& e : types)
+            model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
+        for (const auto& e : enums)
+            model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
+    }
 }
 
 // Full rebuild (debounced at 50ms).
@@ -178,6 +185,7 @@ public:
             invalidateFilter();
         }
     }
+    bool hasFilter() const { return m_hasFilter; }  // for the tree's empty-state hint
 
 protected:
     bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override {
@@ -206,7 +214,7 @@ public:
         m_hover     = t.hover;
         m_selected  = t.selected;
         m_accent    = t.borderFocused; // left accent bar
-        m_bg        = t.background;
+        m_bg        = editorPaperColor(t);  // section-header bg → editor paper
         m_badgeBg   = t.backgroundAlt;
         m_badgeText = t.textDim;
         m_surface   = t.surface;       // count pill bg (darker than badgeBg)

@@ -80,6 +80,7 @@ public:
 signals:
     void sourceSelected(int savedIndex);
     void providerSelected(const QString& identifier);
+    void removeRequested(int savedIndex);
     void clearRequested();
     void dismissed();
 

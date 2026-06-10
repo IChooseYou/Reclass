@@ -417,7 +417,7 @@ public:
             "QLineEdit:focus { border: 1px solid %5; }"
             "QLineEdit QToolButton { padding: 0px 4px; }"
             "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(t.background.name(), t.textDim.name(), t.hover.name(),
+            .arg(rcx::editorPaperColor(t).name(), t.textDim.name(), t.hover.name(),
                  t.border.name(), t.borderFocused.name()));
 
         if (m_chipRowHost) {
@@ -447,7 +447,7 @@ public:
         for (auto* b : m_densityBtns) b->setStyleSheet(sortSheet);
 
         QPalette vp = m_view->palette();
-        vp.setColor(QPalette::Base, t.background);
+        vp.setColor(QPalette::Base, rcx::editorPaperColor(t));  // match editor surface
         vp.setColor(QPalette::Text, t.text);
         vp.setColor(QPalette::Highlight, t.selected);
         vp.setColor(QPalette::HighlightedText, t.text);
@@ -455,7 +455,7 @@ public:
         m_view->setStyleSheet(QStringLiteral(
             "QListView { background: %1; border: none; }"
             "QAbstractScrollArea::corner { background: %1; border: none; }")
-            .arg(t.background.name()));
+            .arg(rcx::editorPaperColor(t).name()));
 
         m_footer->setStyleSheet(QStringLiteral(
             "QLabel { color: %1; background: %2; border-top: 1px solid %3;"

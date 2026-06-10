@@ -19,7 +19,10 @@ namespace rcx {
 
 OwningModule findOwningModule(const Provider& prov, uint64_t addr) {
     OwningModule out;
-    auto mods = prov.enumerateModules();
+    // modulesCached() — NOT enumerateModules(). This runs up to ~4× per RTTI
+    // candidate and once per refresh; the uncached syscall here was the attach
+    // stall on module-heavy processes. See Provider::modulesCached().
+    const auto& mods = prov.modulesCached();
     for (const auto& m : mods) {
         if (addr >= m.base && addr < m.base + m.size) {
             out.name     = m.name;

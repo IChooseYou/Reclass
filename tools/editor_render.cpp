@@ -13,8 +13,11 @@
 #include <QApplication>
 #include <QSplitter>
 #include <QFont>
+#include <Qsci/qsciscintilla.h>
+#include <Qsci/qsciscintillabase.h>
 #include <cstdio>
 #include "controller.h"
+#include "editor.h"
 #include "core.h"
 #include "providers/buffer_provider.h"
 #include "themes/thememanager.h"
@@ -60,6 +63,8 @@ int main(int argc, char** argv) {
     const uint64_t lo = (argc > 2) ? QString::fromLocal8Bit(argv[2]).toULongLong() : 4;
     const uint64_t hi = (argc > 3) ? QString::fromLocal8Bit(argv[3]).toULongLong() : 16;
 
+    // "zoom" mode: editor_render <out.png> zoom <level> — apply the Scintilla
+    // zoom level (point delta, same as Ctrl+wheel) after the editor is built.
     auto* doc = new RcxDocument();
     doc->tree = buildTree();
     doc->provider = std::make_shared<BufferProvider>(buildBuffer(), "editor_render");
@@ -74,6 +79,57 @@ int main(int argc, char** argv) {
     app.processEvents();
     ctrl->refresh();
     app.processEvents();
+
+    const QString mode = (argc > 2) ? QString::fromLocal8Bit(argv[2]) : QString();
+
+    if (mode == QStringLiteral("zoom")) {
+        // Apply the Scintilla zoom level (same path Ctrl+wheel uses) and grab.
+        editor->scintilla()->zoomTo(QString::fromLocal8Bit(argv[3]).toInt());
+        app.processEvents();
+        editor->grab().save(out);
+        return 0;
+    }
+
+    auto lineForId = [&](uint64_t id) -> int {
+        for (int i = 0; ; ++i) {
+            const LineMeta* lm = editor->metaForLine(i);
+            if (!lm) return -1;
+            if (lm->nodeId == id && lm->lineKind == LineKind::Field) return i;
+        }
+    };
+    auto highlightedRow = [&]() -> int {
+        for (int ln = 0; ln < editor->scintilla()->lines(); ++ln) {
+            int m = (int)editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_MARKERGET, (unsigned long)ln);
+            if (m & (1 << M_SELECTED)) return ln;
+        }
+        return -1;
+    };
+
+    if (mode == QStringLiteral("delete")) {
+        // Reproduce the reported bug: select two node rows (h2, h3), park the
+        // caret on one (as a click would), delete them, and see whether any
+        // row stays highlighted / the focus lands on the shifted-up node.
+        uint64_t id2 = doc->tree.nodes[3].id;  // h2 (idx0=root, idx1=h0…)
+        uint64_t id3 = doc->tree.nodes[4].id;  // h3
+        ctrl->handleNodeClick(editor, lineForId(id2), id2, Qt::NoModifier);
+        ctrl->handleNodeClick(editor, lineForId(id3), id3, Qt::ControlModifier);
+        editor->scintilla()->setCursorPosition(lineForId(id3), 4);
+        app.processEvents();
+        std::printf("before delete: selectedIds=%d highlightedRow=%d\n",
+                    ctrl->selectedIds().size(), highlightedRow());
+        QMetaObject::invokeMethod(editor, "deleteSelectedRequested");
+        app.processEvents();
+        int caretLine, caretCol;
+        editor->scintilla()->getCursorPosition(&caretLine, &caretCol);
+        const LineMeta* caretLm = editor->metaForLine(caretLine);
+        std::printf("after delete: selectedIds=%d highlightedRow=%d caretLine=%d caretNode=%s\n",
+                    ctrl->selectedIds().size(), highlightedRow(), caretLine,
+                    caretLm ? qPrintable(caretLm->offsetText) : "(none)");
+        std::fflush(stdout);
+        editor->grab().save(out);
+        return 0;
+    }
 
     const bool ok = editor->setByteSelection(lo, hi);
     app.processEvents();

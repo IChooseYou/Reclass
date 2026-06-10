@@ -102,6 +102,24 @@ public:
     struct ModuleEntry { QString name; QString fullPath; uint64_t base; uint64_t size; };
     virtual QVector<ModuleEntry> enumerateModules() const { return {}; }
 
+    // Memoized view of enumerateModules(). enumerateModules() can be an
+    // expensive syscall (a Toolhelp module snapshot of a process with hundreds
+    // of DLLs — a big game like DayZ). RTTI resolution looks up the owning
+    // module several times per pointer candidate AND runs on every refresh, so
+    // calling the uncached syscall there stalled attach on module-heavy targets
+    // for seconds (kernel providers, with a different module path, didn't lag).
+    // A fresh Provider is created on every (re)attach, so this per-instance
+    // cache self-refreshes; call invalidateModuleCache() if the target loads or
+    // unloads modules mid-session and RTTI must re-resolve.
+    const QVector<ModuleEntry>& modulesCached() const {
+        if (!m_moduleCacheValid) {
+            m_moduleCache = enumerateModules();
+            m_moduleCacheValid = true;
+        }
+        return m_moduleCache;
+    }
+    void invalidateModuleCache() const { m_moduleCacheValid = false; }
+
     // --- Kernel paging capabilities (override in kernel providers) ---
     virtual bool hasKernelPaging() const { return false; }
     virtual uint64_t getCr3() const { return 0; }
@@ -150,6 +168,24 @@ public:
     bool writeBytes(uint64_t addr, const QByteArray& d) {
         return write(addr, d.constData(), d.size());
     }
+
+private:
+    // ── ABI WARNING — Provider is a fragile base class ──
+    // Plugin DLLs (ProcessMemory, KernelMemory, WinDbg, …) inherit from
+    // Provider and are compiled separately. ANY data member added here grows
+    // sizeof(Provider) and shifts every plugin-side subclass member, so the
+    // host and a not-rebuilt plugin disagree on the object layout. The host
+    // then reads these cache members where the plugin stored the subclass's
+    // own data → garbage QVector<ModuleEntry> → access violation the first
+    // time modulesCached() runs (RTTI module resolution during compose).
+    // If you add/remove/reorder members here, EVERY provider plugin must be
+    // rebuilt. The build enforces this via add_dependencies(Reclass <plugins>)
+    // in CMakeLists.txt so a partial app-only build can't ship a stale plugin.
+    //
+    // Per-instance module-list cache backing modulesCached(). Mutable so the
+    // lazy fill works through const lookups in the RTTI path.
+    mutable QVector<ModuleEntry> m_moduleCache;
+    mutable bool                 m_moduleCacheValid = false;
 };
 
 } // namespace rcx

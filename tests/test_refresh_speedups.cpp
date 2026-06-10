@@ -20,6 +20,8 @@
 #include "controller.h"
 #include "providers/snapshot_provider.h"
 #include "core.h"
+#include "diffutil.h"
+#include <random>
 
 using namespace rcx;
 
@@ -40,6 +42,7 @@ public:
 
     mutable QHash<uint64_t, int> readsPerPage;  // page-aligned addr → count
     mutable std::atomic<int>     totalReads{0};
+    mutable std::atomic<int>     regionEnumCount{0};  // enumerateRegions() calls
     QByteArray                   data{kTotalSize, '\0'};
 
     bool read(uint64_t addr, void* buf, int len) const override {
@@ -56,6 +59,7 @@ public:
     QString kind() const override { return QStringLiteral("Process"); }
 
     QVector<MemoryRegion> enumerateRegions() const override {
+        regionEnumCount.fetch_add(1, std::memory_order_relaxed);
         QVector<MemoryRegion> r;
         // Module image — executable + read-only (.text/.rdata equivalent).
         // Speedup 4 marks pages here as permanent on first read.
@@ -83,6 +87,7 @@ public:
     void resetCounters() {
         readsPerPage.clear();
         totalReads = 0;
+        regionEnumCount = 0;
     }
 };
 
@@ -221,6 +226,46 @@ private slots:
         m_prov = nullptr;
     }
 
+    // ── Word-strided page diff is byte-identical to the naive per-byte loop.
+    //    Fuzz across edge lengths (word boundaries, page sizes ±1) with a
+    //    deterministic seed; the word fast-path and the 0-7 byte tail must
+    //    produce exactly the same changed-offset set as a per-byte compare. ──
+    void testDiffPageIntoMatchesNaive() {
+        std::mt19937 rng(0xC0FFEEu);   // fixed seed → deterministic
+        const int lens[] = {0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 63, 64, 65,
+                            255, 256, 257, 4095, 4096, 4097};
+        for (int len : lens) {
+            for (int iter = 0; iter < 200; ++iter) {
+                QByteArray a(len, '\0'), b(len, '\0');
+                for (int i = 0; i < len; ++i) {
+                    a[i] = char(rng() & 0xFF);
+                    // b mostly mirrors a with sparse diffs → exercises both
+                    // all-equal words (fast skip) and partially-differing words.
+                    b[i] = (rng() % 8 == 0) ? char(rng() & 0xFF) : a[i];
+                }
+                uint64_t pageAddr = (uint64_t(rng()) << 12);
+                QSet<int64_t> got, want;
+                bool gc = diffPageInto(got, pageAddr,
+                                       a.constData(), b.constData(), len);
+                bool wc = false;
+                for (int i = 0; i < len; ++i)
+                    if (a[i] != b[i]) { want.insert(int64_t(pageAddr) + i); wc = true; }
+                QCOMPARE(gc, wc);
+                QCOMPARE(got, want);
+            }
+        }
+
+        // Extremes at a full page: all-equal (no diffs) and all-different.
+        QByteArray a(4096, char(0xAB)), b(4096, char(0xAB));
+        QSet<int64_t> s;
+        QVERIFY(!diffPageInto(s, 0, a.constData(), b.constData(), 4096));
+        QVERIFY(s.isEmpty());
+        b.fill(char(0xCD));
+        s.clear();
+        QVERIFY(diffPageInto(s, 0, a.constData(), b.constData(), 4096));
+        QCOMPARE(s.size(), 4096);
+    }
+
     // ── Speedup 4: permanent .rdata cache ───────────────────────────
     // After the first refresh, pages in the module's executable region
     // get marked permanent on the SnapshotProvider. Subsequent ticks
@@ -255,6 +300,37 @@ private slots:
         QApplication::processEvents();
         int modulePageReads = m_prov->readsPerPage.value(ptrTargetAddr & ~uint64_t(4095), 0);
         QCOMPARE(modulePageReads, 0);
+    }
+
+    // ── Speedup 4 (regression pin): enumerateRegions() is CACHED ─────
+    // classifyPermanentPages() used to call provider->enumerateRegions()
+    // — a full VirtualQueryEx sweep of the entire address space — on EVERY
+    // refresh tick. On a module-heavy target (DayZ, thousands of mappings)
+    // that per-tick syscall storm made the view barely usable. It is now
+    // tick-gated (kRegionRefreshTicks = 64). Drive several ticks well
+    // inside one refresh window and assert the sweep ran ~once, NOT once
+    // per tick. The gap between the tick count and the call count is the
+    // guard: revert the cache and this fails loudly.
+    void regionEnumerationIsCachedNotPerTick() {
+        setupWithProvider(/*withPointer=*/false);   // heap reads each tick
+        const int kTicks = 6;
+        int landed = 0;
+        for (int i = 0; i < kTicks; ++i) {
+            if (waitForOneTick(2000)) ++landed;
+            QTest::qWait(60);
+            QApplication::processEvents();
+        }
+        QVERIFY2(landed >= 2, "expected several refresh ticks to land");
+        const int enums = m_prov->regionEnumCount.load();
+        QVERIFY2(enums >= 1,
+                 "classifyPermanentPages should enumerate regions at least once");
+        // kRegionRefreshTicks (64) >> kTicks (6): the cache must serve every
+        // tick after the first. Allow margin (1) but it must stay far below
+        // the tick count — a per-tick implementation would reach ~landed.
+        QVERIFY2(enums <= 2,
+                 qPrintable(QStringLiteral(
+                     "enumerateRegions() must be cached, not per-tick: %1 calls "
+                     "across %2 landed ticks").arg(enums).arg(landed)));
     }
 
     // ── Speedup 3: collapsed pointers don't have their targets read ─
