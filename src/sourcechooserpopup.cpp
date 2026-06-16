@@ -100,6 +100,9 @@ public:
     const QVector<SourceEntry>* entries = nullptr;
     const QVector<QVector<int>>* matchPositions = nullptr;
     QFont baseFont;
+    // Row index whose × delete button the mouse is currently over (-1 = none).
+    // Set by the popup's MouseMove handler so the × gets its own hover state.
+    int hoverDeleteRow = -1;
 
     explicit SourceChooserDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
 
@@ -247,7 +250,9 @@ public:
         if (e.entryKind == SourceEntry::SavedSource) {
             QRect xr = deleteBtnRect(r);
             p->setFont(baseFont);
-            p->setPen((selected || hovered) ? theme.text : theme.textFaint);
+            // The \u00d7 has its OWN hover state: dim by default, bright when the
+            // mouse is over the \u00d7 specifically (not just the row).
+            p->setPen(row == hoverDeleteRow ? theme.text : theme.textFaint);
             p->drawText(xr, Qt::AlignCenter, QStringLiteral("\u00d7"));
         }
 
@@ -356,7 +361,11 @@ SourceChooserPopup::SourceChooserPopup(QWidget* parent)
     setFocusPolicy(Qt::StrongFocus);
 
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(1, 1, 1, 1);
+    // No left/right inset so the main separator (and the filter/list bands)
+    // span the full popup width — to the side borders. Keep 1px top/bottom so
+    // the title/footer clear the top/bottom border. The title row + footer have
+    // their own left padding so text stays inset.
+    layout->setContentsMargins(0, 1, 0, 1);
     layout->setSpacing(0);
 
     // Title row
@@ -650,12 +659,31 @@ bool SourceChooserPopup::eventFilter(QObject* obj, QEvent* event) {
         auto* me = static_cast<QMouseEvent*>(event);
         QModelIndex idx = m_listView->indexAt(me->pos());
         bool clickable = false;
+        int hoverX = -1;
         if (idx.isValid() && idx.row() < m_filteredEntries.size()) {
             const auto& e = m_filteredEntries[idx.row()];
             clickable = e.enabled && e.entryKind != SourceEntry::SectionHeader;
+            // Track the × delete button under the cursor so it gets its own
+            // hover highlight (repaint only when the hovered × row changes).
+            if (e.entryKind == SourceEntry::SavedSource && e.savedIndex >= 0
+                && deleteBtnRect(m_listView->visualRect(idx)).contains(me->pos()))
+                hoverX = idx.row();
         }
         m_listView->viewport()->setCursor(clickable ? Qt::PointingHandCursor
                                                      : Qt::ArrowCursor);
+        auto* dg = static_cast<SourceChooserDelegate*>(m_listView->itemDelegate());
+        if (dg && dg->hoverDeleteRow != hoverX) {
+            dg->hoverDeleteRow = hoverX;
+            m_listView->viewport()->update();
+        }
+    }
+    // Reset the × hover when the cursor leaves the list.
+    if (event->type() == QEvent::Leave && obj == m_listView->viewport()) {
+        auto* dg = static_cast<SourceChooserDelegate*>(m_listView->itemDelegate());
+        if (dg && dg->hoverDeleteRow != -1) {
+            dg->hoverDeleteRow = -1;
+            m_listView->viewport()->update();
+        }
     }
 
     // Click on a saved row's × deletes just that source (popup stays open).

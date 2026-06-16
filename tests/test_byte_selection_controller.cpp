@@ -502,6 +502,51 @@ private slots:
             "byte selection lingered after deleting the nodes it covered");
         QVERIFY(m_ctrl->selectedIds().isEmpty());
     }
+
+    // ── Refresh reconciles the grey row band to an active byte selection ──
+    // Regression (user-reported "Ctrl+Z didn't restore the bottom row's
+    // highlight"): the byte selection owns the row band while active, but the
+    // band (controller m_selIds) and the editor's emit-dedup cache
+    // (m_lastByteRows) live in different objects and can diverge. If m_selIds
+    // is emptied/pruned while the byte selection's covered set is UNCHANGED,
+    // the editor's resync emit is deduped (covered == m_lastByteRows) and the
+    // band is never restored — the multi-row byte selection keeps its purple
+    // highlight but loses the grey band on a covered row. The refresh tail now
+    // pulls the covered set straight from the editor (byteCoveredRows()) so the
+    // band always matches the highlight after a refresh/undo/redo.
+    void testRefreshReconcilesRowBandToByteSelection() {
+        auto idAtOffset = [&](int off) -> uint64_t {
+            for (const auto& n : m_doc->tree.nodes)
+                if (n.parentId != 0 && n.offset == off
+                    && n.kind == NodeKind::Hex32)
+                    return n.id;
+            return 0;
+        };
+        uint64_t id0 = idAtOffset(0), id1 = idAtOffset(4);
+        QVERIFY(id0 != 0 && id1 != 0);
+
+        // Multi-row byte selection drives the band onto both covered rows.
+        QVERIFY(m_editor->setByteSelection(0, 8));
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{id0, id1}));
+
+        // Desync the band WITHOUT touching the byte selection or the editor's
+        // covered-row cache: clearSelection() empties m_selIds only. The byte
+        // selection (hence the editor's covered set) is unchanged, so a
+        // refresh's resync emit would be deduped away (covered == m_lastByteRows).
+        m_ctrl->clearSelection();
+        QApplication::processEvents();
+        QVERIFY(m_editor->byteSelection().has_value());
+        QVERIFY(m_ctrl->selectedIds().isEmpty());
+
+        // A refresh must reconcile the band back to the covered rows — even
+        // though the covered set never changed. Without the fix m_selIds stays
+        // empty (no band); with it the band is pulled from byteCoveredRows().
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{id0, id1}));
+        QCOMPARE(m_ctrl->selectedIds(), m_editor->byteCoveredRows());
+    }
 };
 
 QTEST_MAIN(TestByteSelController)

@@ -89,9 +89,10 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     pal.setColor(QPalette::Window, menuBarColor(theme));
     setPalette(pal);
 
-    // App label
+    // App label. padding-left in the stylesheet (not setContentsMargins, which
+    // a QSS-styled QLabel ignores) so "Reclass" isn't jammed into the corner.
     m_appLabel->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; }")
+        QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; padding-left: 10px; }")
             .arg(theme.text.name()));
 
     // Menu bar palette — all roles used by MenuBarStyle, so live theme
@@ -178,7 +179,7 @@ void TitleBarWidget::setShowIcon(bool show) {
         m_appLabel->setPixmap(QPixmap());
         m_appLabel->setText(QStringLiteral("Reclass"));
         m_appLabel->setStyleSheet(
-            QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; }")
+            QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; padding-left: 10px; }")
                 .arg(m_theme.text.name()));
         setFixedHeight(32);
     }

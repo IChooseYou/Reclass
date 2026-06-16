@@ -170,9 +170,12 @@ uint64_t SymbolStore::resolve(const QString& token, const Provider* provider, bo
 }
 
 QString SymbolStore::getSymbolForAddress(uint64_t addr, const Provider* provider) const {
-    if (m_modules.isEmpty() || !provider)
+    if (!provider)
         return {};
 
+    // 1. Precise PDB-symbol resolution (only when a module's symbols are loaded;
+    //    the loop is simply empty otherwise and we fall through to the synthetic
+    //    module-list fallback below).
     for (auto it = m_modules.begin(); it != m_modules.end(); ++it) {
         const PdbSymbolSet& set = *it;
 
@@ -209,6 +212,19 @@ QString SymbolStore::getSymbolForAddress(uint64_t addr, const Provider* provider
         return set.moduleName + QStringLiteral("!") + upper->second
              + QStringLiteral("+0x") + QString::number(displacement, 16);
     }
+
+    // 2. Synthetic fallback — no PDB symbol matched (or none are loaded). Defer
+    //    to the provider's OWN resolver. Every plugin implements getSymbol():
+    //    it names an address relative to the module that contains it
+    //    ("module+0xRVA") from the plugin's live module map — or, for WinDbg, a
+    //    real symbol via GetNameByOffset. This is what gives the process base
+    //    and module bases a symbol with zero PDBs loaded, and it works for ALL
+    //    providers (kernel, process, remote, windbg, RcNet) — unlike
+    //    modulesCached(), which only the providers that override
+    //    enumerateModules() populate.
+    QString provSym = provider->getSymbol(addr);
+    if (!provSym.isEmpty())
+        return provSym;
 
     return {};
 }

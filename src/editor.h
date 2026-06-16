@@ -100,10 +100,19 @@ public:
     int byteSelectionByteCount() const {
         return m_byteSel ? static_cast<int>(m_byteSel->second - m_byteSel->first) : 0;
     }
-    // Enter hex-overwrite inline edit on the active byte range (single hex
-    // row only; cross-row selections are refused with a statusHint).
+    // The set of encoded row selIds the current byte selection covers,
+    // recomputed against the live m_meta on every applyByteSelectionOverlay
+    // (which runs inside applyDocument). The controller pulls this in its
+    // refresh tail to keep the grey row band (m_selIds) locked to the byte
+    // selection — the editor's own emit dedup (m_lastByteRows) can otherwise
+    // suppress the resync after a refresh prunes/mutates m_selIds.
+    const QSet<uint64_t>& byteCoveredRows() const { return m_byteCoveredRows; }
+    // Enter hex-overwrite inline edit on the active byte range. Builds one
+    // edit segment per hex row the selection covers (clipping the first/last
+    // row to the sub-range), so editing spans multiple hex nodes and may start
+    // at any byte offset; the cursor hops segments via advanceToByteSegment.
     // Public so the controller's "Selected bytes ▸ Edit hex…" action can
-    // invoke it. Definition + full contract noted in the private section.
+    // invoke it.
     void beginByteEdit();
 
     // ── Inline editing ──
@@ -240,9 +249,9 @@ signals:
     // digits. Controller pushes a cmd::WriteBytes — bypassing the
     // node-level setNodeValue path which expects a full-row hex value.
     void byteRangeCommitRequested(uint64_t addr, QByteArray bytes);
-    // One-line status hint emitted by RcxEditor when a byte-selection
-    // operation is rejected (e.g. Enter on a cross-row selection).
-    // Routed to the status bar by MainWindow.
+    // One-line status hint emitted by RcxEditor for byte-selection feedback
+    // (e.g. "Wrote N bytes", read-only target). Routed to the status bar by
+    // MainWindow.
     void statusHintRequested(QString text);
 
 protected:
@@ -328,6 +337,11 @@ private:
     // De-dups the emit so a multi-pixel drag only re-syncs when it crosses
     // a row boundary, and a passive refresh repaint doesn't re-emit.
     QSet<uint64_t> m_lastByteRows;
+    // The covered-row selIds of the CURRENT byte selection against the live
+    // m_meta, refreshed unconditionally by applyByteSelectionOverlay (unlike
+    // m_lastByteRows, which only updates when the emit fires). The controller
+    // reads this each refresh to reconcile m_selIds — see byteCoveredRows().
+    QSet<uint64_t> m_byteCoveredRows;
 
     // ── Deferred click (protects multi-select on double-click) ──
     uint64_t m_pendingClickNodeId = 0;

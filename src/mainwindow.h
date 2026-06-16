@@ -8,7 +8,7 @@
 #include "generator.h"
 #include "workspace_model.h"
 #include "names/name_provider.h"
-namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class DockSizeReadout; class UnifiedSymbolPanel; }
+namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class UnifiedSymbolPanel; }
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -360,6 +360,11 @@ private:
     QStandardItemModel*   m_workspaceModel  = nullptr;
     QSortFilterProxyModel* m_workspaceProxy = nullptr;
     QLineEdit*            m_workspaceSearch = nullptr;
+    // True while a right-click → Rename inline edit is in flight on the
+    // Project tree. Gates the model's itemChanged handler so only a genuine
+    // user rename pushes a ChangeStructTypeName command (not programmatic
+    // rebuilds).
+    bool                  m_wsRenaming = false;
     WorkspaceDelegate*    m_workspaceDelegate = nullptr;
     QLabel*               m_dockTitleLabel  = nullptr;
     QToolButton*          m_dockCloseBtn    = nullptr;
@@ -393,23 +398,10 @@ private:
     QPointer<QDockWidget> m_dragOrigPeer;
     void setupDockOverlay();
 
-    // Live size readout shown while the user drags a dock divider.
-    // Reuses RcxTooltip (the cmd-bar arrow tooltip) so the visual is
-    // consistent with the rest of the chrome. Positioned at the dock's
-    // right edge as the user resizes; hidden when the mouse releases.
-    DockSizeReadout* m_dockSizeTip = nullptr;
     // Re-evaluate the left-side source icon shown on a doc dock's tab.
     // Reads the doc's controller for the active source kind + liveness
     // and updates the DockTabSourceIcon in place.
     void refreshDocTabSourceIcon(QDockWidget* docDock);
-    void showDockSizeTip(QDockWidget* dock, const QSize& sz);
-    // Like showDockSizeTip but with explicit axis: caller knows which
-    // dimension actually changed (e.g. from QResizeEvent::oldSize vs
-    // size). Avoids relying on dockWidgetArea(), which lies for
-    // tabified docks and for height-resizes of sidebars in horizontal
-    // areas.
-    void showDockSizeTipForAxis(QDockWidget* dock, const QSize& sz,
-                                bool horizontalDrag);
     void onDockDragStarted(QDockWidget* dock, QPoint globalPos);
     void onDockDropRequested(QDockWidget* source, QDockWidget* target, int zone);
 

@@ -972,11 +972,6 @@ if(BUILD_TESTING)
         target_link_libraries(test_hairline_dpr PRIVATE ${QT}::Widgets ${QT}::Test)
         add_test(NAME test_hairline_dpr COMMAND test_hairline_dpr)
 
-        add_executable(test_dock_size_tip tests/test_dock_size_tip.cpp)
-        target_include_directories(test_dock_size_tip PRIVATE src)
-        target_link_libraries(test_dock_size_tip PRIVATE ${QT}::Widgets ${QT}::Test)
-        add_test(NAME test_dock_size_tip COMMAND test_dock_size_tip)
-
         add_executable(test_doc_tab_chrome tests/test_doc_tab_chrome.cpp src/resources.qrc)
         target_include_directories(test_doc_tab_chrome PRIVATE src)
         target_link_libraries(test_doc_tab_chrome PRIVATE ${QT}::Widgets ${QT}::Test)

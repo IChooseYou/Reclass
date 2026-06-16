@@ -1,6 +1,5 @@
 #include "mainwindow.h"
 #include <cstdio>
-#include "docksizereadout.h"
 #include "tab_source_icon.h"
 #include "profiler.h"
 #include "profilerdialog.h"
@@ -823,7 +822,7 @@ public:
                     // and to center vertically the same way Qt::AlignVCenter
                     // centers the text below.
                     QSettings s("Reclass", "Reclass");
-                    QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+                    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
                     f.setFixedPitch(true);
                     p->setFont(f);
                     QFontMetrics fm(f);
@@ -951,7 +950,7 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
         "           font-family: '%6'; font-size: 10pt; }")
         .arg(theme.textFaint.name(), theme.textDim.name(),
              theme.backgroundAlt.name(), theme.text.name(), theme.border.name(),
-             QSettings("Reclass", "Reclass").value("font", "IBM Plex Mono").toString()));
+             QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString()));
 }
 
 class BorderOverlay : public QWidget {
@@ -1269,6 +1268,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Track which split pane has focus (for menu-driven view switching)
     connect(qApp, &QApplication::focusChanged, this, [this](QWidget*, QWidget* now) {
         if (!now) return;
+        // Track the active DOC dock by focus — more reliable than tabbed-dock
+        // visibilityChanged, which can skip firing on a tab switch. When focus
+        // lands inside a different doc dock, refresh the status-bar source chip,
+        // window title, and bookmarks so they track the focused tab.
+        for (QWidget* w = now; w; w = w->parentWidget()) {
+            auto* dk = qobject_cast<QDockWidget*>(w);
+            if (dk && m_tabs.contains(dk)) {
+                if (m_activeDocDock != dk) {
+                    m_activeDocDock = dk;
+                    updateWindowTitle();
+                    updateSourceChip();
+                    refreshBookmarksDock();
+                }
+                break;
+            }
+        }
         auto* tab = activeTab();
         if (!tab) return;
         for (int i = 0; i < tab->panes.size(); ++i) {
@@ -1599,7 +1614,7 @@ void MainWindow::createMenus() {
     actIbmPlex->setActionGroup(fontGroup);
     // Load saved preference
     QSettings settings("Reclass", "Reclass");
-    QString savedFont = settings.value("font", "IBM Plex Mono").toString();
+    QString savedFont = settings.value("font", "JetBrains Mono").toString();
     if      (savedFont == "JetBrains Mono")  actJetBrains->setChecked(true);
     else if (savedFont == "IBM Plex Mono")   actIbmPlex->setChecked(true);
     else                                      actConsolas->setChecked(true);
@@ -2648,7 +2663,7 @@ void MainWindow::createStatusBar() {
     // Sync status bar font to global editor font (10pt monospace)
     {
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_statusLabel->setFont(f);
         sb->setMinimumHeight(QFontMetrics(f).height() + 6);
@@ -2659,7 +2674,7 @@ void MainWindow::createStatusBar() {
     {
         const auto& t = ThemeManager::instance().current();
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
 
         m_progressLabel = new QLabel(sb);
@@ -2682,7 +2697,7 @@ void MainWindow::createStatusBar() {
     // active data source. Updated via RcxController::sourceStatusChanged.
     {
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "IBM Plex Mono").toString(), 9);
+        QFont f(s.value("font", "JetBrains Mono").toString(), 9);
         f.setFixedPitch(true);
         m_sourceChip = new SourceStatusChip(sb);
         m_sourceChip->setFont(f);
@@ -2852,7 +2867,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     {
         const auto& t = ThemeManager::instance().current();
         QSettings s("Reclass", "Reclass");
-        QString editorFont = s.value("font", "IBM Plex Mono").toString();
+        QString editorFont = s.value("font", "JetBrains Mono").toString();
         // Flat tabs: background matches the editor paper (no bg emphasis on
         // selection — user-validated). Each tab has a right-border separator
         // and a 1px bottom baseline; the SELECTED tab is marked only by a 2px
@@ -3204,7 +3219,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     {
         const auto& ct = ThemeManager::instance().current();
         QSettings cs("Reclass", "Reclass");
-        QString ef = cs.value("font", "IBM Plex Mono").toString();
+        QString ef = cs.value("font", "JetBrains Mono").toString();
 
         auto* cornerWidget = new QWidget;
         // Pin the corner strip to the SAME height as the tabs (26px, set in
@@ -3275,6 +3290,10 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         pane.zoomSlider->setRange(-8, 24);   // ~4pt..36pt over the 12pt base
         pane.zoomSlider->setFixedWidth(90);
         pane.zoomSlider->setFixedHeight(18);   // fit within the 26px tab strip
+        // Nudge the slider groove ~3px lower than its row neighbours. A styled
+        // QSlider centres the groove in its contents rect, so a 6px top inset
+        // moves the centre down by half = 3px. Only the slider shifts.
+        pane.zoomSlider->setContentsMargins(0, 6, 0, 0);
         pane.zoomSlider->setToolTip(QStringLiteral("Zoom (also Ctrl+scroll)"));
         pane.zoomSlider->setStyleSheet(QStringLiteral(
             "QSlider::groove:horizontal { height: 3px; background: %1; border-radius: 1px; }"
@@ -3580,7 +3599,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         }
         {
             QSettings settings("Reclass", "Reclass");
-            QFont f(settings.value("font", "IBM Plex Mono").toString(), 12);
+            QFont f(settings.value("font", "JetBrains Mono").toString(), 12);
             f.setFixedPitch(true);
             lbl->setFont(f);
         }
@@ -4403,7 +4422,7 @@ void MainWindow::setupDockTabBars() {
         // Set editor font so tab width sizing matches our label painting
         {
             QSettings s("Reclass", "Reclass");
-            QFont tabFont(s.value("font", "IBM Plex Mono").toString(), 10);
+            QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
             tabFont.setFixedPitch(true);
             tabBar->setFont(tabFont);
         }
@@ -4771,44 +4790,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
             }
         }
     }
-    // Dock-resize live size readout. Empirically (test_dock_size_tip),
-    // Qt 6.5 on Windows MinGW does NOT set overrideCursor() or
-    // QMainWindow::cursor() to SizeHor/SizeVer during a separator
-    // drag — the cursor change is done at the native Win32 level,
-    // invisible to QApplication. But QEvent::Resize DOES fire on the
-    // dock for every pixel of the drag (test reports 10 resizes for
-    // 10 mouse moves: 305→310→315...→350). So we hook resize events
-    // on the dock directly. The LMB gate excludes programmatic
-    // resizes (window-init, layout-preset switches) — those happen
-    // without the user holding the mouse.
-    //
-    // The tooltip itself is WA_TransparentForMouseEvents (set in
-    // showDockSizeTip) so showing it doesn't break Qt's internal
-    // mouse grab on QMainWindowLayout for the drag.
-    if (event->type() == QEvent::Resize
-        && (QApplication::mouseButtons() & Qt::LeftButton)) {
-        for (QDockWidget* d : {m_workspaceDock, m_bookmarksDock,
-                                m_symbolsDock, m_scannerDock}) {
-            if (!d || obj != d) continue;
-            if (!d->isVisible() || d->isFloating()) continue;
-            auto* re = static_cast<QResizeEvent*>(event);
-            // Skip "ghost" resizes where the dimension didn't actually
-            // change. When the user drags one sidebar, Qt may re-layout
-            // sibling sidebars and emit Resize on them with the same
-            // size — those would clobber the live tooltip with a
-            // constant value.
-            if (re->oldSize() == re->size()) break;
-            // Pass the changed dimension explicitly via a flag in
-            // size: if width changed, treat as horizontal; else
-            // vertical. showDockSizeTip uses this to pick the right
-            // axis to display.
-            bool widthChanged = (re->oldSize().width() != re->size().width());
-            showDockSizeTipForAxis(d, re->size(), widthChanged);
-            break;
-        }
-    }
     if (event->type() == QEvent::MouseButtonRelease) {
-        if (m_dockSizeTip) m_dockSizeTip->dismiss();
         // Persist the new dock size on drag-release. Otherwise the user
         // resizes the workspace dock once, restarts the app, and Qt
         // re-spawns it at the unbounded default again — which is
@@ -4821,74 +4803,6 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
         }
     }
     return QMainWindow::eventFilter(obj, event);
-}
-
-void MainWindow::showDockSizeTipForAxis(QDockWidget* dock, const QSize& sz, bool horizontalDrag) {
-    if (!dock) return;
-    if (!m_dockSizeTip) {
-        m_dockSizeTip = new DockSizeReadout(this);
-    }
-    const auto& t = ThemeManager::instance().current();
-    m_dockSizeTip->setTheme(t.backgroundAlt, t.border,
-                             t.text, t.textDim, t.border);
-
-    QSettings s("Reclass", "Reclass");
-    QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
-    f.setFixedPitch(true);
-
-    // Find the OTHER widget across the divider — the doc dock area
-    // (m_docDocks.first()) for sidebar drags, fall back to central
-    // widget. When both dock-resizes arrive in the same event-loop
-    // tick, the "other" widget hasn't been resized yet at the time
-    // OUR resize handler fires. Defer the readout via a 0-timer so
-    // Qt's layout has actually applied the geometry on both sides
-    // before we read.
-    int selfSz = horizontalDrag ? sz.width() : sz.height();
-    QPointer<QDockWidget> dockPtr(dock);
-    QTimer::singleShot(0, this, [this, dockPtr, selfSz, horizontalDrag, f]() {
-        if (!dockPtr || !m_dockSizeTip) return;
-        // Probe the doc-area width directly — that's the "other side".
-        QWidget* other = nullptr;
-        if (!m_docDocks.isEmpty()) other = m_docDocks.first();
-        if (!other) other = centralWidget();
-        int otherSz = 0;
-        if (other) {
-            otherSz = horizontalDrag ? other->width() : other->height();
-        } else {
-            otherSz = (horizontalDrag ? width() : height()) - selfSz;
-        }
-        QString body = QStringLiteral("%1 px | %2 px")
-            .arg(selfSz).arg(otherSz);
-        QString title;
-        if (dockPtr == m_workspaceDock)        title = QStringLiteral("Workspace size");
-        else if (dockPtr == m_bookmarksDock)   title = QStringLiteral("Bookmarks size");
-        else if (dockPtr == m_symbolsDock)     title = QStringLiteral("Symbols size");
-        else if (dockPtr == m_scannerDock)     title = QStringLiteral("Scanner size");
-        else                                   title = QStringLiteral("Dock size");
-        m_dockSizeTip->updateText(title, body, f);
-        m_dockSizeTip->showAt(mapFromGlobal(QCursor::pos()));
-    });
-}
-
-void MainWindow::showDockSizeTip(QDockWidget* dock, const QSize& sz) {
-    if (!dock) return;
-    // Legacy entry — fall back to dockWidgetArea-based axis detection
-    // for callers that don't know which dimension actually changed.
-    // dockWidgetArea() returns NoDockWidgetArea for tabified docks, so
-    // the area-based "is this a horizontal drag" check is unreliable.
-    // Fall back to size-delta detection in that case.
-    // Left number: this dock's size on the axis it's being dragged on.
-    // Right number: the central widget's size on the same axis. When
-    // the dock shrinks, the central area grows — so the right number
-    // rises as the left drops.
-    Qt::DockWidgetArea area = dockWidgetArea(dock);
-    bool horizontalDrag;
-    if (area == Qt::LeftDockWidgetArea || area == Qt::RightDockWidgetArea) {
-        horizontalDrag = true;
-    } else {
-        horizontalDrag = false;
-    }
-    showDockSizeTipForAxis(dock, sz, horizontalDrag);
 }
 
 // Build a minimal empty struct for new documents
@@ -5552,7 +5466,7 @@ void MainWindow::showShortcutsDialog() {
     dlg.resize(560, 520);
 
     QSettings settings("Reclass", "Reclass");
-    QFont monoFont(settings.value("font", "IBM Plex Mono").toString(), 10);
+    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
     auto* lay = new QVBoxLayout(&dlg);
@@ -5795,7 +5709,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             // Set editor font so tab width sizing matches our label painting
             {
                 QSettings s("Reclass", "Reclass");
-                QFont tabFont(s.value("font", "IBM Plex Mono").toString(), 10);
+                QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
                 tabFont.setFixedPitch(true);
                 tabBar->setFont(tabFont);
             }
@@ -5826,7 +5740,7 @@ void MainWindow::applyTheme(const Theme& theme) {
 
     // Restyle per-pane view tab bars (Reclass / Code)
     {
-        QString editorFont = QSettings("Reclass", "Reclass").value("font", "IBM Plex Mono").toString();
+        QString editorFont = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
         QString paneTabStyle = QStringLiteral(
             "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
@@ -6127,7 +6041,7 @@ void MainWindow::showOptionsDialog(int initialPage) {
     auto& tm = ThemeManager::instance();
     OptionsResult current;
     current.themeIndex = tm.currentIndex();
-    current.fontName = QSettings("Reclass", "Reclass").value("font", "IBM Plex Mono").toString();
+    current.fontName = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
     current.menuBarTitleCase = m_menuBarTitleCase;
     current.showIcon = m_titleBar
         ? QSettings("Reclass", "Reclass").value("showIcon", false).toBool()
@@ -6376,7 +6290,7 @@ void MainWindow::updateSourceChip() {
 
 void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "IBM Plex Mono").toString();
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
 
@@ -6425,7 +6339,7 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
 
 void MainWindow::setupDebugSci(QsciScintilla* sci) {
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "IBM Plex Mono").toString();
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
 
@@ -6468,7 +6382,7 @@ void MainWindow::applyDebugStyles(QsciScintilla* sci) {
     const QColor editorBg = rcx::editorPaperColor(theme);
 
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "IBM Plex Mono").toString();
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
 
@@ -7656,7 +7570,7 @@ void MainWindow::showValidateDialog() {
     auto* list = new QListWidget(&dlg);
     list->setAlternatingRowColors(false);
     QSettings settings("Reclass", "Reclass");
-    QFont monoFont(settings.value("font", "IBM Plex Mono").toString(), 10);
+    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
     list->setFont(monoFont);
     list->setStyleSheet(QStringLiteral(
@@ -7781,7 +7695,7 @@ void MainWindow::showFindFieldDialog() {
     layout->addWidget(search);
 
     QSettings settings("Reclass", "Reclass");
-    QFont monoFont(settings.value("font", "IBM Plex Mono").toString(), 10);
+    QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
     auto* list = new QListWidget(&dlg);
@@ -8021,7 +7935,7 @@ void MainWindow::createWorkspaceDock() {
             m_dockTitleLabel->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
             QSettings s("Reclass", "Reclass");
-            QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
             f.setFixedPitch(true);
             m_dockTitleLabel->setFont(f);
         }
@@ -8067,7 +7981,7 @@ void MainWindow::createWorkspaceDock() {
     // Clear button uses our close.svg icon instead of Qt's default circle-X
     {
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_workspaceSearch->setFont(f);
     }
@@ -8131,6 +8045,34 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceModel = new QStandardItemModel(this);
     m_workspaceModel->setHorizontalHeaderLabels({"Name"});
 
+    // Inline rename commit. Right-click → Rename sets EditRole to the plain
+    // name, flips m_wsRenaming, and opens the inline editor; on commit the
+    // item's EditRole changes and we push a ChangeStructTypeName undo command.
+    // Gated by m_wsRenaming so programmatic model edits don't fire it.
+    connect(m_workspaceModel, &QStandardItemModel::itemChanged, this,
+            [this](QStandardItem* item) {
+        if (!m_wsRenaming || !item) return;
+        m_wsRenaming = false;
+        auto idVar = item->data(Qt::UserRole + 1);
+        uint64_t sid = idVar.isValid() ? idVar.toULongLong() : 0;
+        auto subVar = item->data(Qt::UserRole);
+        auto* dk = subVar.isValid()
+            ? static_cast<QDockWidget*>(subVar.value<void*>()) : nullptr;
+        if (sid == 0 || !dk || !m_tabs.contains(dk)) { rebuildWorkspaceModel(); return; }
+        auto& tab = m_tabs[dk];
+        int ni = tab.doc->tree.indexOfId(sid);
+        if (ni < 0) { rebuildWorkspaceModel(); return; }
+        QString oldName = tab.doc->tree.nodes[ni].structTypeName.isEmpty()
+            ? tab.doc->tree.nodes[ni].name : tab.doc->tree.nodes[ni].structTypeName;
+        QString newName = item->data(Qt::EditRole).toString().trimmed();
+        if (newName.isEmpty() || newName == oldName) { rebuildWorkspaceModel(); return; }
+        tab.doc->undoStack.push(new rcx::RcxCommand(tab.ctrl,
+            rcx::cmd::ChangeStructTypeName{sid, oldName, newName}));
+        tab.ctrl->refresh();
+        if (dk->windowTitle() == oldName) dk->setWindowTitle(newName);
+        rebuildWorkspaceModel();
+    });
+
     m_workspaceProxy = new rcx::WorkspaceProxyModel(this);
     m_workspaceProxy->setSourceModel(m_workspaceModel);
     m_workspaceProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
@@ -8144,7 +8086,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     {
         QSettings s("Reclass", "Reclass");
-        QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_workspaceTree->setFont(f);
     }
@@ -8258,10 +8200,12 @@ void MainWindow::createWorkspaceDock() {
         QAction* actOpenCurrent = nullptr;
         QAction* actOpenNew = nullptr;
         QAction* actDuplicate = nullptr;
+        QAction* actRename = nullptr;
         if (items.size() == 1) {
             actOpenCurrent = menu.addAction("Open in Current Tab");
             actOpenNew     = menu.addAction("Open in New Tab");
             actDuplicate   = menu.addAction("Duplicate");
+            actRename      = menu.addAction("Rename");
             menu.addSeparator();
         }
 
@@ -8430,6 +8374,19 @@ void MainWindow::createWorkspaceDock() {
             if (!structName.isEmpty())
                 newDock->setWindowTitle(structName);
             rebuildWorkspaceModel();
+
+        } else if (chosen && chosen == actRename && items.size() == 1) {
+            // Inline rename. The display is rich ("Name — N"), so set EditRole
+            // to the plain name first (this emits itemChanged while m_wsRenaming
+            // is still false → ignored), then arm the guard and open the inline
+            // editor. The model's itemChanged handler commits on Enter.
+            const auto& item = items[0];
+            QModelIndex srcIdx = m_workspaceProxy->mapToSource(clickedIndex);
+            if (auto* it = m_workspaceModel->itemFromIndex(srcIdx)) {
+                it->setData(item.typeName, Qt::EditRole);
+                m_wsRenaming = true;
+                m_workspaceTree->edit(clickedIndex);
+            }
 
         } else if (chosen && chosen == actDuplicate && items.size() == 1) {
             // Duplicate: deep-copy the struct as a new root with a unique name
@@ -8750,7 +8707,7 @@ void MainWindow::createScannerDock() {
             m_scanDockTitle->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
             QSettings s("Reclass", "Reclass");
-            QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
             f.setFixedPitch(true);
             m_scanDockTitle->setFont(f);
         }
@@ -8863,7 +8820,7 @@ void MainWindow::ensureScannerPanel() {
     m_scannerPanel->applyTheme(ThemeManager::instance().current());
     {
         QSettings settings("Reclass", "Reclass");
-        QString fontName = settings.value("font", "IBM Plex Mono").toString();
+        QString fontName = settings.value("font", "JetBrains Mono").toString();
         QFont f(fontName, 12);
         f.setFixedPitch(true);
         m_scannerPanel->setEditorFont(f);
@@ -8925,7 +8882,7 @@ void MainWindow::createSymbolsDock() {
 
     const auto& t = ThemeManager::instance().current();
     QSettings s("Reclass", "Reclass");
-    QFont monoFont(s.value("font", "IBM Plex Mono").toString(), 10);
+    QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
     // Custom titlebar (matches scanner dock)
@@ -9728,7 +9685,7 @@ int MainWindow::computeWorkspaceDockWidth() const {
     }
     // Compute pixel width: badge(fontH) + gap(4) + name + gap + count pill(~30) + padding(24)
     QSettings s("Reclass", "Reclass");
-    QFont f(s.value("font", "IBM Plex Mono").toString(), 10);
+    QFont f(s.value("font", "JetBrains Mono").toString(), 10);
     f.setFixedPitch(true);
     QFontMetrics fm(f);
     int nameW = fm.horizontalAdvance(QString(maxChars, QChar('W')));
@@ -10673,7 +10630,7 @@ int main(int argc, char* argv[]) {
     // Apply saved font preference before creating any editors
     {
         QSettings settings("Reclass", "Reclass");
-        QString savedFont = settings.value("font", "IBM Plex Mono").toString();
+        QString savedFont = settings.value("font", "JetBrains Mono").toString();
         rcx::RcxEditor::setGlobalFontName(savedFont);
     }
 

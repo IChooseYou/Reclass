@@ -93,7 +93,7 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
     *ok = false;
     const auto& theme = ThemeManager::instance().current();
     QSettings settings("Reclass", "Reclass");
-    QFont editorFont(settings.value("font", "IBM Plex Mono").toString(), 12);
+    QFont editorFont(settings.value("font", "JetBrains Mono").toString(), 12);
     editorFont.setFixedPitch(true);
 
     rcx::ThemedDialog dlg(parent);
@@ -938,14 +938,15 @@ void RcxController::connectEditor(RcxEditor* editor) {
         QByteArray oldBytes = m_doc->provider->isReadable(addr, n)
             ? m_doc->provider->readBytes(addr, n)
             : QByteArray(n, '\0');
+        // User edit — exclude from value history (see m_userEditRanges).
+        m_userEditRanges.append({addr, addr + (uint64_t)n});
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::WriteBytes{addr, oldBytes, bytes}));
         emit statusHint(QStringLiteral("Wrote %1 byte%2 at 0x%3")
             .arg(n).arg(n == 1 ? "" : "s").arg(addr, 0, 16));
     });
 
-    // Editor status-hint forwarder — used by beginByteEdit when it
-    // refuses a cross-row selection.
+    // Editor status-hint forwarder.
     connect(editor, &RcxEditor::statusHintRequested, this,
             [this](const QString& text) { emit statusHint(text); });
 
@@ -2065,12 +2066,26 @@ void RcxController::refresh() {
                         if (shouldRecord)
                             m_lastValueBytes[lm.nodeId] = rawBytes;
                     }
-                    if (shouldRecord)
+                    // Don't record the user's OWN edit. If this node overlaps a
+                    // range the user just wrote, the baseline was still refreshed
+                    // above (byte branch) so it won't read as an external change
+                    // on later ticks — but we skip adding a history entry now.
+                    bool userWrote = false;
+                    for (const auto& r : m_userEditRanges) {
+                        if (addr < r.second && r.first < addr + (uint64_t)sz) {
+                            userWrote = true;
+                            break;
+                        }
+                    }
+                    if (shouldRecord && !userWrote)
                         m_valueHistory[lm.nodeId].record(val);
                     lm.heatLevel = m_valueHistory[lm.nodeId].heatLevel();
                 }
             }
         }
+        // Consume the one-shot user-edit ranges so only the refresh right after
+        // a user write suppresses history; later ticks see an empty list.
+        m_userEditRanges.clear();
     }
 
     // Prune stale selections (nodes removed by undo/redo/delete)
@@ -2118,6 +2133,24 @@ void RcxController::refresh() {
     {
         PROFILE_SCOPE("refresh.tail");
         pushSavedSourcesToEditors();
+        // Keep the grey row band (m_selIds) locked to any active byte
+        // selection. The byte selection is address-based and owns the row
+        // selection while active, but the prune above (and other m_selIds
+        // mutations) can leave m_selIds out of sync with the freshly-composed
+        // covered rows, and the editor's emit dedup (m_lastByteRows) can
+        // suppress the resync. Pull the authoritative covered set straight
+        // from the editor that holds the selection so the grey band always
+        // matches the purple byte highlight on load/edit/undo/redo. Done
+        // before updateCommandRow() so its selectionChanged emit carries the
+        // corrected count too. Guarded on hasByteSelection() so non-byte
+        // selection paths (clicks, type-change-clears-selection) are untouched.
+        for (auto* editor : m_editors) {
+            if (editor->hasByteSelection()) {
+                m_selIds = editor->byteCoveredRows();
+                m_anchorLine = -1;
+                break;
+            }
+        }
         updateCommandRow();
         applySelectionOverlays();
     }
@@ -3312,6 +3345,11 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
         return;
     }
 
+    // Mark this as a user edit so the refresh triggered by the push below
+    // doesn't record it into the node's value history (user edits aren't
+    // "observed changes").
+    m_userEditRanges.append({addr, addr + (uint64_t)writeSize});
+
     // Write succeeded — push undo command (redo will write again, which is harmless)
     m_doc->undoStack.push(new RcxCommand(this,
         cmd::WriteBytes{addr, oldBytes, newBytes}));
@@ -3973,7 +4011,7 @@ static QWidgetAction* makeCycleRow(QMenu* menu,
                                     std::function<void(NodeKind)> onSelect) {
     const auto& theme = ThemeManager::instance().current();
     QSettings s("Reclass", "Reclass");
-    QFont font(s.value("font", "IBM Plex Mono").toString(), 10);
+    QFont font(s.value("font", "JetBrains Mono").toString(), 10);
     font.setFixedPitch(true);
     QString css = QStringLiteral(
         "QPushButton { background: transparent; color: %1;"
@@ -4059,6 +4097,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             m_selIds.insert(clickedId);
             m_anchorLine = line;
             applySelectionOverlays();
+            // Right-click moved the selection here — emit so the status-bar
+            // "N nodes selected" count tracks it. Every other selection-mutation
+            // path emits selectionChanged (most via updateCommandRow); this
+            // direct branch did not, leaving the count stale on the pre-click
+            // value until the next operation.
+            emit selectionChanged(m_selIds.size());
         }
     }
 
@@ -5555,7 +5599,7 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
 
     // Configure and show popup
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "IBM Plex Mono").toString();
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
     auto* sci = editor->scintilla();
@@ -5633,7 +5677,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
 
     // ── Font with zoom ──
     QSettings settings("Reclass", "Reclass");
-    QString fontName = settings.value("font", "IBM Plex Mono").toString();
+    QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
     auto* sci = editor->scintilla();
@@ -6701,6 +6745,13 @@ void RcxController::copySavedSources(const QVector<SavedSourceEntry>& sources, i
     m_savedSources = sources;
     m_activeSourceIdx = activeIdx;
     pushSavedSourcesToEditors();
+    // Notify so the new tab's source icon repaints to reflect the copied
+    // active source (mirrors removeSavedSource). Without this, a tab opened
+    // into an existing project (project_new, forceFreshDoc=false) keeps the
+    // placeholder plug icon for a disconnected saved source until an unrelated
+    // reconcile — the tab icon refresh is wired to documentChanged (the heavy
+    // rebuild handler is deferred + guarded, so emitting here is safe).
+    emit m_doc->documentChanged();
 }
 
 void RcxController::pushSavedSourcesToEditors() {

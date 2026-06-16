@@ -1701,7 +1701,7 @@ static constexpr int IND_UNREADABLE   = 28; // Strike-through (INDIC_STRIKE) in 
                                             // the whole row red. Set from LineMeta::unreadable;
                                             // painted by applyUnreadableHighlight.
 
-static QString g_fontName = "IBM Plex Mono";
+static QString g_fontName = "JetBrains Mono";
 
 static QFont editorFont() {
     QFont f(g_fontName, 12);
@@ -3425,14 +3425,12 @@ void RcxEditor::applyChipButtonOverlay() {
 
 // ── Byte selection (hex preview rows) ──
 //
-// byteAddrAt returns nullopt for anything that isn't an individual hex
-// byte in a hex preview row's value column. The hex value column is laid
-// out as "XX XX XX..." — 2 hex digits per byte plus a 1-char gap, so
-// (col - vs.start) / 3 maps a column to a byte index. valueSpanFor
-// (called by valueSpan) gives a 23-char span for hex rows specifically
-// (see core.h kColValue branch), which covers byte 0..7 at columns
-// 0..22 inclusive. Out-of-range clicks (past byte 7 of a Hex64, etc.)
-// short-circuit to nullopt and fall through to row-click handling.
+// byteAddrAt returns the absolute address of the individual hex byte under
+// (line, col) in a hex preview row's VALUE column. The hex value column is
+// "XX XX XX..." — 2 hex digits + a 1-char gap per byte — so (col - vs.start)/3
+// is the byte index. Returns nullopt for anything else (incl. the ASCII
+// preview column), so dragging over the ASCII column falls through to normal
+// node/row selection rather than per-byte selection.
 std::optional<uint64_t> RcxEditor::byteAddrAt(int line, int col) const {
     if (line < 0 || line >= m_meta.size()) return std::nullopt;
     const LineMeta& lm = m_meta[line];
@@ -3449,16 +3447,12 @@ std::optional<uint64_t> RcxEditor::byteAddrAt(int line, int col) const {
 }
 
 void RcxEditor::applyByteSelectionOverlay() {
-    // Paint IND_BYTE_SEL across the digits of every selected byte on
-    // every hex preview row that overlaps m_byteSel. INDIC_TEXTFORE
-    // recolours character pixels; the inter-byte spaces have no
-    // pixels and stay visually unaffected, which is the desired
-    // outcome (selected bytes are coloured, gaps are not).
+    // Paint IND_BYTE_SEL (TEXTFORE) across the digits of every selected byte on
+    // every hex preview row that overlaps m_byteSel. Byte selection is a
+    // hex-column-only feature; the ASCII preview column is not selectable.
     long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
-                         (long)IND_BYTE_SEL);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE,
-                         (long)0, docLen);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_BYTE_SEL);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
 
     // Collect the encoded selId of every hex row the byte selection
     // overlaps; mirrored into the controller's row selection below so the
@@ -3483,15 +3477,18 @@ void RcxEditor::applyByteSelectionOverlay() {
             int firstByte = static_cast<int>(qMax(selLo, lineLo) - lineLo);
             int lastByte  = static_cast<int>(qMin(selHi, lineHi) - lineLo);
 
-            // Paint IND_BYTE_SEL across the entire selected run on this
-            // row, including inter-byte spaces. INDIC_TEXTFORE only
-            // colours characters with pixels — the spaces stay
-            // visually unaffected but are bracketed by coloured
-            // digits, which reads as a contiguous selection.
+            // Recolor the selected hex digits (3 chars/byte). The run spans the
+            // digits incl. inter-byte spaces; INDIC_TEXTFORE only tints glyph
+            // pixels, so the gaps read as contiguous.
             int hiCol = vs.start + (lastByte - 1) * 3 + 2;
             fillIndicatorCols(IND_BYTE_SEL, i, vs.start + firstByte * 3, hiCol);
         }
     }
+
+    // Expose the freshly-computed covered set so the controller can pull it
+    // in its refresh tail (byteCoveredRows()) and reconcile m_selIds — kept
+    // current every call, even when the emit below is deduped/suppressed.
+    m_byteCoveredRows = covered;
 
     // Mirror the covered rows into the controller's row selection so the
     // grey M_SELECTED highlight tracks the byte selection. De-duped (only
@@ -5657,8 +5654,9 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return false;
     case Qt::Key_Return:
     case Qt::Key_Enter:
-        // Byte selection → start hex-overwrite edit on the byte range.
-        // beginByteEdit emits statusHintRequested on cross-row refusal.
+        // Byte selection → start hex-overwrite edit on the byte range. The
+        // edit spans whatever hex rows the selection covers (multi-node,
+        // mid-node).
         if (m_byteSel.has_value()) {
             beginByteEdit();
             return true;
@@ -6496,7 +6494,7 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
         long pos = posFromCol(m_sci, line, col);
         replaceCharAt(pos, (char)ch.toLatin1());
 
-        // Advance cursor
+        // Advance cursor (single-node ASCII edit: clamp at the last char).
         int nextCol = col + 1;
         if (nextCol >= spanEnd) nextCol = spanEnd - 1;
         m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,

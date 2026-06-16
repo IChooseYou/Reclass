@@ -379,6 +379,12 @@ private:
     // register as a value change and spuriously light the heatmap / fire the
     // previous-values popup.
     QHash<uint64_t, QByteArray> m_lastValueBytes;
+    // Absolute [lo,hi) byte ranges the USER just wrote (inline value edit or
+    // hex/ascii byte edit). Consumed by the very next value-history pass: nodes
+    // overlapping these ranges have their baseline updated but are NOT recorded
+    // into value history — the user's own edit must not appear as a tracked
+    // change. Cleared each refresh after the value-history pass.
+    QVector<QPair<uint64_t, uint64_t>> m_userEditRanges;
     bool            m_trackValues = true;
     int             m_valueTrackCooldown = 0; // suppress value recording for N refresh cycles after clear
     uint64_t        m_refreshGen = 0;

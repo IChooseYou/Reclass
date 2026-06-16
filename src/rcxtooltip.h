@@ -38,7 +38,7 @@ class RcxTooltip : public QWidget {
 public:
     static constexpr int kArrowH = 8;
     static constexpr int kArrowW = 14;
-    static constexpr int kRadius = 6;
+    static constexpr int kRadius = 0;  // square corners — matches the app's no-rounded-corner convention (arcTo no-ops at r=0)
     static constexpr int kPad    = 10;
     static constexpr int kGap    = 4;
     static constexpr int kMaxW   = 550;
