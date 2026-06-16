@@ -2008,6 +2008,8 @@ private:
 // background) so they're invisible; they exist purely to set the edge cursor
 // and start a native resize, which preserves OS snap/aero behaviour.
 class ResizeEdge : public QWidget {
+    Q_OBJECT  // Qt 6.8 findChildren<ResizeEdge*> (repositionResizeWidgets) hard-
+              // requires Q_OBJECT via a static_assert 6.5 lacked.
 public:
     ResizeEdge(Qt::Edges edges, Qt::CursorShape cursor, QWidget* parent)
         : QWidget(parent), m_edges(edges) {
