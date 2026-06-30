@@ -83,7 +83,7 @@ jobs:
           export PATH="$IQTA_TOOLS/mingw1310_64/bin:$PATH"
           mkdir -p release
           cp build/Reclass.exe release/
-          cp build/ReclassMcpBridge.exe release/
+          cp build/REECLASSMcpBridge.exe release/
           cp build/*.dll release/ 2>/dev/null || true
           cp -r build/platforms release/ 2>/dev/null || true
           cp -r build/styles release/ 2>/dev/null || true
@@ -153,7 +153,7 @@ jobs:
           # Build AppDir structure
           mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
           cp build/Reclass AppDir/usr/bin/
-          cp build/ReclassMcpBridge AppDir/usr/bin/
+          cp build/REECLASSMcpBridge AppDir/usr/bin/
           cp -r build/themes AppDir/usr/bin/ 2>/dev/null || true
           cp -r build/examples AppDir/usr/bin/ 2>/dev/null || true
           mkdir -p AppDir/usr/bin/Plugins

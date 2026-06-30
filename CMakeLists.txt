@@ -263,14 +263,14 @@ if(WIN32)
     endforeach()
 endif()
 
-add_executable(ReclassMcpBridge tools/rcx-mcp-stdio.cpp)
-target_link_libraries(ReclassMcpBridge PRIVATE ${QT}::Core ${QT}::Network)
+add_executable(REECLASSMcpBridge tools/rcx-mcp-stdio.cpp)
+target_link_libraries(REECLASSMcpBridge PRIVATE ${QT}::Core ${QT}::Network)
 if(APPLE)
-    add_custom_command(TARGET ReclassMcpBridge POST_BUILD
+    add_custom_command(TARGET REECLASSMcpBridge POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
-            $<TARGET_FILE:ReclassMcpBridge>
-            $<TARGET_FILE_DIR:Reclass>/ReclassMcpBridge
-        COMMENT "Bundling ReclassMcpBridge into Reclass.app"
+            $<TARGET_FILE:REECLASSMcpBridge>
+            $<TARGET_FILE_DIR:Reclass>/REECLASSMcpBridge
+        COMMENT "Bundling REECLASSMcpBridge into Reclass.app"
     )
 endif()
 
