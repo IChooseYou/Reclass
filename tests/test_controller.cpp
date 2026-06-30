@@ -148,6 +148,55 @@ private slots:
         delete doc2;
     }
 
+    // ── Test: expanded-pointer footer carries append pills that target the
+    //    REFERENCED class (not the 8-byte pointer → no invalid child) ──
+    void testExpandedPointerFooterPillsTargetRefClass() {
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "Root";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+        Node cls; cls.kind = NodeKind::Struct; cls.structTypeName = "C"; cls.parentId = 0;
+        uint64_t clsId = m_doc->tree.nodes[m_doc->tree.addNode(cls)].id;
+        Node c0; c0.kind = NodeKind::Hex64; c0.name = "c0"; c0.parentId = clsId; c0.offset = 0;
+        m_doc->tree.addNode(c0);
+        Node c1; c1.kind = NodeKind::Hex64; c1.name = "c1"; c1.parentId = clsId; c1.offset = 8;
+        m_doc->tree.addNode(c1);
+        Node p; p.kind = NodeKind::Pointer64; p.name = "p"; p.parentId = rootId; p.offset = 0;
+        p.refId = clsId; p.collapsed = false;  // EXPANDED inline
+        uint64_t pId = m_doc->tree.nodes[m_doc->tree.addNode(p)].id;
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        // The expanded pointer's footer line carries the pills.
+        bool footerHasPills = false;
+        const ComposeResult& res = m_ctrl->lastResult();
+        const QStringList lines = res.text.split('\n');
+        for (int i = 0; i < res.meta.size(); ++i)
+            if (res.meta[i].lineKind == LineKind::Footer
+                && res.meta[i].nodeKind == NodeKind::Pointer64
+                && i < lines.size()
+                && lines[i].contains(QStringLiteral("+1 +10h +100h +1000h Trim Top")))
+                footerHasPills = true;
+        QVERIFY2(footerHasPills, "expanded pointer footer should carry the append pills");
+
+        // "+1" targets the refId class, NOT the pointer (no invalid child).
+        int before = m_doc->tree.childrenOf(clsId).size();
+        emit m_editor->appendSingleFieldRequested(pId);
+        QCOMPARE(m_doc->tree.childrenOf(clsId).size(), before + 1);
+        QVERIFY2(m_doc->tree.childrenOf(pId).isEmpty(),
+                 "pointer must NOT receive a child");
+
+        // "+10h" (appendBytes) also targets the refId class.
+        int before2 = m_doc->tree.childrenOf(clsId).size();
+        emit m_editor->appendBytesRequested(pId, 0x10);
+        QVERIFY2(m_doc->tree.childrenOf(clsId).size() > before2,
+                 "appendBytes should grow the refId class");
+        QVERIFY2(m_doc->tree.childrenOf(pId).isEmpty(),
+                 "pointer must still have no child");
+    }
+
     // ── Test: setNodeValue writes bytes to provider ──
     void testSetNodeValueWritesData() {
         // Find field_u32 (index 1, child of root at index 0)

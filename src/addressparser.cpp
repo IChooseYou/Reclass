@@ -177,7 +177,12 @@ private:
             uint64_t rhs = 0;
             if (!parseExpression(rhs))
                 return false;
-            result = isLeft ? (result << rhs) : (result >> rhs);
+            // A shift >= the operand width is undefined behavior in C++; the
+            // mathematically meaningful result for a 64-bit value is 0.
+            if (rhs >= 64)
+                result = 0;
+            else
+                result = isLeft ? (result << rhs) : (result >> rhs);
         }
         return true;
     }

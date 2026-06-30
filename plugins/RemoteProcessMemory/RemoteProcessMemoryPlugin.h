@@ -37,6 +37,16 @@ public:
     QString  getSymbol(uint64_t addr) const override;
     uint64_t symbolToAddress(const QString& n) const override;
 
+    // Expose the cached module list so RTTI / symbol resolution works against
+    // this provider (base Provider::enumerateModules() returns empty).
+    QVector<ModuleEntry> enumerateModules() const override {
+        QVector<ModuleEntry> result;
+        result.reserve(m_modules.size());
+        for (const auto& m : m_modules)
+            result.push_back(ModuleEntry{m.name, QString(), m.base, m.size});
+        return result;
+    }
+
     uint32_t pid() const { return m_pid; }
 
 private:

@@ -71,7 +71,7 @@ protected:
         QFont titleF = font(); titleF.setPixelSize(30); titleF.setWeight(QFont::Light);
         p.setFont(titleF); p.setPen(m_t.text);
         QFontMetrics titleFm(titleF);
-        p.drawText(kLeftMargin, y + titleFm.ascent(), "Reclass");
+        p.drawText(kLeftMargin, y + titleFm.ascent(), "re-class");
         y += titleFm.height() + 24;
 
         // ── Headings (left + right at same y) ──

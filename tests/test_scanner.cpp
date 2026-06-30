@@ -2924,9 +2924,22 @@ void TestScanner::selfAttach_findMutateRevalidate() {
     // (privateOnly + skipSystemModules + user-mode VA cap) actually
     // converge on user data instead of getting lost in DLL .rdata.
     struct alignas(8) Marker { uint64_t magic; };
-    auto marker = std::make_unique<Marker>();
+    // Plant the marker in a DEDICATED VirtualAlloc'd MEM_PRIVATE RW page rather
+    // than the C++ heap. The scanner reads each region with a single
+    // ReadProcessMemory; the heap's large segments contain guard/uncommitted
+    // pages, so that whole-region read can fail (the logs showed a 912 KB region
+    // read failure) and silently drop the marker — while a stack copy of the
+    // literal becomes the lone hit. That made this test flaky ("scan didn't
+    // return the planted heap address"). A dedicated committed RW page is
+    // private, isolated, and cleanly readable, so the scan reliably finds it.
+    auto vfree = [](void* p) { if (p) VirtualFree(p, 0, MEM_RELEASE); };
+    std::unique_ptr<void, decltype(vfree)> page(
+        VirtualAlloc(nullptr, sizeof(Marker), MEM_COMMIT | MEM_RESERVE,
+                     PAGE_READWRITE), vfree);
+    QVERIFY(page);
+    auto* marker = static_cast<Marker*>(page.get());
     marker->magic = 0xDEADBEEFCAFEBABEULL;
-    const uint64_t markerAddr = reinterpret_cast<uintptr_t>(marker.get());
+    const uint64_t markerAddr = reinterpret_cast<uintptr_t>(marker);
 
     auto prov = std::make_shared<WinSelfProvider>();
     QVERIFY(prov->handle);

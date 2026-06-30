@@ -224,6 +224,21 @@ public:
     uint64_t viewRootId() const { return m_viewRootId; }
     void scrollToNodeId(uint64_t nodeId);
 
+    // ── Drill-down breadcrumb (inline-expansion focus path) ──
+    // The breadcrumb is CLICK-driven: handleNodeClick sets the focus path to
+    // the chain of expanded typed pointers containing the clicked node, so
+    // selecting a typed pointer (or any row inside its inline expansion) adds
+    // it to the breadcrumb. No row affordance / follow-arrow.
+    // Breadcrumb crumb clicked (crumbIndex: 0 = root class, i = the class shown
+    // by focus pointer i-1): collapse everything below that class and scroll to
+    // it. The view root never changes.
+    void collapseToFocus(int crumbIndex);
+    const QVector<uint64_t>& focusPath() const { return m_focusPath; }  // test accessor
+    // The focus-path chain that a selection on `nodeId` produces (the expanded
+    // typed pointers from the view root down to the one containing it). Public
+    // for tests; handleNodeClick assigns its result to m_focusPath.
+    QVector<uint64_t> focusChainToNode(uint64_t nodeId) const;
+
     // Bookmarks
     bool navigateToFormula(const QString& formula, QString* errOut = nullptr);
     void addBookmark(const QString& name, const QString& formula);
@@ -330,6 +345,43 @@ private:
     bool               m_showEnumChips = true;     // chip toggle, default ON
     bool               m_readOnlyOverride = false; // tutorial safety; see header
     uint64_t           m_viewRootId = 0;
+    QVector<uint64_t>  m_focusPath;    // breadcrumb focus: chain of expanded
+                                       // typed-pointer ids from the root class
+                                       // down to the deepest drilled one.
+
+    // Drill target for a node — the struct id following it navigates to
+    // (drillTargetId on the resolved node). 0 = nothing to follow.
+    uint64_t resolveDefinitionTarget(int nodeIdx) const;
+    // Top-most struct of a node's parentId chain (the root that contains it).
+    // Used to place a drilled pointer at the right focus depth, since a
+    // virtually-expanded member's parentId points at its struct root, NOT the
+    // pointer that expanded it (the refId hop isn't in the parentId chain).
+    uint64_t rootStructOf(uint64_t nodeId) const;
+    // Reconstruct the chain of expanded pointers from the view root down to
+    // `pid` (inclusive) by following refId hops — so ancestors expanded via the
+    // fold margin (which never grew m_focusPath) are still represented. Empty
+    // if no expanded chain reaches the view root (orphan / cycle).
+    QVector<uint64_t> focusChainTo(uint64_t pid) const;
+    // Trim m_focusPath at the first entry that is gone, no longer a drillable
+    // pointer, collapsed, or whose container breaks the chain (e.g. the user
+    // fold-collapsed an ancestor). Keeps the breadcrumb honest each refresh.
+    void reconcileFocusPath();
+    // Display label for a class id (structTypeName / name / fallback). For
+    // id 0 / show-all, the first root struct name.
+    QString classLabelOf(uint64_t id) const;
+    // Build the dotted "class.field" Crumb list from m_focusPath and push to
+    // every editor's breadcrumb.
+    void pushBreadcrumb();
+
+    // ── Class creation (one canonical scheme, shared by every creator) ──
+    // Unique struct type name: `base`, else `base_2`, `base_3`, …
+    QString uniqueStructName(const QString& base = QStringLiteral("NewClass")) const;
+    // Create a root struct (parentId 0) named `typeName` with `keyword`
+    // ("class"/"struct"/…, empty = struct) and `fieldCount` arch-sized hex
+    // children; pushes the Insert commands onto the CURRENT undo macro and
+    // returns the new struct id. Caller wraps in beginMacro + m_suppressRefresh.
+    uint64_t createRootStruct(const QString& typeName, const QString& keyword,
+                              int fieldCount);
 
     // ── Saved sources for quick-switch ──
     QVector<SavedSourceEntry> m_savedSources;

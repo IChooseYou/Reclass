@@ -464,43 +464,50 @@ QString WinDbgMemoryProvider::getSymbol(uint64_t addr) const
 #endif
 }
 
+QVector<rcx::Provider::ModuleEntry> WinDbgMemoryProvider::queryModules() const
+{
+    QVector<ModuleEntry> modules;
+#ifdef _WIN32
+    if (!m_symbols) return modules;
+    dispatchToOwner([&]() {
+        ULONG loaded = 0, unloaded = 0;
+        if (FAILED(m_symbols->GetNumberModules(&loaded, &unloaded)))
+            return;
+        for (ULONG i = 0; i < loaded; i++) {
+            ULONG64 modBase = 0;
+            if (FAILED(m_symbols->GetModuleByIndex(i, &modBase)))
+                continue;
+            DEBUG_MODULE_PARAMETERS params = {};
+            if (FAILED(m_symbols->GetModuleParameters(1, &modBase, 0, &params)))
+                continue;
+            char nameBuf[256] = {};
+            ULONG nameSize = 0;
+            m_symbols->GetModuleNames(i, 0,
+                                      nullptr, 0, nullptr,
+                                      nameBuf, sizeof(nameBuf), &nameSize,
+                                      nullptr, 0, nullptr);
+            modules.append(ModuleEntry{QString::fromUtf8(nameBuf), QString(),
+                                       modBase, params.Size});
+        }
+    });
+#endif
+    return modules;
+}
+
+QVector<rcx::Provider::ModuleEntry> WinDbgMemoryProvider::enumerateModules() const
+{
+    return queryModules();
+}
+
 QVector<rcx::MemoryRegion> WinDbgMemoryProvider::enumerateRegions() const
 {
     QVector<rcx::MemoryRegion> regions;
 #ifdef _WIN32
     if (!m_dataSpaces) return regions;
 
-    // Enumerate modules — used for tagging (user-mode) or as the primary
-    // source of regions (kernel-mode, where QueryVirtual is unavailable).
-    struct ModInfo { uint64_t base; uint64_t size; QString name; };
-    QVector<ModInfo> modules;
-
-    if (m_symbols) {
-        dispatchToOwner([&]() {
-            ULONG loaded = 0, unloaded = 0;
-            if (FAILED(m_symbols->GetNumberModules(&loaded, &unloaded)))
-                return;
-            for (ULONG i = 0; i < loaded; i++) {
-                ULONG64 modBase = 0;
-                if (FAILED(m_symbols->GetModuleByIndex(i, &modBase)))
-                    continue;
-                DEBUG_MODULE_PARAMETERS params = {};
-                if (FAILED(m_symbols->GetModuleParameters(1, &modBase, 0, &params)))
-                    continue;
-                char nameBuf[256] = {};
-                ULONG nameSize = 0;
-                m_symbols->GetModuleNames(i, 0,
-                                          nullptr, 0, nullptr,
-                                          nameBuf, sizeof(nameBuf), &nameSize,
-                                          nullptr, 0, nullptr);
-                ModInfo mi;
-                mi.base = modBase;
-                mi.size = params.Size;
-                mi.name = QString::fromUtf8(nameBuf);
-                modules.append(mi);
-            }
-        });
-    }
+    // Loaded modules — used for tagging (user-mode) or as the primary source
+    // of regions (kernel-mode, where QueryVirtual is unavailable).
+    QVector<ModuleEntry> modules = queryModules();
 
     // Try QueryVirtual first (user-mode debugging / user-mode dumps).
     // MSDN: "This method is not available in kernel-mode debugging."

@@ -1069,7 +1069,7 @@ static QString sciGetLineText(QsciScintilla* sci, int line) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     PROFILE_SCOPE("MainWindow::ctor");
-    setWindowTitle("Reclass");
+    setWindowTitle("re-class");
     // Initial size +30% over the legacy 1080×720 to give docks + editor
     // more breathing room on first launch.
     resize(1080, 720);
@@ -1093,7 +1093,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_menuBar->setNativeMenuBar(false);
 #endif
 #else
-    setWindowTitle(QStringLiteral("Reclass"));
+    setWindowTitle(QStringLiteral("re-class"));
     setUnifiedTitleAndToolBarOnMac(true);
     m_menuBar = menuBar();
     m_menuBar->setNativeMenuBar(true);
@@ -1942,7 +1942,7 @@ void MainWindow::createMenus() {
                     makeIcon(":/vsicons/question.svg"), this,
                     &MainWindow::showShortcutsDialog);
     help->addSeparator();
-    Qt5Qt6AddAction(help, "&About Reclass", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
+    Qt5Qt6AddAction(help, "&About re-class", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
 }
 
 // ── Themed resize grip (replaces ugly default QSizeGrip) ──
@@ -3084,7 +3084,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     reclassPageLay->setContentsMargins(0, 0, 0, 0);
     reclassPageLay->setSpacing(0);
     reclassPageLay->addWidget(pane.editorContainer);
-    pane.tabWidget->addTab(pane.reclassPage, "Reclass");  // index 0
+    pane.tabWidget->addTab(pane.reclassPage, "re-class");  // index 0
 
     // Create per-pane rendered C++ view with find bar. Same device-exact
     // outline as the hex editor (EditorContainer) so the Code view reads as a
@@ -5387,7 +5387,7 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
 
 void MainWindow::about() {
     ThemedDialog dlg(this);
-    dlg.setWindowTitle(QStringLiteral("About Reclass"));
+    dlg.setWindowTitle(QStringLiteral("About re-class"));
     dlg.setFixedSize(420, 420);
     auto* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(20, 16, 20, 16);
@@ -5417,7 +5417,7 @@ void MainWindow::about() {
     ack->setWordWrap(true);
     ack->setText(QStringLiteral(
         "<div style='color:%1;font-size:11px;line-height:140%%;'>"
-        "<p>Reclass uses the following open-source software. Many thanks "
+        "<p>re-class uses the following open-source software. Many thanks "
         "to their authors and maintainers.</p>"
         "<ul style='margin-left:14px;padding-left:0;'>"
         "<li><a href='https://www.qt.io/' style='color:%2;'>Qt</a> "
@@ -6198,7 +6198,7 @@ void MainWindow::updateEmptyWorkspaceVisibility() {
 
 void MainWindow::updateWindowTitle() {
 #ifdef __APPLE__
-    setWindowTitle(QStringLiteral("Reclass"));
+    setWindowTitle(QStringLiteral("re-class"));
 #else
     QString title;
     QDockWidget* activeDock = m_activeDocDock;
@@ -6206,9 +6206,9 @@ void MainWindow::updateWindowTitle() {
         auto& tab = m_tabs[activeDock];
         QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
         if (tab.doc->modified) name += " *";
-        title = name + " - Reclass";
+        title = name + " - re-class";
     } else {
-        title = "Reclass";
+        title = "re-class";
     }
     setWindowTitle(title);
 #endif
@@ -8990,6 +8990,14 @@ void MainWindow::createSymbolsDock() {
             }
         }
     });
+
+    // The symbol panel's empty-area context menu emits "Load PDB..." /
+    // "Add bookmark..." but they were never connected — wire them to the
+    // existing handlers so the menu items actually work.
+    connect(m_unifiedSymbols, &rcx::UnifiedSymbolPanel::loadPdbRequested,
+            this, &MainWindow::importPdb);
+    connect(m_unifiedSymbols, &rcx::UnifiedSymbolPanel::addBookmarkRequested,
+            this, &MainWindow::promptAddBookmark);
 
     m_symbolsDock->setWidget(container);
     // Symbols dock is taller and needs room for module list + symbol tree.

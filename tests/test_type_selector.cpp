@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QVBoxLayout>
 #include <QToolButton>
+#include <QPushButton>
 #include <QButtonGroup>
 #include <QLineEdit>
 #include <QListView>
@@ -486,7 +487,7 @@ private slots:
         // Verify the entry came through — check the fullText (second arg)
         QCOMPARE(typeSpy.at(0).at(1).toString(), QStringLiteral("B"));
 
-        emit popup.createNewTypeRequested(0, 0);
+        emit popup.createNewTypeRequested(0, 0, QString(), QString());
         QCOMPARE(createSpy.count(), 1);
     }
 
@@ -542,11 +543,14 @@ private slots:
         QVERIFY(!simple.contains("vec3"));             // long-tail hidden
         QVERIFY(!simple.contains("UNICODE_STRING"));   // std-lib section hidden
 
-        // The expand toggle row is present in simple mode.
-        bool hasToggle = false;
+        // Collapsible section headers replace the old global "Show all types"
+        // toggle: long-tail groups (Vec, std-lib "Common types") appear as
+        // collapsed headers whose members are hidden until expanded.
+        bool hasCollapsibleSection = false;
         for (const auto& e : popup.filteredTypes())
-            if (e.isExpandToggle) { hasToggle = true; break; }
-        QVERIFY2(hasToggle, "expected a 'Show all types' toggle row");
+            if (e.entryKind == TypeEntry::Section && e.sectionCollapsible)
+                { hasCollapsibleSection = true; break; }
+        QVERIFY2(hasCollapsibleSection, "expected collapsible section headers");
 
         // Filtering surfaces hidden types even though we're in simple mode.
         auto* filterEdit = popup.findChild<QLineEdit*>();
@@ -778,11 +782,12 @@ private slots:
         QApplication::processEvents();
         QCOMPARE(dismissSpy.count(), 1);
 
-        // 2) A committed pick (via "+ New") must NOT emit dismissed() again.
-        QToolButton* newBtn = nullptr;
-        for (auto* b : popup.findChildren<QToolButton*>())
+        // 2) A committed pick (via "New" button) must NOT emit dismissed() again.
+        // The create/OK buttons are DialogButtons (QPushButton), not QToolButton.
+        QPushButton* newBtn = nullptr;
+        for (auto* b : popup.findChildren<QPushButton*>())
             if (b->text().contains("New")) { newBtn = b; break; }
-        QVERIFY2(newBtn, "Could not find '+ New' button");
+        QVERIFY2(newBtn, "Could not find 'New' button");
 
         QSignalSpy createSpy(&popup, &TypeSelectorPopup::createNewTypeRequested);
         popup.show();
@@ -1548,25 +1553,19 @@ private slots:
     void testSetModifierPreselects() {
         TypeSelectorPopup popup;
 
-        // Test * preselection
+        // The segmented control's QButtonGroup ids are 0=Value/1=Pointer/2=Array;
+        // the legacy modifier id (1=*, 2=**, 3=[]) is exposed via currentModId().
         popup.setMode(TypePopupMode::FieldType);
-        popup.setModifier(1);
-        auto* btnGroup = popup.findChild<QButtonGroup*>();
-        QVERIFY(btnGroup);
-        QCOMPARE(btnGroup->checkedId(), 1);
+        popup.setModifier(1);                     // *
+        QCOMPARE(popup.currentModId(), 1);
 
-        // Test ** preselection
         popup.setMode(TypePopupMode::FieldType);
-        popup.setModifier(2);
-        QCOMPARE(btnGroup->checkedId(), 2);
+        popup.setModifier(2);                     // ** (Pointer + ×2 depth)
+        QCOMPARE(popup.currentModId(), 2);
 
-        // Test [n] preselection with count
         popup.setMode(TypePopupMode::FieldType);
-        popup.setModifier(3, 8);
-        QCOMPARE(btnGroup->checkedId(), 3);
-        auto* countEdit = popup.findChild<QLineEdit*>(QStringLiteral("arrayCountEdit"));
-        // Array count edit may not have objectName set; find via parent
-        // Just verify button group is correct
+        popup.setModifier(3, 8);                  // [8]
+        QCOMPARE(popup.currentModId(), 3);
     }
 
     // ── isValidPrimitivePtrTarget ──
@@ -1998,14 +1997,15 @@ private slots:
         QVERIFY(model != nullptr);
         QStringList items = model->stringList();
 
-        // Should contain kind-group section headers (Int/Bool for int32_t, Type for struct/enum)
+        // Should contain kind-group section headers (Int/Bool for int32_t,
+        // "Your classes" for the struct/enum composites).
         bool hasIntSection = false, hasTypeSection = false;
         for (const auto& item : items) {
             if (item.contains(QStringLiteral("Int"))) hasIntSection = true;
-            if (item.contains(QStringLiteral("Type"))) hasTypeSection = true;
+            if (item.contains(QStringLiteral("Your classes"))) hasTypeSection = true;
         }
         QVERIFY2(hasIntSection, "Missing 'Int' section header");
-        QVERIFY2(hasTypeSection, "Missing 'Type' section header");
+        QVERIFY2(hasTypeSection, "Missing 'Your classes' section header");
     }
 
     // ── Test: struct embed auto-selects the current composite in popup ──
@@ -2082,13 +2082,12 @@ private slots:
 
         // ── Plain (no modifier) ──
         popup.setModifier(0);
-        auto* createBtn = popup.findChild<QToolButton*>(QString(), Qt::FindDirectChildrenOnly);
-        // Find the "+ New" button by iterating children
-        QToolButton* newBtn = nullptr;
-        for (auto* btn : popup.findChildren<QToolButton*>()) {
+        // The create button is a DialogButton (QPushButton), not QToolButton.
+        QPushButton* newBtn = nullptr;
+        for (auto* btn : popup.findChildren<QPushButton*>()) {
             if (btn->text().contains("New")) { newBtn = btn; break; }
         }
-        QVERIFY2(newBtn, "Could not find '+ New' button in popup");
+        QVERIFY2(newBtn, "Could not find 'New' button in popup");
 
         newBtn->click();
         QCOMPARE(spy.count(), 1);

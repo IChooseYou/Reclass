@@ -130,6 +130,10 @@ uint64_t SymbolStore::resolve(const QString& token, const Provider* provider, bo
         if (moduleBase == 0)
             moduleBase = getModuleBase(provider, modPart);
 
+        // Module not loaded in the target — the symbol's RVA alone is not a
+        // valid address. Report "unresolved" instead of a bogus 0+rva.
+        if (moduleBase == 0)
+            return 0;
         *ok = true;
         return moduleBase + rva;
     }
@@ -152,6 +156,9 @@ uint64_t SymbolStore::resolve(const QString& token, const Provider* provider, bo
 
     if (matches == 1) {
         uint64_t moduleBase = getModuleBase(provider, foundModule);
+        // Module not loaded — RVA alone is not a valid address (see above).
+        if (moduleBase == 0)
+            return 0;
         *ok = true;
         return moduleBase + foundRva;
     }

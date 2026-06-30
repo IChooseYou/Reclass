@@ -618,11 +618,18 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             // 4. Comment — user-authored Node::comment, falls back to
             //    state.symbolLookup() for the field's OWN address (not
             //    the pointer's value — that's the Symbol chip above).
+            //    The own-address fallback is SUPPRESSED on pointer/fnptr rows:
+            //    the value's Symbol chip already annotates where it points, so
+            //    a second "module+0x<slot-rva>" of the pointer's own slot was
+            //    just redundant noise ("why two addresses" — user). Data fields
+            //    keep the fallback (a named global at that address is useful);
+            //    user-authored comments always show.
             if (state.showComments) {
                 QString commentText;
                 if (!node.comment.isEmpty())
                     commentText = node.comment;
-                else if (state.symbolLookup) {
+                else if (state.symbolLookup
+                         && !isPointerKind(node.kind) && !isFuncPtr(node.kind)) {
                     QString sym = state.symbolLookup(absAddr);
                     if (!sym.isEmpty())
                         commentText = sym;
@@ -1198,9 +1205,13 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                     pushPtrChip(ChipKind::Comment, commentText,
                                 [](LineChip&) {});
                 }
+                // Breadcrumb drilling is click-driven (selecting a typed
+                // pointer or any row inside its inline expansion adds it to the
+                // breadcrumb) — no trailing affordance glyph on the row.
                 if (state.braceWrap && !effectiveCollapsed && ptrText.endsWith(QChar('{'))) {
                     ptrText.chop(1);
                     while (ptrText.endsWith(' ')) ptrText.chop(1);
+                    const uint32_t hdrMarkerMask = lm.markerMask;  // capture before move
                     state.emitLine(ptrText, std::move(lm));
                     LineMeta braceLm;
                     braceLm.nodeIdx   = nodeIdx;
@@ -1208,7 +1219,7 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                     braceLm.depth     = depth;
                     braceLm.lineKind  = LineKind::Footer;  // tree connectors align with closing }
                     braceLm.foldLevel = computeFoldLevel(depth, true);
-                    braceLm.markerMask = lm.markerMask;
+                    braceLm.markerMask = hdrMarkerMask;  // (was a use-after-move read of lm)
                     state.emitLine(fmt::indent(depth) + QStringLiteral("{"), std::move(braceLm));
                 } else {
                     state.emitLine(ptrText, std::move(lm));
@@ -1302,7 +1313,15 @@ void composeNode(ComposeState& state, const NodeTree& tree,
 
             state.currentPtrBase = savedPtrBase;
 
-            // Footer for pointer fold
+            // Footer for pointer fold. Carries the same append/trim pills as an
+            // embedded-struct footer so the user can grow/trim the referenced
+            // class straight from the expanded pointer's closing brace. nodeKind
+            // stays Pointer64 (so the pointer-footer lookups keep working) and
+            // nodeId stays the pointer — the controller's append/trim handlers
+            // already redirect a childless pointer-with-refId to its refId
+            // class, so the pills act on the referenced class, not the 8-byte
+            // pointer (which is what previously produced an invalid child).
+            // Kept as "}" (not "};") to match the pointer fold's "{" header.
             {
                 LineMeta lm;
                 lm.nodeIdx   = nodeIdx;
@@ -1313,7 +1332,13 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 lm.offsetText.clear();
                 lm.foldLevel = computeFoldLevel(depth, false);
                 lm.markerMask = 0;
-                state.emitLine(fmt::indent(depth) + QStringLiteral("}"), std::move(lm));
+                QString footerText = fmt::indent(depth)
+                    + QStringLiteral("}  +1 +10h +100h +1000h Trim Top");
+                int refSz = tree.structSpan(node.refId, &state.childMap);
+                if (refSz > 0)
+                    footerText += QStringLiteral("  // 0x%1 (%2)")
+                        .arg(QString::number(refSz, 16).toUpper()).arg(refSz);
+                state.emitLine(footerText, std::move(lm));
             }
         }
         return;

@@ -24,6 +24,7 @@
 #include "themes/thememanager.h"
 #include "widgets/category_chip.h"
 #include "widgets/fuzzy_match.h"
+#include "widgets/dialog_button.h"
 #include "rcxtooltip.h"
 #include "fontutil.h"
 #include <QSettings>
@@ -175,6 +176,7 @@ public:
     int m_padL   = 4;    // left inset before icon
     int m_pad    = 4;    // tight gap (icon ↔ name)
     int m_gap    = 6;    // loose gap (between right-side columns: bar / size / pad)
+    int m_indent = 16;   // item inset under a section header (the "tab")
     void recomputeLayout() {
         const int h = m_fm.height();
         // Scale linearly off the default 10 pt JetBrains Mono row
@@ -186,6 +188,7 @@ public:
         m_padL   = qMax(4, h * 4 / 14);
         m_pad    = qMax(4, h * 4 / 14);
         m_gap    = qMax(6, h * 6 / 14);
+        m_indent = qMax(16, h * 16 / 14);
         m_barW   = qMax(32, h * 32 / 14);
         m_szCol  = m_sfm.horizontalAdvance(QStringLiteral("9999B")) + 4;
         // m_maxSz is a logical normalization value, not a pixel; keep at 64
@@ -232,22 +235,73 @@ public:
             painter->fillRect(r, t.hover);
         }
 
-        // ── Section header: pip + left-aligned text ──
+        // ── Section header: chevron + pip + bold title, with a separator
+        // rule above so groups read as distinct bands. The title uses the
+        // MAIN font (bold) — not the small font — so headers anchor the
+        // hierarchy instead of looking smaller than the items beneath them.
         if (isSection) {
-            const int px = r.x() + m_accent + m_padL + 1;
+            const bool collap = entry && entry->sectionCollapsible;
+            // Separator rule above every header except the very first row, so
+            // sections are clearly divided.
+            if (row > 0)
+                painter->fillRect(r.x(), y, r.width(), 1, t.border);
+            // Collapsible headers are interactive — selection / hover feedback.
+            if (collap) {
+                if (option.state & QStyle::State_Selected)
+                    painter->fillRect(r, t.selected);
+                else if (option.state & QStyle::State_MouseOver)
+                    painter->fillRect(r, t.hover);
+            }
+            QFont hf = m_font;
+            hf.setBold(true);
+            painter->setFont(hf);
+            const int hbl = y + (h + m_fm.ascent() - m_fm.descent()) / 2;
+            int px = r.x() + m_accent + m_padL + 1;
+            // ▾ expanded / ▸ collapsed chevron (collapsible only).
+            if (collap) {
+                painter->setPen(t.textDim);
+                painter->drawText(px, hbl, entry->sectionExpanded
+                    ? QStringLiteral("▾") : QStringLiteral("▸"));
+                px += m_fm.horizontalAdvance(QStringLiteral("▸")) + m_pad;
+            }
             const int pipSz = qMax(4, m_fm.height() / 3);
             painter->fillRect(px, y + (h - pipSz) / 2, pipSz, pipSz, groupCol);
-            painter->setFont(m_smallFont);
-            painter->setPen(t.textFaint);
+            painter->setPen(t.textDim);
             const int tx = px + pipSz + m_pad;
-            painter->drawText(tx, y + (h + m_sfm.ascent() - m_sfm.descent()) / 2,
-                              index.data().toString());
+            painter->drawText(tx, hbl, index.data().toString());
             painter->restore();
             return;
         }
 
-        // ── Columns ──
-        int x = r.x() + m_accent + m_padL;
+        // ── "Create new" action row: green ＋ class icon + label, no size /
+        // keyword columns. The selection/hover background above already ran
+        // (it's not a section), so the row highlights like any other. ──
+        if (entry && entry->isCreateNew) {
+            const QColor accent = t.indHintGreen;
+            int xx = r.x() + m_accent + m_padL + m_indent;
+            const int iconSz = m_fm.height();
+            static QIcon createI(QStringLiteral(":/vsicons/symbol-class.svg"));
+            QPixmap pm = createI.pixmap(iconSz, iconSz);
+            if (!pm.isNull()) {
+                QPainter pp(&pm);
+                pp.setCompositionMode(QPainter::CompositionMode_SourceIn);
+                pp.fillRect(pm.rect(), accent);
+                pp.end();
+                painter->drawPixmap(xx, y + (h - iconSz) / 2, pm);
+            }
+            xx += iconSz + m_pad;
+            painter->setFont(m_font);
+            painter->setPen(accent);
+            const QString label = index.data().toString();
+            painter->drawText(xx, baseline,
+                m_fm.elidedText(label, Qt::ElideRight, r.right() - xx - m_pad));
+            painter->restore();
+            return;
+        }
+
+        // ── Columns ── items are indented one "tab" so they read as children
+        // of the section header above them.
+        int x = r.x() + m_accent + m_padL + m_indent;
         const int rightW = m_gap + m_barW + m_gap + m_szCol + m_gap;
         const int nameEnd = r.right() - rightW;
 
@@ -388,7 +442,16 @@ public:
     }
 
     QSize sizeHint(const QStyleOptionViewItem& /*option*/,
-                   const QModelIndex& /*index*/) const override {
+                   const QModelIndex& index) const override {
+        // Section headers get extra height: room for the separator rule above
+        // plus breathing space, so groups read as distinct bands.
+        if (m_filtered) {
+            int row = index.row();
+            if (row >= 0 && row < m_filtered->size()
+                && (*m_filtered)[row].entryKind == TypeEntry::Section)
+                return QSize(m_cachedSizeHint.width(),
+                             m_fm.height() + (m_compact ? 7 : 11));
+        }
         return m_cachedSizeHint;
     }
 
@@ -485,11 +548,12 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         row->setContentsMargins(0, 0, 0, 0);
 
         m_filterEdit = new QLineEdit;
-        m_filterEdit->setPlaceholderText(QStringLiteral("Filter types..  (Ctrl+F)"));
+        m_filterEdit->setPlaceholderText(
+            QStringLiteral("Filter types..  (try int*, Ball[10])"));
         m_filterEdit->setClearButtonEnabled(true);
         m_filterEdit->setPalette(pal);
         m_filterEdit->setStyleSheet(QStringLiteral(
-            "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 3px; }")
+            "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 0px; }")
             .arg(theme.border.name()));
         m_filterEdit->setAccessibleName(QStringLiteral("Filter types"));
         m_filterEdit->installEventFilter(this);
@@ -577,9 +641,9 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
 
     // ── Sort toolbar ──
     {
-        auto* sortRow = new QWidget;
-        sortRow->setFixedHeight(22);
-        auto* slay = new QHBoxLayout(sortRow);
+        m_sortRow = new QWidget;
+        m_sortRow->setFixedHeight(22);
+        auto* slay = new QHBoxLayout(m_sortRow);
         slay->setContentsMargins(0, 0, 0, 0);
         slay->setSpacing(0);
 
@@ -682,7 +746,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
             if (m_showDetail) updateDetailPane();
         });
 
-        layout->addWidget(sortRow);
+        layout->addWidget(m_sortRow);
     }
 
     // ── List view + detail pane (horizontal split) ──
@@ -737,23 +801,13 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         connect(m_detailContent, &QLabel::linkActivated,
                 this, [this](const QString& link) {
             if (link == QStringLiteral("action:select")) {
-                // Clear modifier and accept
-                for (auto* b : m_modGroup->buttons()) b->setChecked(false);
-                m_arrayCountEdit->hide();
+                setModifier(0);          // plain
                 acceptCurrent();
             } else if (link == QStringLiteral("action:ptr")) {
-                // Set pointer modifier and accept
-                for (auto* b : m_modGroup->buttons()) b->setChecked(false);
-                m_btnPtr->setChecked(true);
-                m_arrayCountEdit->hide();
+                setModifier(1);          // pointer
                 acceptCurrent();
             } else if (link == QStringLiteral("action:arr")) {
-                // Set array modifier and accept
-                for (auto* b : m_modGroup->buttons()) b->setChecked(false);
-                m_btnArray->setChecked(true);
-                if (m_arrayCountEdit->text().trimmed().isEmpty())
-                    m_arrayCountEdit->setText(QStringLiteral("1"));
-                m_arrayCountEdit->show();
+                setModifier(3, 1);       // array, count 1
                 acceptCurrent();
             }
         });
@@ -769,11 +823,115 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
                 this, [this](const QModelIndex& index) {
             acceptIndex(index.row());
         });
+        // A single click on a collapsible section header expands/collapses it
+        // (everywhere else a single click just selects; double-click accepts).
+        connect(m_listView, &QListView::clicked,
+                this, [this](const QModelIndex& index) {
+            int r = index.row();
+            if (r >= 0 && r < m_filteredTypes.size()) {
+                const auto& e = m_filteredTypes[r];
+                if (e.entryKind == TypeEntry::Section && e.sectionCollapsible)
+                    acceptIndex(r);
+            }
+        });
         connect(m_listView->selectionModel(), &QItemSelectionModel::currentChanged,
                 this, [this]() { updateModifierPreview(); updateDetailPane(); });
     }
 
-    // ── Action row: "Apply as: ..." + modifiers + "+ New" ──
+    // ── Modifier row: "Apply as: [ Value | Pointer | Array ]" on its OWN
+    // full-width line. Previously this shared one row with the preview banner
+    // and the New/OK buttons, which crushed the segments below their text
+    // width on a narrow popup so they rendered as empty boxes. A dedicated row
+    // gives the segments their natural size. Hidden in simple mode
+    // (updateModeChrome); the C4 text path (typing "int*") still applies
+    // modifiers there. ──
+    {
+        m_modRow = new QWidget;
+        auto* modLayout = new QHBoxLayout(m_modRow);
+        modLayout->setContentsMargins(0, 0, 0, 0);
+        modLayout->setSpacing(4);
+
+        m_modLabel = new QLabel(QStringLiteral("Apply as:"));
+        m_modLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; }")
+            .arg(theme.textDim.name()));
+        modLayout->addWidget(m_modLabel);
+
+        m_modGroup = new QButtonGroup(this);
+        m_modGroup->setExclusive(true);  // exactly one segment selected
+
+        // The three segments live in their OWN Fixed-size container widget.
+        // A bare sub-layout still let the joined group stretch to fill the row
+        // (eliding "Pointer" → "Po…er" once ×2 appeared); a Fixed-policy
+        // QWidget sizes exactly to its contents and can never stretch, so the
+        // segments always show full text regardless of how much row is free.
+        auto* segBox = new QWidget;
+        auto* segWrap = new QHBoxLayout(segBox);
+        segWrap->setContentsMargins(0, 0, 0, 0);
+        segWrap->setSpacing(0);  // joined; border-right divides segments
+        segBox->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        auto makeSeg = [&](const QString& label, int id) -> QToolButton* {
+            auto* btn = new QToolButton;
+            btn->setText(label);
+            btn->setCheckable(true);
+            btn->setCursor(Qt::PointingHandCursor);
+            m_modGroup->addButton(btn, id);
+            segWrap->addWidget(btn);
+            return btn;
+        };
+        m_segValue   = makeSeg(QStringLiteral("Value"),   0);
+        m_segPointer = makeSeg(QStringLiteral("Pointer"), 1);
+        m_segArray   = makeSeg(QStringLiteral("Array"),   2);
+        m_segValue->setChecked(true);
+        modLayout->addWidget(segBox);
+
+        // ×2 depth toggle — only meaningful (and shown) when Pointer active.
+        m_ptrDouble = new QToolButton;
+        m_ptrDouble->setText(QStringLiteral("×2"));
+        m_ptrDouble->setCheckable(true);
+        m_ptrDouble->setCursor(Qt::PointingHandCursor);
+        m_ptrDouble->setToolTip(QStringLiteral("Pointer-to-pointer (**)"));
+        m_ptrDouble->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        m_ptrDouble->hide();
+        modLayout->addWidget(m_ptrDouble);
+
+        // Square, joined segmented styling (matches the sort toolbar).
+        const QString segStyle = QStringLiteral(
+            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+            "  border-radius: 0px; padding: 2px 12px; }"
+            "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
+            "QToolButton:hover:!checked { background: %6; }")
+            .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
+                 theme.text.name(), theme.selected.name(), theme.hover.name());
+        m_segValue->setStyleSheet(segStyle);
+        m_segPointer->setStyleSheet(segStyle);
+        m_segArray->setStyleSheet(segStyle);
+        m_ptrDouble->setStyleSheet(segStyle);
+
+        m_arrayCountEdit = new QLineEdit;
+        m_arrayCountEdit->setPlaceholderText(QStringLiteral("n"));
+        m_arrayCountEdit->setValidator(new QIntValidator(1, 99999, m_arrayCountEdit));
+        m_arrayCountEdit->setFixedWidth(50);
+        m_arrayCountEdit->setPalette(pal);
+        m_arrayCountEdit->hide();
+        modLayout->addWidget(m_arrayCountEdit);
+
+        // Stretch pins the controls left at natural size — they never expand
+        // to fill, and never shrink below their text.
+        modLayout->addStretch();
+
+        connect(m_modGroup, &QButtonGroup::idClicked, this, [this](int) {
+            syncModifierExtras(/*focusCount=*/true);
+            updateModifierPreview();
+        });
+        connect(m_ptrDouble, &QToolButton::toggled,
+                this, [this]() { updateModifierPreview(); });
+        connect(m_arrayCountEdit, &QLineEdit::textChanged,
+                this, [this]() { updateModifierPreview(); });
+
+        layout->addWidget(m_modRow);
+    }
+
+    // ── Action row: live preview banner (left) + "＋ New" / "OK" (right) ──
     {
         auto* row = new QHBoxLayout;
         row->setContentsMargins(0, 0, 0, 0);
@@ -788,88 +946,15 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
 
         row->addStretch();
 
-        // Modifier toggles: [*] [**] [[] count]
-        {
-            m_modRow = new QWidget;
-            auto* modLayout = new QHBoxLayout(m_modRow);
-            modLayout->setContentsMargins(0, 0, 0, 0);
-            modLayout->setSpacing(3);
-
-            m_modGroup = new QButtonGroup(this);
-            m_modGroup->setExclusive(false);
-
-            QString btnStyle = QStringLiteral(
-                "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-                "  padding: 2px 8px; border-radius: 3px; }"
-                "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
-                "QToolButton:hover:!checked { background: %6; }"
-                "QToolButton:pressed { background: %7; }")
-                .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
-                     theme.text.name(), theme.selected.name(), theme.hover.name(),
-                     theme.surface.name());
-
-            auto makeToggle = [&](const QString& label, int id) -> QToolButton* {
-                auto* btn = new QToolButton;
-                btn->setText(label);
-                btn->setCheckable(true);
-                btn->setCursor(Qt::PointingHandCursor);
-                btn->setStyleSheet(btnStyle);
-                m_modGroup->addButton(btn, id);
-                modLayout->addWidget(btn);
-                return btn;
-            };
-
-            m_btnPtr    = makeToggle(QStringLiteral("*"),  1);
-            m_btnDblPtr = makeToggle(QStringLiteral("**"), 2);
-            m_btnArray  = makeToggle(QStringLiteral("[]"), 3);
-
-            m_arrayCountEdit = new QLineEdit;
-            m_arrayCountEdit->setPlaceholderText(QStringLiteral("n"));
-            m_arrayCountEdit->setValidator(new QIntValidator(1, 99999, m_arrayCountEdit));
-            m_arrayCountEdit->setFixedWidth(50);
-            m_arrayCountEdit->setPalette(pal);
-            m_arrayCountEdit->hide();
-            modLayout->addWidget(m_arrayCountEdit);
-
-            row->addWidget(m_modRow);
-
-            connect(m_modGroup, &QButtonGroup::idClicked,
-                    this, [this](int id) {
-                QAbstractButton* btn = m_modGroup->button(id);
-                if (btn->isChecked()) {
-                    for (auto* b : m_modGroup->buttons())
-                        if (b != btn) b->setChecked(false);
-                }
-                // If unchecked (toggled off), all buttons stay unchecked = plain
-                m_arrayCountEdit->setVisible(m_btnArray->isChecked());
-                if (m_btnArray->isChecked()) {
-                    if (m_arrayCountEdit->text().trimmed().isEmpty())
-                        m_arrayCountEdit->setText(QStringLiteral("1"));
-                    m_arrayCountEdit->setFocus();
-                    m_arrayCountEdit->selectAll();
-                }
-                updateModifierPreview();
-            });
-            connect(m_arrayCountEdit, &QLineEdit::textChanged,
-                    this, [this]() { updateModifierPreview(); });
-        }
-
-        m_createBtn = new QToolButton;
-        m_createBtn->setText(QStringLiteral("+ New"));
-        m_createBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        m_createBtn->setAutoRaise(true);
+        // Outline-only square buttons via the shared DialogButton (self-themes
+        // on themeChanged) — matches the project's validated dialog button
+        // language and removes the per-button stylesheet drift.
+        m_createBtn = new DialogButton(QStringLiteral("＋ New"),
+                                       DialogButton::Secondary);
         m_createBtn->setCursor(Qt::PointingHandCursor);
         m_createBtn->setAccessibleName(QStringLiteral("Create new type"));
-        m_createBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-            "  padding: 2px 10px; border-radius: 0px; }"
-            "QToolButton:hover { color: %4; background: %5; border-color: %5; }"
-            "QToolButton:pressed { background: %6; }")
-            .arg(theme.text.name(), theme.background.name(), theme.border.name(),
-                 theme.text.name(), theme.selected.name(), theme.surface.name()));
-        connect(m_createBtn, &QToolButton::clicked, this, [this]() {
-            int modId = m_modGroup ? m_modGroup->checkedId() : -1;
-            if (modId < 0) modId = 0;  // -1 (no button checked) → 0 (plain)
+        connect(m_createBtn, &QPushButton::clicked, this, [this]() {
+            int modId = currentModId();
             int arrCount = 0;
             if (modId == 3 && m_arrayCountEdit) {
                 arrCount = m_arrayCountEdit->text().trimmed().toInt();
@@ -877,31 +962,15 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
             }
             m_accepted = true;
             hide();
-            emit createNewTypeRequested(modId, arrCount);
+            // Corner "+ New" button: auto-named struct (no typed name/keyword).
+            emit createNewTypeRequested(modId, arrCount, QString(), QString());
         });
         row->addWidget(m_createBtn);
 
-        m_saveBtn = new QToolButton;
-        m_saveBtn->setText(QStringLiteral("OK"));
-        m_saveBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        m_saveBtn->setAutoRaise(true);
+        m_saveBtn = new DialogButton(QStringLiteral("OK"), DialogButton::Primary);
         m_saveBtn->setCursor(Qt::PointingHandCursor);
         m_saveBtn->setAccessibleName(QStringLiteral("OK"));
-        // Outline-only primary button — square corners, accent border to
-        // mark this as the dialog's primary action without resorting to a
-        // filled blue background. Matches the user's validated dialog
-        // visual language (see CLAUDE-MEMORY: dialog conventions).
-        m_saveBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-            "  padding: 2px 14px; border-radius: 0px; }"
-            "QToolButton:hover { color: %1; background: %4; border-color: %1; }"
-            "QToolButton:pressed { background: %5; }")
-            .arg(theme.text.name(),           // text
-                 theme.background.name(),     // bg
-                 theme.borderFocused.name(),  // accent outline
-                 theme.hover.name(),          // hover bg
-                 theme.surface.name()));      // pressed bg
-        connect(m_saveBtn, &QToolButton::clicked, this, [this]() {
+        connect(m_saveBtn, &QPushButton::clicked, this, [this]() {
             acceptCurrent();
         });
         row->addWidget(m_saveBtn);
@@ -916,6 +985,8 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     // same actionable information.)
     m_footerLabel = nullptr;
 
+    // Apply the initial chrome gating for the default (simple/Common) mode.
+    updateModeChrome();
 }
 
 // Static once-per-process primer: absorbs the ~300ms DLL/style/font init
@@ -1028,8 +1099,11 @@ void TypeSelectorPopup::setFont(const QFont& font) {
     m_font = font;
 
     {
+        // C5 — the live "type+modifier → size" preview is the centerpiece:
+        // larger + bold so the user always sees what they'll get.
         QFont tf = font;
-        tf.setPointSize(qMax(7, resolvedPointSize(font) - 1));
+        tf.setPointSize(qMax(8, resolvedPointSize(font) + 1));
+        tf.setBold(true);
         m_titleLabel->setFont(tf);
     }
     m_escLabel->setFont(font);
@@ -1038,10 +1112,28 @@ void TypeSelectorPopup::setFont(const QFont& font) {
 
     QFont smallFont = font;
     smallFont.setPointSize(qMax(7, resolvedPointSize(font) - 1));
-    m_btnPtr->setFont(smallFont);
-    m_btnDblPtr->setFont(smallFont);
-    m_btnArray->setFont(smallFont);
+    m_segValue->setFont(smallFont);
+    m_segPointer->setFont(smallFont);
+    m_segArray->setFont(smallFont);
+    m_ptrDouble->setFont(smallFont);
+    if (m_modLabel) m_modLabel->setFont(smallFont);
     m_arrayCountEdit->setFont(smallFont);
+
+    // Pin each segment to exactly its text width + padding (the stylesheet's
+    // 12px horizontal padding + 1px borders ≈ 28px of chrome). A styled
+    // QToolButton otherwise reports a fat, roughly-equal minimum width, so the
+    // joined group filled the row and middle-elided "Pointer" → "Po…er" once
+    // the ×2 toggle appeared. A hard per-text width can't stretch or clip.
+    {
+        const QFontMetrics segFm(smallFont);
+        auto fitSeg = [&](QToolButton* b) {
+            if (b) b->setFixedWidth(segFm.horizontalAdvance(b->text()) + 30);
+        };
+        fitSeg(m_segValue);
+        fitSeg(m_segPointer);
+        fitSeg(m_segArray);
+        fitSeg(m_ptrDouble);
+    }
 
     m_createBtn->setFont(smallFont);
     m_saveBtn->setFont(smallFont);
@@ -1085,42 +1177,30 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
         "QToolButton:hover { color: %2; }")
         .arg(theme.textDim.name(), theme.indHoverSpan.name()));
 
-    // Create button
-    m_createBtn->setStyleSheet(QStringLiteral(
-        "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-        "  padding: 2px 10px; border-radius: 3px; }"
-        "QToolButton:hover { color: %4; background: %5; border-color: %5; }"
-        "QToolButton:pressed { background: %6; }")
-        .arg(theme.text.name(), theme.background.name(), theme.border.name(),
-             theme.text.name(), theme.selected.name(), theme.surface.name()));
-
-    // OK button (primary accent)
-    m_saveBtn->setStyleSheet(QStringLiteral(
-        "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-        "  padding: 2px 14px; border-radius: 3px; }"
-        "QToolButton:hover { background: %4; }"
-        "QToolButton:pressed { background: %5; }")
-        .arg(theme.text.name(), theme.selection.name(), theme.syntaxKeyword.name(),
-             theme.selection.lighter(120).name(), theme.selection.darker(110).name()));
+    // Create / OK buttons are DialogButtons — they self-theme on
+    // themeChanged, so no per-button stylesheet here (removes the old
+    // square-vs-rounded constructor/applyTheme drift).
 
     // Filter (no focus accent)
     m_filterEdit->setStyleSheet(QStringLiteral(
-        "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 3px; }")
+        "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 0px; }")
         .arg(theme.border.name()));
 
-    // Modifier toggle buttons
-    QString btnStyle = QStringLiteral(
+    // Segmented modifier control (square, joined)
+    QString segStyle = QStringLiteral(
         "QToolButton { color: %1; background: %2; border: 1px solid %3;"
-        "  padding: 2px 8px; border-radius: 3px; }"
+        "  border-radius: 0px; padding: 2px 10px; }"
         "QToolButton:checked { color: %4; background: %5; border-color: %5; }"
-        "QToolButton:hover:!checked { background: %6; }"
-        "QToolButton:pressed { background: %7; }")
+        "QToolButton:hover:!checked { background: %6; }")
         .arg(theme.textDim.name(), theme.background.name(), theme.border.name(),
-             theme.text.name(), theme.selected.name(), theme.hover.name(),
-             theme.surface.name());
-    m_btnPtr->setStyleSheet(btnStyle);
-    m_btnDblPtr->setStyleSheet(btnStyle);
-    m_btnArray->setStyleSheet(btnStyle);
+             theme.text.name(), theme.selected.name(), theme.hover.name());
+    m_segValue->setStyleSheet(segStyle);
+    m_segPointer->setStyleSheet(segStyle);
+    m_segArray->setStyleSheet(segStyle);
+    m_ptrDouble->setStyleSheet(segStyle);
+    if (m_modLabel)
+        m_modLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; }")
+            .arg(theme.textDim.name()));
 
     // Kind-group chips — custom painted, theme read at paint time, no stylesheet needed
     for (auto* c : m_groupChips) c->update();
@@ -1165,12 +1245,15 @@ void TypeSelectorPopup::setTitle(const QString& /*title*/) {
 
 void TypeSelectorPopup::setMode(TypePopupMode mode) {
     m_mode = mode;
+    // Option (a): the modifier row is always available when the mode allows it
+    // (no longer gated on the simple/full split). updateModeChrome() owns the
+    // same rule.
     bool showMods = (mode == TypePopupMode::FieldType
                      || mode == TypePopupMode::ArrayElement);
     m_modRow->setVisible(showMods);
-    // Reset all modifiers — no modifier = plain
-    for (auto* b : m_modGroup->buttons())
-        b->setChecked(false);
+    // Reset to the default "Value" segment (plain).
+    if (m_segValue) { QSignalBlocker b(m_modGroup); m_segValue->setChecked(true); }
+    if (m_ptrDouble) { m_ptrDouble->setChecked(false); m_ptrDouble->hide(); }
     m_arrayCountEdit->clear();
     m_arrayCountEdit->hide();
 }
@@ -1184,19 +1267,49 @@ void TypeSelectorPopup::setPointerSize(int bytes) {
 }
 
 void TypeSelectorPopup::setModifier(int modId, int arrayCount) {
-    for (auto* b : m_modGroup->buttons())
-        b->setChecked(false);
-    if (modId == 1)      m_btnPtr->setChecked(true);
-    else if (modId == 2) m_btnDblPtr->setChecked(true);
-    else if (modId == 3) {
-        m_btnArray->setChecked(true);
+    if (!m_modGroup) return;
+    QSignalBlocker bg(m_modGroup);
+    if (modId == 1 || modId == 2) {
+        m_segPointer->setChecked(true);
+        QSignalBlocker bd(m_ptrDouble);
+        m_ptrDouble->setChecked(modId == 2);
+    } else if (modId == 3) {
+        m_segArray->setChecked(true);
         // Clamp to >=1: arrayCount 0/negative would defeat the QIntValidator
         // and later be dropped as "not an array", silently committing a plain
-        // type while the toggle reads as checked.
+        // type while the segment reads as Array.
         m_arrayCountEdit->setText(QString::number(qMax(1, arrayCount)));
-        m_arrayCountEdit->show();
+    } else {
+        m_segValue->setChecked(true);
     }
-    // else: all unchecked = plain (no modifier)
+    syncModifierExtras();
+    updateModifierPreview();
+}
+
+int TypeSelectorPopup::currentModId() const {
+    if (!m_modGroup) return 0;
+    const int seg = m_modGroup->checkedId();  // 0=Value 1=Pointer 2=Array
+    if (seg == 1) return (m_ptrDouble && m_ptrDouble->isChecked()) ? 2 : 1;
+    if (seg == 2) return 3;
+    return 0;  // Value / plain
+}
+
+void TypeSelectorPopup::syncModifierExtras(bool focusCount) {
+    if (!m_modGroup) return;
+    const int seg = m_modGroup->checkedId();
+    if (m_ptrDouble) m_ptrDouble->setVisible(seg == 1);
+    if (m_arrayCountEdit) {
+        const bool arr = (seg == 2);
+        m_arrayCountEdit->setVisible(arr);
+        if (arr) {
+            if (m_arrayCountEdit->text().trimmed().isEmpty())
+                m_arrayCountEdit->setText(QStringLiteral("1"));
+            if (focusCount) {
+                m_arrayCountEdit->setFocus();
+                m_arrayCountEdit->selectAll();
+            }
+        }
+    }
 }
 
 void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntry* current) {
@@ -1244,7 +1357,7 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
     case TypePopupMode::Root:           placeholder = QStringLiteral("Filter %1 structs..."); break;
     case TypePopupMode::ArrayElement:   placeholder = QStringLiteral("Filter %1 element types..."); break;
     case TypePopupMode::PointerTarget:  placeholder = QStringLiteral("Filter %1 targets..."); break;
-    default:                            placeholder = QStringLiteral("Filter %1 types..."); break;
+    default:                            placeholder = QStringLiteral("Filter %1 types..  (try int*, Ball[10])"); break;
     }
     m_filterEdit->setPlaceholderText(placeholder.arg(typeCount));
 
@@ -1271,6 +1384,27 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
             }
         }
     }
+}
+
+void TypeSelectorPopup::setShowAllTypesForTest(bool all) {
+    m_showAllTypes = all;
+    updateModeChrome();
+    applyFilter(m_filterEdit ? m_filterEdit->text() : QString());
+}
+
+void TypeSelectorPopup::updateModeChrome() {
+    // Option (a) — decluttered default: the kind-group chips and the sort
+    // toolbar (density / detail toggles included) are permanently hidden, so
+    // the chooser is just filter + list + Apply-as + create. Typing the filter
+    // already searches every type, so browsing chrome isn't needed to reach
+    // anything; m_showAllTypes now controls ONLY the list content (common vs
+    // all types) via the bottom "Show all types" row, not chrome. The modifier
+    // row is always available (it's a core action) whenever the mode allows it.
+    if (m_chipRow) m_chipRow->setVisible(false);
+    if (m_sortRow) m_sortRow->setVisible(false);
+    const bool modeAllowsMods = (m_mode == TypePopupMode::FieldType
+                                 || m_mode == TypePopupMode::ArrayElement);
+    if (m_modRow)  m_modRow->setVisible(modeAllowsMods);
 }
 
 void TypeSelectorPopup::popup(const QPoint& globalPos) {
@@ -1331,7 +1465,7 @@ void TypeSelectorPopup::updateModifierPreview() {
             .arg(t.textFaint.name(), entry.displayName.toHtmlEscaped(), szText, entry.kindGroup));
     }
 
-    int modId = m_modGroup->checkedId();
+    int modId = currentModId();
 
     // Build modifier suffix
     QString suffix;
@@ -1388,7 +1522,7 @@ void TypeSelectorPopup::updateDetailPane() {
 
     const TypeEntry& entry = m_filteredTypes[row];
     const QColor gc = kindGroupColor(entry.kindGroup);
-    const int modId = m_modGroup ? m_modGroup->checkedId() : -1;
+    const int modId = currentModId();
 
     // Use the actual font point size — all HTML sizes are relative to this
     const int pt = resolvedPointSize(m_font);
@@ -1595,6 +1729,20 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
 
     QString filterBase = text.trimmed();
 
+    // C4 — text path: typing "int*", "int**", or "Ball[10]" reflects the
+    // suffix into the segmented modifier and filters on the base name. The
+    // base type still matches by fuzzy search, so "Ball[10]" finds Ball and
+    // pre-arms the Array modifier. setModifier blocks signals + doesn't steal
+    // focus, so it can't re-enter applyFilter or interrupt typing.
+    {
+        TypeSpec spec = parseTypeSpec(text);
+        if (spec.isPointer || spec.arrayCount > 0) {
+            int modId = spec.arrayCount > 0 ? 3 : (spec.ptrDepth >= 2 ? 2 : 1);
+            setModifier(modId, spec.arrayCount);
+            filterBase = spec.baseName.trimmed();
+        }
+    }
+
     // Build set of enabled groups from chips
     QSet<QString> enabledGroups;
     for (auto it = m_groupChips.begin(); it != m_groupChips.end(); ++it)
@@ -1614,6 +1762,42 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         return label;
     };
 
+    // A C-identifier the user could legally name a new class (B1 gate).
+    auto isValidIdent = [](const QString& s) {
+        if (s.isEmpty()) return false;
+        if (!(s.at(0).isLetter() || s.at(0) == QLatin1Char('_'))) return false;
+        for (const QChar& c : s)
+            if (!(c.isLetterOrNumber() || c == QLatin1Char('_'))) return false;
+        return true;
+    };
+
+    // Build a synthetic "＋ Create/New" row. The label tracks the active
+    // modifier (computed here, so the C4 text path keeps it live since typing
+    // re-runs applyFilter). name empty → "＋ New struct/class"; else
+    // "＋ Create class “Foo*”". The row stores createName/createKeyword so
+    // acceptIndex can emit createNewTypeRequested in one step.
+    auto makeCreateEntry = [this](const QString& name, const QString& keyword) {
+        TypeEntry e;
+        e.entryKind    = TypeEntry::Primitive;   // selectable (not a Section)
+        e.isCreateNew  = true;
+        e.enabled      = true;
+        e.createName   = name;
+        e.createKeyword = keyword;
+        int modId = currentModId();
+        QString suffix;
+        if (modId == 1) suffix = QStringLiteral("*");
+        else if (modId == 2) suffix = QStringLiteral("**");
+        else if (modId == 3) {
+            QString c = m_arrayCountEdit ? m_arrayCountEdit->text().trimmed() : QString();
+            suffix = QStringLiteral("[%1]").arg(c.isEmpty() ? QStringLiteral("n") : c);
+        }
+        const QString kw = keyword.isEmpty() ? QStringLiteral("struct") : keyword;
+        e.displayName = name.isEmpty()
+            ? QStringLiteral("＋ New %1").arg(kw)
+            : QStringLiteral("＋ Create %1 “%2%3”").arg(kw, name, suffix);
+        return e;
+    };
+
     QHash<QString, int> groupCounts;       // counts of matched/visible types per group
     QHash<QString, int> totalGroupCounts;  // counts of ALL types per group (for chip totals)
     const int totalTypes = m_allTypes.size();
@@ -1631,6 +1815,8 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     m_matchPositions.reserve(totalTypes);
     displayStrings.reserve(totalTypes);
 
+    bool hasCreateRow = false;
+
     if (!filterBase.isEmpty()) {
         // ── Fuzzy search: flat ranked list, no section headers ──
         // Use index + score to avoid deep-copying TypeEntry structs
@@ -1638,9 +1824,12 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         QVector<Scored> scored;
         scored.reserve(totalTypes);
 
+        bool exactMatch = false;
         for (int i = 0; i < totalTypes; i++) {
             const auto& t = m_allTypes[i];
             if (t.entryKind == TypeEntry::Section) continue;
+            if (t.displayName.compare(filterBase, Qt::CaseInsensitive) == 0)
+                exactMatch = true;
             QVector<int> pos;
             int sc = fuzzyScore(filterBase, t.displayName, &pos);
             if (sc <= 0) continue;
@@ -1655,6 +1844,18 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
             m_filteredTypes.append(m_allTypes[s.idx]);
             m_matchPositions.append(s.pos);
             displayStrings << makeLabel(m_allTypes[s.idx]);
+        }
+
+        // B1 — one-step "＋ Create class “Foo”" when the typed base is a fresh
+        // identifier with no exact match. Appended (not prepended) so a strong
+        // match like "int" still auto-selects on Enter; only when there are no
+        // matches at all does the create row become the default selection.
+        if (isValidIdent(filterBase) && !exactMatch) {
+            TypeEntry ce = makeCreateEntry(filterBase, QStringLiteral("class"));
+            m_filteredTypes.append(ce);
+            m_matchPositions.append(QVector<int>());
+            displayStrings << ce.displayName;
+            hasCreateRow = true;
         }
     } else {
         // ── No filter: build list with current sort mode ──
@@ -1681,20 +1882,36 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         };
 
         auto appendSection = [&](const QString& title, const QString& groupKey,
-                                 const QVector<TypeEntry>& items) {
+                                 const QVector<TypeEntry>& items,
+                                 bool collapsible = false,
+                                 bool defaultExpanded = true) {
             if (items.isEmpty()) return;
+            // Collapsible sections honour the user's per-section toggle
+            // (m_sectionExpanded), falling back to the built-in default;
+            // m_showAllTypes (test/harness hook) force-expands everything.
+            const bool expanded = !collapsible ? true
+                : (m_showAllTypes
+                   || m_sectionExpanded.value(groupKey, defaultExpanded));
             TypeEntry sec;
             sec.entryKind = TypeEntry::Section;
-            sec.displayName = title;
+            // Bake the member count into a collapsible header so the size is
+            // visible before expanding ("Your classes (1003)").
+            sec.displayName = collapsible
+                ? QStringLiteral("%1 (%2)").arg(title).arg(items.size())
+                : title;
             // Use the EXACT group key for the pip color. Deriving it from the
             // label's first word produced "Pointer"/"String"/"Type" — none of
             // which kindGroupColor() knows ("Ptr"/"Str"/"Ctr"), so those pips
             // fell through to the neutral default instead of red/salmon/green.
             sec.kindGroup = groupKey;
             sec.enabled = false;
+            sec.sectionCollapsible = collapsible;
+            sec.sectionExpanded = expanded;
+            sec.sectionKey = groupKey;
             m_filteredTypes.append(sec);
             m_matchPositions.append(QVector<int>());
             displayStrings << sec.displayName;
+            if (!expanded) return;   // collapsed: header only
             for (const auto& c : items) {
                 m_filteredTypes.append(c);
                 m_matchPositions.append(QVector<int>());
@@ -1703,6 +1920,14 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
         };
 
         if (m_sortMode == SortGroup) {
+            // Collapsible-section model: common primitive groups (Hex / Int /
+            // Float / Ptr) are what people reach for, so they're listed first
+            // and expanded by default; "Your classes" and the std-lib group are
+            // ordinary collapsible sections, COLLAPSED by default — so a large
+            // SDK (1000s of classes) never floods the view or buries the
+            // primitives. Click a header (or Enter) to expand/collapse it; the
+            // filter still fuzzy-searches every type regardless of collapse.
+
             // Recent section — entries whose displayName matches a recent
             // pick. Listed first so common selections are one chord away.
             // Items still appear in their normal kindGroup section below.
@@ -1719,26 +1944,13 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 if (!recents.isEmpty())
                     appendSection(QStringLiteral("Recent"), QStringLiteral("Common"), recents);
             }
-            // Group view: per-kindGroup sections
+            // Group view: per-kindGroup collapsible sections. Common primitive
+            // groups expand by default; "Your classes" (Ctr) and the std-lib
+            // "Common types" group collapse by default so they never flood.
             for (int gi = 0; gi < 8; gi++) {
                 QString g = QString::fromLatin1(kGroupOrder[gi]);
                 auto& items = buckets[g];
                 if (items.isEmpty()) continue;
-                // Simple (default) mode: hide the std-lib "Common Types"
-                // section entirely and drop long-tail primitives, keeping
-                // only the common set + user structs. The "Show all types"
-                // row below flips m_showAllTypes; the filter box still
-                // searches everything regardless.
-                if (!m_showAllTypes) {
-                    if (g == QStringLiteral("Common")) continue;
-                    QVector<TypeEntry> keep;
-                    keep.reserve(items.size());
-                    for (const auto& it : items)
-                        if (it.entryKind != TypeEntry::Primitive || isCommonKind(it.primitiveKind))
-                            keep.append(it);
-                    items = keep;
-                    if (items.isEmpty()) continue;
-                }
                 // Same-size-first sorting for the matching group — except
                 // the Hex group, where the user reads it as a fixed size
                 // ladder (hex128 → hex64 → hex32 → hex16 → hex8). When the
@@ -1759,8 +1971,38 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 } else {
                     std::stable_sort(items.begin(), items.end(), bySizeDesc);
                 }
-                appendSection(QString::fromLatin1(kGroupLabels[gi]),
-                              QString::fromLatin1(kGroupOrder[gi]), items);
+                // Default expand state:
+                //  • hex/int/float/pointer — what people reach for → expanded
+                //  • Your classes (Ctr) — expanded only for a SMALL SDK; a big
+                //    one (1000s) stays collapsed so it can't flood / bury the
+                //    primitives. Either way it's one click to toggle.
+                //  • everything else (Vec/Str/std-lib) → collapsed
+                constexpr int kAutoExpandClassCap = 8;
+                bool defExpand;
+                if (g == QStringLiteral("Hex") || g == QStringLiteral("Int")
+                    || g == QStringLiteral("Float") || g == QStringLiteral("Ptr"))
+                    defExpand = true;
+                else if (g == QStringLiteral("Ctr"))
+                    defExpand = (items.size() <= kAutoExpandClassCap);
+                else
+                    defExpand = false;
+                const QString title =
+                      g == QStringLiteral("Ctr")    ? QStringLiteral("Your classes")
+                    : g == QStringLiteral("Common") ? QStringLiteral("Common types")
+                    : QString::fromLatin1(kGroupLabels[gi]);
+                appendSection(title, g, items, /*collapsible=*/true, defExpand);
+            }
+            // Pinned one-click "＋ New struct / ＋ New class" creators at the
+            // BOTTOM: people reach for primitives/their classes first, and the
+            // primary create path is typing a fresh name (the inline "＋ Create
+            // class" row), so these stay as an out-of-the-way fallback rather
+            // than pushing the common primitives down. Auto-named (empty
+            // createName → controller's uniqueStructName).
+            {
+                QVector<TypeEntry> creators;
+                creators.append(makeCreateEntry(QString(), QString()));
+                creators.append(makeCreateEntry(QString(), QStringLiteral("class")));
+                appendSection(QStringLiteral("Create"), QStringLiteral("Ctr"), creators);
             }
         } else {
             // Flat sorted list (no sections) — name/size/align
@@ -1806,32 +2048,8 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                 displayStrings << makeLabel(c);
             }
         }
-
-        // Inline expand/collapse affordance at the bottom of the unfiltered
-        // view — in BOTH the grouped and flat sorts, so simple mode stays
-        // consistent and always reversible regardless of sort. In simple
-        // mode it shows the hidden count; when expanded it offers the way
-        // back. Activating it toggles m_showAllTypes (handled in acceptIndex),
-        // not a type pick.
-        int hiddenCount = 0;
-        for (const auto& t : m_allTypes) {
-            if (t.entryKind == TypeEntry::Section) continue;
-            if (t.kindGroup == QStringLiteral("Common")
-                || (t.entryKind == TypeEntry::Primitive && !isCommonKind(t.primitiveKind)))
-                hiddenCount++;
-        }
-        if (m_showAllTypes || hiddenCount > 0) {
-            TypeEntry tog;
-            tog.entryKind = TypeEntry::Primitive;  // selectable (not a Section)
-            tog.isExpandToggle = true;
-            tog.enabled = true;
-            tog.displayName = m_showAllTypes
-                ? QStringLiteral("− Show common types only")
-                : QStringLiteral("+ Show all types (%1)").arg(hiddenCount);
-            m_filteredTypes.append(tog);
-            m_matchPositions.append(QVector<int>());
-            displayStrings << tog.displayName;
-        }
+        // (The old global "Show all types" toggle row is gone — expanding the
+        // per-section headers replaces it.)
     }
 
     // Empty state — the expand/collapse toggle row is not a real type, so
@@ -1839,9 +2057,12 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     // empty-state placeholder.
     int resultCount = 0;
     for (const auto& f : m_filteredTypes)
-        if (f.entryKind != TypeEntry::Section && !f.isExpandToggle) resultCount++;
+        if (f.entryKind != TypeEntry::Section && !f.isExpandToggle && !f.isCreateNew)
+            resultCount++;
 
-    if (resultCount == 0) {
+    // A lone "＋ Create" row (no matches but a valid fresh name) is the answer,
+    // so suppress the "No types match" placeholder in that case.
+    if (resultCount == 0 && !hasCreateRow) {
         TypeEntry empty;
         empty.entryKind = TypeEntry::Section;
         empty.displayName = filterBase.isEmpty()
@@ -1944,14 +2165,54 @@ void TypeSelectorPopup::acceptIndex(int row) {
     // Never emits a selection and never hides the popup.
     if (entry.isExpandToggle) {
         m_showAllTypes = !m_showAllTypes;
+        updateModeChrome();
         applyFilter(m_filterEdit ? m_filterEdit->text() : QString());
         return;
     }
-    if (entry.entryKind == TypeEntry::Section) return;
+    // B1/B5 — create-new action row: create + apply in one step, carrying the
+    // typed name (or empty → controller auto-names), the keyword, and the
+    // active modifier so the new class lands as value/pointer/array directly.
+    if (entry.isCreateNew) {
+        int modId = currentModId();
+        int arrCount = 0;
+        if (modId == 3) {
+            QString c = m_arrayCountEdit ? m_arrayCountEdit->text().trimmed() : QString();
+            bool ok = false;
+            int n = c.toInt(&ok);
+            arrCount = (ok && n > 0) ? n : 1;
+        }
+        m_accepted = true;
+        hide();
+        emit createNewTypeRequested(modId, arrCount, entry.createName, entry.createKeyword);
+        return;
+    }
+    // Collapsible section header: toggle its expand state and re-render in
+    // place (never emits a type, never hides the popup).
+    if (entry.entryKind == TypeEntry::Section) {
+        if (entry.sectionCollapsible) {
+            const QString key = entry.sectionKey;
+            m_sectionExpanded[key] = !entry.sectionExpanded;
+            applyFilter(m_filterEdit ? m_filterEdit->text() : QString());
+            // applyFilter's restore only tracks real entries, so the header
+            // selection would otherwise jump to the top — keep focus on the
+            // header the user just toggled.
+            for (int i = 0; i < m_filteredTypes.size(); ++i)
+                // Require sectionCollapsible: the non-collapsible "Create" and
+                // "Recent" headers reuse the "Ctr"/"Common" keys, so a bare key
+                // match would land on them instead of the toggled section.
+                if (m_filteredTypes[i].entryKind == TypeEntry::Section
+                    && m_filteredTypes[i].sectionCollapsible
+                    && m_filteredTypes[i].sectionKey == key) {
+                    m_listView->setCurrentIndex(m_model->index(i));
+                    break;
+                }
+        }
+        return;
+    }
     if (!entry.enabled) return;
 
     // Build full text with modifier from toggle buttons
-    int modId = m_modGroup ? m_modGroup->checkedId() : -1;
+    int modId = currentModId();
     QString fullText = entry.displayName;
     if (modId == 1)
         fullText += QStringLiteral("*");
@@ -1978,7 +2239,10 @@ int TypeSelectorPopup::nextSelectableRow(int from, int direction) const {
     int i = from;
     while (i >= 0 && i < m_filteredTypes.size()) {
         const auto& e = m_filteredTypes[i];
-        if (e.entryKind != TypeEntry::Section && e.enabled)
+        // Real, enabled entries are selectable; so are collapsible section
+        // headers (so the keyboard can land on one and Enter toggles it).
+        if ((e.entryKind != TypeEntry::Section && e.enabled)
+            || (e.entryKind == TypeEntry::Section && e.sectionCollapsible))
             return i;
         i += direction;
     }

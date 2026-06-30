@@ -1165,25 +1165,23 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // F12: go to definition — navigate to the type referenced by the
     // current node. Pointer.refId, Struct.refId, or Array element struct.
     connect(editor, &RcxEditor::goToDefinitionRequested, this, [this](int nodeIdx) {
-        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
-        const Node& n = m_doc->tree.nodes[nodeIdx];
-        uint64_t target = 0;
-        // Direct refId on pointer or embedded struct
-        if (n.refId != 0) target = n.refId;
-        // Array of structs — chase refId on the array
-        else if (n.kind == NodeKind::Array && n.elementKind == NodeKind::Struct
-                 && n.refId != 0) target = n.refId;
-        // Plain struct field — view its own subtree
-        else if (n.kind == NodeKind::Struct && n.parentId != 0) target = n.id;
+        uint64_t target = resolveDefinitionTarget(nodeIdx);
         if (target == 0) {
             emit statusHint(QStringLiteral("No definition to navigate to"));
             return;
         }
         // Reuse existing tab if one already views this struct, else focus
-        // here. Don't open a new tab — F12 is meant to be quick nav.
+        // here. Don't open a new tab — F12 is meant to be quick nav. F12 is
+        // a jump (resets the breadcrumb trail); the ▸ follow-arrow is what
+        // grows the drill trail.
         setViewRootId(target);
         emit statusHint(QStringLiteral("Jumped to definition"));
     });
+
+    // Breadcrumb crumb click: collapse everything below that class and scroll
+    // to it (carries the crumb index; no view-root change). The breadcrumb
+    // itself is grown by selection, in handleNodeClick.
+    connect(editor, &RcxEditor::crumbClicked, this, &RcxController::collapseToFocus);
 
     connect(editor, &RcxEditor::expandAllRequested, this, [this]() {
         m_suppressRefresh = true;
@@ -1278,6 +1276,18 @@ void RcxController::connectEditor(RcxEditor* editor) {
             this, [this](uint64_t nodeId) {
         int si = m_doc->tree.indexOfId(nodeId);
         if (si < 0) return;
+        // Expanded typed-pointer footer "+1": append to the REFERENCED class,
+        // not the 8-byte pointer (which made an invalid child). appendBytes /
+        // trim already do this redirect; mirror it here so all the footer pills
+        // agree.
+        {
+            const Node& nd = m_doc->tree.nodes[si];
+            if ((isPointerKind(nd.kind) || isFuncPtr(nd.kind)) && nd.refId != 0
+                && m_doc->tree.childrenOf(nd.id).isEmpty()) {
+                int ri = m_doc->tree.indexOfId(nd.refId);
+                if (ri >= 0) si = ri;
+            }
+        }
         // Walk up to the enclosing struct/array/enum if a leaf was passed.
         while (si >= 0) {
             const Node& n = m_doc->tree.nodes[si];
@@ -1883,7 +1893,148 @@ void RcxController::connectEditor(RcxEditor* editor) {
 void RcxController::setViewRootId(uint64_t id) {
     if (m_viewRootId == id) return;
     m_viewRootId = id;
+    m_focusPath.clear();   // new root view → fresh breadcrumb (no drill yet)
     refresh();
+}
+
+uint64_t RcxController::resolveDefinitionTarget(int nodeIdx) const {
+    if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return 0;
+    return drillTargetId(m_doc->tree.nodes[nodeIdx]);
+}
+
+uint64_t RcxController::rootStructOf(uint64_t nodeId) const {
+    int idx = m_doc->tree.indexOfId(nodeId);
+    int guard = 0;
+    while (idx >= 0 && m_doc->tree.nodes[idx].parentId != 0 && guard++ < 4096)
+        idx = m_doc->tree.indexOfId(m_doc->tree.nodes[idx].parentId);
+    return idx >= 0 ? m_doc->tree.nodes[idx].id : 0;
+}
+
+void RcxController::reconcileFocusPath() {
+    // Walk the chain: each focus pointer must still exist, be drillable, be
+    // expanded, and sit inside the previous depth's class (refId). Trim at the
+    // first break so a fold-margin collapse can't leave a stale breadcrumb.
+    uint64_t expectedContainer = m_viewRootId;
+    int valid = 0;
+    for (int i = 0; i < m_focusPath.size(); ++i) {
+        int pi = m_doc->tree.indexOfId(m_focusPath[i]);
+        if (pi < 0) break;
+        const Node& p = m_doc->tree.nodes[pi];
+        if (drillTargetId(p) == 0 || p.collapsed) break;
+        if (expectedContainer != 0 && rootStructOf(p.id) != expectedContainer) break;
+        expectedContainer = p.refId;
+        valid = i + 1;
+    }
+    if (valid < m_focusPath.size()) m_focusPath.resize(valid);
+}
+
+QVector<uint64_t> RcxController::focusChainTo(uint64_t pid) const {
+    QVector<uint64_t> chain;
+    QSet<uint64_t> seen;
+    uint64_t cur = pid;
+    while (cur != 0 && !seen.contains(cur)) {
+        seen.insert(cur);
+        chain.prepend(cur);
+        uint64_t container = rootStructOf(cur);
+        if (container == 0) return {};                  // orphan
+        if (container == m_viewRootId) return chain;    // reached the view root
+        if (m_viewRootId == 0) return chain;            // show-all: any root is a base
+        // The pointer that inline-expanded this class: an EXPANDED drillable
+        // pointer whose refId == container. First match wins (deterministic;
+        // ambiguous only when one class is referenced by 2+ expanded pointers).
+        uint64_t parentPtr = 0;
+        for (const Node& nd : m_doc->tree.nodes) {
+            if (nd.refId == container && !nd.collapsed && drillTargetId(nd) != 0) {
+                parentPtr = nd.id;
+                break;
+            }
+        }
+        cur = parentPtr;
+    }
+    return {};  // no expanded chain reaches the view root
+}
+
+QVector<uint64_t> RcxController::focusChainToNode(uint64_t nodeId) const {
+    int idx = m_doc->tree.indexOfId(nodeId);
+    if (idx < 0) return {};
+    const Node& n = m_doc->tree.nodes[idx];
+    // The selected node is itself an expanded typed pointer → its own chain.
+    if (drillTargetId(n) != 0 && !n.collapsed)
+        return focusChainTo(n.id);
+    // Otherwise it sits inside some struct root. If that root is the view root
+    // it's a top-level row (no focus → bare root crumb); else the root is the
+    // refId class of the expanded pointer that inline-rendered it — return that
+    // pointer's chain, so selecting inside a NewClass* adds NewClass.
+    uint64_t container = rootStructOf(nodeId);
+    if (container == 0 || container == m_viewRootId) return {};
+    for (const Node& p : m_doc->tree.nodes) {
+        if (p.refId == container && !p.collapsed && drillTargetId(p) != 0)
+            return focusChainTo(p.id);
+    }
+    return {};
+}
+
+void RcxController::collapseToFocus(int crumbIndex) {
+    if (crumbIndex < 0) return;
+    // crumbIndex 0 = root class; i = the class shown by focus pointer i-1.
+    // Collapse focus[crumbIndex] (the pointer that opens everything below this
+    // class), then truncate the path to crumbIndex.
+    const uint64_t collapsePid =
+        (crumbIndex < m_focusPath.size()) ? m_focusPath[crumbIndex] : 0;
+    const uint64_t scrollPid =
+        (crumbIndex >= 1 && crumbIndex - 1 < m_focusPath.size())
+            ? m_focusPath[crumbIndex - 1] : 0;
+    m_focusPath.resize(qMin(crumbIndex, (int)m_focusPath.size()));
+
+    bool pushed = false;
+    if (collapsePid) {
+        int idx = m_doc->tree.indexOfId(collapsePid);
+        if (idx >= 0 && !m_doc->tree.nodes[idx].collapsed) {
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::Collapse{collapsePid, false, true}));  // auto-refresh
+            pushed = true;
+        }
+    }
+    if (!pushed) refresh();
+    RcxEditor* ed = qobject_cast<RcxEditor*>(sender());
+    if (!ed) ed = primaryEditor();
+    if (ed) ed->scrollNodeToTop(scrollPid ? scrollPid : m_viewRootId);
+}
+
+QString RcxController::classLabelOf(uint64_t id) const {
+    int idx = id ? m_doc->tree.indexOfId(id) : -1;
+    if (idx >= 0) return nodeClassLabel(m_doc->tree.nodes[idx]);
+    // No single view root (show-all): fall back to the first root struct name.
+    const QStringList roots = rootClassNames(m_doc->tree);
+    return roots.isEmpty() ? QStringLiteral("…") : roots.first();
+}
+
+void RcxController::pushBreadcrumb() {
+    reconcileFocusPath();
+
+    // Dotted "class.field" crumbs: each crumb is the class you were IN plus the
+    // field you followed OUT of it (focusPath[i] is the pointer left via);
+    // the final crumb is the current class with no trailing field. Crumb i is
+    // clickable → collapseToFocus(i) (go back to that class). Avoids the
+    // redundant-looking "field › class" pair on auto-named pointers.
+    QVector<Crumb> crumbs;
+    uint64_t container = m_viewRootId;  // depth 0 container = the view root
+    for (int i = 0; i < m_focusPath.size(); ++i) {
+        int pi = m_doc->tree.indexOfId(m_focusPath[i]);
+        if (pi < 0) break;
+        const Node& p = m_doc->tree.nodes[pi];
+        QString field = p.name.isEmpty() ? fmt::typeNameRaw(p.kind) : p.name;
+        crumbs.push_back({ classLabelOf(container) + QStringLiteral(".") + field,
+                           (uint64_t)i, /*isField=*/false });
+        container = p.refId;  // next depth's container = this pointer's class
+    }
+    // Current (deepest) class — `container` is the last pointer's refId, or the
+    // view root when nothing is drilled.
+    crumbs.push_back({ classLabelOf(container), (uint64_t)m_focusPath.size(),
+                       /*isField=*/false });
+
+    for (auto* editor : m_editors)
+        editor->setBreadcrumb(crumbs);
 }
 
 void RcxController::scrollToNodeId(uint64_t nodeId) {
@@ -2152,6 +2303,7 @@ void RcxController::refresh() {
             }
         }
         updateCommandRow();
+        pushBreadcrumb();
         applySelectionOverlays();
     }
 }
@@ -2469,20 +2621,8 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
         }
     };
 
-    // Match the File → New Class naming convention: walk existing
-    // root struct names and pick the lowest-numbered UnnamedClassN
-    // that isn't taken. Same flat namespace, no "Extracted" prefix.
-    QString typeName;
-    {
-        QSet<QString> existing;
-        for (const auto& nd : tree.nodes)
-            if (nd.kind == NodeKind::Struct && !nd.structTypeName.isEmpty())
-                existing.insert(nd.structTypeName);
-        int idx = 0;
-        do {
-            typeName = QStringLiteral("UnnamedClass%1").arg(idx++);
-        } while (existing.contains(typeName));
-    }
+    // One canonical naming scheme across every class-creation path.
+    const QString typeName = uniqueStructName();
 
     bool wasSuppressed = m_suppressRefresh;
     m_suppressRefresh = true;
@@ -3385,77 +3525,60 @@ void RcxController::duplicateNode(int nodeIdx) {
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, adjs}));
 }
 
-void RcxController::convertToTypedPointer(uint64_t nodeId) {
-    int ni = m_doc->tree.indexOfId(nodeId);
-    if (ni < 0) return;
-    const Node& node = m_doc->tree.nodes[ni];
-
-    // Determine pointer kind from document's target pointer size
-    NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
-        ? NodeKind::Pointer64
-        : NodeKind::Pointer32;
-
-    // Generate unique struct name: "NewClass", "NewClass_2", "NewClass_3", ...
-    QString baseName = QStringLiteral("NewClass");
-    QString typeName = baseName;
-    int suffix = 2;
-    while (true) {
-        bool exists = false;
-        for (const auto& n : m_doc->tree.nodes) {
-            if (n.kind == NodeKind::Struct && n.structTypeName == typeName) {
-                exists = true; break;
-            }
-        }
-        if (!exists) break;
-        typeName = QStringLiteral("%1_%2").arg(baseName).arg(suffix++);
+QString RcxController::uniqueStructName(const QString& base) const {
+    QSet<QString> existing;
+    for (const auto& n : m_doc->tree.nodes)
+        if (n.kind == NodeKind::Struct && !n.structTypeName.isEmpty())
+            existing.insert(n.structTypeName);
+    QString seed = base.isEmpty() ? QStringLiteral("NewClass") : base;
+    if (!existing.contains(seed)) return seed;
+    for (int suffix = 2; ; ++suffix) {
+        QString candidate = QStringLiteral("%1_%2").arg(seed).arg(suffix);
+        if (!existing.contains(candidate)) return candidate;
     }
+}
 
-    // Create the new root struct node
+uint64_t RcxController::createRootStruct(const QString& typeName,
+                                         const QString& keyword, int fieldCount) {
     Node rootStruct;
     rootStruct.kind = NodeKind::Struct;
     rootStruct.name = QStringLiteral("instance");
     rootStruct.structTypeName = typeName;
-    rootStruct.classKeyword = QStringLiteral("class");
+    rootStruct.classKeyword = keyword;
     rootStruct.parentId = 0;
     rootStruct.offset = 0;
     rootStruct.id = m_doc->tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{rootStruct, {}}));
 
-    // Create child hex fields for the new struct, sized to target arch
-    constexpr int kDefaultFields = 16;
-    bool is32 = (m_doc->tree.pointerSize < 8);
-    NodeKind hexKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
-    int stride = is32 ? 4 : 8;
-    QVector<Node> children;
-    for (int i = 0; i < kDefaultFields; i++) {
+    const bool is32 = (m_doc->tree.pointerSize < 8);
+    const NodeKind hexKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
+    const int stride = is32 ? 4 : 8;
+    for (int i = 0; i < fieldCount; i++) {
         Node c;
         c.kind = hexKind;
         c.name = QStringLiteral("field_%1").arg(i * stride, 2, 16, QChar('0'));
         c.parentId = rootStruct.id;
         c.offset = i * stride;
         c.id = m_doc->tree.reserveId();
-        children.append(c);
+        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{c, {}}));
     }
+    return rootStruct.id;
+}
 
-    uint64_t oldRefId = node.refId;
+void RcxController::convertToTypedPointer(uint64_t nodeId) {
+    int ni = m_doc->tree.indexOfId(nodeId);
+    if (ni < 0) return;
+    const uint64_t oldRefId = m_doc->tree.nodes[ni].refId;
+    const NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
+        ? NodeKind::Pointer64 : NodeKind::Pointer32;
 
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Change to ptr*"));
-
-    // 1. Change kind to Pointer64/32 (if not already)
-    if (node.kind != ptrKind)
+    if (m_doc->tree.nodes[ni].kind != ptrKind)
         changeNodeKind(ni, ptrKind);
-
-    // 2. Insert the new root struct
-    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{rootStruct, {}}));
-
-    // 3. Insert its children
-    for (const Node& c : children)
-        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{c, {}}));
-
-    // 4. Set refId to point to the new struct
+    uint64_t newId = createRootStruct(uniqueStructName(), QStringLiteral("class"), 16);
     m_doc->undoStack.push(new RcxCommand(this,
-        cmd::ChangePointerRef{nodeId, oldRefId, rootStruct.id}));
-
+        cmd::ChangePointerRef{nodeId, oldRefId, newId}));
     m_doc->undoStack.endMacro();
     m_suppressRefresh = false;
     refresh();
@@ -3470,70 +3593,24 @@ uint64_t RcxController::attachRttiClassToPointer(uint64_t nodeId,
     // RTTI chip click yields a distinct, independently-editable struct.
     int ni = m_doc->tree.indexOfId(nodeId);
     if (ni < 0) return 0;
-    const Node& node = m_doc->tree.nodes[ni];
-
-    NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
+    const uint64_t oldRefId = m_doc->tree.nodes[ni].refId;
+    const NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
         ? NodeKind::Pointer64 : NodeKind::Pointer32;
 
-    // Generate unique name: baseName, baseName_2, baseName_3, ...
-    // Empty baseName defends against an empty demangled string — fall
-    // back to "NewClass" so we never produce an empty structTypeName.
-    QString seed = baseName.isEmpty() ? QStringLiteral("NewClass") : baseName;
-    QString typeName = seed;
-    int suffix = 2;
-    while (true) {
-        bool exists = false;
-        for (const auto& n : m_doc->tree.nodes) {
-            if (n.kind == NodeKind::Struct && n.structTypeName == typeName)
-                { exists = true; break; }
-        }
-        if (!exists) break;
-        typeName = QStringLiteral("%1_%2").arg(seed).arg(suffix++);
-    }
-
-    Node rootStruct;
-    rootStruct.kind = NodeKind::Struct;
-    rootStruct.name = QStringLiteral("instance");
-    rootStruct.structTypeName = typeName;
-    rootStruct.classKeyword = QStringLiteral("class");
-    rootStruct.parentId = 0;
-    rootStruct.offset = 0;
-    rootStruct.id = m_doc->tree.reserveId();
-
-    constexpr int kDefaultFields = 16;
-    bool is32 = (m_doc->tree.pointerSize < 8);
-    NodeKind hexKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
-    int stride = is32 ? 4 : 8;
-    QVector<Node> children;
-    for (int i = 0; i < kDefaultFields; i++) {
-        Node c;
-        c.kind = hexKind;
-        c.name = QStringLiteral("field_%1").arg(i * stride, 2, 16, QChar('0'));
-        c.parentId = rootStruct.id;
-        c.offset = i * stride;
-        c.id = m_doc->tree.reserveId();
-        children.append(c);
-    }
-
-    uint64_t oldRefId = node.refId;
+    const QString typeName = uniqueStructName(baseName);  // RTTI name (or NewClass)
 
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(
         QStringLiteral("Attach RTTI class %1").arg(typeName));
-
-    if (node.kind != ptrKind)
+    if (m_doc->tree.nodes[ni].kind != ptrKind)
         changeNodeKind(ni, ptrKind);
-
-    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{rootStruct, {}}));
-    for (const Node& c : children)
-        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{c, {}}));
+    uint64_t newId = createRootStruct(typeName, QStringLiteral("class"), 16);
     m_doc->undoStack.push(new RcxCommand(this,
-        cmd::ChangePointerRef{nodeId, oldRefId, rootStruct.id}));
-
+        cmd::ChangePointerRef{nodeId, oldRefId, newId}));
     m_doc->undoStack.endMacro();
     m_suppressRefresh = false;
     refresh();
-    return rootStruct.id;
+    return newId;
 }
 
 void RcxController::splitHexNode(uint64_t nodeId) {
@@ -4847,6 +4924,14 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             if (node.kind == NodeKind::FuncPtr32)
                 convertMenu->addAction("ptr32", [this, nodeId]() {
                     int ni = m_doc->tree.indexOfId(nodeId); if (ni >= 0) changeNodeKind(ni, NodeKind::Pointer32); });
+            // The fnptr/ptr conversions above add actions but didn't mark the
+            // menu non-empty; without this the Convert submenu gets disabled
+            // (the `if (!hasConvert)` guard below) for a node whose ONLY
+            // available conversion is one of these (e.g. FuncPtr64 -> ptr64).
+            if (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64 ||
+                node.kind == NodeKind::Hex32 || node.kind == NodeKind::Pointer32 ||
+                node.kind == NodeKind::FuncPtr64 || node.kind == NodeKind::FuncPtr32)
+                hasConvert = true;
             if (hasConvert)
                 convertMenu->addSeparator();
 
@@ -5382,6 +5467,17 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     updateCommandRow();
     applySelectionOverlays();
 
+    // Breadcrumb follows the selection: the chain of expanded typed pointers
+    // containing the clicked node. Selecting inside a NewClass* expansion adds
+    // it; a top-level row clears back to the root crumb. Only rebuild when the
+    // scope actually changed — most clicks land within the same crumb path and
+    // would otherwise recreate the crumb widgets needlessly.
+    QVector<uint64_t> newFocus = focusChainToNode(nodeId);
+    if (newFocus != m_focusPath) {
+        m_focusPath = std::move(newFocus);
+        pushBreadcrumb();
+    }
+
     if (m_selIds.size() == 1) {
         uint64_t sid = *m_selIds.begin();
         // Strip footer/array/member bits for node lookup
@@ -5393,8 +5489,11 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
 void RcxController::clearSelection() {
     m_selIds.clear();
     m_anchorLine = -1;
+    bool hadFocus = !m_focusPath.isEmpty();
+    m_focusPath.clear();   // breadcrumb back to the bare root crumb
     updateCommandRow();
     applySelectionOverlays();
+    if (hadFocus) pushBreadcrumb();
 }
 
 void RcxController::applySelectionOverlays() {
@@ -5711,42 +5810,24 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
         applyTypePopupResult(mode, nodeIdx, entry, fullText);
     });
     connect(popup, &TypeSelectorPopup::createNewTypeRequested,
-            this, [this, mode, nodeIdx](int modifierId, int arrayCount) {
+            this, [this, mode, nodeIdx](int modifierId, int arrayCount,
+                                        const QString& name, const QString& keyword) {
         bool wasSuppressed = m_suppressRefresh;
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Create new type"));
 
-        QString baseName = QStringLiteral("NewClass");
-        QString typeName = baseName;
-        int counter = 1;
-        QSet<QString> existing;
-        for (const auto& nd : m_doc->tree.nodes) {
-            if (nd.kind == NodeKind::Struct && !nd.structTypeName.isEmpty())
-                existing.insert(nd.structTypeName);
-        }
-        while (existing.contains(typeName))
-            typeName = baseName + QString::number(counter++);
-
-        Node n;
-        n.kind = NodeKind::Struct;
-        n.structTypeName = typeName;
-        n.name = QStringLiteral("instance");
-        n.parentId = 0;
-        n.offset = 0;
-        n.id = m_doc->tree.reserveId();
-        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
-
-        for (int i = 0; i < 8; i++) {
-            insertNode(n.id, i * 8, NodeKind::Hex64,
-                       QString("field_%1").arg(i * 8, 2, 16, QChar('0')));
-        }
+        // name empty → uniqueStructName() falls back to "NewClass"; a typed
+        // name is de-duplicated (Foo → Foo_2) the same way. keyword carries
+        // struct vs class through to the new root.
+        const QString typeName = uniqueStructName(name);
+        uint64_t newId = createRootStruct(typeName, keyword, 8);
 
         m_doc->undoStack.endMacro();
         m_suppressRefresh = wasSuppressed;
 
         TypeEntry newEntry;
         newEntry.entryKind = TypeEntry::Composite;
-        newEntry.structId  = n.id;
+        newEntry.structId  = newId;
 
         // Build fullText with modifier suffix so applyTypePopupResult
         // wraps the new type as pointer/array accordingly

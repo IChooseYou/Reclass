@@ -3682,7 +3682,7 @@ QJsonObject McpBridge::toolBookmarksAdd(const QJsonObject& args) {
 
 QJsonObject McpBridge::toolBookmarksRemove(const QJsonObject& args) {
     auto* tab = resolveTab(args);
-    if (!tab || !tab->ctrl) return makeTextResult("No active project.");
+    if (!tab || !tab->doc || !tab->ctrl) return makeTextResult("No active project.");
     auto& bms = tab->doc->tree.bookmarks;
     int idx = -1;
     if (args.contains("index")) {

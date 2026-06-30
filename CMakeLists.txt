@@ -789,6 +789,21 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME test_controller COMMAND test_controller)
 
+        # ── Drill-down breadcrumb (nav stack + BreadcrumbBar widget) ──
+        add_executable(test_breadcrumb tests/test_breadcrumb.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
+        target_include_directories(test_breadcrumb PRIVATE src third_party/fadec)
+        target_link_libraries(test_breadcrumb PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+        if(WIN32)
+            target_link_libraries(test_breadcrumb PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_breadcrumb COMMAND test_breadcrumb)
+
         # ── New Class self-attach (doc-owned buffer + processmemory loopback) ──
         add_executable(test_new_class_selfattach tests/test_new_class_selfattach.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp

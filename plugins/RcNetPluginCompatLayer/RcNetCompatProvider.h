@@ -30,6 +30,15 @@ public:
     QString  getSymbol(uint64_t addr) const override;
     uint64_t symbolToAddress(const QString& name) const override;
 
+    // Expose cached modules so RTTI / symbol resolution works (base returns empty).
+    QVector<ModuleEntry> enumerateModules() const override {
+        QVector<ModuleEntry> result;
+        result.reserve(m_modules.size());
+        for (const auto& m : m_modules)
+            result.push_back(ModuleEntry{m.name, QString(), m.base, m.size});
+        return result;
+    }
+
     struct ModuleInfo {
         QString  name;
         uint64_t base;

@@ -560,6 +560,12 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     m_typeCombo->addItem(QStringLiteral("uint64"),  (int)ValueType::UInt64);
     m_typeCombo->addItem(QStringLiteral("float"),   (int)ValueType::Float);
     m_typeCombo->addItem(QStringLiteral("double"),  (int)ValueType::Double);
+    m_typeCombo->addItem(QStringLiteral("vec2"),    (int)ValueType::Vec2);
+    m_typeCombo->addItem(QStringLiteral("vec3"),    (int)ValueType::Vec3);
+    m_typeCombo->addItem(QStringLiteral("vec4"),    (int)ValueType::Vec4);
+    m_typeCombo->addItem(QStringLiteral("utf-8"),   (int)ValueType::UTF8);
+    m_typeCombo->addItem(QStringLiteral("utf-16"),  (int)ValueType::UTF16);
+    m_typeCombo->addItem(QStringLiteral("hex"),     (int)ValueType::HexBytes);
     m_typeCombo->setCurrentIndex(2); // default: int32
     m_typeCombo->setToolTip(QStringLiteral("Bit width / signedness"));
     form->addWidget(m_typeCombo, 2, 1);
@@ -630,14 +636,21 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         "Only scan inside the bounds of the currently-viewed struct."));
     filterRow->addWidget(m_structOnlyCheck);
 
-    // Stubs kept for API/test compatibility — hidden, never displayed.
+    m_privateOnlyCheck = new FilterChip(QStringLiteral("Private only"), this);
+    m_privateOnlyCheck->setToolTip(QStringLiteral(
+        "Only scan MEM_PRIVATE regions (heap/stack/private commits); "
+        "skip image-backed memory."));
+    filterRow->addWidget(m_privateOnlyCheck);
+
+    m_skipSystemCheck = new FilterChip(QStringLiteral("Skip system DLLs"), this);
+    m_skipSystemCheck->setToolTip(QStringLiteral(
+        "Exclude system-directory modules (ntdll, kernel32, ...) from the scan."));
+    filterRow->addWidget(m_skipSystemCheck);
+
+    // Dead stub kept for API/test compatibility — hidden, never displayed.
     m_fastScanCheck = new FilterChip(QString(), this);
     m_fastScanCheck->setChecked(true);
     m_fastScanCheck->hide();
-    m_privateOnlyCheck = new FilterChip(QString(), this);
-    m_privateOnlyCheck->hide();
-    m_skipSystemCheck = new FilterChip(QString(), this);
-    m_skipSystemCheck->hide();
 
     filterRow->addStretch();
     bodyContent->addLayout(filterRow);
@@ -2474,6 +2487,12 @@ int ScannerPanel::valueSize() const {
     case ValueType::Int16: case ValueType::UInt16: return 2;
     case ValueType::Int32: case ValueType::UInt32: case ValueType::Float: return 4;
     case ValueType::Int64: case ValueType::UInt64: case ValueType::Double: return 8;
+    case ValueType::Vec2: return 8;
+    case ValueType::Vec3: return 12;
+    case ValueType::Vec4: return 16;
+    case ValueType::UTF8: case ValueType::UTF16: case ValueType::HexBytes:
+        // Variable-length: the searched pattern length is the value size.
+        return m_lastPattern.isEmpty() ? 16 : (int)m_lastPattern.size();
     default: return 16;
     }
 }
@@ -2557,6 +2576,40 @@ QString ScannerPanel::formatValue(const QByteArray& bytes) const {
     // mismatched lengths.
     case ValueType::Float:  if (sz >= 4) { float v; memcpy(&v, d, 4); return QString::number(v, 'g', 7); } break;
     case ValueType::Double: if (sz >= 8) { double v; memcpy(&v, d, 8); return QString::number(v, 'g', 10); } break;
+    case ValueType::Vec2: case ValueType::Vec3: case ValueType::Vec4: {
+        int n = (m_lastValueType == ValueType::Vec2) ? 2
+              : (m_lastValueType == ValueType::Vec3) ? 3 : 4;
+        if (sz >= n * 4) {
+            QString s;
+            for (int k = 0; k < n; k++) {
+                if (k) s += ' ';
+                float v; memcpy(&v, d + k * 4, 4);
+                s += QString::number(v, 'g', 7);
+            }
+            return s;
+        }
+        break;
+    }
+    case ValueType::UTF8: {
+        int n = m_lastPattern.isEmpty() ? sz : qMin(sz, (int)m_lastPattern.size());
+        return QString::fromUtf8(bytes.constData(), n);
+    }
+    case ValueType::UTF16: {
+        // Reconstruct UTF-16LE via memcpy (avoids alignment UB on char* data).
+        int n = m_lastPattern.isEmpty() ? sz : qMin(sz, (int)m_lastPattern.size());
+        QString s;
+        for (int j = 0; j + 1 < n; j += 2) { uint16_t u; memcpy(&u, d + j, 2); s += QChar(u); }
+        return s;
+    }
+    case ValueType::HexBytes: {
+        int n = m_lastPattern.isEmpty() ? sz : qMin(sz, (int)m_lastPattern.size());
+        QString s;
+        for (int j = 0; j < n; j++) {
+            if (j) s += ' ';
+            s += QStringLiteral("%1").arg((uint8_t)bytes[j], 2, 16, QLatin1Char('0')).toUpper();
+        }
+        return s;
+    }
     default: break;
     }
     return QStringLiteral("??");

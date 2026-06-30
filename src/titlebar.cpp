@@ -21,7 +21,7 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
     layout->setSpacing(0);
 
     // App name
-    m_appLabel = new QLabel(QStringLiteral("Reclass"), this);
+    m_appLabel = new QLabel(QStringLiteral("re-class"), this);
     m_appLabel->setContentsMargins(10, 0, 4, 0);
     m_appLabel->setAlignment(Qt::AlignVCenter);
     m_appLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -177,7 +177,7 @@ void TitleBarWidget::setShowIcon(bool show) {
         setFixedHeight(34);
     } else {
         m_appLabel->setPixmap(QPixmap());
-        m_appLabel->setText(QStringLiteral("Reclass"));
+        m_appLabel->setText(QStringLiteral("re-class"));
         m_appLabel->setStyleSheet(
             QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; padding-left: 10px; }")
                 .arg(m_theme.text.name()));

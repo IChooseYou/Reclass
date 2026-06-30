@@ -517,20 +517,20 @@ private slots:
         m_ctrl->extractByteSelectionToNewClass(4, 20);
         QApplication::processEvents();
 
-        // A new root struct named UnnamedClass0 exists.
+        // A new root struct named NewClass exists.
         int extractedRootIdx = -1;
         for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
             const auto& n = m_doc->tree.nodes[i];
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName == "UnnamedClass0") {
+                && n.structTypeName == "NewClass") {
                 extractedRootIdx = i;
                 break;
             }
         }
-        QVERIFY2(extractedRootIdx >= 0, "UnnamedClass0 root struct missing");
+        QVERIFY2(extractedRootIdx >= 0, "NewClass root struct missing");
         uint64_t extractedRootId = m_doc->tree.nodes[extractedRootIdx].id;
 
-        // UnnamedClass0 should contain greedy hex packing of 16 bytes:
+        // NewClass should contain greedy hex packing of 16 bytes:
         // Hex64 + Hex64 (8 + 8 = 16).
         int extSpan = m_doc->tree.structSpan(extractedRootId);
         QCOMPARE(extSpan, 16);
@@ -685,12 +685,12 @@ private slots:
         m_ctrl->extractByteSelectionToNewClass(4, 16);
         QApplication::processEvents();
 
-        // Find the UnnamedClass0.
+        // Find the NewClass.
         int extractedRootIdx = -1;
         for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
             const auto& n = m_doc->tree.nodes[i];
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName == "UnnamedClass0") {
+                && n.structTypeName == "NewClass") {
                 extractedRootIdx = i; break;
             }
         }
@@ -759,11 +759,11 @@ private slots:
         for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
             const auto& n = m_doc->tree.nodes[i];
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName == "UnnamedClass0") {
+                && n.structTypeName == "NewClass") {
                 extractedRootIdx = i; break;
             }
         }
-        QVERIFY2(extractedRootIdx >= 0, "UnnamedClass0 missing — VTable's FuncPtr64s falsely triggered cross-parent refusal");
+        QVERIFY2(extractedRootIdx >= 0, "NewClass missing — VTable's FuncPtr64s falsely triggered cross-parent refusal");
         uint64_t exId = m_doc->tree.nodes[extractedRootIdx].id;
         QCOMPARE(m_doc->tree.structSpan(exId), 16);
 
@@ -793,7 +793,7 @@ private slots:
         // Tree unchanged.
         QCOMPARE(countNodes(), before);
         for (const auto& nd : m_doc->tree.nodes)
-            QVERIFY(nd.structTypeName != QStringLiteral("UnnamedClass0"));
+            QVERIFY(nd.structTypeName != QStringLiteral("NewClass"));
     }
 
     // The headline fix: breaking a region that contains an embedded struct
@@ -810,7 +810,7 @@ private slots:
         for (int i = 0; i < m_doc->tree.nodes.size(); ++i) {
             const auto& n = m_doc->tree.nodes[i];
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName == "UnnamedClass0") { exIdx = i; break; }
+                && n.structTypeName == "NewClass") { exIdx = i; break; }
         }
         QVERIFY(exIdx >= 0);
         uint64_t exId = m_doc->tree.nodes[exIdx].id;
@@ -843,7 +843,7 @@ private slots:
         QApplication::processEvents();
         QCOMPARE(countNodes(), before);
         for (const auto& nd : m_doc->tree.nodes)
-            QVERIFY(nd.structTypeName != QStringLiteral("UnnamedClass0"));
+            QVERIFY(nd.structTypeName != QStringLiteral("NewClass"));
     }
 
     // Undo reverts the whole break (incl. the moved embedded struct) in a
@@ -1118,12 +1118,12 @@ private slots:
         m_ctrl->extractByteSelectionToNewClass(16, 24);
         QApplication::processEvents();
 
-        // It must REFUSE: no UnnamedClass created, tree byte-for-byte unchanged,
+        // It must REFUSE: no NewClass created, tree byte-for-byte unchanged,
         // inner still intact — i.e. no wrong-field extraction / corruption.
         bool madeNewClass = false;
         for (const auto& n : m_doc->tree.nodes)
             if (n.parentId == 0 && n.kind == NodeKind::Struct
-                && n.structTypeName.startsWith(QStringLiteral("UnnamedClass")))
+                && n.structTypeName.startsWith(QStringLiteral("NewClass")))
                 madeNewClass = true;
         QVERIFY2(!madeNewClass,
                  "partial byte selection inside a nested inline struct must NOT "

@@ -44,6 +44,10 @@ inline QIcon themedVsIcon(const QString& path, const QColor& tint,
     svg.replace("#C5C5C5", tint.name().toLatin1());
     svg.replace("#c5c5c5", tint.name().toLatin1());
     QSvgRenderer r(svg);
+    // Malformed SVG (or a tint replace that broke it) renders nothing — fall
+    // back to Qt's built-in icon engine on the raw path so the glyph still
+    // shows (untinted) instead of a silent blank.
+    if (!r.isValid()) return QIcon(path);
     QPixmap pm(QSize(logicalSize, logicalSize) * s);
     // Stamp the device-pixel-ratio BEFORE painting so the painter's logical
     // coordinate space is `logicalSize` (not the raw device size). Rendering

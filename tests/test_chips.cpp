@@ -337,6 +337,67 @@ private slots:
         QCOMPARE(countChips(rOff, ChipKind::Comment), 0);
     }
 
+    // ── Own-address comment fallback is suppressed on pointer/fnptr rows ──
+    // The value's Symbol chip already annotates where a pointer points, so a
+    // second "module+0x<own-slot-rva>" comment was redundant ("why two
+    // addresses" — user). Data fields keep the fallback; user comments always
+    // show.
+    void ownAddressCommentSuppressedOnPointers() {
+        NodeTree tree;
+        tree.baseAddress = kStructBase;
+        Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = QStringLiteral("Holder");
+        uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+
+        auto addField = [&](NodeKind k, const char* name, int off) {
+            Node f; f.kind = k; f.name = QString::fromLatin1(name);
+            f.parentId = rootId; f.offset = off;
+            tree.addNode(f);
+        };
+        addField(NodeKind::UInt32,    "data",  0);   // data field — fallback fires
+        addField(NodeKind::Pointer64, "ptr",   8);   // pointer — suppressed
+        addField(NodeKind::FuncPtr64, "fnptr", 16);  // fnptr — suppressed
+
+        QByteArray buf(kStructBase + 64, '\0');
+        BufferProvider prov(std::move(buf), QStringLiteral("synthetic"));
+        // No-PDB fallback form returned for every address.
+        auto symLookup = [](uint64_t) -> QString { return QStringLiteral("Reclass.exe+0x10"); };
+
+        ComposeResult r = compose(tree, prov, rootId,
+            /*compactColumns=*/false, /*treeLines=*/false, /*braceWrap=*/false,
+            /*typeHints=*/false, /*showComments=*/true, symLookup);
+
+        auto hasCommentOn = [&](const ComposeResult& res, const QString& nm) -> bool {
+            for (const auto& lm : res.meta) {
+                if (lm.nodeIdx < 0 || lm.nodeIdx >= tree.nodes.size()) continue;
+                if (tree.nodes[lm.nodeIdx].name == nm && findChip(lm, ChipKind::Comment))
+                    return true;
+            }
+            return false;
+        };
+        QVERIFY2(hasCommentOn(r, QStringLiteral("data")),
+                 "data field should keep the own-address comment fallback");
+        QVERIFY2(!hasCommentOn(r, QStringLiteral("ptr")),
+                 "pointer row must NOT get the redundant own-address comment");
+        QVERIFY2(!hasCommentOn(r, QStringLiteral("fnptr")),
+                 "fnptr row must NOT get the redundant own-address comment");
+
+        // A user-authored comment on a pointer ALWAYS shows.
+        for (int i = 0; i < tree.nodes.size(); i++)
+            if (tree.nodes[i].name == QStringLiteral("ptr"))
+                tree.nodes[i].comment = QStringLiteral("the d_ptr");
+        ComposeResult r2 = compose(tree, prov, rootId,
+            false, false, false, false, /*showComments=*/true, symLookup);
+        bool userComment = false;
+        for (const auto& lm : r2.meta) {
+            if (lm.nodeIdx < 0 || lm.nodeIdx >= tree.nodes.size()) continue;
+            if (tree.nodes[lm.nodeIdx].name != QStringLiteral("ptr")) continue;
+            const LineChip* c = findChip(lm, ChipKind::Comment);
+            if (c && c->text == QStringLiteral("the d_ptr")) userComment = true;
+        }
+        QVERIFY2(userComment, "user-authored comment on a pointer must still show");
+    }
+
     // ── Multi-line newlines in a comment collapse to a middle-dot
     //    separator (defensive against phantom Scintilla rows) ──
     void multilineCommentStaysOnOneLine() {

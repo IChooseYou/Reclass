@@ -61,6 +61,7 @@ public:
     QString kind() const override { return QStringLiteral("WinDbg"); }
     QString getSymbol(uint64_t addr) const override;
     QVector<rcx::MemoryRegion> enumerateRegions() const override;
+    QVector<ModuleEntry> enumerateModules() const override;
 
     bool isLive() const override { return m_isLive; }
     uint64_t base() const override { return m_base; }
@@ -70,6 +71,10 @@ private:
     void initInterfaces();   // get IDebugDataSpaces/Control/Symbols from client
     void querySessionInfo(); // determine live/dump, writable, name, base
     void cleanup();
+    // Query loaded modules via DbgEng. Shared by enumerateRegions (tagging /
+    // kernel-mode region source) and enumerateModules (RTTI / symbols). Empty
+    // on non-Windows or before a connection exists.
+    QVector<ModuleEntry> queryModules() const;
 
     // Marshal a lambda to the DbgEng-owning thread.  If already on that
     // thread, calls directly.  Otherwise blocks via QueuedConnection.

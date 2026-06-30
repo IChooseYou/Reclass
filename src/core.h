@@ -169,9 +169,10 @@ inline constexpr bool isCommonKind(NodeKind k) {
     case NodeKind::Hex8:  case NodeKind::Hex16: case NodeKind::Hex32:
     case NodeKind::Hex64: case NodeKind::Hex128:
     case NodeKind::UInt8: case NodeKind::UInt16:
-    case NodeKind::UInt32: case NodeKind::UInt64:
-    case NodeKind::Int32: case NodeKind::Int64:
-    case NodeKind::Pointer64:
+    case NodeKind::UInt32: case NodeKind::UInt64: case NodeKind::UInt128:
+    case NodeKind::Int8:  case NodeKind::Int16:
+    case NodeKind::Int32: case NodeKind::Int64: case NodeKind::Int128:
+    case NodeKind::Pointer32: case NodeKind::Pointer64:
     case NodeKind::Float: case NodeKind::Double:
     case NodeKind::Bool:
         return true;
@@ -414,6 +415,38 @@ extern QString (*g_nameLookupHook)(uint64_t address, const Provider* active);
 // the unified Symbols panel without dragging NameRegistry into the core
 // (and test) targets.
 extern void (*g_namesChangedHook)();
+
+// Resolve the "go to definition" / drill target for a node: the struct id
+// that following this node navigates to (0 = nothing to follow). Single
+// source of truth shared by compose and the controller (F12 go-to-definition
+// + the click-driven breadcrumb focus chain). A pointer or embedded
+// struct with a wired refId follows that ref; a plain struct field views its
+// own subtree. Array-of-struct is subsumed by the refId case.
+inline uint64_t drillTargetId(const Node& n) {
+    if (n.refId != 0) return n.refId;
+    if (n.kind == NodeKind::Struct && n.parentId != 0) return n.id;
+    return 0;
+}
+
+// Human label for a class/struct node — its type name when set, else its
+// instance name, else "Untitled". Used for breadcrumb crumbs and matches
+// the rule in rootClassNames().
+inline QString nodeClassLabel(const Node& n) {
+    if (!n.structTypeName.isEmpty()) return n.structTypeName;
+    if (!n.name.isEmpty()) return n.name;
+    return QStringLiteral("Untitled");
+}
+
+// One rendered breadcrumb segment. The controller flattens its focus path
+// (root class + the chain of expanded pointers) into a Crumb list — class
+// names plus the field followed between them — and hands it to each editor's
+// BreadcrumbBar. `isField` segments are the inert "› fieldName" connectors;
+// class segments carry their crumb INDEX (0 = root) for collapse-to-on-click.
+struct Crumb {
+    QString  label;
+    uint64_t rootId  = 0;      // crumb index for class segments (0 for field segments)
+    bool     isField = false;  // true = inert field connector, false = clickable class
+};
 
 // ── NodeTree ──
 

@@ -20,6 +20,7 @@ namespace rcx {
 
 class HoverPreviewRegistry;  // src/widgets/hover_preview.h
 class HoverPreview;          // src/widgets/hover_preview.h
+class BreadcrumbBar;         // src/widgets/breadcrumb_bar.h
 
 class RcxEditor : public QWidget {
     Q_OBJECT
@@ -28,6 +29,12 @@ public:
     ~RcxEditor() override;
 
     void applyDocument(const ComposeResult& result);
+
+    // Update the drill-down breadcrumb strip above the command row. The
+    // controller flattens its inline-expansion focus path into this Crumb list;
+    // the bar stays visible whenever a class is in view (≥1 class crumb).
+    void setBreadcrumb(const QVector<Crumb>& crumbs);
+    BreadcrumbBar* breadcrumbBar() const { return m_breadcrumb; }  // test accessor
 
     ViewState saveViewState() const;
     void restoreViewState(const ViewState& vs);
@@ -43,6 +50,10 @@ public:
     const LineMeta* metaForLine(int line) const;
     int currentNodeIndex() const;
     void scrollToNodeId(uint64_t nodeId);
+    // Scroll a node's first display line flush to the TOP of the viewport
+    // (SCI_SETFIRSTVISIBLELINE) — used by breadcrumb drill/jump so the focused
+    // class header lands at the top. scrollToNodeId only ensure-visibles.
+    void scrollNodeToTop(uint64_t nodeId);
     void smoothScrollToNodeId(uint64_t nodeId);
     void setFocusNode(uint64_t nodeId);
     void clearFocusNode();
@@ -211,6 +222,10 @@ signals:
     // a NEW tab (sharing the same document). Controller resolves and asks
     // MainWindow to spawn the tab.
     void openTypeInNewTabRequested(int nodeIdx);
+    // A breadcrumb class crumb was clicked: collapse everything below that
+    // class and scroll to it. Carries the crumb INDEX (0 = root class, i = the
+    // class shown by focus-path pointer i-1).
+    void crumbClicked(int crumbIndex);
     // ── Byte-selection actions ──
     // Fired when the user invokes Ctrl+C / Ctrl+V / Delete with an active
     // hex byte selection (`m_byteSel`). Controller reads the selection
@@ -446,6 +461,7 @@ private:
     const NodeTree* m_disasmTree = nullptr;
 
     // ── Find bar ──
+    BreadcrumbBar* m_breadcrumb = nullptr;  // drill-down trail above the command row
     QWidget*   m_findBarContainer = nullptr;
     QLineEdit* m_findBar = nullptr;
     long       m_findPos = 0;
@@ -477,6 +493,12 @@ private:
     bool     m_hoverDwellElapsed = false;
     uint64_t m_dwellNodeId = 0;
     int      m_dwellLine = -1;
+    // Part of the dwell key: a TYPE change (e.g. converting a hex node to
+    // ptr64/void*) keeps the same nodeId+line, so without this the already-
+    // elapsed dwell would carry over and immediately pop the new pointer's
+    // preview before the user hovers it. A live value tick keeps the same
+    // kind, so it does NOT reset the dwell.
+    NodeKind m_dwellNodeKind = NodeKind::Hex8;
 
     // ── Presentation mode (smooth scroll + focus glow) ──
     bool m_presentationMode = false;

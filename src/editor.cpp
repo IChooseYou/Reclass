@@ -4,6 +4,7 @@
 #include "rcxtooltip.h"
 #include "profiler.h"
 #include "widgets/hover_preview.h"
+#include "widgets/breadcrumb_bar.h"
 #include <QDebug>
 #include <QSettings>
 #include <QtEndian>
@@ -1260,6 +1261,29 @@ public:
         setFixedSize(m_standardSize);
     }
 
+    // Live-refresh the active preview's content in place so the popup tracks a
+    // value that changes under a stationary cursor (e.g. a live pointer target).
+    // We rebuild a THROWAWAY widget with current data and, only if its text
+    // differs, copy it onto the shown QLabel — setText doesn't tear down the
+    // widget, so there is no flicker / "fighting". Only text-body previews
+    // (QLabel) live-update; richer widgets (value-history rows) keep their
+    // dwell snapshot. Same-row guarded by the caller. No-op when not visible.
+    void refreshActiveLive(const LineMeta& lm, const Node& node,
+                           const HoverContext& ctx) {
+        if (!isVisible() || m_active < 0 || m_active >= m_eligible.size())
+            return;
+        QWidget* cur = (m_active < m_content->count())
+                       ? m_content->widget(m_active) : nullptr;
+        auto* curLbl = qobject_cast<QLabel*>(cur);
+        if (!curLbl) return;  // non-text previews keep their snapshot
+        QWidget* fresh = m_eligible[m_active]->widget(lm, node, ctx, nullptr);
+        if (auto* freshLbl = qobject_cast<QLabel*>(fresh)) {
+            if (curLbl->text() != freshLbl->text())
+                curLbl->setText(freshLbl->text());
+        }
+        if (fresh) fresh->deleteLater();
+    }
+
     // Inline-edit entry point: show ONLY the value-history page, with
     // interactive Set buttons, in edit-mode chrome (no dots, edit footer).
     // The caller passes the registered ValueHistoryPreview instance.
@@ -1362,13 +1386,13 @@ private:
                 html += QStringLiteral(" cycle &nbsp; ");
             }
             html += keyTagHtml(QStringLiteral("Esc"), t);
-            html += QStringLiteral(" close all &nbsp; ");
+            html += QStringLiteral(" close &nbsp; ");
             // "Hide for good" is a KEY (H), not a click: the popup is
             // see-through (mousing onto it dismisses it), so a footer link can
             // never be reached. H disables value popups until they're
             // re-enabled via View ▸ Value Popups.
             html += keyTagHtml(QStringLiteral("H"), t);
-            html += QStringLiteral(" hide popups");
+            html += QStringLiteral(" hide all");
         }
         html += QStringLiteral("</span>");
         m_footerHint->setText(html);
@@ -1714,6 +1738,13 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
+    // Drill-down breadcrumb strip — above the command row (Scintilla line 0),
+    // hidden until the user drills ≥1 level. A click re-emits crumbClicked so
+    // the controller jumps the view back to that class.
+    m_breadcrumb = new BreadcrumbBar(this);
+    m_breadcrumb->setOnCrumb([this](uint64_t idx) { emit crumbClicked((int)idx); });
+    layout->addWidget(m_breadcrumb);
+
     m_sci = new QsciScintilla(this);
     layout->addWidget(m_sci);
 
@@ -1962,11 +1993,12 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     // not gated (see editor.h comment).
     m_hoverDwellTimer = new QTimer(this);
     m_hoverDwellTimer->setSingleShot(true);
-    // 700 ms: long enough that casual mouse-overs while browsing don't
-    // pop anything, short enough that "I'm actually inspecting this
-    // pointer" doesn't feel laggy. Standard OS tooltip is 500 ms; we
-    // sit slightly above because these popups are content-rich.
-    m_hoverDwellTimer->setInterval(700);
+    // 1000 ms: these content-rich popups should require an INTENTIONAL dwell,
+    // not pop on casual mouse-overs while browsing (user feedback: "don't auto
+    // pop them quickly ... you gotta be more intentional"). Standard OS tooltip
+    // is 500 ms; we sit well above because a popup that fires on a quick pass
+    // fights the text underneath.
+    m_hoverDwellTimer->setInterval(1000);
     connect(m_hoverDwellTimer, &QTimer::timeout, this, [this]() {
         m_hoverDwellElapsed = true;
         applyHoverCursor();
@@ -2329,7 +2361,12 @@ void RcxEditor::allocateMarginStyles() {
     }
 }
 
+void RcxEditor::setBreadcrumb(const QVector<Crumb>& crumbs) {
+    if (m_breadcrumb) m_breadcrumb->setCrumbs(crumbs);
+}
+
 void RcxEditor::applyTheme(const Theme& theme) {
+    if (m_breadcrumb) m_breadcrumb->applyTheme(theme);
     // Editor paper:
     //   - Dark themes: slightly darker than chrome for visual depth.
     //   - Light themes (chrome lightness > 0.78): pure white. Threshold
@@ -4162,6 +4199,27 @@ void RcxEditor::scrollToNodeId(uint64_t nodeId) {
             return;
         }
     }
+}
+
+void RcxEditor::scrollNodeToTop(uint64_t nodeId) {
+    // First display line of the node — O(1) via the per-refresh index, with a
+    // linear fallback. Compose re-emits only visible lines (collapsed nodes'
+    // children are absent), so the m_meta index equals the Scintilla visible
+    // line and feeds SCI_SETFIRSTVISIBLELINE directly (no doc→visible convert).
+    int line = -1;
+    auto it = m_nodeLineIndex.constFind(nodeId);
+    if (it != m_nodeLineIndex.constEnd() && !it->isEmpty())
+        line = it->first();
+    else {
+        for (int i = 0; i < m_meta.size(); i++)
+            if (m_meta[i].nodeId == nodeId && m_meta[i].lineKind != LineKind::Footer) {
+                line = i;
+                break;
+            }
+    }
+    if (line < 0) return;
+    m_sci->setCursorPosition(line, 0);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, (unsigned long)line);
 }
 
 // ── Presentation mode: smooth scroll ──
@@ -7480,9 +7538,13 @@ void RcxEditor::applyHoverCursor() {
     // popup keeps showing while the user moves within the same row.
     // Each preview popup block below gates its show on
     // m_hoverDwellElapsed so they don't flash on incidental hovers.
-    if (m_dwellNodeId != m_hoveredNodeId || m_dwellLine != m_hoveredLine) {
-        m_dwellNodeId = m_hoveredNodeId;
-        m_dwellLine   = m_hoveredLine;
+    NodeKind hoveredKind = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size())
+                           ? m_meta[m_hoveredLine].nodeKind : NodeKind::Hex8;
+    if (m_dwellNodeId != m_hoveredNodeId || m_dwellLine != m_hoveredLine
+        || m_dwellNodeKind != hoveredKind) {
+        m_dwellNodeId   = m_hoveredNodeId;
+        m_dwellLine     = m_hoveredLine;
+        m_dwellNodeKind = hoveredKind;
         m_hoverDwellElapsed = false;
         if (m_hoverDwellTimer) m_hoverDwellTimer->stop();
         if (m_hoveredNodeId != 0 && m_hoveredLine >= 0 && m_hoverDwellTimer)
@@ -7520,7 +7582,19 @@ void RcxEditor::applyHoverCursor() {
                 ColumnSpan vsNarrow = narrowPtrValueSpan(lm, vsFull, lineText);
                 bool inFull   = vsFull.valid   && h.col >= vsFull.start   && h.col < vsFull.end;
                 bool inNarrow = vsNarrow.valid && h.col >= vsNarrow.start && h.col < vsNarrow.end;
-                if (inFull || inNarrow) {
+                // Right-margin guard: Scintilla rounds an x just past the last
+                // value glyph back onto the last column, so the column test
+                // alone pops the preview when the cursor sits in the empty
+                // margin to the RIGHT of the value. Require the mouse pixel to
+                // be at or left of the value's right edge — you must be
+                // intentionally over the value, not the trailing margin.
+                long valEndPos = posFromCol(m_sci, h.line,
+                                            vsFull.valid ? vsFull.end : 0);
+                int valEndX = (int)m_sci->SendScintilla(
+                    QsciScintillaBase::SCI_POINTXFROMPOSITION,
+                    (unsigned long)0, valEndPos);
+                bool inRightMargin = vsFull.valid && m_lastHoverPos.x() > valEndX;
+                if ((inFull || inNarrow) && !inRightMargin) {
                     HoverContext ctx;
                     ctx.editorFont   = editorFont();
                     ctx.theme        = &ThemeManager::instance().current();
@@ -7533,6 +7607,15 @@ void RcxEditor::applyHoverCursor() {
                         int initial = pickLastUsedPreviewIdx(eligible, lm.nodeKind);
                         auto* host = static_cast<HoverPopupHost*>(m_popupHost);
                         host->setEligible(eligible, lm, node, ctx, initial);
+                        // setEligible is fingerprint-gated and SKIPS the rebuild
+                        // on an unchanged row, so a value that changes under a
+                        // stationary cursor would never update. Refresh the
+                        // active preview's content in place (setText, no
+                        // teardown) so live values track without flicker. Only
+                        // for live providers — static data can't change, so
+                        // there's nothing to track and no reason to re-read.
+                        if (ctx.dataProvider && ctx.dataProvider->isLive())
+                            host->refreshActiveLive(lm, node, ctx);
                         ColumnSpan anchorSpan = vsNarrow.valid ? vsNarrow : vsFull;
                         int lh = 0;
                         QPoint anchor = popupAnchorAt(

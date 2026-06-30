@@ -6,6 +6,8 @@
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QFileInfo>
+#include <QFile>      // used by the Linux /proc reader below; <QFileInfo> alone
+                      // doesn't pull in QFile, so omitting it broke the Linux build
 #include <QPixmap>
 #include <QSettings>
 #include <QApplication>

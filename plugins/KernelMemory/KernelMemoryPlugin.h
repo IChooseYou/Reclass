@@ -37,6 +37,14 @@ public:
     uint64_t base() const override { return m_base; }
     int pointerSize() const override { return m_pointerSize; }
     QVector<rcx::MemoryRegion> enumerateRegions() const override;
+    // Expose cached modules so RTTI / symbol resolution works (base returns empty).
+    QVector<ModuleEntry> enumerateModules() const override {
+        QVector<ModuleEntry> result;
+        result.reserve(m_modules.size());
+        for (const auto& m : m_modules)
+            result.push_back(ModuleEntry{m.name, QString(), m.base, m.size});
+        return result;
+    }
     bool isReadable(uint64_t, int len) const override { return m_driverHandle && len >= 0; }
 
     uint32_t pid() const { return m_pid; }
