@@ -255,7 +255,7 @@ private slots:
 
     void provider_connect_badPipe()
     {
-        WinDbgMemoryProvider prov("npipe:Pipe=nonexistent_reclass_test_pipe,Server=localhost");
+        WinDbgMemoryProvider prov("npipe:Pipe=nonexistent_REECLASS_test_pipe,Server=localhost");
         QVERIFY(!prov.isValid());
         QCOMPARE(prov.size(), 0);
     }

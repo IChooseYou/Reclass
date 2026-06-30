@@ -42,7 +42,7 @@ public:
         resize(560, 380);
 
         const auto& t = ThemeManager::instance().current();
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont font(s.value("font", "JetBrains Mono").toString(), 10);
         font.setFixedPitch(true);
 

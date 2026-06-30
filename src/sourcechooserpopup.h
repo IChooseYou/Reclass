@@ -23,7 +23,7 @@ inline QString iconForProvider(const QString& identifier) {
         return QStringLiteral(":/vsicons/remote.svg");
     if (identifier == QStringLiteral("windbgmemory"))
         return QStringLiteral(":/vsicons/debug.svg");
-    if (identifier == QStringLiteral("reclass.netcompatlayer"))
+    if (identifier == QStringLiteral("REECLASS.netcompatlayer"))
         return QStringLiteral(":/vsicons/plug.svg");
     if (identifier == QStringLiteral("kernelmemory"))
         return QStringLiteral(":/vsicons/symbol-key.svg");

@@ -361,7 +361,7 @@ private slots:
         QByteArray buf(kStructBase + 64, '\0');
         BufferProvider prov(std::move(buf), QStringLiteral("synthetic"));
         // No-PDB fallback form returned for every address.
-        auto symLookup = [](uint64_t) -> QString { return QStringLiteral("Reclass.exe+0x10"); };
+        auto symLookup = [](uint64_t) -> QString { return QStringLiteral("REECLASS.exe+0x10"); };
 
         ComposeResult r = compose(tree, prov, rootId,
             /*compactColumns=*/false, /*treeLines=*/false, /*braceWrap=*/false,

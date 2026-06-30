@@ -143,7 +143,7 @@ public:
 // Plugin factory function signature
 typedef IPlugin* (*CreatePluginFunc)();
 
-#define IPLUGIN_IID "com.reclass.IPlugin/1.0"
+#define IPLUGIN_IID "com.REECLASS.IPlugin/1.0"
 
 // ── Provider ABI guard ──
 // Provider plugins derive from rcx::Provider, a *fragile base class*: adding a

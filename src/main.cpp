@@ -199,7 +199,7 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
         GetLocalTime(&st);
         wchar_t dumpPath[MAX_PATH];
         _snwprintf_s(dumpPath, MAX_PATH,
-                   L"%sreclass_crash_%04d%02d%02d_%02d%02d%02d.dmp",
+                   L"%sREECLASS_crash_%04d%02d%02d_%02d%02d%02d.dmp",
                    exePath, st.wYear, st.wMonth, st.wDay,
                    st.wHour, st.wMinute, st.wSecond);
 
@@ -352,7 +352,7 @@ static void posixCrashHandler(int sig, siginfo_t* info, void* /*uctx*/) {
     const char* home = getenv("HOME");
     if (home && *home) {
         char dirPath[1024];
-        snprintf(dirPath, sizeof(dirPath), "%s/.reclass", home);
+        snprintf(dirPath, sizeof(dirPath), "%s/.REECLASS", home);
         mkdir(dirPath, 0700);  // ignore EEXIST
         time_t now = time(nullptr);
         struct tm tm{};
@@ -370,7 +370,7 @@ static void posixCrashHandler(int sig, siginfo_t* info, void* /*uctx*/) {
     FILE* logF = logPath[0] ? fopen(logPath, "w") : nullptr;
     if (logF) {
         fprintf(stderr, "Log    : %s\n", logPath);
-        fprintf(logF, "=== Reclass crash ===\n");
+        fprintf(logF, "=== REECLASS crash ===\n");
         fprintf(logF, "Signal : %s (%d)\n", posixSigName(sig), sig);
         fprintf(logF, "Addr   : %p\n", info ? info->si_addr : nullptr);
         fflush(logF);
@@ -821,7 +821,7 @@ public:
                     // sizing to match the dropdown's fm.height()+4 sizing
                     // and to center vertically the same way Qt::AlignVCenter
                     // centers the text below.
-                    QSettings s("Reclass", "Reclass");
+                    QSettings s("REECLASS", "REECLASS");
                     QFont f(s.value("font", "JetBrains Mono").toString(), 10);
                     f.setFixedPitch(true);
                     p->setFont(f);
@@ -950,7 +950,7 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
         "           font-family: '%6'; font-size: 10pt; }")
         .arg(theme.textFaint.name(), theme.textDim.name(),
              theme.backgroundAlt.name(), theme.text.name(), theme.border.name(),
-             QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString()));
+             QSettings("REECLASS", "REECLASS").value("font", "JetBrains Mono").toString()));
 }
 
 class BorderOverlay : public QWidget {
@@ -1069,7 +1069,7 @@ static QString sciGetLineText(QsciScintilla* sci, int line) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     PROFILE_SCOPE("MainWindow::ctor");
-    setWindowTitle("re-class");
+    setWindowTitle("REECLASS");
     // Initial size +30% over the legacy 1080×720 to give docks + editor
     // more breathing room on first launch.
     resize(1080, 720);
@@ -1093,7 +1093,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_menuBar->setNativeMenuBar(false);
 #endif
 #else
-    setWindowTitle(QStringLiteral("re-class"));
+    setWindowTitle(QStringLiteral("REECLASS"));
     setUnifiedTitleAndToolBarOnMac(true);
     m_menuBar = menuBar();
     m_menuBar->setNativeMenuBar(true);
@@ -1193,7 +1193,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // Restore menu bar title case setting (after menus are created)
     {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         m_menuBarTitleCase = s.value("menuBarTitleCase", false).toBool();
         applyMenuBarTitleCase(m_menuBarTitleCase);
         if (m_titleBar && s.value("showIcon", false).toBool())
@@ -1511,10 +1511,10 @@ void MainWindow::createMenus() {
         auto* actConsole = view->addAction(QStringLiteral("Show &Console"));
         actConsole->setCheckable(true);
         actConsole->setChecked(
-            QSettings("Reclass", "Reclass").value("showConsole", false).toBool());
+            QSettings("REECLASS", "REECLASS").value("showConsole", false).toBool());
         connect(actConsole, &QAction::triggered, this, [](bool checked) {
             rcxSetConsoleVisible(checked);
-            QSettings("Reclass", "Reclass").setValue("showConsole", checked);
+            QSettings("REECLASS", "REECLASS").setValue("showConsole", checked);
         });
         view->addSeparator();
     }
@@ -1613,7 +1613,7 @@ void MainWindow::createMenus() {
     actIbmPlex->setCheckable(true);
     actIbmPlex->setActionGroup(fontGroup);
     // Load saved preference
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QString savedFont = settings.value("font", "JetBrains Mono").toString();
     if      (savedFont == "JetBrains Mono")  actJetBrains->setChecked(true);
     else if (savedFont == "IBM Plex Mono")   actIbmPlex->setChecked(true);
@@ -1645,7 +1645,7 @@ void MainWindow::createMenus() {
     actCompact->setCheckable(true);
     actCompact->setChecked(settings.value("compactColumns", true).toBool());
     connect(actCompact, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("compactColumns", checked);
+        QSettings("REECLASS", "REECLASS").setValue("compactColumns", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setCompactColumns(checked);
     });
@@ -1654,7 +1654,7 @@ void MainWindow::createMenus() {
     actTreeLines->setCheckable(true);
     actTreeLines->setChecked(settings.value("treeLines", true).toBool());
     connect(actTreeLines, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("treeLines", checked);
+        QSettings("REECLASS", "REECLASS").setValue("treeLines", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setTreeLines(checked);
     });
@@ -1663,7 +1663,7 @@ void MainWindow::createMenus() {
     m_actRelOfs->setCheckable(true);
     m_actRelOfs->setChecked(settings.value("relativeOffsets", true).toBool());
     connect(m_actRelOfs, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("relativeOffsets", checked);
+        QSettings("REECLASS", "REECLASS").setValue("relativeOffsets", checked);
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
                 pane.editor->setRelativeOffsets(checked);
@@ -1683,7 +1683,7 @@ void MainWindow::createMenus() {
     actComments->setCheckable(true);
     actComments->setChecked(settings.value("showComments", false).toBool());
     connect(actComments, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("showComments", checked);
+        QSettings("REECLASS", "REECLASS").setValue("showComments", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setShowComments(checked);
     });
@@ -1706,7 +1706,7 @@ void MainWindow::createMenus() {
     actRttiChips->setCheckable(true);
     actRttiChips->setChecked(settings.value("showRttiChips", false).toBool());
     connect(actRttiChips, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("showRttiChips", checked);
+        QSettings("REECLASS", "REECLASS").setValue("showRttiChips", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setShowRtti(checked);
     });
@@ -1716,7 +1716,7 @@ void MainWindow::createMenus() {
     actEnumChips->setCheckable(true);
     actEnumChips->setChecked(settings.value("showEnumChips", true).toBool());
     connect(actEnumChips, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("showEnumChips", checked);
+        QSettings("REECLASS", "REECLASS").setValue("showEnumChips", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setShowEnumChips(checked);
     });
@@ -1726,7 +1726,7 @@ void MainWindow::createMenus() {
     actHoverEffects->setCheckable(true);
     actHoverEffects->setChecked(settings.value("hoverEffects", true).toBool());
     connect(actHoverEffects, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("hoverEffects", checked);
+        QSettings("REECLASS", "REECLASS").setValue("hoverEffects", checked);
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
                 if (pane.editor) pane.editor->setHoverEffects(checked);
@@ -1742,7 +1742,7 @@ void MainWindow::createMenus() {
     m_actValuePopups->setCheckable(true);
     m_actValuePopups->setChecked(settings.value("valuePopups", true).toBool());
     connect(m_actValuePopups, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("valuePopups", checked);
+        QSettings("REECLASS", "REECLASS").setValue("valuePopups", checked);
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
                 if (pane.editor) pane.editor->setValuePopupsEnabled(checked);
@@ -1755,7 +1755,7 @@ void MainWindow::createMenus() {
     actMinimap->setCheckable(true);
     actMinimap->setChecked(settings.value("minimap", false).toBool());
     connect(actMinimap, &QAction::triggered, this, [this](bool checked) {
-        QSettings("Reclass", "Reclass").setValue("minimap", checked);
+        QSettings("REECLASS", "REECLASS").setValue("minimap", checked);
         for (auto& tab : m_tabs) {
             for (auto& pane : tab.panes) {
                 if (!pane.minimap || !pane.editor) continue;
@@ -1926,7 +1926,7 @@ void MainWindow::createMenus() {
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F),
                     QIcon(), this, &MainWindow::showProfilerDialog);
     tools->addSeparator();
-    const auto mcpName = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
+    const auto mcpName = QSettings("REECLASS", "REECLASS").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
     m_mcpAction = Qt5Qt6AddAction(tools, mcpName, QKeySequence::UnknownKey, QIcon(), this, &MainWindow::toggleMcp);
     tools->addSeparator();
     Qt5Qt6AddAction(tools, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this,
@@ -1942,7 +1942,7 @@ void MainWindow::createMenus() {
                     makeIcon(":/vsicons/question.svg"), this,
                     &MainWindow::showShortcutsDialog);
     help->addSeparator();
-    Qt5Qt6AddAction(help, "&About re-class", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
+    Qt5Qt6AddAction(help, "&About REECLASS", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
 }
 
 // ── Themed resize grip (replaces ugly default QSizeGrip) ──
@@ -2664,7 +2664,7 @@ void MainWindow::createStatusBar() {
 
     // Sync status bar font to global editor font (10pt monospace)
     {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_statusLabel->setFont(f);
@@ -2675,7 +2675,7 @@ void MainWindow::createStatusBar() {
     // begin/end. Hidden by default; shown only during long operations.
     {
         const auto& t = ThemeManager::instance().current();
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
 
@@ -2698,7 +2698,7 @@ void MainWindow::createStatusBar() {
     // Source-status chip — right-anchored liveness dot + "[kind:name]" of the
     // active data source. Updated via RcxController::sourceStatusChanged.
     {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont f(s.value("font", "JetBrains Mono").toString(), 9);
         f.setFixedPitch(true);
         m_sourceChip = new SourceStatusChip(sb);
@@ -2868,7 +2868,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Style to match the top dock tab bar, with accent line on selected tab
     {
         const auto& t = ThemeManager::instance().current();
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QString editorFont = s.value("font", "JetBrains Mono").toString();
         // Flat tabs: background matches the editor paper (no bg emphasis on
         // selection — user-validated). Each tab has a right-border separator
@@ -2894,7 +2894,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Create editor via controller (parent = tabWidget for ownership)
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
     {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         pane.editor->setRelativeOffsets(s.value("relativeOffsets", true).toBool());
         pane.editor->setHoverEffects(s.value("hoverEffects", true).toBool());
         pane.editor->setValuePopupsEnabled(s.value("valuePopups", true).toBool());
@@ -2919,7 +2919,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // emitting editor + emits this. Mirror it to the View-menu checkbox, the
     // persisted setting, and every other editor so the choice is global.
     connect(pane.editor, &RcxEditor::valuePopupsDisableRequested, this, [this]() {
-        QSettings("Reclass", "Reclass").setValue("valuePopups", false);
+        QSettings("REECLASS", "REECLASS").setValue("valuePopups", false);
         if (m_actValuePopups) m_actValuePopups->setChecked(false);
         for (auto& tab : m_tabs)
             for (auto& p : tab.panes)
@@ -2928,7 +2928,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
     // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
     connect(pane.editor, &RcxEditor::relativeOffsetsChanged, this, [this](bool rel) {
-        QSettings("Reclass", "Reclass").setValue("relativeOffsets", rel);
+        QSettings("REECLASS", "REECLASS").setValue("relativeOffsets", rel);
         if (m_actRelOfs) m_actRelOfs->setChecked(rel);
         // Propagate to all other editors so they stay in sync
         for (auto& tab : m_tabs)
@@ -3018,7 +3018,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         mm->setSelectionBackgroundColor(tt.selected);
     }
     mm->setVisible(
-        QSettings("Reclass", "Reclass").value("minimap", false).toBool());
+        QSettings("REECLASS", "REECLASS").value("minimap", false).toBool());
     ecLayout->addWidget(mm);
 
     // Translucent rectangle overlay covering the lines currently
@@ -3084,7 +3084,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     reclassPageLay->setContentsMargins(0, 0, 0, 0);
     reclassPageLay->setSpacing(0);
     reclassPageLay->addWidget(pane.editorContainer);
-    pane.tabWidget->addTab(pane.reclassPage, "re-class");  // index 0
+    pane.tabWidget->addTab(pane.reclassPage, "REECLASS");  // index 0
 
     // Create per-pane rendered C++ view with find bar. Same device-exact
     // outline as the hex editor (EditorContainer) so the Code view reads as a
@@ -3220,7 +3220,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Corner widget: format combo + gear icon
     {
         const auto& ct = ThemeManager::instance().current();
-        QSettings cs("Reclass", "Reclass");
+        QSettings cs("REECLASS", "REECLASS");
         QString ef = cs.value("font", "JetBrains Mono").toString();
 
         auto* cornerWidget = new QWidget;
@@ -3336,7 +3336,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
         connect(pane.fmtCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this, refreshAllRendered](int idx) {
-            QSettings("Reclass", "Reclass").setValue("codeFormat", idx);
+            QSettings("REECLASS", "REECLASS").setValue("codeFormat", idx);
             refreshAllRendered();
             for (auto& tab : m_tabs)
                 for (auto& p : tab.panes)
@@ -3345,7 +3345,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         });
         connect(pane.scopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this, refreshAllRendered](int idx) {
-            QSettings("Reclass", "Reclass").setValue("codeScope", idx);
+            QSettings("REECLASS", "REECLASS").setValue("codeScope", idx);
             refreshAllRendered();
             for (auto& tab : m_tabs)
                 for (auto& p : tab.panes)
@@ -3600,7 +3600,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             lbl->setPalette(lp);
         }
         {
-            QSettings settings("Reclass", "Reclass");
+            QSettings settings("REECLASS", "REECLASS");
             QFont f(settings.value("font", "JetBrains Mono").toString(), 12);
             f.setFixedPitch(true);
             lbl->setFont(f);
@@ -3707,13 +3707,13 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     tab.panes.append(createSplitPane(tab));
 
     // Apply global compact columns setting to new tab
-    ctrl->setCompactColumns(QSettings("Reclass", "Reclass").value("compactColumns", true).toBool());
-    ctrl->setTreeLines(QSettings("Reclass", "Reclass").value("treeLines", true).toBool());
-    ctrl->setBraceWrap(QSettings("Reclass", "Reclass").value("braceWrap", false).toBool());
-    ctrl->setTypeHints(QSettings("Reclass", "Reclass").value("typeHints", false).toBool());
-    ctrl->setShowComments(QSettings("Reclass", "Reclass").value("showComments", false).toBool());
-    ctrl->setShowRtti(QSettings("Reclass", "Reclass").value("showRttiChips", false).toBool());
-    ctrl->setShowEnumChips(QSettings("Reclass", "Reclass").value("showEnumChips", true).toBool());
+    ctrl->setCompactColumns(QSettings("REECLASS", "REECLASS").value("compactColumns", true).toBool());
+    ctrl->setTreeLines(QSettings("REECLASS", "REECLASS").value("treeLines", true).toBool());
+    ctrl->setBraceWrap(QSettings("REECLASS", "REECLASS").value("braceWrap", false).toBool());
+    ctrl->setTypeHints(QSettings("REECLASS", "REECLASS").value("typeHints", false).toBool());
+    ctrl->setShowComments(QSettings("REECLASS", "REECLASS").value("showComments", false).toBool());
+    ctrl->setShowRtti(QSettings("REECLASS", "REECLASS").value("showRttiChips", false).toBool());
+    ctrl->setShowEnumChips(QSettings("REECLASS", "REECLASS").value("showEnumChips", true).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
@@ -4423,7 +4423,7 @@ void MainWindow::setupDockTabBars() {
         tabBar->setDrawBase(false);
         // Set editor font so tab width sizing matches our label painting
         {
-            QSettings s("Reclass", "Reclass");
+            QSettings s("REECLASS", "REECLASS");
             QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
             tabFont.setFixedPitch(true);
             tabBar->setFont(tabFont);
@@ -5049,7 +5049,7 @@ void MainWindow::selfTest() {
     // with empty bytes instead of live ones.
     if (ProviderRegistry::instance().findProvider(QStringLiteral("processmemory"))) {
         DWORD pid = GetCurrentProcessId();
-        QString target = QString("%1:Reclass.exe").arg(pid);
+        QString target = QString("%1:REECLASS.exe").arg(pid);
         editorCtrl->attachViaPlugin(QStringLiteral("processmemory"), target);
     }
 
@@ -5387,7 +5387,7 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
 
 void MainWindow::about() {
     ThemedDialog dlg(this);
-    dlg.setWindowTitle(QStringLiteral("About re-class"));
+    dlg.setWindowTitle(QStringLiteral("About REECLASS"));
     dlg.setFixedSize(420, 420);
     auto* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(20, 16, 20, 16);
@@ -5417,7 +5417,7 @@ void MainWindow::about() {
     ack->setWordWrap(true);
     ack->setText(QStringLiteral(
         "<div style='color:%1;font-size:11px;line-height:140%%;'>"
-        "<p>re-class uses the following open-source software. Many thanks "
+        "<p>REECLASS uses the following open-source software. Many thanks "
         "to their authors and maintainers.</p>"
         "<ul style='margin-left:14px;padding-left:0;'>"
         "<li><a href='https://www.qt.io/' style='color:%2;'>Qt</a> "
@@ -5447,7 +5447,7 @@ void MainWindow::about() {
     auto* ghBtn = new DialogButton(QStringLiteral("Open GitHub"),
         DialogButton::Primary, &dlg);
     connect(ghBtn, &QPushButton::clicked, this, []() {
-        QDesktopServices::openUrl(QUrl("https://github.com/IChooseYou/Reclass"));
+        QDesktopServices::openUrl(QUrl("https://github.com/IChooseYou/REECLASS"));
     });
     lay->addWidget(ghBtn, 0, Qt::AlignCenter);
     dlg.exec();
@@ -5467,7 +5467,7 @@ void MainWindow::showShortcutsDialog() {
     dlg.setWindowTitle(QStringLiteral("Keyboard Shortcuts"));
     dlg.resize(560, 520);
 
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
@@ -5552,7 +5552,7 @@ void MainWindow::showShortcutsDialog() {
         {QStringLiteral("Bookmarks & Window"), {}, true},
         {QStringLiteral("Ctrl+B"),              QStringLiteral("Add bookmark...")},
         {QStringLiteral("Ctrl+Alt+B"),          QStringLiteral("Quick bookmark here")},
-        {QStringLiteral("Ctrl+\\"),             QStringLiteral("Split view below (Reclass / Code side-by-side)")},
+        {QStringLiteral("Ctrl+\\"),             QStringLiteral("Split view below (REECLASS / Code side-by-side)")},
         {QStringLiteral("Ctrl+Shift+\\"),       QStringLiteral("Unsplit view")},
         {QStringLiteral("Ctrl+Shift+[ / ]"),    QStringLiteral("Collapse all / expand all")},
         {QStringLiteral("F5"),                  QStringLiteral("Refresh")},
@@ -5642,7 +5642,7 @@ void MainWindow::toggleMcp() {
     } else {
         m_mcp->start();
         m_mcpAction->setText("Stop &MCP Server");
-        setAppStatus("MCP server listening on pipe: ReclassMcpBridge");
+        setAppStatus("MCP server listening on pipe: REECLASSMcpBridge");
     }
 }
 
@@ -5710,7 +5710,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             tabBar->setExpanding(false);
             // Set editor font so tab width sizing matches our label painting
             {
-                QSettings s("Reclass", "Reclass");
+                QSettings s("REECLASS", "REECLASS");
                 QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
                 tabFont.setFixedPitch(true);
                 tabBar->setFont(tabFont);
@@ -5742,7 +5742,7 @@ void MainWindow::applyTheme(const Theme& theme) {
 
     // Restyle per-pane view tab bars (Reclass / Code)
     {
-        QString editorFont = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
+        QString editorFont = QSettings("REECLASS", "REECLASS").value("font", "JetBrains Mono").toString();
         QString paneTabStyle = QStringLiteral(
             "QTabWidget::pane { border: none; }"
             "QTabBar { border: none; }"
@@ -5969,7 +5969,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             // format the user last viewed governs which lexer is attached;
             // re-apply for it so a theme switch recolors all languages.
             const CodeFormat fmt = static_cast<CodeFormat>(
-                QSettings("Reclass", "Reclass").value("codeFormat", 0).toInt());
+                QSettings("REECLASS", "REECLASS").value("codeFormat", 0).toInt());
             applyCodeLexer(sci, fmt, theme, sci->font());
             sci->setPaper(rcx::editorPaperColor(theme));
             sci->setColor(theme.text);
@@ -6024,7 +6024,7 @@ void MainWindow::loadPluginsDeferred() {
     if (int n = m_pluginManager.rejectedPlugins().size())
         setAppStatus(QStringLiteral(
             "%1 plugin(s) skipped (incompatible) — see Plugins ▸ Manage Plugins").arg(n));
-    if (m_mcp && QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool())
+    if (m_mcp && QSettings("REECLASS", "REECLASS").value("autoStartMcp", true).toBool())
         m_mcp->start();
 }
 
@@ -6043,15 +6043,15 @@ void MainWindow::showOptionsDialog(int initialPage) {
     auto& tm = ThemeManager::instance();
     OptionsResult current;
     current.themeIndex = tm.currentIndex();
-    current.fontName = QSettings("Reclass", "Reclass").value("font", "JetBrains Mono").toString();
+    current.fontName = QSettings("REECLASS", "REECLASS").value("font", "JetBrains Mono").toString();
     current.menuBarTitleCase = m_menuBarTitleCase;
     current.showIcon = m_titleBar
-        ? QSettings("Reclass", "Reclass").value("showIcon", false).toBool()
+        ? QSettings("REECLASS", "REECLASS").value("showIcon", false).toBool()
         : false;
-    current.autoStartMcp = QSettings("Reclass", "Reclass").value("autoStartMcp", true).toBool();
-    current.refreshMs = QSettings("Reclass", "Reclass").value("refreshMs", rcx::kDefaultRefreshMs).toInt();
-    current.generatorAsserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
-    current.braceWrap = QSettings("Reclass", "Reclass").value("braceWrap", false).toBool();
+    current.autoStartMcp = QSettings("REECLASS", "REECLASS").value("autoStartMcp", true).toBool();
+    current.refreshMs = QSettings("REECLASS", "REECLASS").value("refreshMs", rcx::kDefaultRefreshMs).toInt();
+    current.generatorAsserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
+    current.braceWrap = QSettings("REECLASS", "REECLASS").value("braceWrap", false).toBool();
 
     OptionsDialog dlg(current, this);
     if (initialPage >= 0)
@@ -6068,36 +6068,36 @@ void MainWindow::showOptionsDialog(int initialPage) {
 
     if (r.menuBarTitleCase != current.menuBarTitleCase) {
         applyMenuBarTitleCase(r.menuBarTitleCase);
-        QSettings("Reclass", "Reclass").setValue("menuBarTitleCase", r.menuBarTitleCase);
+        QSettings("REECLASS", "REECLASS").setValue("menuBarTitleCase", r.menuBarTitleCase);
     }
 
     if (r.showIcon != current.showIcon) {
         if (m_titleBar)
             m_titleBar->setShowIcon(r.showIcon);
-        QSettings("Reclass", "Reclass").setValue("showIcon", r.showIcon);
+        QSettings("REECLASS", "REECLASS").setValue("showIcon", r.showIcon);
     }
 
     if (r.autoStartMcp != current.autoStartMcp)
-        QSettings("Reclass", "Reclass").setValue("autoStartMcp", r.autoStartMcp);
+        QSettings("REECLASS", "REECLASS").setValue("autoStartMcp", r.autoStartMcp);
 
     if (r.refreshMs != current.refreshMs) {
-        QSettings("Reclass", "Reclass").setValue("refreshMs", r.refreshMs);
+        QSettings("REECLASS", "REECLASS").setValue("refreshMs", r.refreshMs);
         for (auto& tab : m_tabs)
             tab.ctrl->setRefreshInterval(r.refreshMs);
     }
 
     if (r.generatorAsserts != current.generatorAsserts)
-        QSettings("Reclass", "Reclass").setValue("generatorAsserts", r.generatorAsserts);
+        QSettings("REECLASS", "REECLASS").setValue("generatorAsserts", r.generatorAsserts);
 
     if (r.braceWrap != current.braceWrap) {
-        QSettings("Reclass", "Reclass").setValue("braceWrap", r.braceWrap);
+        QSettings("REECLASS", "REECLASS").setValue("braceWrap", r.braceWrap);
         for (auto& tab : m_tabs)
             tab.ctrl->setBraceWrap(r.braceWrap);
     }
 }
 
 void MainWindow::setEditorFont(const QString& fontName) {
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     settings.setValue("font", fontName);
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -6198,7 +6198,7 @@ void MainWindow::updateEmptyWorkspaceVisibility() {
 
 void MainWindow::updateWindowTitle() {
 #ifdef __APPLE__
-    setWindowTitle(QStringLiteral("re-class"));
+    setWindowTitle(QStringLiteral("REECLASS"));
 #else
     QString title;
     QDockWidget* activeDock = m_activeDocDock;
@@ -6206,9 +6206,9 @@ void MainWindow::updateWindowTitle() {
         auto& tab = m_tabs[activeDock];
         QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
         if (tab.doc->modified) name += " *";
-        title = name + " - re-class";
+        title = name + " - REECLASS";
     } else {
-        title = "re-class";
+        title = "REECLASS";
     }
     setWindowTitle(title);
 #endif
@@ -6291,7 +6291,7 @@ void MainWindow::updateSourceChip() {
 // ── Rendered view setup ──
 
 void MainWindow::setupRenderedSci(QsciScintilla* sci) {
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -6324,7 +6324,7 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     // updateRenderedView; here we attach the one for the saved format so the
     // view is correctly coloured before the first render.
     const CodeFormat initialFmt = static_cast<CodeFormat>(
-        QSettings("Reclass", "Reclass").value("codeFormat", 0).toInt());
+        QSettings("REECLASS", "REECLASS").value("codeFormat", 0).toInt());
     applyCodeLexer(sci, initialFmt, theme, f);
     const QColor editorBg = rcx::editorPaperColor(theme);
     sci->setBraceMatching(QsciScintilla::NoBraceMatch);
@@ -6340,7 +6340,7 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
 }
 
 void MainWindow::setupDebugSci(QsciScintilla* sci) {
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -6383,7 +6383,7 @@ void MainWindow::applyDebugStyles(QsciScintilla* sci) {
     const auto& theme = ThemeManager::instance().current();
     const QColor editorBg = rcx::editorPaperColor(theme);
 
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -6458,7 +6458,7 @@ uint64_t MainWindow::findRootStructForNode(const NodeTree& tree, uint64_t nodeId
 
 void MainWindow::applyPaneZoom(SplitPane& p, int level) {
     level = qBound(-8, level, 24);
-    QSettings("Reclass", "Reclass").setValue("viewZoomLevel", level);
+    QSettings("REECLASS", "REECLASS").setValue("viewZoomLevel", level);
     // Drive Scintilla's own zoom (the same SCI_SETZOOM that Ctrl+wheel uses) on
     // all three views so the pane stays consistent across tab switches. Block
     // each view's signals while zooming so the SCN_ZOOM sync can't bounce back.
@@ -6516,11 +6516,11 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     // ~800ms generator passes to <1ms.
     const QHash<NodeKind, QString>* aliases =
         tab.doc->typeAliases.isEmpty() ? nullptr : &tab.doc->typeAliases;
-    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
     CodeFormat fmt = static_cast<CodeFormat>(
-        QSettings("Reclass", "Reclass").value("codeFormat", 0).toInt());
+        QSettings("REECLASS", "REECLASS").value("codeFormat", 0).toInt());
     CodeScope scope = static_cast<CodeScope>(
-        QSettings("Reclass", "Reclass").value("codeScope", 0).toInt());
+        QSettings("REECLASS", "REECLASS").value("codeScope", 0).toInt());
     quint64 treeGen = tab.doc->tree.generation();
     bool cacheHit = (!pane.lastRenderedText.isEmpty()
                      && pane.lastRenderedTreeGen == treeGen
@@ -6837,7 +6837,7 @@ void MainWindow::exportToFile(CodeFormat fmt) {
 
     const QHash<NodeKind, QString>* aliases =
         tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
-    bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+    bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
     QString text = renderCodeAll(fmt, tab->doc->tree, aliases, asserts);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -6863,7 +6863,7 @@ void MainWindow::exportReclassXmlAction() {
     if (!tab) return;
 
     QString path = QFileDialog::getSaveFileName(this,
-        "Export ReClass XML", {}, "ReClass XML (*.reclass);;All Files (*)");
+        "Export ReClass XML", {}, "ReClass XML (*.REECLASS);;All Files (*)");
     if (path.isEmpty()) return;
 
     QString error;
@@ -6888,9 +6888,9 @@ void MainWindow::exportReclassXmlAction() {
 void MainWindow::importReclassXml() {
     QString filePath = QFileDialog::getOpenFileName(this,
         "Import ReClass / ReClass.NET", {},
-        "ReClass formats (*.reclass *.MemeCls *.xml *.rcnet);;"
+        "ReClass formats (*.REECLASS *.MemeCls *.xml *.rcnet);;"
         "ReClass.NET (*.rcnet);;"
-        "ReClass XML (*.reclass *.MemeCls *.xml);;"
+        "ReClass XML (*.REECLASS *.MemeCls *.xml);;"
         "All Files (*)");
     if (filePath.isEmpty()) return;
 
@@ -7206,9 +7206,9 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword,
     if (ProviderRegistry::instance().findProvider(QStringLiteral("processmemory"))) {
         auto& tab = m_tabs[dock];
         DWORD pid = GetCurrentProcessId();
-        QString target = QString("%1:Reclass.exe").arg(pid);
+        QString target = QString("%1:REECLASS.exe").arg(pid);
         // registerAsSavedSource=true so the source-picker dropdown
-        // surfaces "Reclass.exe" as an entry. Without this the user
+        // surfaces "REECLASS.exe" as an entry. Without this the user
         // would see an active source label but an empty dropdown,
         // breaking discoverability when they want to switch back.
         tab.ctrl->attachViaPlugin(QStringLiteral("processmemory"), target,
@@ -7257,7 +7257,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     if (filePath.isEmpty()) {
         filePath = QFileDialog::getOpenFileName(this,
             "Open Definition", {},
-            "Reclass (*.rcx)"
+            "REECLASS (*.rcx)"
             ";;All (*)");
         if (filePath.isEmpty()) return nullptr;
     }
@@ -7420,7 +7420,7 @@ bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
     QString savedPath;
     if (saveAs || tab.doc->filePath.isEmpty()) {
         QString path = QFileDialog::getSaveFileName(this,
-            "Save Definition", {}, "Reclass (*.rcx);;JSON (*.json)");
+            "Save Definition", {}, "REECLASS (*.rcx);;JSON (*.json)");
         if (path.isEmpty()) return false;
         tab.doc->save(path);
         addRecentFile(path);
@@ -7571,7 +7571,7 @@ void MainWindow::showValidateDialog() {
 
     auto* list = new QListWidget(&dlg);
     list->setAlternatingRowColors(false);
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
     list->setFont(monoFont);
@@ -7696,7 +7696,7 @@ void MainWindow::showFindFieldDialog() {
              t.borderFocused.name()));
     layout->addWidget(search);
 
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
@@ -7936,7 +7936,7 @@ void MainWindow::createWorkspaceDock() {
         {
             m_dockTitleLabel->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
-            QSettings s("Reclass", "Reclass");
+            QSettings s("REECLASS", "REECLASS");
             QFont f(s.value("font", "JetBrains Mono").toString(), 10);
             f.setFixedPitch(true);
             m_dockTitleLabel->setFont(f);
@@ -7982,7 +7982,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceSearch->setPlaceholderText(QStringLiteral("Filter types..."));
     // Clear button uses our close.svg icon instead of Qt's default circle-X
     {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_workspaceSearch->setFont(f);
@@ -8087,7 +8087,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceTree->setMouseTracking(true);
     m_workspaceTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_workspaceTree->setFont(f);
@@ -8708,7 +8708,7 @@ void MainWindow::createScannerDock() {
         {
             m_scanDockTitle->setStyleSheet(
                 QStringLiteral("color: %1;").arg(t.textDim.name()));
-            QSettings s("Reclass", "Reclass");
+            QSettings s("REECLASS", "REECLASS");
             QFont f(s.value("font", "JetBrains Mono").toString(), 10);
             f.setFixedPitch(true);
             m_scanDockTitle->setFont(f);
@@ -8821,7 +8821,7 @@ void MainWindow::ensureScannerPanel() {
     m_scannerPanel = new ScannerPanel(m_scannerDock);
     m_scannerPanel->applyTheme(ThemeManager::instance().current());
     {
-        QSettings settings("Reclass", "Reclass");
+        QSettings settings("REECLASS", "REECLASS");
         QString fontName = settings.value("font", "JetBrains Mono").toString();
         QFont f(fontName, 12);
         f.setFixedPitch(true);
@@ -8883,7 +8883,7 @@ void MainWindow::createSymbolsDock() {
         QDockWidget::DockWidgetFloatable);
 
     const auto& t = ThemeManager::instance().current();
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
@@ -9694,7 +9694,7 @@ int MainWindow::computeWorkspaceDockWidth() const {
         }
     }
     // Compute pixel width: badge(fontH) + gap(4) + name + gap + count pill(~30) + padding(24)
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     QFont f(s.value("font", "JetBrains Mono").toString(), 10);
     f.setFixedPitch(true);
     QFontMetrics fm(f);
@@ -9788,13 +9788,13 @@ void MainWindow::saveDockSize(QDockWidget* dock) {
                               || a == Qt::RightDockWidgetArea);
     int size = horizontal ? dock->width() : dock->height();
     if (size <= 0) return;
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     s.setValue(QStringLiteral("ui/dock.%1.size").arg(dock->objectName()), size);
 }
 
 int MainWindow::loadDockSize(QDockWidget* dock, int fallback) const {
     if (!dock) return fallback;
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     return s.value(QStringLiteral("ui/dock.%1.size").arg(dock->objectName()),
                    fallback).toInt();
 }
@@ -9823,7 +9823,7 @@ void MainWindow::addRecentFile(const QString& path) {
     if (path.isEmpty()) return;
     QString absPath = QFileInfo(path).absoluteFilePath();
 
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     QStringList recent = s.value("recentFiles").toStringList();
     recent.removeAll(absPath);
     recent.prepend(absPath);
@@ -9838,7 +9838,7 @@ void MainWindow::updateRecentFilesMenu() {
     if (!m_recentFilesMenu) return;
     m_recentFilesMenu->clear();
 
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     QStringList recent = s.value("recentFiles").toStringList();
 
     int added = 0;
@@ -9856,7 +9856,7 @@ void MainWindow::updateRecentFilesMenu() {
     } else {
         m_recentFilesMenu->addSeparator();
         m_recentFilesMenu->addAction(QStringLiteral("&Clear Recent"), this, [this]() {
-            QSettings s("Reclass", "Reclass");
+            QSettings s("REECLASS", "REECLASS");
             s.remove("recentFiles");
             updateRecentFilesMenu();
         });
@@ -10596,13 +10596,13 @@ int main(int argc, char* argv[]) {
     // GUI-subsystem build: no console at launch (no flash). If the user left
     // the console toggled on (View ▸ Show Console persists the choice),
     // summon one now. QSettings with explicit org/app works pre-QApplication.
-    if (QSettings("Reclass", "Reclass").value("showConsole", false).toBool())
+    if (QSettings("REECLASS", "REECLASS").value("showConsole", false).toBool())
         rcxSetConsoleVisible(true);
 #endif
 
     DarkApp app(argc, argv);
-    app.setApplicationName("Reclass");
-    app.setOrganizationName("Reclass");
+    app.setApplicationName("REECLASS");
+    app.setOrganizationName("REECLASS");
     app.setStyle(new MenuBarStyle("Fusion")); // Fusion + generous menu sizing
 
     // Replace Qt's default tooltips with RcxTooltip everywhere. See class
@@ -10639,7 +10639,7 @@ int main(int argc, char* argv[]) {
         qWarning("Failed to load embedded IBM Plex Mono font");
     // Apply saved font preference before creating any editors
     {
-        QSettings settings("Reclass", "Reclass");
+        QSettings settings("REECLASS", "REECLASS");
         QString savedFont = settings.value("font", "JetBrains Mono").toString();
         rcx::RcxEditor::setGlobalFontName(savedFont);
     }

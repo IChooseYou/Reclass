@@ -71,7 +71,7 @@ protected:
         QFont titleF = font(); titleF.setPixelSize(30); titleF.setWeight(QFont::Light);
         p.setFont(titleF); p.setPen(m_t.text);
         QFontMetrics titleFm(titleF);
-        p.drawText(kLeftMargin, y + titleFm.ascent(), "re-class");
+        p.drawText(kLeftMargin, y + titleFm.ascent(), "REECLASS");
         y += titleFm.height() + 24;
 
         // ── Headings (left + right at same y) ──
@@ -216,7 +216,7 @@ private:
 
     void loadEntries() {
         m_all.clear();
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         for (const auto& path : s.value("recentFiles").toStringList()) {
             QFileInfo fi(path);
             if (!fi.exists()) continue;

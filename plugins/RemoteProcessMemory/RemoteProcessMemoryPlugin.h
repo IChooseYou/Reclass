@@ -71,7 +71,7 @@ public:
 
     std::string Name() const override        { return "Remote Process Memory"; }
     std::string Version() const override     { return "1.0.0"; }
-    std::string Author() const override      { return "Reclass"; }
+    std::string Author() const override      { return "REECLASS"; }
     std::string Description() const override {
         return "Read/write memory via injected payload (shared-memory IPC)";
     }

@@ -112,9 +112,9 @@ void McpBridge::start() {
     m_server->setSocketOptions(QLocalServer::WorldAccessOption);
 
     // Remove stale socket (Linux/Mac leave files behind)
-    QLocalServer::removeServer("ReclassMcpBridge");
+    QLocalServer::removeServer("REECLASSMcpBridge");
 
-    if (!m_server->listen("ReclassMcpBridge")) {
+    if (!m_server->listen("REECLASSMcpBridge")) {
         qWarning() << "[MCP] Failed to start server:" << m_server->errorString();
         delete m_server;
         m_server = nullptr;
@@ -123,7 +123,7 @@ void McpBridge::start() {
 
     connect(m_server, &QLocalServer::newConnection,
             this, &McpBridge::onNewConnection);
-    qDebug() << "[MCP] Server listening on pipe: ReclassMcpBridge";
+    qDebug() << "[MCP] Server listening on pipe: REECLASSMcpBridge";
 }
 
 void McpBridge::stop() {
@@ -353,7 +353,7 @@ QJsonObject McpBridge::handleInitialize(const QJsonValue& id, const QJsonObject&
         {"protocolVersion", "2024-11-05"},
         {"capabilities", caps},
         {"serverInfo", QJsonObject{
-            {"name", "reclass-mcp"},
+            {"name", "REECLASS-mcp"},
             {"version", "1.0.0"}
         }},
         {"instructions",
@@ -843,8 +843,8 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     // 11. mcp.reconnect
     tools.append(QJsonObject{
         {"name", "mcp.reconnect"},
-        {"description", "Disconnect the current MCP client so it can reconnect to Reclass (e.g. after Reclass was restarted or to reset connection state). "
-                        "The client process will exit; your IDE may restart it automatically, reconnecting to Reclass like at startup."},
+        {"description", "Disconnect the current MCP client so it can reconnect to REECLASS (e.g. after REECLASS was restarted or to reset connection state). "
+                        "The client process will exit; your IDE may restart it automatically, reconnecting to REECLASS like at startup."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{}}
@@ -2167,7 +2167,7 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
     if (action == "export_cpp") {
         if (!doc) return makeTextResult("No active tab", true);
         const QHash<NodeKind, QString>* aliases = doc->typeAliases.isEmpty() ? nullptr : &doc->typeAliases;
-        bool asserts = QSettings("Reclass", "Reclass").value("generatorAsserts", false).toBool();
+        bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
         QString code;
         if (!nodeIdStr.isEmpty()) {
             // Per-struct export
@@ -2687,7 +2687,7 @@ QJsonObject McpBridge::toolReconnect(const QJsonObject&) {
         if (findClient(sock))
             sock->disconnectFromServer();
     });
-    return makeTextResult("Disconnected. The MCP client will exit; your IDE may restart it and reconnect to Reclass.");
+    return makeTextResult("Disconnected. The MCP client will exit; your IDE may restart it and reconnect to REECLASS.");
 }
 
 // ════════════════════════════════════════════════════════════════════

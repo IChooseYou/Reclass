@@ -92,7 +92,7 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
                                  const QString& existing, bool* ok) {
     *ok = false;
     const auto& theme = ThemeManager::instance().current();
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QFont editorFont(settings.value("font", "JetBrains Mono").toString(), 12);
     editorFont.setFixedPitch(true);
 
@@ -224,7 +224,7 @@ bool RcxDocument::load(const QString& path) {
             : QJsonDocument::fromJson(bytes, &jerr);
     }
     if (jdoc.isNull() || !jdoc.isObject()) {
-        qWarning().noquote() << "[load]" << path << "isn't a Reclass project ("
+        qWarning().noquote() << "[load]" << path << "isn't a REECLASS project ("
                              << (jdoc.isNull() ? jerr.errorString()
                                                : QStringLiteral("not a JSON object"))
                              << ") — refuse rather than show Untitled placeholder";
@@ -728,7 +728,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
     });
 
     // Real clipboard (Ctrl+C / Ctrl+X / Ctrl+V).
-    // Serialize via ClipboardCodec to "application/x-reclass-nodes-v1" plus a
+    // Serialize via ClipboardCodec to "application/x-REECLASS-nodes-v1" plus a
     // plain-text dump for external pastes. Cut = copy + delete. Paste wires
     // pasted nodes into the current view-root via a single undo macro.
     auto selectedRootIds = [this]() -> QVector<uint64_t> {
@@ -780,7 +780,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (!mime) return;
         auto paste = ClipboardCodec::deserialize(m_doc->tree, mime);
         if (paste.nodes.isEmpty()) {
-            emit statusHint(QStringLiteral("Nothing to paste — clipboard has no Reclass data"));
+            emit statusHint(QStringLiteral("Nothing to paste — clipboard has no REECLASS data"));
             return;
         }
 
@@ -4087,7 +4087,7 @@ static QWidgetAction* makeCycleRow(QMenu* menu,
                                     const QString& centerLabel,
                                     std::function<void(NodeKind)> onSelect) {
     const auto& theme = ThemeManager::instance().current();
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     QFont font(s.value("font", "JetBrains Mono").toString(), 10);
     font.setFixedPitch(true);
     QString css = QStringLiteral(
@@ -5697,7 +5697,7 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
     };
 
     // Configure and show popup
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
@@ -5775,7 +5775,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
     }
 
     // ── Font with zoom ──
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
@@ -6937,7 +6937,7 @@ void RcxController::setShowEnumChips(bool v) {
 }
 
 void RcxController::setupAutoRefresh() {
-    int ms = QSettings("Reclass", "Reclass").value("refreshMs", kDefaultRefreshMs).toInt();
+    int ms = QSettings("REECLASS", "REECLASS").value("refreshMs", kDefaultRefreshMs).toInt();
     m_refreshIntervalBaseMs = qMax(1, ms);
     m_refreshIntervalMaxMs  = qMax(m_refreshIntervalBaseMs, 1500);
     m_refreshIntervalBlurMs = qMax(m_refreshIntervalBaseMs, 1500);

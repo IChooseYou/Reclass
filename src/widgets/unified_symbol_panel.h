@@ -393,7 +393,7 @@ public:
     }
 
     void applyTheme(const Theme& t) {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont base(s.value("font", "JetBrains Mono").toString(), 10);
         base.setFixedPitch(true);
         m_view->setFont(base);
@@ -1195,7 +1195,7 @@ private:
 
     // ── Persistence ([22], [28]) ─────────────────────────────────────────
     void loadPersistedState() {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         s.beginGroup("SymbolPanel");
         m_sort = s.value("sort", 0).toInt();
         m_sortDir = s.value("sortDir", 1).toInt();
@@ -1218,7 +1218,7 @@ private:
     }
 
     void savePersistedState() {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         s.beginGroup("SymbolPanel");
         s.setValue("sort", m_sort);
         s.setValue("sortDir", m_sortDir);

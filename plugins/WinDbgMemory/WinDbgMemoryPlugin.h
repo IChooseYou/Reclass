@@ -117,7 +117,7 @@ class WinDbgMemoryPlugin : public IProviderPlugin
 public:
     std::string Name() const override { return "WinDbg Memory"; }
     std::string Version() const override { return "2.0.0"; }
-    std::string Author() const override { return "Reclass"; }
+    std::string Author() const override { return "REECLASS"; }
     std::string Description() const override { return "Read memory via DbgEng (live process attach or crash dump)"; }
     k_ELoadType LoadType() const override { return k_ELoadTypeAuto; }
     QIcon Icon() const override;

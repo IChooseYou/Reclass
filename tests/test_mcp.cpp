@@ -165,7 +165,7 @@ static QVector<QJsonObject> drain(QLocalSocket* s, int ms = 300) {
 class TestMcp : public QObject {
     Q_OBJECT
     MockMcpServer* m_srv = nullptr;
-    static constexpr const char* P = "ReclassMcpTest";
+    static constexpr const char* P = "REECLASSMcpTest";
 private slots:
     void init()    { m_srv = new MockMcpServer; QVERIFY(m_srv->start(P)); }
     void cleanup() { m_srv->stop(); delete m_srv; m_srv = nullptr; }

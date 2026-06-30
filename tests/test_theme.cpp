@@ -19,11 +19,11 @@ private slots:
         const Theme* dark = nullptr;
         const Theme* warm = nullptr;
         for (const auto& t : all) {
-            if (t.name == "Reclass Dark") dark = &t;
+            if (t.name == "REECLASS Dark") dark = &t;
             if (t.name == "Warm") warm = &t;
         }
         QVERIFY(dark);
-        QCOMPARE(dark->name, QString("Reclass Dark"));
+        QCOMPARE(dark->name, QString("REECLASS Dark"));
         QVERIFY(dark->background.isValid());
         QVERIFY(dark->text.isValid());
         QVERIFY(dark->syntaxKeyword.isValid());
@@ -93,7 +93,7 @@ private slots:
         auto& tm = ThemeManager::instance();
         auto all = tm.themes();
         QVERIFY(all.size() >= 3);
-        QCOMPARE(all[0].name, QString("Reclass Dark"));
+        QCOMPARE(all[0].name, QString("REECLASS Dark"));
         // VS2022 Dark and Warm are also loaded (order depends on filename sort)
         bool hasVs = false, hasWarm = false;
         for (const auto& t : all) {

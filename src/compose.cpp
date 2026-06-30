@@ -511,7 +511,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             // 3. RTTI / Symbol — annotation chips.
             //    Priority (per user: "RTTI always more accurate"):
             //      1. RTTI resolved  → overlay chip with demangled name only,
-            //                          NO "Reclass.exe+0x..." symbol suffix.
+            //                          NO "REECLASS.exe+0x..." symbol suffix.
             //                          Click → create class of that name.
             //      2. Pointer with value 0 → overlay "(Name class…)" CTA chip.
             //                          Click → rename current tab's root struct.

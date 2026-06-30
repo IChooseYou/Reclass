@@ -17,7 +17,7 @@ ThemeManager::ThemeManager() {
     loadBuiltInThemes();
     loadUserThemes();
 
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     QString fallback;
     for (const auto& t : m_builtIn) {
         if (t.name.contains("VS2022", Qt::CaseInsensitive)) { fallback = t.name; break; }
@@ -79,7 +79,7 @@ void ThemeManager::setCurrent(int index) {
     auto all = themes();
     if (index < 0 || index >= all.size()) return;
     m_currentIdx = index;
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     settings.setValue("theme", all[index].name);
     emit themeChanged(current());
 }
@@ -101,7 +101,7 @@ void ThemeManager::updateTheme(int index, const Theme& theme) {
             m_user[ui] = theme;
     }
     saveUserThemes();
-    QSettings settings("Reclass", "Reclass");
+    QSettings settings("REECLASS", "REECLASS");
     settings.setValue("theme", current().name);
     emit themeChanged(current());
 }

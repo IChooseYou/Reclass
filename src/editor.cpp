@@ -2048,7 +2048,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     host->setOnActiveChanged([](const LineMeta& lm, QString id) {
         const KindMeta* km = kindMeta(lm.nodeKind);
         if (!km) return;
-        QSettings("Reclass","Reclass").setValue(
+        QSettings("REECLASS","REECLASS").setValue(
             QStringLiteral("hoverPreview/kind/") + QString::fromLatin1(km->name),
             id);
     });
@@ -2093,7 +2093,7 @@ void RcxEditor::setupScintilla() {
     // key "compactRowSpacing" (View menu toggle in a follow-up) — defaults
     // to false / standard spacing.
     {
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         const bool compact = s.value("compactRowSpacing", false).toBool();
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT,
                              (long)(compact ? 1 : 4));
@@ -4163,7 +4163,7 @@ QString RcxEditor::hoverPopupActiveId() const {
     return p ? p->id() : QString();
 }
 
-// pickLastUsedPreviewIdx — read QSettings("Reclass","Reclass")
+// pickLastUsedPreviewIdx — read QSettings("REECLASS","REECLASS")
 // "hoverPreview/kind/<kindName>" and return the index of the matching
 // preview in `eligible`. Falls back to 0 (registry-order default) when
 // nothing is stored or the stored id is no longer eligible.
@@ -4172,7 +4172,7 @@ int RcxEditor::pickLastUsedPreviewIdx(
     if (eligible.isEmpty()) return -1;
     const KindMeta* km = kindMeta(kind);
     if (!km) return 0;
-    QString stored = QSettings("Reclass","Reclass")
+    QString stored = QSettings("REECLASS","REECLASS")
         .value(QStringLiteral("hoverPreview/kind/") + QString::fromLatin1(km->name))
         .toString();
     if (stored.isEmpty()) return 0;

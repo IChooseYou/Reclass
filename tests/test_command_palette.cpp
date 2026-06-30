@@ -23,7 +23,7 @@ private slots:
         int s1 = CommandPalette::fuzzyScore(QStringLiteral("open"),
                                             QStringLiteral("File > Open"));
         int s2 = CommandPalette::fuzzyScore(QStringLiteral("open"),
-                                            QStringLiteral("Reclass > Reopen Last"));
+                                            QStringLiteral("REECLASS > Reopen Last"));
         QVERIFY(s1 > 0);
         QVERIFY(s2 > 0);
         // Word-start "Open" should outscore middle-of-word "open" in "Reopen"

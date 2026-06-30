@@ -16,7 +16,7 @@ namespace rcx {
 // suitable for a round-trip paste elsewhere in the same project, in another
 // tab, or — via the plain-text fallback — pasted verbatim into a text editor
 // for inspection. JSON form lives on the clipboard under the custom MIME
-// type "application/x-reclass-nodes-v1"; plain text is set via QMimeData's
+// type "application/x-REECLASS-nodes-v1"; plain text is set via QMimeData's
 // text path so external apps (VS Code, Notepad, chat) get a readable dump.
 //
 // Design notes:
@@ -30,7 +30,7 @@ namespace rcx {
 //     good enough for humans to skim; not meant to round-trip back.
 
 struct ClipboardCodec {
-    static constexpr const char* kMimeType = "application/x-reclass-nodes-v1";
+    static constexpr const char* kMimeType = "application/x-REECLASS-nodes-v1";
 
     // Collect node + all descendants (iterative, cycle-safe).
     // roots are ids the user explicitly picked; we include their subtrees.

@@ -638,7 +638,7 @@ bool KernelMemoryPlugin::ensureDriverLoaded(QString* errorMsg)
     if (!scm) {
         if (errorMsg)
             *errorMsg = QStringLiteral("Failed to open Service Control Manager.\n"
-                "Run Reclass as Administrator to load the kernel driver.");
+                "Run REECLASS as Administrator to load the kernel driver.");
         return false;
     }
 

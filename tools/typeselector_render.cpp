@@ -25,17 +25,17 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
 
     // ThemeManager::setCurrent() PERSISTS the chosen theme to the shared
-    // QSettings("Reclass","Reclass") that the real app reads at startup — so a
+    // QSettings("REECLASS","REECLASS") that the real app reads at startup — so a
     // harness run that switches theme would flip the user's app theme. Capture
     // the original and restore it on exit so the harness never mutates it.
     const QString kOrigTheme =
-        QSettings(QStringLiteral("Reclass"), QStringLiteral("Reclass"))
+        QSettings(QStringLiteral("REECLASS"), QStringLiteral("REECLASS"))
             .value(QStringLiteral("theme")).toString();
     struct ThemeRestorer {
         QString name;
         ~ThemeRestorer() {
             if (!name.isEmpty())
-                QSettings(QStringLiteral("Reclass"), QStringLiteral("Reclass"))
+                QSettings(QStringLiteral("REECLASS"), QStringLiteral("REECLASS"))
                     .setValue(QStringLiteral("theme"), name);
         }
     } themeRestorer{kOrigTheme};

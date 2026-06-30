@@ -170,7 +170,7 @@ private slots:
             RcxController ctrl(&doc, nullptr);
             ctrl.addSplitEditor(&splitter);
             DWORD pid = GetCurrentProcessId();
-            QString target = QString("%1:Reclass.exe").arg(pid);
+            QString target = QString("%1:REECLASS.exe").arg(pid);
             ctrl.attachViaPlugin(QStringLiteral("processmemory"), target);
             QCOMPARE(ctrl.savedSources().size(), 0);
             QCOMPARE(ctrl.activeSourceIndex(), -1);
@@ -187,7 +187,7 @@ private slots:
             RcxController ctrl(&doc, nullptr);
             ctrl.addSplitEditor(&splitter);
             DWORD pid = GetCurrentProcessId();
-            QString target = QString("%1:Reclass.exe").arg(pid);
+            QString target = QString("%1:REECLASS.exe").arg(pid);
             ctrl.attachViaPlugin(QStringLiteral("processmemory"), target,
                 /*registerAsSavedSource=*/true);
 
@@ -195,7 +195,7 @@ private slots:
             QCOMPARE(sources.size(), 1);
             QCOMPARE(sources[0].kind, QStringLiteral("processmemory"));
             QCOMPARE(sources[0].providerTarget, target);
-            QCOMPARE(sources[0].displayName, QStringLiteral("Reclass.exe"));
+            QCOMPARE(sources[0].displayName, QStringLiteral("REECLASS.exe"));
             QCOMPARE(ctrl.activeSourceIndex(), 0);
         }
     }
@@ -214,7 +214,7 @@ private slots:
         RcxController ctrl(&doc, nullptr);
         ctrl.addSplitEditor(&splitter);
         DWORD pid = GetCurrentProcessId();
-        QString target = QString("%1:Reclass.exe").arg(pid);
+        QString target = QString("%1:REECLASS.exe").arg(pid);
         ctrl.attachViaPlugin(QStringLiteral("processmemory"), target, true);
         ctrl.attachViaPlugin(QStringLiteral("processmemory"), target, true);
         ctrl.attachViaPlugin(QStringLiteral("processmemory"), target, true);
@@ -244,7 +244,7 @@ private slots:
         RcxController ctrl(&doc, nullptr);
         ctrl.addSplitEditor(&splitter);
         DWORD pid = GetCurrentProcessId();
-        QString target = QString("%1:Reclass.exe").arg(pid);
+        QString target = QString("%1:REECLASS.exe").arg(pid);
         ctrl.attachViaPlugin(QStringLiteral("processmemory"), target);
         // attachViaPlugin can re-set baseAddress; re-pin it.
         doc.tree.baseAddress = reinterpret_cast<uint64_t>(doc.m_ownedBuffer.get());

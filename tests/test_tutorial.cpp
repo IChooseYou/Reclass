@@ -67,7 +67,7 @@ QByteArray buildAddressSpace(const char* mangledName) {
     return data;
 }
 
-// Provider that announces a single "Reclass.exe-like" module covering
+// Provider that announces a single "REECLASS.exe-like" module covering
 // the synthetic image. Without this, findOwningModule returns invalid
 // and rttiForVtable short-circuits before walkRtti/walkRttiItanium runs.
 class FakeProcessProvider : public BufferProvider {
@@ -75,8 +75,8 @@ public:
     FakeProcessProvider(QByteArray d, const QString& n)
         : BufferProvider(std::move(d), n) {}
     QVector<ModuleEntry> enumerateModules() const override {
-        return { ModuleEntry{ QStringLiteral("Reclass.exe"),
-                              QStringLiteral("Reclass.exe"),
+        return { ModuleEntry{ QStringLiteral("REECLASS.exe"),
+                              QStringLiteral("REECLASS.exe"),
                               kImageBase, 0x10000 } };
     }
 };
@@ -207,7 +207,7 @@ private slots:
     void editorDemoComposesWithRcxEditorAsViewRoot() {
         QByteArray data = buildAddressSpace("9RcxEditor");  // demangles to "RcxEditor"
         FakeProcessProvider prov(std::move(data),
-                                 QStringLiteral("Reclass.exe"));
+                                 QStringLiteral("REECLASS.exe"));
 
         NodeTree tree;
         tree.baseAddress  = kInstanceVa;
@@ -275,7 +275,7 @@ private slots:
     void hex64BaselineLightsUp() {
         QByteArray data = buildAddressSpace("9RcxEditor");
         FakeProcessProvider prov(std::move(data),
-                                 QStringLiteral("Reclass.exe"));
+                                 QStringLiteral("REECLASS.exe"));
 
         NodeTree tree;
         tree.baseAddress = kInstanceVa;
@@ -352,7 +352,7 @@ private slots:
     void abiTagSetOnItaniumWalk() {
         QByteArray data = buildAddressSpace("9RcxEditor");
         FakeProcessProvider prov(std::move(data),
-                                 QStringLiteral("Reclass.exe"));
+                                 QStringLiteral("REECLASS.exe"));
         auto info = walkRttiItanium(prov, kImageBase + 0x1000);
         QVERIFY(info.ok);
         QCOMPARE(info.abi, QStringLiteral("Itanium"));

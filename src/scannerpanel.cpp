@@ -2891,7 +2891,7 @@ bool ScannerPanel::loadResultsFrom(const QString& path) {
 }
 
 void ScannerPanel::saveSettings(const QString& key) const {
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     s.beginGroup(key);
     s.setValue("mode",         m_modeCombo->currentIndex());
     s.setValue("valueType",    m_typeCombo->currentIndex());
@@ -2909,7 +2909,7 @@ void ScannerPanel::saveSettings(const QString& key) const {
 }
 
 void ScannerPanel::loadSettings(const QString& key) {
-    QSettings s("Reclass", "Reclass");
+    QSettings s("REECLASS", "REECLASS");
     s.beginGroup(key);
     auto clampIndex = [](QComboBox* c, int idx) {
         if (idx >= 0 && idx < c->count()) c->setCurrentIndex(idx);

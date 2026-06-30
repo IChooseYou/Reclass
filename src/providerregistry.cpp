@@ -67,7 +67,7 @@ void ProviderRegistry::populateSourceMenu(QMenu* menu,
         {QStringLiteral("processmemory"),          QStringLiteral(":/vsicons/server-process.svg")},
         {QStringLiteral("remoteprocessmemory"),    QStringLiteral(":/vsicons/remote.svg")},
         {QStringLiteral("windbgmemory"),           QStringLiteral(":/vsicons/debug.svg")},
-        {QStringLiteral("reclass.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
+        {QStringLiteral("REECLASS.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
     };
 
     // File source

@@ -24,9 +24,9 @@ public:
     // Plugin metadata
     std::string Name() const override { return "ReClass.NET Compat Layer"; }
     std::string Version() const override { return "1.0.0"; }
-    std::string Author() const override { return "Reclass"; }
+    std::string Author() const override { return "REECLASS"; }
     std::string Description() const override {
-        return "Loads ReClass.NET native and .NET plugin DLLs as Reclass data sources";
+        return "Loads ReClass.NET native and .NET plugin DLLs as REECLASS data sources";
     }
     k_ELoadType LoadType() const override { return k_ELoadTypeAuto; }
     QIcon Icon() const override;

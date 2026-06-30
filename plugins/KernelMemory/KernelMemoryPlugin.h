@@ -120,7 +120,7 @@ public:
 
     std::string Name() const override { return "Kernel Memory"; }
     std::string Version() const override { return "1.0.0"; }
-    std::string Author() const override { return "Reclass"; }
+    std::string Author() const override { return "REECLASS"; }
     std::string Description() const override { return "Read and write memory via kernel driver (IOCTL)"; }
     k_ELoadType LoadType() const override { return k_ELoadTypeManual; }
     QIcon Icon() const override;

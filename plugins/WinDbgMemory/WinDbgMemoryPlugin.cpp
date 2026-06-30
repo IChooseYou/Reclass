@@ -687,7 +687,7 @@ bool WinDbgMemoryPlugin::selectTarget(QWidget* parent, QString* target)
     };
 
     addExample(".server tcp:port=5056");
-    addExample(".server npipe:pipe=reclass");
+    addExample(".server npipe:pipe=REECLASS");
 
     // ── Debugger Tools status ──
     layout->addSpacing(8);

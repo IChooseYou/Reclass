@@ -2280,7 +2280,7 @@ private slots:
 
         auto* btnGroup = new QButtonGroup(&win);
         btnGroup->setExclusive(true);
-        auto* btnR = new VTB("Reclass");
+        auto* btnR = new VTB("REECLASS");
         auto* btnC = new VTB("C/C++");
         setColors(btnR); setColors(btnC);
         btnR->setChecked(true);
@@ -3130,7 +3130,7 @@ private slots:
         // Set a formula-style command row
         m_editor->applyDocument(m_result);
         m_editor->setCommandRowText(
-            QStringLiteral("source\u25BE  <Reclass.exe>+0x8  class Foo {"));
+            QStringLiteral("source\u25BE  <REECLASS.exe>+0x8  class Foo {"));
         QApplication::processEvents();
 
         QString lineText = getLine0();
@@ -3138,7 +3138,7 @@ private slots:
         QVERIFY2(as.valid, "Formula ADDR span should be valid");
 
         QString spanText = lineText.mid(as.start, as.end - as.start);
-        QVERIFY2(spanText.contains("<Reclass.exe>"),
+        QVERIFY2(spanText.contains("<REECLASS.exe>"),
                  qPrintable("Formula span should include module ref, got: " + spanText));
         QVERIFY2(spanText.contains("+0x8"),
                  qPrintable("Formula span should include offset, got: " + spanText));

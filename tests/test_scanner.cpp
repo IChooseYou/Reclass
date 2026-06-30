@@ -2099,7 +2099,7 @@ private slots:
         QVERIFY(ScanEngine::isSystemModule("vcruntime140"));
     }
     void sysmod_userBinaryNotSystem() {
-        QVERIFY(!ScanEngine::isSystemModule("Reclass.exe"));
+        QVERIFY(!ScanEngine::isSystemModule("REECLASS.exe"));
         QVERIFY(!ScanEngine::isSystemModule("MyGame.exe"));
         QVERIFY(!ScanEngine::isSystemModule("custom.dll"));
         QVERIFY(!ScanEngine::isSystemModule("game_x64.exe"));

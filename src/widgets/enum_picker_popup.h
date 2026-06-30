@@ -391,7 +391,7 @@ private:
 
     void applyTheme() {
         const auto& t = ThemeManager::instance().current();
-        QSettings s("Reclass", "Reclass");
+        QSettings s("REECLASS", "REECLASS");
         QFont mono(s.value("font", "JetBrains Mono").toString(), 10);
         mono.setFixedPitch(true);
         setFont(mono);
