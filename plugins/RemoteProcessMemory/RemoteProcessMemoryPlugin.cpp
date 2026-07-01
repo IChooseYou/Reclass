@@ -10,6 +10,7 @@
 #include <QFileInfo>
 #include <QPixmap>
 #include <QImage>
+#include <QDateTime>
 
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0) && defined(_WIN32)
 #include <QtWin>
@@ -58,6 +59,18 @@ struct IpcClient {
     void*  mappedView = nullptr;
     QMutex mutex;
     bool   connected  = false;
+
+    /* ── block-read cache ─────────────────────────────────────────────── *
+     * Serves all readSingle() calls that fall inside the same 64 KB block
+     * from a single prefetch RPC instead of one round-trip per field.
+     * One compose pass for a 300-field class: ~1500 IPC calls → 1.          */
+    static constexpr uint64_t kCacheBlock = 65536;  // 64 KB per prefetch
+    static constexpr qint64   kCacheTtlMs = 40;     // expires between refresh ticks
+
+    QByteArray m_cacheBuf;
+    uint64_t   m_cacheBase  = 0;
+    qint64     m_cacheTsMs  = 0;
+    bool       m_cacheValid = false;
 
     RcxRpcHeader* header() const {
         return mappedView ? reinterpret_cast<RcxRpcHeader*>(mappedView) : nullptr;
@@ -169,10 +182,62 @@ struct IpcClient {
 
     /* ── public API ────────────────────────────────────────────────── */
 
-    bool readSingle(uint64_t addr, void* buf, int len)
+    /* Fill m_cacheBuf with kCacheBlock bytes starting at alignedBase via one
+     * batch RPC.  Caller must NOT hold the mutex.                            */
+    bool prefetchBlock(uint64_t alignedBase)
     {
         QMutexLocker lock(&mutex);
+        if (!connected) return false;
+
+        auto* hdr  = static_cast<RcxRpcHeader*>(mappedView);
+        auto* data = static_cast<uint8_t*>(mappedView) + RCX_RPC_DATA_OFFSET;
+
+        hdr->command      = RPC_CMD_READ_BATCH;
+        hdr->requestCount = 1;
+        hdr->status       = RCX_RPC_STATUS_OK;
+
+        auto* entry       = reinterpret_cast<RcxRpcReadEntry*>(data);
+        entry->address    = alignedBase;
+        entry->length     = (uint32_t)kCacheBlock;
+        entry->dataOffset = (uint32_t)sizeof(RcxRpcReadEntry);  /* 16 bytes, response follows */
+
+        if (!signalAndWait()) { connected = false; return false; }
+
+        m_cacheBuf.resize((int)kCacheBlock);
+        memcpy(m_cacheBuf.data(), data + entry->dataOffset, (size_t)kCacheBlock);
+        m_cacheBase  = alignedBase;
+        m_cacheTsMs  = QDateTime::currentMSecsSinceEpoch();
+        m_cacheValid = true;
+        return true;
+    }
+
+    bool readSingle(uint64_t addr, void* buf, int len)
+    {
         if (!connected || len <= 0) return false;
+
+        /* ── fast path: serve from block cache (no lock — UI thread only) ── */
+        uint64_t blockBase = addr & ~(kCacheBlock - 1);
+        if (m_cacheValid
+            && (QDateTime::currentMSecsSinceEpoch() - m_cacheTsMs) < kCacheTtlMs
+            && blockBase == m_cacheBase
+            && (addr - m_cacheBase) + (uint64_t)len <= (uint64_t)m_cacheBuf.size()) {
+            memcpy(buf, m_cacheBuf.constData() + (addr - m_cacheBase), (size_t)len);
+            return true;
+        }
+
+        /* ── cache miss: prefetch the aligned 64 KB block (one IPC call) ── */
+        bool crossBlock = blockBase != ((addr + (uint64_t)len - 1) & ~(kCacheBlock - 1));
+        if (!crossBlock) {
+            if (prefetchBlock(blockBase)) {
+                memcpy(buf, m_cacheBuf.constData() + (addr - m_cacheBase), (size_t)len);
+                return true;
+            }
+            /* prefetch failed (payload unresponsive) — fall through */
+        }
+
+        /* ── fallback: direct single-entry RPC (cross-block or prefetch fail) ── */
+        QMutexLocker lock(&mutex);
+        if (!connected) return false;
 
         auto* hdr  = static_cast<RcxRpcHeader*>(mappedView);
         auto* data = static_cast<uint8_t*>(mappedView) + RCX_RPC_DATA_OFFSET;
@@ -184,16 +249,17 @@ struct IpcClient {
         auto* entry       = reinterpret_cast<RcxRpcReadEntry*>(data);
         entry->address    = addr;
         entry->length     = (uint32_t)len;
-        entry->dataOffset = sizeof(RcxRpcReadEntry);
+        entry->dataOffset = (uint32_t)sizeof(RcxRpcReadEntry);
 
         if (!signalAndWait()) { connected = false; return false; }
 
-        memcpy(buf, data + entry->dataOffset, len);
+        memcpy(buf, data + entry->dataOffset, (size_t)len);
         return true;
     }
 
     bool writeSingle(uint64_t addr, const void* buf, int len)
     {
+        m_cacheValid = false;   /* write may change what the cached bytes represent */
         QMutexLocker lock(&mutex);
         if (!connected || len <= 0) return false;
 
@@ -215,6 +281,7 @@ struct IpcClient {
     QVector<RemoteProcessProvider::ModuleInfo> enumerateModules()
     {
         QVector<RemoteProcessProvider::ModuleInfo> result;
+        m_cacheValid = false;   /* module scan changes the memory map; old block may be unmapped */
         QMutexLocker lock(&mutex);
         if (!connected) return result;
 
