@@ -1,4 +1,4 @@
-name: Build
+﻿name: Build
 
 on:
   push:
@@ -82,27 +82,27 @@ jobs:
         run: |
           export PATH="$IQTA_TOOLS/mingw1310_64/bin:$PATH"
           mkdir -p release
-          cp build/Reclass.exe release/
+          cp build/REECLASS.exe release/
           cp build/REECLASSMcpBridge.exe release/
           cp build/*.dll release/ 2>/dev/null || true
           cp -r build/platforms release/ 2>/dev/null || true
           cp -r build/styles release/ 2>/dev/null || true
           cp -r build/imageformats release/ 2>/dev/null || true
           cp -r build/iconengines release/ 2>/dev/null || true
-          windeployqt --no-translations --no-system-d3d-compiler --no-opengl-sw release/Reclass.exe
+          windeployqt --no-translations --no-system-d3d-compiler --no-opengl-sw release/REECLASS.exe
           mkdir -p release/Plugins
           cp build/Plugins/*.dll release/Plugins/ 2>/dev/null || true
           cp plugins/KernelMemory/driver/build/rcxdrv.sys release/Plugins/ 2>/dev/null || true
           cp -r build/themes release/ 2>/dev/null || true
           cp -r build/examples release/ 2>/dev/null || true
           cp build/screenshot.png release/ 2>/dev/null || true
-          cd release && 7z a ../Reclass-win64-qt6.zip *
+          cd release && 7z a ../REECLASS-win64-qt6.zip *
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Reclass-win64-qt6
-          path: Reclass-win64-qt6.zip
+          name: REECLASS-win64-qt6
+          path: REECLASS-win64-qt6.zip
 
   linux:
     runs-on: ubuntu-22.04
@@ -152,7 +152,7 @@ jobs:
 
           # Build AppDir structure
           mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
-          cp build/Reclass AppDir/usr/bin/
+          cp build/REECLASS AppDir/usr/bin/
           cp build/REECLASSMcpBridge AppDir/usr/bin/
           cp -r build/themes AppDir/usr/bin/ 2>/dev/null || true
           cp -r build/examples AppDir/usr/bin/ 2>/dev/null || true
@@ -170,19 +170,19 @@ jobs:
           export EXTRA_QT_PLUGINS="svg;iconengines"
           export LDAI_RUNTIME_FILE=runtime-x86_64
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --desktop-file deploy/Reclass.desktop \
+            --desktop-file deploy/REECLASS.desktop \
             --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/reclass.png \
             --plugin qt \
             --output appimage
           # Rename to final name
-          ls Reclass-*.AppImage
-          mv Reclass-*.AppImage Reclass-linux64-qt6.AppImage
+          ls REECLASS-*.AppImage
+          mv REECLASS-*.AppImage REECLASS-linux64-qt6.AppImage
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Reclass-linux64-qt6
-          path: Reclass-linux64-qt6.AppImage
+          name: REECLASS-linux64-qt6
+          path: REECLASS-linux64-qt6.AppImage
 
   macos:
     runs-on: ${{ matrix.os }}
@@ -192,12 +192,12 @@ jobs:
         include:
           - os: macos-15
             qt_arch: clang_arm64
-            artifact_name: Reclass-macos-arm64-qt6
-            zip_name: Reclass-macos-arm64-qt6.zip
+            artifact_name: REECLASS-macos-arm64-qt6
+            zip_name: REECLASS-macos-arm64-qt6.zip
           - os: macos-15-intel
             qt_arch: clang_64
-            artifact_name: Reclass-macos-x86_64-qt6
-            zip_name: Reclass-macos-x86_64-qt6.zip
+            artifact_name: REECLASS-macos-x86_64-qt6
+            zip_name: REECLASS-macos-x86_64-qt6.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -229,9 +229,9 @@ jobs:
             MACDEPLOYQT_BIN=$(which macdeployqt 2>/dev/null || find "$RUNNER_WORKSPACE" -name macdeployqt -path "*/bin/*" | head -1)
           fi
           echo "Found macdeployqt at: $MACDEPLOYQT_BIN"
-          "$MACDEPLOYQT_BIN" build/Reclass.app -always-overwrite
-          codesign --force --deep --sign - build/Reclass.app
-          ditto -c -k --sequesterRsrc --keepParent build/Reclass.app "${{ matrix.zip_name }}"
+          "$MACDEPLOYQT_BIN" build/REECLASS.app -always-overwrite
+          codesign --force --deep --sign - build/REECLASS.app
+          ditto -c -k --sequesterRsrc --keepParent build/REECLASS.app "${{ matrix.zip_name }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -264,9 +264,9 @@ jobs:
             Commit: ${{ github.sha }}
           prerelease: false
           files: |
-            artifacts/Reclass-win64-qt6/Reclass-win64-qt6.zip
-            artifacts/Reclass-linux64-qt6/Reclass-linux64-qt6.AppImage
-            artifacts/Reclass-macos-arm64-qt6/Reclass-macos-arm64-qt6.zip
-            artifacts/Reclass-macos-x86_64-qt6/Reclass-macos-x86_64-qt6.zip
+            artifacts/REECLASS-win64-qt6/REECLASS-win64-qt6.zip
+            artifacts/REECLASS-linux64-qt6/REECLASS-linux64-qt6.AppImage
+            artifacts/REECLASS-macos-arm64-qt6/REECLASS-macos-arm64-qt6.zip
+            artifacts/REECLASS-macos-x86_64-qt6/REECLASS-macos-x86_64-qt6.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

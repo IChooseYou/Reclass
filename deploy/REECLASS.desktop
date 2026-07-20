@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Reclass
+Name=REECLASS
 Comment=Memory structure reverse engineering tool
-Exec=Reclass
-Icon=reclass
+Exec=REECLASS
+Icon=reeclass
 Categories=Development;Debugger;
 Terminal=false

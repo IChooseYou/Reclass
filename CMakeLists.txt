@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.20)
-project(Reclass VERSION 0.1 LANGUAGES C CXX)
+﻿cmake_minimum_required(VERSION 3.20)
+project(REECLASS VERSION 0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -91,7 +91,7 @@ if(NOT EXISTS "${FADEC_DIR}/fadec-decode-public.inc")
     endif()
 endif()
 
-add_executable(Reclass
+add_executable(REECLASS
     src/main.cpp
     src/editor.h
     src/editor.cpp
@@ -199,11 +199,11 @@ add_executable(Reclass
 )
 
 if(APPLE)
-    set_target_properties(Reclass PROPERTIES
+    set_target_properties(REECLASS PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_ICON_FILE "class.icns"
     )
-    target_sources(Reclass PRIVATE src/icons/class.icns)
+    target_sources(REECLASS PRIVATE src/icons/class.icns)
     set_source_files_properties(src/icons/class.icns
         PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 endif()
@@ -217,12 +217,12 @@ if(WIN32)
     # the --screenshot/--profile/QT_FORCE_STDERR_LOGGING flow is intact.
     # MinGW maps this to -mwindows and keeps main() as the entry point (no
     # WinMain shim needed).
-    set_target_properties(Reclass PROPERTIES WIN32_EXECUTABLE TRUE)
+    set_target_properties(REECLASS PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
-target_include_directories(Reclass PRIVATE src third_party/fadec)
+target_include_directories(REECLASS PRIVATE src third_party/fadec)
 
-target_link_libraries(Reclass PRIVATE
+target_link_libraries(REECLASS PRIVATE
     ${QT}::Widgets
     ${QT}::PrintSupport
     ${QT}::Svg
@@ -236,13 +236,13 @@ target_link_libraries(Reclass PRIVATE
 # and a compile define; if absent, the .rcnet path falls back to an
 # error message ("supported on Linux/Windows builds only").
 if(TARGET ${QT}::GuiPrivate)
-    target_link_libraries(Reclass PRIVATE ${QT}::GuiPrivate)
-    target_compile_definitions(Reclass PRIVATE RCX_HAVE_QZIPREADER)
+    target_link_libraries(REECLASS PRIVATE ${QT}::GuiPrivate)
+    target_compile_definitions(REECLASS PRIVATE RCX_HAVE_QZIPREADER)
 endif()
 if(WIN32)
-    target_link_libraries(Reclass PRIVATE dbghelp dwmapi psapi raw_pdb)
+    target_link_libraries(REECLASS PRIVATE dbghelp dwmapi psapi raw_pdb)
 
-    # Copy Debugging Tools dbghelp.dll next to Reclass.exe so the Windows
+    # Copy Debugging Tools dbghelp.dll next to REECLASS.exe so the Windows
     # loader picks it up (app dir > System32).  The system dbghelp.dll
     # lacks StackWalk2 which the tools dbgeng.dll needs for remote debug.
     set(_DBG_TOOLS_DIRS
@@ -252,9 +252,9 @@ if(WIN32)
         if(EXISTS "${_dir}/dbghelp.dll")
             foreach(_dll dbghelp.dll dbgcore.dll symsrv.dll)
                 if(EXISTS "${_dir}/${_dll}")
-                    add_custom_command(TARGET Reclass POST_BUILD
+                    add_custom_command(TARGET REECLASS POST_BUILD
                         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                            "${_dir}/${_dll}" $<TARGET_FILE_DIR:Reclass>
+                            "${_dir}/${_dll}" $<TARGET_FILE_DIR:REECLASS>
                         COMMENT "Copying ${_dll} from Debugging Tools")
                 endif()
             endforeach()
@@ -269,15 +269,15 @@ if(APPLE)
     add_custom_command(TARGET REECLASSMcpBridge POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
             $<TARGET_FILE:REECLASSMcpBridge>
-            $<TARGET_FILE_DIR:Reclass>/REECLASSMcpBridge
-        COMMENT "Bundling REECLASSMcpBridge into Reclass.app"
+            $<TARGET_FILE_DIR:REECLASS>/REECLASSMcpBridge
+        COMMENT "Bundling REECLASSMcpBridge into REECLASS.app"
     )
 endif()
 
 # Copy built-in theme JSON files next to the executable.
 # For single-config generators (Ninja/Make) the exe is in ${CMAKE_BINARY_DIR},
 # for multi-config generators (MSVC/Xcode) it's in ${CMAKE_BINARY_DIR}/<config>.
-# Using a post-build copy with $<TARGET_FILE_DIR:Reclass> handles both.
+# Using a post-build copy with $<TARGET_FILE_DIR:REECLASS> handles both.
 file(GLOB _theme_files "${CMAKE_SOURCE_DIR}/src/themes/defaults/*.json")
 
 # Single-config: configure_file for IDE convenience (available before first build)
@@ -290,18 +290,18 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # Post-build: always copy to the actual exe directory (works for all generators)
-add_custom_command(TARGET Reclass POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Reclass>/themes"
+add_custom_command(TARGET REECLASS POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:REECLASS>/themes"
     COMMENT "Creating themes directory next to executable")
 foreach(_tf ${_theme_files})
     get_filename_component(_name ${_tf} NAME)
-    add_custom_command(TARGET Reclass POST_BUILD
+    add_custom_command(TARGET REECLASS POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_tf}" "$<TARGET_FILE_DIR:Reclass>/themes/${_name}")
+            "${_tf}" "$<TARGET_FILE_DIR:REECLASS>/themes/${_name}")
 endforeach()
 
 if(APPLE)
-    target_sources(Reclass PRIVATE ${_theme_files})
+    target_sources(REECLASS PRIVATE ${_theme_files})
     set_source_files_properties(${_theme_files}
         PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/themes")
 endif()
@@ -322,18 +322,18 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
     endforeach()
 endif()
 
-add_custom_command(TARGET Reclass POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Reclass>/examples"
+add_custom_command(TARGET REECLASS POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:REECLASS>/examples"
     COMMENT "Creating examples directory next to executable")
 foreach(_ef ${_example_files})
     get_filename_component(_name ${_ef} NAME)
-    add_custom_command(TARGET Reclass POST_BUILD
+    add_custom_command(TARGET REECLASS POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_ef}" "$<TARGET_FILE_DIR:Reclass>/examples/${_name}")
+            "${_ef}" "$<TARGET_FILE_DIR:REECLASS>/examples/${_name}")
 endforeach()
 
 if(APPLE)
-    target_sources(Reclass PRIVATE ${_example_files})
+    target_sources(REECLASS PRIVATE ${_example_files})
     set_source_files_properties(${_example_files}
         PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/examples")
 endif()
@@ -366,7 +366,7 @@ message(STATUS \"Combined sources -> \${_out}\")
 
 add_custom_target(combined ALL
     COMMAND ${CMAKE_COMMAND} -P ${_combine_script}
-    DEPENDS Reclass
+    DEPENDS REECLASS
     COMMENT "Combining all source files into h_cpp_combined.txt"
 )
 
@@ -1122,19 +1122,19 @@ endif()
 
 # ── Keep provider plugins in lockstep with the app (ABI safety) ──
 # Every plugin here derives from rcx::Provider and is loaded at RUNTIME via
-# CreatePlugin(), so there is no link dependency on Reclass. But each plugin
+# CreatePlugin(), so there is no link dependency on REECLASS. But each plugin
 # COMPILES against providers/provider.h. Provider is a fragile base class:
 # adding a data member to it (e.g. the modulesCached() cache) grows
 # sizeof(Provider) and shifts every plugin-side derived member. If only the
-# Reclass target is rebuilt after such a change (e.g. `cmake --build build
-# --target Reclass`), the stale plugin DLLs become ABI-incompatible: the
+# REECLASS target is rebuilt after such a change (e.g. `cmake --build build
+# --target REECLASS`), the stale plugin DLLs become ABI-incompatible: the
 # host reads the new base-class members where the plugin laid out the
 # subclass's own data, producing a garbage QVector<ModuleEntry> and an
 # access-violation crash the first time RTTI module resolution runs.
 # (Symptom: lock-add on a near-null pointer inside rttiForVtable, reproduced
 # by attaching a process source then refreshing.)
 #
-# Making Reclass depend on the plugin targets means building the app ALWAYS
+# Making REECLASS depend on the plugin targets means building the app ALWAYS
 # (re)builds the plugins first, so a partial app-only build can never leave
 # an ABI-stale plugin behind. The plugins still pick up provider.h changes
 # through Ninja/Make header-dependency tracking — this just guarantees they
@@ -1146,6 +1146,6 @@ foreach(_rcx_plugin
         WinDbgMemoryPlugin
         RcNetCompatPlugin)
     if(TARGET ${_rcx_plugin})
-        add_dependencies(Reclass ${_rcx_plugin})
+        add_dependencies(REECLASS ${_rcx_plugin})
     endif()
 endforeach()
