@@ -317,6 +317,11 @@ private:
     void reconcileDockTabBars();
     bool m_reconciling = false;
     void updateWindowTitle();
+    // Assign dock as the active doc dock and refresh all dependent chrome
+    // (window title, scanner title, source chip, bookmarks).  Every site that
+    // switches the active doc should call this instead of assigning
+    // m_activeDocDock directly, so chrome never goes stale.
+    void setActiveDocDock(QDockWidget* dock);
     // Refresh the floating Memory Scanner dock's title bar so it shows the
     // active editor tab's source name + kind in parentheses, e.g.
     // "Memory Scanner — notepad.exe (Process)". Called whenever the active

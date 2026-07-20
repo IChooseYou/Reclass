@@ -1275,12 +1275,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         for (QWidget* w = now; w; w = w->parentWidget()) {
             auto* dk = qobject_cast<QDockWidget*>(w);
             if (dk && m_tabs.contains(dk)) {
-                if (m_activeDocDock != dk) {
-                    m_activeDocDock = dk;
-                    updateWindowTitle();
-                    updateSourceChip();
-                    refreshBookmarksDock();
-                }
+                if (m_activeDocDock != dk)
+                    setActiveDocDock(dk);
                 break;
             }
         }
@@ -3949,7 +3945,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             if (it->doc == doc && it->ctrl->viewRootId() == structId) {
                 it.key()->raise();
                 it.key()->show();
-                m_activeDocDock = it.key();
+                setActiveDocDock(it.key());
                 return;
             }
         }
@@ -6218,6 +6214,12 @@ void MainWindow::updateWindowTitle() {
     updateSourceChip();
 }
 
+void MainWindow::setActiveDocDock(QDockWidget* dock) {
+    m_activeDocDock = dock;
+    updateWindowTitle();      // chains updateScannerTitle() + updateSourceChip()
+    refreshBookmarksDock();
+}
+
 void MainWindow::updateScannerTitle() {
     if (!m_scanDockTitle) return;
 
@@ -7613,6 +7615,12 @@ void MainWindow::showValidateDialog() {
         dock->show();
         m_activeDocDock = dock;
         m_tabs[dock].ctrl->scrollToNodeId(nodeId);
+        // Re-assert after dlg.accept(): closing the dialog can return focus to
+        // the old dock and let focusChanged revert m_activeDocDock.
+        QPointer<QDockWidget> dockRef = dock;
+        QTimer::singleShot(0, this, [this, dockRef]() {
+            if (dockRef && m_tabs.contains(dockRef)) setActiveDocDock(dockRef);
+        });
         dlg.accept();
     });
 
@@ -7767,6 +7775,10 @@ void MainWindow::showFindFieldDialog() {
         dock->show();
         m_activeDocDock = dock;
         m_tabs[dock].ctrl->scrollToNodeId(nodeId);
+        QPointer<QDockWidget> dockRef = dock;
+        QTimer::singleShot(0, this, [this, dockRef]() {
+            if (dockRef && m_tabs.contains(dockRef)) setActiveDocDock(dockRef);
+        });
         dlg.accept();
     };
     connect(list, &QListWidget::itemActivated, this, activate);
@@ -7834,6 +7846,10 @@ void MainWindow::showFindReferences(const QString& targetTypeName,
         dock->show();
         m_activeDocDock = dock;
         m_tabs[dock].ctrl->scrollToNodeId(nodeId);
+        QPointer<QDockWidget> dockRef = dock;
+        QTimer::singleShot(0, this, [this, dockRef]() {
+            if (dockRef && m_tabs.contains(dockRef)) setActiveDocDock(dockRef);
+        });
         dlg.accept();
     });
 
@@ -8351,7 +8367,7 @@ void MainWindow::createWorkspaceDock() {
             tab.ctrl->refresh();
             targetDock->raise();
             targetDock->show();
-            m_activeDocDock = targetDock;
+            setActiveDocDock(targetDock);
             QString structName = doc->tree.nodes[ni].structTypeName.isEmpty()
                 ? doc->tree.nodes[ni].name
                 : doc->tree.nodes[ni].structTypeName;
@@ -8570,7 +8586,7 @@ void MainWindow::createWorkspaceDock() {
         if (parentId != 0) {
             ownerDock->raise();
             ownerDock->show();
-            m_activeDocDock = ownerDock;
+            setActiveDocDock(ownerDock);
             auto& tab = m_tabs[ownerDock];
             int pi = tree.indexOfId(parentId);
             if (pi >= 0) tree.nodes[pi].collapsed = false;
@@ -8594,7 +8610,7 @@ void MainWindow::createWorkspaceDock() {
             if (it->doc == doc && it->ctrl->viewRootId() == structId) {
                 it.key()->raise();
                 it.key()->show();
-                m_activeDocDock = it.key();
+                setActiveDocDock(it.key());
                 return;
             }
         }
@@ -8639,7 +8655,7 @@ void MainWindow::createWorkspaceDock() {
             // Child member: navigate within owner tab, scroll to member
             ownerDock->raise();
             ownerDock->show();
-            m_activeDocDock = ownerDock;
+            setActiveDocDock(ownerDock);
             auto& tab = m_tabs[ownerDock];
             int pi = tree.indexOfId(parentId);
             if (pi >= 0) tree.nodes[pi].collapsed = false;
@@ -8661,7 +8677,7 @@ void MainWindow::createWorkspaceDock() {
                 if (it->doc == doc && it->ctrl->viewRootId() == structId) {
                     it.key()->raise();
                     it.key()->show();
-                    m_activeDocDock = it.key();
+                    setActiveDocDock(it.key());
                     return;
                 }
             }
