@@ -61,10 +61,13 @@ struct IpcClient {
     bool   connected  = false;
 
     /* ── block-read cache ─────────────────────────────────────────────── *
-     * Serves all readSingle() calls that fall inside the same 64 KB block
-     * from a single prefetch RPC instead of one round-trip per field.
-     * One compose pass for a 300-field class: ~1500 IPC calls → 1.          */
-    static constexpr uint64_t kCacheBlock = 65536;  // 64 KB per prefetch
+     * Serves all readSingle() calls that fall inside the same page from a
+     * single prefetch RPC instead of one round-trip per field.
+     * 4 KB = one OS page: RcxIsReadable checks exactly one VirtualQuery
+     * region, so it either succeeds fully or fails fully — no false zeros
+     * from a 64KB window that clips a guard/unmapped page at the edge.
+     * One compose pass for a 300-field class: ~1500 IPC calls → 1-2.        */
+    static constexpr uint64_t kCacheBlock = 4096;   // 4 KB = one OS page
     static constexpr qint64   kCacheTtlMs = 40;     // expires between refresh ticks
 
     QByteArray m_cacheBuf;
