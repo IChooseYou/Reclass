@@ -3299,13 +3299,23 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     if (!selChanged && m_lastApplyWasPatch) {
         // Selection markers survive the text patch (they're outside the
         // patched range or move with their line), so skip re-applying them.
-        // BUT the hover highlight must still be restored every tick: on a
-        // live refresh the line under the cursor is exactly the one being
-        // text-patched, and SCI_REPLACETARGET clears that line's
-        // IND_HOVER_SPAN. Returning here without re-painting made the hover
-        // highlight blink off on every refresh and "fight" the cursor on any
-        // updating field. applyHoverCursor() re-paints the span (and keeps
-        // the popup, which is now fingerprint-guarded, from flickering).
+        // BUT SCI_REPLACETARGET clears ALL indicators on the patched lines,
+        // including IND_EDITABLE (editable-span underlines) and IND_HOVER_SPAN.
+        // Repaint editable spans for selected lines so the underlines don't
+        // disappear on the selected node during live refresh. Each selected
+        // node is typically 1-3 lines, so this is fast even for multi-select.
+        for (uint64_t selId : m_currentSelIds) {
+            SelKind sk = selKindOf(selId);
+            uint64_t nodeId = baseNodeIdFromSelId(selId);
+            auto it = m_nodeLineIndex.constFind(nodeId);
+            if (it == m_nodeLineIndex.constEnd()) continue;
+            for (int ln : *it) {
+                if (isSyntheticLine(m_meta[ln])) continue;
+                bool isFooter = (m_meta[ln].lineKind == LineKind::Footer);
+                if ((sk == SelKind::Footer) != isFooter) continue;
+                if (!isFooter) paintEditableSpans(ln);
+            }
+        }
         applyHoverHighlight();
         applyHoverCursor();
         return;
