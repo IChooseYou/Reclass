@@ -4479,6 +4479,55 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             for (const auto& r : rows) addrs << r.second;
             QApplication::clipboard()->setText(addrs.join('\n'));
         });
+        copyMenu->addSeparator();
+        if (editor) {
+            copyMenu->addAction("Copy Line", [editor, line]() {
+                auto* sci = editor->scintilla();
+                int len = (int)sci->SendScintilla(
+                    QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
+                if (len > 0) {
+                    QByteArray buf(len + 1, '\0');
+                    sci->SendScintilla(QsciScintillaBase::SCI_GETLINE,
+                                       (unsigned long)line, (void*)buf.data());
+                    QString text = QString::fromUtf8(buf.data(), len).trimmed();
+                    if (!text.isEmpty())
+                        QApplication::clipboard()->setText(text);
+                }
+            });
+        }
+        copyMenu->addAction("Copy All as Text", [editor]() {
+            if (editor) QApplication::clipboard()->setText(editor->textWithMargins());
+        });
+        {
+            QSet<uint64_t> capIds = ids;
+            auto lastResult = m_lastResult;
+            copyMenu->addAction(tr("Copy Selected as Text (%1 row%2)")
+                                    .arg(ids.size()).arg(ids.size() == 1 ? "" : "s"),
+                                [editor, capIds, lastResult]() {
+                QStringList lines;
+                for (int i = 0; i < lastResult.meta.size(); ++i) {
+                    const auto& lm = lastResult.meta[i];
+                    if (lm.nodeIdx < 0) continue;
+                    if (!capIds.contains(selIdForLine(lm))) continue;
+                    QString margin = lm.offsetText;
+                    QString text;
+                    if (editor) {
+                        auto* sci = editor->scintilla();
+                        int len = (int)sci->SendScintilla(
+                            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)i);
+                        if (len > 0) {
+                            QByteArray buf(len + 1, '\0');
+                            sci->SendScintilla(QsciScintillaBase::SCI_GETLINE,
+                                               (unsigned long)i, (void*)buf.data());
+                            text = QString::fromUtf8(buf.data(), len).trimmed();
+                        }
+                    }
+                    lines.append(margin + text);
+                }
+                if (!lines.isEmpty())
+                    QApplication::clipboard()->setText(lines.join('\n'));
+            });
+        }
 
         // Save selected nodes' raw bytes as a binary file (parallel to
         // the byte-selection menu's same action). For multi-row, the
@@ -4558,58 +4607,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             if (editor) editor->clearByteSelection();
             clearSelection();
         });
-
-        // ── Copy (multi-select) ──
-        {
-            QMenu* copyMenu = menu.addMenu(icon("clippy.svg"), "Copy");
-            if (editor) {
-                copyMenu->addAction("Copy Line", [editor, line]() {
-                    auto* sci = editor->scintilla();
-                    int len = (int)sci->SendScintilla(
-                        QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
-                    if (len > 0) {
-                        QByteArray buf(len + 1, '\0');
-                        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE,
-                                           (unsigned long)line, (void*)buf.data());
-                        QString text = QString::fromUtf8(buf.data(), len).trimmed();
-                        if (!text.isEmpty())
-                            QApplication::clipboard()->setText(text);
-                    }
-                });
-            }
-            copyMenu->addAction("Copy All as Text", [editor]() {
-                if (editor) QApplication::clipboard()->setText(editor->textWithMargins());
-            });
-            // "Copy Selected as Text": rows whose selId is in the captured ids set
-            QSet<uint64_t> capIds = ids;
-            auto lastResult = m_lastResult;
-            copyMenu->addAction(tr("Copy Selected as Text (%1 row%2)")
-                                    .arg(ids.size()).arg(ids.size() == 1 ? "" : "s"),
-                                [editor, capIds, lastResult]() {
-                QStringList lines;
-                for (int i = 0; i < lastResult.meta.size(); ++i) {
-                    const auto& lm = lastResult.meta[i];
-                    if (lm.nodeIdx < 0) continue;
-                    if (!capIds.contains(selIdForLine(lm))) continue;
-                    QString margin = lm.offsetText;
-                    QString text;
-                    if (editor) {
-                        auto* sci = editor->scintilla();
-                        int len = (int)sci->SendScintilla(
-                            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)i);
-                        if (len > 0) {
-                            QByteArray buf(len + 1, '\0');
-                            sci->SendScintilla(QsciScintillaBase::SCI_GETLINE,
-                                               (unsigned long)i, (void*)buf.data());
-                            text = QString::fromUtf8(buf.data(), len).trimmed();
-                        }
-                    }
-                    lines.append(margin + text);
-                }
-                if (!lines.isEmpty())
-                    QApplication::clipboard()->setText(lines.join('\n'));
-            });
-        }
 
         emit contextMenuAboutToShow(&menu, line);
         menu.exec(globalPos);
