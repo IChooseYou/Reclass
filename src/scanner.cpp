@@ -935,16 +935,16 @@ done:
     QMetaObject::invokeMethod(this, "scanStats",
         Qt::QueuedConnection, Q_ARG(rcx::ScanStats, stats));
 
-    // For capture-mode comparison conditions, run an immediate "rescan"
-    // against the just-captured baseline so the user gets a Changed/
-    // Unchanged/Increased/Decreased result set in one click.
-    if (cond == ScanCondition::Changed || cond == ScanCondition::Unchanged
-        || cond == ScanCondition::Increased || cond == ScanCondition::Decreased
-        || cond == ScanCondition::IncreasedBy || cond == ScanCondition::DecreasedBy) {
-        // The first scan can't compare against anything — the panel turns these
-        // into UnknownValue at first-scan time, so we shouldn't reach here for
-        // a true "first scan". Defensive: just return.
-    }
+//TODO-DELETE(runScan capture-mode rescan no-op if block)     // For capture-mode comparison conditions, run an immediate "rescan"
+//    // against the just-captured baseline so the user gets a Changed/
+//    // Unchanged/Increased/Decreased result set in one click.
+//    if (cond == ScanCondition::Changed || cond == ScanCondition::Unchanged
+//        || cond == ScanCondition::Increased || cond == ScanCondition::Decreased
+//        || cond == ScanCondition::IncreasedBy || cond == ScanCondition::DecreasedBy) {
+//        // The first scan can't compare against anything — the panel turns these
+//        // into UnknownValue at first-scan time, so we shouldn't reach here for
+//        // a true "first scan". Defensive: just return.
+//    }
 
     // Matrix mode: rank best candidates first so the top result is the most
     // matrix-like window.

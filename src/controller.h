@@ -295,11 +295,11 @@ public:
     // Test accessors
     const QHash<uint64_t, ValueHistory>& valueHistory() const { return m_valueHistory; }
     const ComposeResult& lastResult() const { return m_lastResult; }
-    int  dataExtent() const { return computeDataExtent(); }
+//TODO-DELETE(dataExtent)     int  dataExtent() const { return computeDataExtent(); }
     // Refresh-speedup observability (test-only).
     int  refreshIntervalMs()  const { return m_refreshTimer ? m_refreshTimer->interval() : 0; }
     bool refreshTimerActive() const { return m_refreshTimer && m_refreshTimer->isActive(); }
-    int  idleTicks()          const { return m_idleTicks; }
+//TODO-DELETE(idleTicks)     int  idleTicks()          const { return m_idleTicks; }
     int  pageStability(uint64_t pageAddr) const { return m_pageStability.value(pageAddr & ~uint64_t(4095), 0); }
     const SnapshotProvider* snapshotProv() const { return m_snapshotProv.get(); }
 

@@ -4526,31 +4526,31 @@ void RcxEditor::applySymbolColoring(const QVector<LineMeta>& meta,
     // Old body kept under an always-false guard so a search for
     // "applySymbolColoring" still finds the historical implementation
     // (removed once the chip migration ships).
-    if (false) {
-    PROFILE_SCOPE("applySymbolColoring");
-    bool full = (firstLine < 0);
-    int begin = full ? 0 : firstLine;
-    int end = full ? meta.size() : qMin(lastLine + 1, (int)meta.size());
-    for (int i = begin; i < end; i++) {
-        const LineMeta& lm = meta[i];
-        if (!isFuncPtr(lm.nodeKind)
-            && lm.nodeKind != NodeKind::Pointer32
-            && lm.nodeKind != NodeKind::Pointer64)
-            continue;
-        const QString& lineText = lineTexts[i];
-        // Find "  // " within the value region and color "// sym" portion green
-        ColumnSpan vs = valueSpan(lm, lineText.size(), lm.effectiveTypeW, lm.effectiveNameW);
-        if (!vs.valid) continue;
-        int searchFrom = vs.start;
-        int sep = lineText.indexOf(QLatin1String("  // "), searchFrom);
-        if (sep < 0 || sep >= vs.end) continue;
-        int symStart = sep + 2;  // start of "// sym"
-        int symEnd = vs.end;
-        while (symEnd > symStart && lineText[symEnd - 1] == ' ') symEnd--;
-        if (symEnd > symStart)
-            fillIndicatorCols(IND_HINT_GREEN, i, symStart, symEnd);
-    }
-    }  // end if (false) dead-code guard
+//TODO-DELETE(RcxEditor::applySymbolColoring (if(false) historical body))     if (false) {
+//    PROFILE_SCOPE("applySymbolColoring");
+//    bool full = (firstLine < 0);
+//    int begin = full ? 0 : firstLine;
+//    int end = full ? meta.size() : qMin(lastLine + 1, (int)meta.size());
+//    for (int i = begin; i < end; i++) {
+//        const LineMeta& lm = meta[i];
+//        if (!isFuncPtr(lm.nodeKind)
+//            && lm.nodeKind != NodeKind::Pointer32
+//            && lm.nodeKind != NodeKind::Pointer64)
+//            continue;
+//        const QString& lineText = lineTexts[i];
+//        // Find "  // " within the value region and color "// sym" portion green
+//        ColumnSpan vs = valueSpan(lm, lineText.size(), lm.effectiveTypeW, lm.effectiveNameW);
+//        if (!vs.valid) continue;
+//        int searchFrom = vs.start;
+//        int sep = lineText.indexOf(QLatin1String("  // "), searchFrom);
+//        if (sep < 0 || sep >= vs.end) continue;
+//        int symStart = sep + 2;  // start of "// sym"
+//        int symEnd = vs.end;
+//        while (symEnd > symStart && lineText[symEnd - 1] == ' ') symEnd--;
+//        if (symEnd > symStart)
+//            fillIndicatorCols(IND_HINT_GREEN, i, symStart, symEnd);
+//    }
+//    }  // end if (false) dead-code guard
 }
 
 void RcxEditor::applyBaseAddressColoring(const QVector<LineMeta>& meta) {
@@ -7139,10 +7139,10 @@ void RcxEditor::showTypeListFiltered(const QString& filter) {
     m_sci->viewport()->setCursor(Qt::ArrowCursor);
 }
 
-void RcxEditor::showSourcePicker() {
-    // Replaced by SourceChooserPopup — Source target now early-returns
-    // from beginInlineEdit() and emits sourcePopupRequested().
-}
+//TODO-DELETE(RcxEditor::showSourcePicker) void RcxEditor::showSourcePicker() {
+//    // Replaced by SourceChooserPopup — Source target now early-returns
+//    // from beginInlineEdit() and emits sourcePopupRequested().
+//}
 
 void RcxEditor::updateTypeListFilter() {
     if (!m_editState.active ||

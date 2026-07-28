@@ -85,7 +85,7 @@ public:
 
     uint32_t firstIndex() const { return m_firstIndex; }
     uint32_t lastIndex()  const { return m_lastIndex; }
-    size_t   count()      const { return m_count; }
+//TODO-DELETE(TypeTable::count)     size_t   count()      const { return m_count; }
 
     const PDB::CodeView::TPI::Record* get(uint32_t typeIndex) const {
         if (typeIndex < m_firstIndex || typeIndex >= m_lastIndex) return nullptr;

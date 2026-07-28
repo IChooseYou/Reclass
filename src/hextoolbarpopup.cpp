@@ -175,9 +175,9 @@ QSize HexToolbarPopup::computeSize() const {
     // Height: buttons + sep + preview + info
     int previewLines = 1;
     if (m_hoveredBtn >= 0 && m_hoveredBtn < (int)m_hits.size()) {
-        for (const auto& h : m_hits) {
-            if (h.rect.contains(QPoint(0, 0)) || true) {} // just use hovered kind
-        }
+//TODO-DELETE(computeSize no-op hits loop)         for (const auto& h : m_hits) {
+//            if (h.rect.contains(QPoint(0, 0)) || true) {} // just use hovered kind
+//        }
         // Find hovered size kind
         if (m_hoveredBtn >= 0 && m_hoveredBtn < kNumSizes) {
             int tgtSz = sizeForKind(kHexSizes[m_hoveredBtn]);
@@ -235,7 +235,7 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         bool canDo = (sizeForKind(kHexSizes[i]) <= sizeForKind(m_ctx.currentKind))
                   || (sizeForKind(kHexSizes[i]) <= joinable);
         bool isHovered = false;
-        for (const auto& h : m_hits) { (void)h; } // hits not built yet, check via m_hoveredBtn
+//TODO-DELETE(paintEvent no-op hits loop)         for (const auto& h : m_hits) { (void)h; } // hits not built yet, check via m_hoveredBtn
         // Check if mouse is over this button
         QPoint mp = mapFromGlobal(QCursor::pos());
         isHovered = r.contains(mp) && canDo;

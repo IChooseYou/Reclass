@@ -53,10 +53,10 @@ public:
         // Accent defaults to the theme's focus border if not otherwise set.
         if (!m_accentOverride) m_accent = t.borderFocused;
     }
-    void setAccentColorOverride(const QColor& c) {
-        m_accent = c;
-        m_accentOverride = true;
-    }
+//TODO-DELETE(DockOverlay::setAccentColorOverride)     void setAccentColorOverride(const QColor& c) {
+//        m_accent = c;
+//        m_accentOverride = true;
+//    }
 
     void beginDrag(QDockWidget* dock, const QString& title) {
         m_draggedDock = dock;

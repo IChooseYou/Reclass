@@ -137,7 +137,7 @@ public:
             m_smallFont.setPointSize(qMax(7, m_smallFont.pointSize() - 1));
         recomputeMetrics();
     }
-    int rowHeight() const { return m_rowH; }
+//TODO-DELETE(UnifiedSymbolDelegate::rowHeight)     int rowHeight() const { return m_rowH; }
 
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
         return QSize(0, m_rowH);
@@ -385,12 +385,12 @@ public:
     ~UnifiedSymbolPanel() override { savePersistedState(); }
 
     void setActiveProviderFn(ActiveProviderFn fn) { m_activeFn = std::move(fn); }
-    // [20] Caller passes the editor's current absolute address so the
-    // matching row (if any) gets a soft active-row marker.
-    void setActiveAddress(uint64_t addr) {
-        m_delegate->setActiveAddress(addr);
-        m_view->viewport()->update();
-    }
+//TODO-DELETE(UnifiedSymbolPanel::setActiveAddress)     // [20] Caller passes the editor's current absolute address so the
+//    // matching row (if any) gets a soft active-row marker.
+//    void setActiveAddress(uint64_t addr) {
+//        m_delegate->setActiveAddress(addr);
+//        m_view->viewport()->update();
+//    }
 
     void applyTheme(const Theme& t) {
         QSettings s("REECLASS", "REECLASS");

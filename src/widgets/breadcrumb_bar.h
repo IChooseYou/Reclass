@@ -48,8 +48,8 @@ public:
 
     void setOnCrumb(CrumbFn fn) { m_onCrumb = std::move(fn); }
 
-    // Beyond this many class crumbs the middle collapses to an ellipsis.
-    void setMaxClassCrumbs(int n) { m_maxClassCrumbs = qMax(2, n); rebuild(); }
+//TODO-DELETE(setMaxClassCrumbs)     // Beyond this many class crumbs the middle collapses to an ellipsis.
+//    void setMaxClassCrumbs(int n) { m_maxClassCrumbs = qMax(2, n); rebuild(); }
 
     // Replace the rendered trail. Interleaves clickable class crumbs
     // (isField=false, rootId = crumb index) and inert "fieldName" connectors

@@ -22,15 +22,15 @@ void NameRegistry::registerProvider(std::shared_ptr<NameProvider> p) {
     emit providersChanged();
 }
 
-void NameRegistry::unregisterProvider(const QString& id) {
-    for (int i = 0; i < m_providers.size(); i++) {
-        if (m_providers[i]->id() == id) {
-            m_providers.removeAt(i);
-            emit providersChanged();
-            return;
-        }
-    }
-}
+//TODO-DELETE(NameRegistry::unregisterProvider) void NameRegistry::unregisterProvider(const QString& id) {
+//    for (int i = 0; i < m_providers.size(); i++) {
+//        if (m_providers[i]->id() == id) {
+//            m_providers.removeAt(i);
+//            emit providersChanged();
+//            return;
+//        }
+//    }
+//}
 
 QString NameRegistry::nameFor(uint64_t addr, const Provider* active) const {
     if (addr == 0) return {};
@@ -41,14 +41,14 @@ QString NameRegistry::nameFor(uint64_t addr, const Provider* active) const {
     return {};
 }
 
-uint64_t NameRegistry::addressFor(const QString& name, const Provider* active) const {
-    if (name.isEmpty()) return 0;
-    for (const auto& p : m_providers) {
-        uint64_t a = p->addressFor(name, active);
-        if (a != 0) return a;
-    }
-    return 0;
-}
+//TODO-DELETE(NameRegistry::addressFor) uint64_t NameRegistry::addressFor(const QString& name, const Provider* active) const {
+//    if (name.isEmpty()) return 0;
+//    for (const auto& p : m_providers) {
+//        uint64_t a = p->addressFor(name, active);
+//        if (a != 0) return a;
+//    }
+//    return 0;
+//}
 
 void NameRegistry::emitChanged() {
     emit providersChanged();

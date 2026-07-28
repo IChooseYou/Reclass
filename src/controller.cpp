@@ -78,11 +78,11 @@ static QString elide(QString s, int max) {
     return s.left(max - 1) + QChar(0x2026);
 }
 
-static QString elideLeft(const QString& s, int max) {
-    if (s.size() <= max) return s;
-    if (max <= 1) return QStringLiteral("\u2026").left(max);
-    return QStringLiteral("\u2026") + s.right(max - 1);
-}
+//TODO-DELETE(elideLeft) static QString elideLeft(const QString& s, int max) {
+//    if (s.size() <= max) return s;
+//    if (max <= 1) return QStringLiteral("\u2026").left(max);
+//    return QStringLiteral("\u2026") + s.right(max - 1);
+//}
 
 // Themed comment input dialog matching the editor style. ThemedDialog +
 // DialogButton — was a raw QDialog with a QDialogButtonBox styled inline
@@ -140,23 +140,23 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
     return {};
 }
 
-static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
-    QStringList parts;
-    QSet<uint64_t> seen;
-    uint64_t cur = nodeId;
-    while (cur != 0 && !seen.contains(cur)) {
-        seen.insert(cur);
-        int idx = t.indexOfId(cur);
-        if (idx < 0) break;
-        const auto& n = t.nodes[idx];
-        parts << (n.name.isEmpty() ? QStringLiteral("<unnamed>") : n.name);
-        cur = n.parentId;
-    }
-    std::reverse(parts.begin(), parts.end());
-    if (parts.size() > 4)
-        parts = QStringList{parts.front(), QStringLiteral("\u2026"), parts[parts.size() - 2], parts.back()};
-    return parts.join(QStringLiteral(" \u00B7 "));
-}
+//TODO-DELETE(crumbFor) static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
+//    QStringList parts;
+//    QSet<uint64_t> seen;
+//    uint64_t cur = nodeId;
+//    while (cur != 0 && !seen.contains(cur)) {
+//        seen.insert(cur);
+//        int idx = t.indexOfId(cur);
+//        if (idx < 0) break;
+//        const auto& n = t.nodes[idx];
+//        parts << (n.name.isEmpty() ? QStringLiteral("<unnamed>") : n.name);
+//        cur = n.parentId;
+//    }
+//    std::reverse(parts.begin(), parts.end());
+//    if (parts.size() > 4)
+//        parts = QStringList{parts.front(), QStringLiteral("\u2026"), parts[parts.size() - 2], parts.back()};
+//    return parts.join(QStringLiteral(" \u00B7 "));
+//}
 
 // ── RcxDocument ──
 
@@ -3663,228 +3663,228 @@ void RcxController::splitHexNode(uint64_t nodeId) {
 
 // ── Hex toolbar popup ──
 
-void RcxController::showHexToolbar(RcxEditor* editor, int nodeIdx) {
-    if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
-    const auto& node = m_doc->tree.nodes[nodeIdx];
-    if (!isHexNode(node.kind)) return;
-
-    if (!m_hexToolbar) {
-        m_hexToolbar = new HexToolbarPopup(editor);
-        connect(m_hexToolbar, &HexToolbarPopup::sizeSelected,
-                this, [this](uint64_t nid, NodeKind newKind) {
-            int ni = m_doc->tree.indexOfId(nid);
-            if (ni < 0) return;
-            const auto& n = m_doc->tree.nodes[ni];
-            if (isHexNode(newKind)) {
-                if (sizeForKind(newKind) <= sizeForKind(n.kind))
-                    changeNodeKind(ni, newKind);
-                else
-                    joinHexNodes(nid, newKind);
-            } else {
-                changeNodeKind(ni, newKind);  // smart suggestion (ptr/float/utf8)
-            }
-        });
-        connect(m_hexToolbar, &HexToolbarPopup::insertAbove,
-                this, [this](uint64_t nid) {
-            int ni = m_doc->tree.indexOfId(nid);
-            if (ni >= 0) insertNodeAbove(ni, NodeKind::Hex64, QStringLiteral("field"));
-        });
-        connect(m_hexToolbar, &HexToolbarPopup::insertBelow,
-                this, [this](uint64_t nid) {
-            int ni = m_doc->tree.indexOfId(nid);
-            if (ni < 0) return;
-            const auto& n = m_doc->tree.nodes[ni];
-            insertNode(n.parentId, n.offset + sizeForKind(n.kind),
-                       NodeKind::Hex64, QStringLiteral("field"));
-        });
-        connect(m_hexToolbar, &HexToolbarPopup::joinSelected,
-                this, [this]() {
-            if (m_selIds.size() < 2) return;
-            // Find first selected hex node
-            uint64_t firstId = 0;
-            int totalBytes = 0;
-            for (uint64_t sid : m_selIds) {
-                int ni = m_doc->tree.indexOfId(sid);
-                if (ni < 0 || !isHexNode(m_doc->tree.nodes[ni].kind)) continue;
-                if (firstId == 0 || m_doc->tree.nodes[ni].offset < m_doc->tree.nodes[m_doc->tree.indexOfId(firstId)].offset)
-                    firstId = sid;
-                totalBytes += sizeForKind(m_doc->tree.nodes[ni].kind);
-            }
-            if (!firstId || totalBytes < 2) return;
-            NodeKind target = NodeKind::Hex8;
-            if      (totalBytes >= 16) target = NodeKind::Hex128;
-            else if (totalBytes >= 8)  target = NodeKind::Hex64;
-            else if (totalBytes >= 4)  target = NodeKind::Hex32;
-            else if (totalBytes >= 2)  target = NodeKind::Hex16;
-            joinHexNodes(firstId, target);
-        });
-        connect(m_hexToolbar, &HexToolbarPopup::fillToOffset,
-                this, [this](uint64_t nid, int targetOffset) {
-            int ni = m_doc->tree.indexOfId(nid);
-            if (ni < 0) return;
-            const auto& n = m_doc->tree.nodes[ni];
-            int curEnd = n.offset + sizeForKind(n.kind);
-            int gap = targetOffset - curEnd;
-            if (gap <= 0) return;
-            m_suppressRefresh = true;
-            m_doc->undoStack.beginMacro(QStringLiteral("Fill to offset 0x%1").arg(targetOffset, 0, 16));
-            int padOff = curEnd;
-            while (gap > 0) {
-                NodeKind pk; int ps;
-                if      (gap >= 16) { pk = NodeKind::Hex128; ps = 16; }
-                else if (gap >= 8)  { pk = NodeKind::Hex64;  ps = 8; }
-                else if (gap >= 4)  { pk = NodeKind::Hex32;  ps = 4; }
-                else if (gap >= 2)  { pk = NodeKind::Hex16;  ps = 2; }
-                else                { pk = NodeKind::Hex8;   ps = 1; }
-                Node pad;
-                pad.kind = pk;
-                pad.name = QStringLiteral("pad_%1").arg(padOff, 0, 16);
-                pad.parentId = n.parentId;
-                pad.offset = padOff;
-                pad.id = m_doc->tree.reserveId();
-                m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{pad, {}}));
-                padOff += ps;
-                gap -= ps;
-            }
-            m_doc->undoStack.endMacro();
-            m_suppressRefresh = false;
-            refresh();
-        });
-    }
-
-    // Build context
-    HexPopupContext ctx;
-    ctx.nodeId = node.id;
-    ctx.currentKind = node.kind;
-    int curSz = sizeForKind(node.kind);
-    bool addrOk = true;
-    uint64_t addr = m_doc->tree.absoluteAddress(nodeIdx, &addrOk);
-    ctx.data = (addrOk && m_doc->provider)
-        ? m_doc->provider->readBytes(addr, curSz)
-        : QByteArray(curSz, '\0');
-
-    // Collect adjacent same-parent hex nodes
-    uint64_t parentId = node.parentId;
-    int nextOff = node.offset + curSz;
-    for (int i = nodeIdx + 1; i < m_doc->tree.nodes.size() && ctx.nexts.size() < 15; i++) {
-        const auto& sib = m_doc->tree.nodes[i];
-        if (sib.parentId != parentId) break;
-        if (sib.offset != nextOff) break;
-        if (!isHexNode(sib.kind)) break;
-        HexPopupContext::Adjacent adj;
-        adj.exists = true;
-        adj.kind = sib.kind;
-        int sibSz = sizeForKind(sib.kind);
-        bool sibOk = true;
-        uint64_t sibAddr = m_doc->tree.absoluteAddress(i, &sibOk);
-        adj.data = (sibOk && m_doc->provider)
-            ? m_doc->provider->readBytes(sibAddr, sibSz)
-            : QByteArray(sibSz, '\0');
-        ctx.nexts.append(adj);
-        nextOff += sibSz;
-    }
-
-    // Smart suggestions (only when pinned — avoids overhead on every selection)
-    if (m_hexToolbar->isPinned() && m_doc->provider) {
-        // Pointer check: interpret bytes as uint64, check if readable address
-        if (curSz >= 8) {
-            uint64_t ptrVal = 0;
-            memcpy(&ptrVal, ctx.data.constData(), qMin(curSz, 8));
-            if (ptrVal > 0x10000 && m_doc->provider->isReadable(ptrVal, 1)) {
-                ctx.hasPtr = true;
-                ctx.ptrSymbol = m_doc->provider->getSymbol(ptrVal);
-            }
-        } else if (curSz == 4) {
-            uint32_t ptrVal = 0;
-            memcpy(&ptrVal, ctx.data.constData(), 4);
-            if (ptrVal > 0x10000 && m_doc->provider->isReadable(ptrVal, 1)) {
-                ctx.hasPtr = true;
-                ctx.ptrSymbol = m_doc->provider->getSymbol(ptrVal);
-            }
-        }
-        // Float check
-        if (curSz >= 4) {
-            float fv = 0;
-            memcpy(&fv, ctx.data.constData(), 4);
-            if (std::isfinite(fv) && std::fabs(fv) < 1e6f && fv != 0.0f
-                && std::fabs(fv) > 1e-6f) {
-                ctx.hasFloat = true;
-                ctx.floatVal = fv;
-            }
-        }
-        // String check: count leading printable ASCII bytes
-        {
-            int printable = 0;
-            for (int i = 0; i < ctx.data.size(); i++) {
-                uint8_t c = (uint8_t)ctx.data[i];
-                if (c >= 0x20 && c <= 0x7E) printable++;
-                else break;
-            }
-            if (printable >= 4) {
-                ctx.hasString = true;
-                ctx.stringPreview = QString::fromLatin1(ctx.data.constData(), printable);
-            }
-        }
-    }
-
-    // Multi-select info
-    if (m_selIds.size() > 1) {
-        // m_selIds is a QSet — collect the selected node indices and sort by
-        // offset before the contiguity scan. Iterating in hash order would
-        // make the "each node's offset == previous node's end" adjacency test
-        // spuriously fail on a genuinely contiguous selection, which wrongly
-        // disables the "merge into one typed field" affordance (hextoolbar).
-        QVector<int> sel;
-        for (uint64_t sid : m_selIds) {
-            int si = m_doc->tree.indexOfId(sid);
-            if (si >= 0) sel.append(si);
-        }
-        std::sort(sel.begin(), sel.end(), [this](int a, int b) {
-            return m_doc->tree.nodes[a].offset < m_doc->tree.nodes[b].offset;
-        });
-        int count = 0, bytes = 0;
-        bool contiguous = true;
-        NodeKind commonKind = NodeKind::Hex8;
-        int lastOff = -1;
-        uint64_t commonParent = 0;
-        for (int si : sel) {
-            if (!isHexNode(m_doc->tree.nodes[si].kind)) { contiguous = false; continue; }
-            const auto& sn = m_doc->tree.nodes[si];
-            if (count == 0) { commonKind = sn.kind; commonParent = sn.parentId; }
-            else {
-                if (sn.kind != commonKind || sn.parentId != commonParent) contiguous = false;
-                if (lastOff >= 0 && sn.offset != lastOff) contiguous = false;
-            }
-            count++;
-            bytes += sizeForKind(sn.kind);
-            lastOff = sn.offset + sizeForKind(sn.kind);
-        }
-        ctx.multiSelectCount = count;
-        ctx.multiSelectBytes = bytes;
-        ctx.multiSelectContiguous = contiguous;
-        ctx.multiSelectKind = commonKind;
-    }
-
-    m_hexToolbar->setFont(editor->scintilla()->font());
-    m_hexToolbar->setContext(ctx);
-
-    // Position below the selected line, left-aligned to the type text
-    auto* sci = editor->scintilla();
-    int line = -1;
-    for (int i = 0; i < m_lastResult.meta.size(); i++) {
-        if (m_lastResult.meta[i].nodeId == node.id) { line = i; break; }
-    }
-    if (line < 0) return;
-    const auto& lm = m_lastResult.meta[line];
-    ColumnSpan ts = typeSpanFor(lm);
-    int linePos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, line);
-    int typePos = linePos + (ts.start > 0 ? ts.start : 0);
-    int xPos = sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, (uintptr_t)0, typePos);
-    int yPos = sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, (uintptr_t)0, linePos);
-    int lineH = sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, line);
-    QPoint gp = sci->viewport()->mapToGlobal(QPoint(xPos, yPos + lineH));
-    m_hexToolbar->popup(gp);
-}
+//TODO-DELETE(RcxController::showHexToolbar) void RcxController::showHexToolbar(RcxEditor* editor, int nodeIdx) {
+//    if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+//    const auto& node = m_doc->tree.nodes[nodeIdx];
+//    if (!isHexNode(node.kind)) return;
+//
+//    if (!m_hexToolbar) {
+//        m_hexToolbar = new HexToolbarPopup(editor);
+//        connect(m_hexToolbar, &HexToolbarPopup::sizeSelected,
+//                this, [this](uint64_t nid, NodeKind newKind) {
+//            int ni = m_doc->tree.indexOfId(nid);
+//            if (ni < 0) return;
+//            const auto& n = m_doc->tree.nodes[ni];
+//            if (isHexNode(newKind)) {
+//                if (sizeForKind(newKind) <= sizeForKind(n.kind))
+//                    changeNodeKind(ni, newKind);
+//                else
+//                    joinHexNodes(nid, newKind);
+//            } else {
+//                changeNodeKind(ni, newKind);  // smart suggestion (ptr/float/utf8)
+//            }
+//        });
+//        connect(m_hexToolbar, &HexToolbarPopup::insertAbove,
+//                this, [this](uint64_t nid) {
+//            int ni = m_doc->tree.indexOfId(nid);
+//            if (ni >= 0) insertNodeAbove(ni, NodeKind::Hex64, QStringLiteral("field"));
+//        });
+//        connect(m_hexToolbar, &HexToolbarPopup::insertBelow,
+//                this, [this](uint64_t nid) {
+//            int ni = m_doc->tree.indexOfId(nid);
+//            if (ni < 0) return;
+//            const auto& n = m_doc->tree.nodes[ni];
+//            insertNode(n.parentId, n.offset + sizeForKind(n.kind),
+//                       NodeKind::Hex64, QStringLiteral("field"));
+//        });
+//        connect(m_hexToolbar, &HexToolbarPopup::joinSelected,
+//                this, [this]() {
+//            if (m_selIds.size() < 2) return;
+//            // Find first selected hex node
+//            uint64_t firstId = 0;
+//            int totalBytes = 0;
+//            for (uint64_t sid : m_selIds) {
+//                int ni = m_doc->tree.indexOfId(sid);
+//                if (ni < 0 || !isHexNode(m_doc->tree.nodes[ni].kind)) continue;
+//                if (firstId == 0 || m_doc->tree.nodes[ni].offset < m_doc->tree.nodes[m_doc->tree.indexOfId(firstId)].offset)
+//                    firstId = sid;
+//                totalBytes += sizeForKind(m_doc->tree.nodes[ni].kind);
+//            }
+//            if (!firstId || totalBytes < 2) return;
+//            NodeKind target = NodeKind::Hex8;
+//            if      (totalBytes >= 16) target = NodeKind::Hex128;
+//            else if (totalBytes >= 8)  target = NodeKind::Hex64;
+//            else if (totalBytes >= 4)  target = NodeKind::Hex32;
+//            else if (totalBytes >= 2)  target = NodeKind::Hex16;
+//            joinHexNodes(firstId, target);
+//        });
+//        connect(m_hexToolbar, &HexToolbarPopup::fillToOffset,
+//                this, [this](uint64_t nid, int targetOffset) {
+//            int ni = m_doc->tree.indexOfId(nid);
+//            if (ni < 0) return;
+//            const auto& n = m_doc->tree.nodes[ni];
+//            int curEnd = n.offset + sizeForKind(n.kind);
+//            int gap = targetOffset - curEnd;
+//            if (gap <= 0) return;
+//            m_suppressRefresh = true;
+//            m_doc->undoStack.beginMacro(QStringLiteral("Fill to offset 0x%1").arg(targetOffset, 0, 16));
+//            int padOff = curEnd;
+//            while (gap > 0) {
+//                NodeKind pk; int ps;
+//                if      (gap >= 16) { pk = NodeKind::Hex128; ps = 16; }
+//                else if (gap >= 8)  { pk = NodeKind::Hex64;  ps = 8; }
+//                else if (gap >= 4)  { pk = NodeKind::Hex32;  ps = 4; }
+//                else if (gap >= 2)  { pk = NodeKind::Hex16;  ps = 2; }
+//                else                { pk = NodeKind::Hex8;   ps = 1; }
+//                Node pad;
+//                pad.kind = pk;
+//                pad.name = QStringLiteral("pad_%1").arg(padOff, 0, 16);
+//                pad.parentId = n.parentId;
+//                pad.offset = padOff;
+//                pad.id = m_doc->tree.reserveId();
+//                m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{pad, {}}));
+//                padOff += ps;
+//                gap -= ps;
+//            }
+//            m_doc->undoStack.endMacro();
+//            m_suppressRefresh = false;
+//            refresh();
+//        });
+//    }
+//
+//    // Build context
+//    HexPopupContext ctx;
+//    ctx.nodeId = node.id;
+//    ctx.currentKind = node.kind;
+//    int curSz = sizeForKind(node.kind);
+//    bool addrOk = true;
+//    uint64_t addr = m_doc->tree.absoluteAddress(nodeIdx, &addrOk);
+//    ctx.data = (addrOk && m_doc->provider)
+//        ? m_doc->provider->readBytes(addr, curSz)
+//        : QByteArray(curSz, '\0');
+//
+//    // Collect adjacent same-parent hex nodes
+//    uint64_t parentId = node.parentId;
+//    int nextOff = node.offset + curSz;
+//    for (int i = nodeIdx + 1; i < m_doc->tree.nodes.size() && ctx.nexts.size() < 15; i++) {
+//        const auto& sib = m_doc->tree.nodes[i];
+//        if (sib.parentId != parentId) break;
+//        if (sib.offset != nextOff) break;
+//        if (!isHexNode(sib.kind)) break;
+//        HexPopupContext::Adjacent adj;
+//        adj.exists = true;
+//        adj.kind = sib.kind;
+//        int sibSz = sizeForKind(sib.kind);
+//        bool sibOk = true;
+//        uint64_t sibAddr = m_doc->tree.absoluteAddress(i, &sibOk);
+//        adj.data = (sibOk && m_doc->provider)
+//            ? m_doc->provider->readBytes(sibAddr, sibSz)
+//            : QByteArray(sibSz, '\0');
+//        ctx.nexts.append(adj);
+//        nextOff += sibSz;
+//    }
+//
+//    // Smart suggestions (only when pinned — avoids overhead on every selection)
+//    if (m_hexToolbar->isPinned() && m_doc->provider) {
+//        // Pointer check: interpret bytes as uint64, check if readable address
+//        if (curSz >= 8) {
+//            uint64_t ptrVal = 0;
+//            memcpy(&ptrVal, ctx.data.constData(), qMin(curSz, 8));
+//            if (ptrVal > 0x10000 && m_doc->provider->isReadable(ptrVal, 1)) {
+//                ctx.hasPtr = true;
+//                ctx.ptrSymbol = m_doc->provider->getSymbol(ptrVal);
+//            }
+//        } else if (curSz == 4) {
+//            uint32_t ptrVal = 0;
+//            memcpy(&ptrVal, ctx.data.constData(), 4);
+//            if (ptrVal > 0x10000 && m_doc->provider->isReadable(ptrVal, 1)) {
+//                ctx.hasPtr = true;
+//                ctx.ptrSymbol = m_doc->provider->getSymbol(ptrVal);
+//            }
+//        }
+//        // Float check
+//        if (curSz >= 4) {
+//            float fv = 0;
+//            memcpy(&fv, ctx.data.constData(), 4);
+//            if (std::isfinite(fv) && std::fabs(fv) < 1e6f && fv != 0.0f
+//                && std::fabs(fv) > 1e-6f) {
+//                ctx.hasFloat = true;
+//                ctx.floatVal = fv;
+//            }
+//        }
+//        // String check: count leading printable ASCII bytes
+//        {
+//            int printable = 0;
+//            for (int i = 0; i < ctx.data.size(); i++) {
+//                uint8_t c = (uint8_t)ctx.data[i];
+//                if (c >= 0x20 && c <= 0x7E) printable++;
+//                else break;
+//            }
+//            if (printable >= 4) {
+//                ctx.hasString = true;
+//                ctx.stringPreview = QString::fromLatin1(ctx.data.constData(), printable);
+//            }
+//        }
+//    }
+//
+//    // Multi-select info
+//    if (m_selIds.size() > 1) {
+//        // m_selIds is a QSet — collect the selected node indices and sort by
+//        // offset before the contiguity scan. Iterating in hash order would
+//        // make the "each node's offset == previous node's end" adjacency test
+//        // spuriously fail on a genuinely contiguous selection, which wrongly
+//        // disables the "merge into one typed field" affordance (hextoolbar).
+//        QVector<int> sel;
+//        for (uint64_t sid : m_selIds) {
+//            int si = m_doc->tree.indexOfId(sid);
+//            if (si >= 0) sel.append(si);
+//        }
+//        std::sort(sel.begin(), sel.end(), [this](int a, int b) {
+//            return m_doc->tree.nodes[a].offset < m_doc->tree.nodes[b].offset;
+//        });
+//        int count = 0, bytes = 0;
+//        bool contiguous = true;
+//        NodeKind commonKind = NodeKind::Hex8;
+//        int lastOff = -1;
+//        uint64_t commonParent = 0;
+//        for (int si : sel) {
+//            if (!isHexNode(m_doc->tree.nodes[si].kind)) { contiguous = false; continue; }
+//            const auto& sn = m_doc->tree.nodes[si];
+//            if (count == 0) { commonKind = sn.kind; commonParent = sn.parentId; }
+//            else {
+//                if (sn.kind != commonKind || sn.parentId != commonParent) contiguous = false;
+//                if (lastOff >= 0 && sn.offset != lastOff) contiguous = false;
+//            }
+//            count++;
+//            bytes += sizeForKind(sn.kind);
+//            lastOff = sn.offset + sizeForKind(sn.kind);
+//        }
+//        ctx.multiSelectCount = count;
+//        ctx.multiSelectBytes = bytes;
+//        ctx.multiSelectContiguous = contiguous;
+//        ctx.multiSelectKind = commonKind;
+//    }
+//
+//    m_hexToolbar->setFont(editor->scintilla()->font());
+//    m_hexToolbar->setContext(ctx);
+//
+//    // Position below the selected line, left-aligned to the type text
+//    auto* sci = editor->scintilla();
+//    int line = -1;
+//    for (int i = 0; i < m_lastResult.meta.size(); i++) {
+//        if (m_lastResult.meta[i].nodeId == node.id) { line = i; break; }
+//    }
+//    if (line < 0) return;
+//    const auto& lm = m_lastResult.meta[line];
+//    ColumnSpan ts = typeSpanFor(lm);
+//    int linePos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, line);
+//    int typePos = linePos + (ts.start > 0 ? ts.start : 0);
+//    int xPos = sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, (uintptr_t)0, typePos);
+//    int yPos = sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, (uintptr_t)0, linePos);
+//    int lineH = sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, line);
+//    QPoint gp = sci->viewport()->mapToGlobal(QPoint(xPos, yPos + lineH));
+//    m_hexToolbar->popup(gp);
+//}
 
 void RcxController::hideHexToolbar() {
     if (m_hexToolbar && m_hexToolbar->isVisible() && !m_hexToolbar->isPinned())

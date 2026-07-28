@@ -83,8 +83,8 @@ public:
     // List loaded module names.
     QStringList loadedModules() const { return m_modules.keys(); }
 
-    // Number of loaded modules.
-    int moduleCount() const { return m_modules.size(); }
+//TODO-DELETE(SymbolStore::moduleCount)     // Number of loaded modules.
+//    int moduleCount() const { return m_modules.size(); }
 
     // Access module data by name (returns nullptr if not found).
     const PdbSymbolSet* moduleData(const QString& moduleName) const {

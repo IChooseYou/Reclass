@@ -29,7 +29,7 @@ namespace rcx {
 // outPositions receives the matched character indices in `text` so the
 // delegate can paint highlight backgrounds at exactly those positions.
 
-inline constexpr int kMaxFuzzyLen = 64;
+//TODO-DELETE(kMaxFuzzyLen) // inline constexpr int kMaxFuzzyLen = 64;  // [dead-code staged for removal]
 
 inline int fuzzyScore(const QString& pattern, const QString& text,
                       QVector<int>* outPositions = nullptr) {

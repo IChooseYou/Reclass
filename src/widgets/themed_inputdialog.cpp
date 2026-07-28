@@ -117,40 +117,40 @@ std::optional<QString> ThemedInputDialog::getText(QWidget* parent,
     return edit->text();
 }
 
-std::optional<int> ThemedInputDialog::getInt(QWidget* parent,
-        const QString& title, const QString& label,
-        int value, int min, int max) {
-    ThemedDialog dlg(parent);
-    dlg.setWindowTitle(title);
-    dlg.setModal(true);
-    dlg.setMinimumWidth(320);
-
-    auto* outer = new QVBoxLayout(&dlg);
-    outer->setContentsMargins(20, 18, 20, 14);
-    outer->setSpacing(10);
-
-    auto* lbl = new QLabel(label, &dlg);
-    styleLabel(lbl);
-    lbl->setWordWrap(true);
-    outer->addWidget(lbl);
-
-    auto* sb = new QSpinBox(&dlg);
-    sb->setRange(min, max);
-    sb->setValue(value);
-    styleSpinBox(sb);
-    outer->addWidget(sb);
-
-    DialogButton* ok = nullptr;
-    DialogButton* cancel = nullptr;
-    outer->addLayout(makeOkCancelRow(&dlg, &ok, &cancel));
-
-    ok->setDefault(true);
-    sb->setFocus();
-    sb->selectAll();
-
-    if (dlg.exec() != QDialog::Accepted) return std::nullopt;
-    return sb->value();
-}
+//TODO-DELETE(ThemedInputDialog::getInt) std::optional<int> ThemedInputDialog::getInt(QWidget* parent,
+//        const QString& title, const QString& label,
+//        int value, int min, int max) {
+//    ThemedDialog dlg(parent);
+//    dlg.setWindowTitle(title);
+//    dlg.setModal(true);
+//    dlg.setMinimumWidth(320);
+//
+//    auto* outer = new QVBoxLayout(&dlg);
+//    outer->setContentsMargins(20, 18, 20, 14);
+//    outer->setSpacing(10);
+//
+//    auto* lbl = new QLabel(label, &dlg);
+//    styleLabel(lbl);
+//    lbl->setWordWrap(true);
+//    outer->addWidget(lbl);
+//
+//    auto* sb = new QSpinBox(&dlg);
+//    sb->setRange(min, max);
+//    sb->setValue(value);
+//    styleSpinBox(sb);
+//    outer->addWidget(sb);
+//
+//    DialogButton* ok = nullptr;
+//    DialogButton* cancel = nullptr;
+//    outer->addLayout(makeOkCancelRow(&dlg, &ok, &cancel));
+//
+//    ok->setDefault(true);
+//    sb->setFocus();
+//    sb->selectAll();
+//
+//    if (dlg.exec() != QDialog::Accepted) return std::nullopt;
+//    return sb->value();
+//}
 
 std::optional<QString> ThemedInputDialog::getItem(QWidget* parent,
         const QString& title, const QString& label,

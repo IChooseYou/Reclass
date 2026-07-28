@@ -381,10 +381,10 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
         return;
     }
 
-    if (node.kind == NodeKind::Array) {
-        ctx.visiting.remove(structId);
-        return;
-    }
+//TODO-DELETE(emitStruct (redundant Array guard))     if (node.kind == NodeKind::Array) {
+//        ctx.visiting.remove(structId);
+//        return;
+//    }
 
     // Deduplicate by struct type name
     QString typeName = ctx.nameFor(node);

@@ -2213,66 +2213,66 @@ private:
     bool m_hover = false;
 };
 
-// ── Custom-painted view tab button (no CSS) ──
-class ViewTabButton : public QPushButton {
-public:
-    static constexpr int kAccentH = 3;   // accent line height in pixels
-    static constexpr int kPadLR  = 12;   // horizontal padding
-    static constexpr int kPadBot = 4;    // extra bottom padding
-
-    int baselineY = -1;  // set by FlatStatusBar for cross-widget text alignment
-
-    QColor colBg, colBgChecked, colBgHover, colBgPressed;
-    QColor colText, colTextMuted, colAccent, colBorder;
-
-    explicit ViewTabButton(const QString& text, QWidget* parent = nullptr)
-        : QPushButton(text, parent) {
-        setCheckable(true);
-        setFlat(true);
-        setCursor(Qt::PointingHandCursor);
-        setContentsMargins(0, 0, 0, 0);
-        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Ignored);
-    }
-
-    QSize sizeHint() const override {
-        QFontMetrics fm(font());
-        int w = fm.horizontalAdvance(text()) + 2 * kPadLR;
-        int h = qRound((fm.height() + kAccentH + kPadBot) * 1.33);
-        return QSize(w, h);
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        // Background
-        QColor bg = colBg;
-        if (isDown())          bg = colBgPressed;
-        else if (underMouse()) bg = colBgHover;
-        else if (isChecked())  bg = colBgChecked;
-        p.fillRect(rect(), bg);
-
-        // Top border (continuous with status bar hairline)
-        if (colBorder.isValid())
-            p.fillRect(0, 0, width(), 1, colBorder);
-
-        // Accent line at y=0 when checked (paints over border)
-        if (isChecked())
-            p.fillRect(0, 0, width(), kAccentH, colAccent);
-
-        // Text — use shared baseline if set, otherwise fall back to VCenter
-        p.setPen(isChecked() || underMouse() || isDown() ? colText : colTextMuted);
-        p.setFont(font());
-        if (baselineY >= 0) {
-            p.drawText(kPadLR, baselineY, text());
-        } else {
-            QRect textRect(kPadLR, kAccentH, width() - 2 * kPadLR, height() - kAccentH);
-            p.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, text());
-        }
-    }
-
-    void enterEvent(QEnterEvent*) override { update(); }
-    void leaveEvent(QEvent*) override { update(); }
-};
+//TODO-DELETE(ViewTabButton) // ── Custom-painted view tab button (no CSS) ──
+//class ViewTabButton : public QPushButton {
+//public:
+//    static constexpr int kAccentH = 3;   // accent line height in pixels
+//    static constexpr int kPadLR  = 12;   // horizontal padding
+//    static constexpr int kPadBot = 4;    // extra bottom padding
+//
+//    int baselineY = -1;  // set by FlatStatusBar for cross-widget text alignment
+//
+//    QColor colBg, colBgChecked, colBgHover, colBgPressed;
+//    QColor colText, colTextMuted, colAccent, colBorder;
+//
+//    explicit ViewTabButton(const QString& text, QWidget* parent = nullptr)
+//        : QPushButton(text, parent) {
+//        setCheckable(true);
+//        setFlat(true);
+//        setCursor(Qt::PointingHandCursor);
+//        setContentsMargins(0, 0, 0, 0);
+//        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Ignored);
+//    }
+//
+//    QSize sizeHint() const override {
+//        QFontMetrics fm(font());
+//        int w = fm.horizontalAdvance(text()) + 2 * kPadLR;
+//        int h = qRound((fm.height() + kAccentH + kPadBot) * 1.33);
+//        return QSize(w, h);
+//    }
+//
+//protected:
+//    void paintEvent(QPaintEvent*) override {
+//        QPainter p(this);
+//        // Background
+//        QColor bg = colBg;
+//        if (isDown())          bg = colBgPressed;
+//        else if (underMouse()) bg = colBgHover;
+//        else if (isChecked())  bg = colBgChecked;
+//        p.fillRect(rect(), bg);
+//
+//        // Top border (continuous with status bar hairline)
+//        if (colBorder.isValid())
+//            p.fillRect(0, 0, width(), 1, colBorder);
+//
+//        // Accent line at y=0 when checked (paints over border)
+//        if (isChecked())
+//            p.fillRect(0, 0, width(), kAccentH, colAccent);
+//
+//        // Text — use shared baseline if set, otherwise fall back to VCenter
+//        p.setPen(isChecked() || underMouse() || isDown() ? colText : colTextMuted);
+//        p.setFont(font());
+//        if (baselineY >= 0) {
+//            p.drawText(kPadLR, baselineY, text());
+//        } else {
+//            QRect textRect(kPadLR, kAccentH, width() - 2 * kPadLR, height() - kAccentH);
+//            p.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, text());
+//        }
+//    }
+//
+//    void enterEvent(QEnterEvent*) override { update(); }
+//    void leaveEvent(QEvent*) override { update(); }
+//};
 
 // ── Shimmer label — gradient text sweep for MCP activity ──
 class ShimmerLabel : public QWidget {
@@ -2832,7 +2832,7 @@ public:
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setAttribute(Qt::WA_NoSystemBackground);
     }
-    void setTint(const QColor& c) { m_tint = c; update(); }
+//TODO-DELETE(MinimapViewportIndicator::setTint)     void setTint(const QColor& c) { m_tint = c; update(); }
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);

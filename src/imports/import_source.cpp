@@ -299,7 +299,7 @@ struct ParsedStruct {
     QString name;
     QString keyword; // "struct", "class", or "enum"
     QVector<ParsedField> fields;
-    int declaredSize = -1; // from static_assert
+//TODO-DELETE(ParsedStruct::declaredSize)     int declaredSize = -1; // from static_assert
     QVector<QPair<QString, int64_t>> enumValues; // for keyword="enum"
 };
 
@@ -436,10 +436,10 @@ struct Parser {
                 parseTypedef();
             } else if (checkIdent("enum")) {
                 parseEnumDef();
-            } else if (peek().kind == TokKind::Hash) {
-                // preprocessor (shouldn't reach here if tokenizer skipped them)
-                advance();
-                while (peek().kind != TokKind::Eof && peek().kind != TokKind::Semi) advance();
+//TODO-DELETE(Parser::parse() Hash branch)             } else if (peek().kind == TokKind::Hash) {
+//                // preprocessor (shouldn't reach here if tokenizer skipped them)
+//                advance();
+//                while (peek().kind != TokKind::Eof && peek().kind != TokKind::Semi) advance();
             } else {
                 advance(); // skip unknown
             }

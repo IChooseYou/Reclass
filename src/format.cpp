@@ -57,9 +57,9 @@ static uint16_t floatToHalf(float f) {
 }
 
 // ── Column layout ──
-// COL_TYPE and COL_NAME use shared constants from core.h (kColType, kColName)
-static constexpr int COL_TYPE    = kColType;
-static constexpr int COL_NAME    = kColName;
+//TODO-DELETE(COL_TYPE / COL_NAME) // COL_TYPE and COL_NAME use shared constants from core.h (kColType, kColName)
+//static constexpr int COL_TYPE    = kColType;
+//static constexpr int COL_NAME    = kColName;
 static constexpr int COL_VALUE   = kColValue;
 static constexpr int COL_COMMENT = 28;  // "// Enter=Save Esc=Cancel" fits
 static const QString SEP = QStringLiteral(" ");

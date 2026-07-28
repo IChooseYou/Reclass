@@ -29,8 +29,8 @@ public:
               const QString& moduleName = {});
 
     // Drop accumulated hits — call on process detach or explicit clear.
-    void clear();
-    void clearForModule(const QString& moduleName);
+//TODO-DELETE(clear)     void clear();
+//TODO-DELETE(clearForModule)     void clearForModule(const QString& moduleName);
 
 private:
     RttiNameProvider() = default;

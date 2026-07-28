@@ -140,9 +140,9 @@ void ThemedMessageBox::applyTheme() {
     }
 }
 
-void ThemedMessageBox::redrawIcon() {
-    // Severity icon removed — see ctor for the rationale.
-}
+//TODO-DELETE(ThemedMessageBox::redrawIcon) void ThemedMessageBox::redrawIcon() {
+//    // Severity icon removed — see ctor for the rationale.
+//}
 
 void ThemedMessageBox::info(QWidget* parent, const QString& title,
                             const QString& text) {

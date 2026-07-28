@@ -57,7 +57,7 @@ public:
     void smoothScrollToNodeId(uint64_t nodeId);
     void setFocusNode(uint64_t nodeId);
     void clearFocusNode();
-    bool isFocusGlowActive() const { return m_focusNodeId != 0; }
+//TODO-DELETE(isFocusGlowActive)     bool isFocusGlowActive() const { return m_focusNodeId != 0; }
     void setPresentationMode(bool on) { m_presentationMode = on; }
     void setHoverEffects(bool on);
     bool hoverEffects() const { return m_hoverEffects; }

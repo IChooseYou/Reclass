@@ -26,7 +26,7 @@ public:
     void setCount(int n) { m_count = n; m_totalCount = -1; update(); }
     void setCount(int visible, int total) { m_count = visible; m_totalCount = total; update(); }
     void setGroupColor(const QColor& c) { m_groupColor = c; update(); }
-    void setLabel(const QString& s) { m_label = s; update(); }
+//TODO-DELETE(CategoryChip::setLabel)     void setLabel(const QString& s) { m_label = s; update(); }
 
     QSize sizeHint() const override {
         QFontMetrics fm(font());

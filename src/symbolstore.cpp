@@ -68,26 +68,26 @@ void SymbolStore::addModuleTypes(const QString& moduleName,
     it->types = types;
 }
 
-void SymbolStore::addRttiHits(const QString& moduleName,
-                              const QVector<QPair<QString, uint32_t>>& hits) {
-    QString canonical = resolveAlias(moduleName);
-    auto it = m_modules.find(canonical);
-    if (it == m_modules.end()) {
-        // No PDB set for this module yet — spin one up so RTTI hits still
-        // participate in resolve()/getSymbolForAddress(). The pdbPath is
-        // intentionally empty to mark it as RTTI-only.
-        PdbSymbolSet set;
-        set.moduleName = canonical;
-        m_modules.insert(canonical, set);
-        it = m_modules.find(canonical);
-    }
-    for (const auto& h : hits) {
-        if (it->nameToRva.contains(h.first)) continue;
-        it->nameToRva.insert(h.first, h.second);
-        it->rvaToName.emplaceBack(h.second, h.first);
-    }
-    it->sortRvaIndex();
-}
+//TODO-DELETE(SymbolStore::addRttiHits) void SymbolStore::addRttiHits(const QString& moduleName,
+//                              const QVector<QPair<QString, uint32_t>>& hits) {
+//    QString canonical = resolveAlias(moduleName);
+//    auto it = m_modules.find(canonical);
+//    if (it == m_modules.end()) {
+//        // No PDB set for this module yet — spin one up so RTTI hits still
+//        // participate in resolve()/getSymbolForAddress(). The pdbPath is
+//        // intentionally empty to mark it as RTTI-only.
+//        PdbSymbolSet set;
+//        set.moduleName = canonical;
+//        m_modules.insert(canonical, set);
+//        it = m_modules.find(canonical);
+//    }
+//    for (const auto& h : hits) {
+//        if (it->nameToRva.contains(h.first)) continue;
+//        it->nameToRva.insert(h.first, h.second);
+//        it->rvaToName.emplaceBack(h.second, h.first);
+//    }
+//    it->sortRvaIndex();
+//}
 
 uint32_t SymbolStore::typeIndexForSymbol(const QString& qualifiedSymbol) const {
     int bangIdx = qualifiedSymbol.indexOf('!');
@@ -101,10 +101,10 @@ uint32_t SymbolStore::typeIndexForSymbol(const QString& qualifiedSymbol) const {
     return modIt->nameToTypeIndex.value(symPart, 0);
 }
 
-void SymbolStore::unloadModule(const QString& moduleName) {
-    QString canonical = resolveAlias(moduleName);
-    m_modules.remove(canonical);
-}
+//TODO-DELETE(SymbolStore::unloadModule) void SymbolStore::unloadModule(const QString& moduleName) {
+//    QString canonical = resolveAlias(moduleName);
+//    m_modules.remove(canonical);
+//}
 
 uint64_t SymbolStore::resolve(const QString& token, const Provider* provider, bool* ok) const {
     *ok = false;
@@ -236,8 +236,8 @@ QString SymbolStore::getSymbolForAddress(uint64_t addr, const Provider* provider
     return {};
 }
 
-void SymbolStore::addAlias(const QString& alias, const QString& canonicalModule) {
-    m_aliases[alias.toLower()] = canonicalModule.toLower();
-}
+//TODO-DELETE(SymbolStore::addAlias) void SymbolStore::addAlias(const QString& alias, const QString& canonicalModule) {
+//    m_aliases[alias.toLower()] = canonicalModule.toLower();
+//}
 
 } // namespace rcx

@@ -8,11 +8,11 @@ DialogButton::DialogButton(const QString& label, Variant v, QWidget* parent)
     init();
 }
 
-DialogButton::DialogButton(const QIcon& icon, const QString& label,
-                           Variant v, QWidget* parent)
-    : QPushButton(icon, label, parent), m_variant(v) {
-    init();
-}
+//TODO-DELETE(DialogButton::DialogButton(const QIcon&, const QString&, Variant, QWidget*)) DialogButton::DialogButton(const QIcon& icon, const QString& label,
+//                           Variant v, QWidget* parent)
+//    : QPushButton(icon, label, parent), m_variant(v) {
+//    init();
+//}
 
 void DialogButton::init() {
     setIconSize(QSize(14, 14));
@@ -23,10 +23,10 @@ void DialogButton::init() {
             this, [this](const Theme&){ applyTheme(); });
 }
 
-void DialogButton::setVariant(Variant v) {
-    m_variant = v;
-    applyTheme();
-}
+//TODO-DELETE(DialogButton::setVariant(Variant)) void DialogButton::setVariant(Variant v) {
+//    m_variant = v;
+//    applyTheme();
+//}
 
 void DialogButton::applyTheme() {
     const auto& t = ThemeManager::instance().current();

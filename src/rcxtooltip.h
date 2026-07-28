@@ -88,22 +88,22 @@ public:
         recalc();
     }
 
-    void populateRich(const QString& title, const QVector<TipLine>& richBody, const QFont& font) {
-        m_title = title;
-        m_richLines = richBody;
-        m_body.clear();
-        m_lines.clear();
-        // Build plain lines for width calculation
-        for (const auto& rl : richBody) {
-            QString plain;
-            for (const auto& s : rl) plain += s.text;
-            m_lines.append(plain);
-        }
-        m_font = font;
-        m_font.setPointSizeF(font.pointSizeF() * 0.9);
-        m_bold = m_font; m_bold.setBold(true);
-        recalc();
-    }
+//TODO-DELETE(RcxTooltip::populateRich)     void populateRich(const QString& title, const QVector<TipLine>& richBody, const QFont& font) {
+//        m_title = title;
+//        m_richLines = richBody;
+//        m_body.clear();
+//        m_lines.clear();
+//        // Build plain lines for width calculation
+//        for (const auto& rl : richBody) {
+//            QString plain;
+//            for (const auto& s : rl) plain += s.text;
+//            m_lines.append(plain);
+//        }
+//        m_font = font;
+//        m_font.setPointSizeF(font.pointSizeF() * 0.9);
+//        m_bold = m_font; m_bold.setBold(true);
+//        recalc();
+//    }
 
     // `anchor`: global screen point where the arrow tip touches.
     // Typically the center-bottom of the hovered span.

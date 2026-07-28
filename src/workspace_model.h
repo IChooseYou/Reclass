@@ -22,7 +22,7 @@ namespace rcx {
 // Qt::UserRole + 6  → bool isDirty (document modified)
 
 static constexpr int RoleSectionHeader = Qt::UserRole + 5;
-static constexpr int RoleDirty         = Qt::UserRole + 6;
+//TODO-DELETE(RoleDirty) static constexpr int RoleDirty         = Qt::UserRole + 6;
 
 struct TabInfo {
     const NodeTree* tree;

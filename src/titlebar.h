@@ -28,7 +28,7 @@ public:
     void applyTheme(const Theme& theme);
     void setShowIcon(bool show);
     void setMenuBarTitleCase(bool titleCase);
-    bool menuBarTitleCase() const { return m_titleCase; }
+//TODO-DELETE(menuBarTitleCase)     bool menuBarTitleCase() const { return m_titleCase; }
     void finalizeMenuBar();
 
     void updateMaximizeIcon();

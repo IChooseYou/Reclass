@@ -131,10 +131,10 @@ inline NodeKind kindFromTypeName(const QString& s, bool* ok = nullptr) {
     return NodeKind::Hex8;
 }
 
-inline constexpr uint32_t flagsFor(NodeKind k) {
-    const auto* m = kindMeta(k);
-    return m ? m->flags : 0;
-}
+//TODO-DELETE(flagsFor) inline constexpr uint32_t flagsFor(NodeKind k) {
+//    const auto* m = kindMeta(k);
+//    return m ? m->flags : 0;
+//}
 inline constexpr bool isHexNode(NodeKind k) {
     return k >= NodeKind::Hex8 && k <= NodeKind::Hex128;
 }

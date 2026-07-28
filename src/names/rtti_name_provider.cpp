@@ -38,32 +38,32 @@ void RttiNameProvider::push(const QString& name, uint64_t address,
     NameRegistry::instance().emitChanged();
 }
 
-void RttiNameProvider::clear() {
-    {
-        QMutexLocker lock(&m_lock);
-        m_hits.clear();
-        m_byKey.clear();
-    }
-    NameRegistry::instance().emitChanged();
-}
+//TODO-DELETE(RttiNameProvider::clear) void RttiNameProvider::clear() {
+//    {
+//        QMutexLocker lock(&m_lock);
+//        m_hits.clear();
+//        m_byKey.clear();
+//    }
+//    NameRegistry::instance().emitChanged();
+//}
 
-void RttiNameProvider::clearForModule(const QString& moduleName) {
-    if (moduleName.isEmpty()) return;
-    {
-        QMutexLocker lock(&m_lock);
-        QVector<NamedAddress> kept;
-        kept.reserve(m_hits.size());
-        QHash<QString, int> newKey;
-        for (const auto& h : m_hits) {
-            if (h.source == moduleName) continue;
-            QString key = h.name + QStringLiteral("@") + QString::number(h.address, 16);
-            newKey.insert(key, kept.size());
-            kept.append(h);
-        }
-        m_hits = std::move(kept);
-        m_byKey = std::move(newKey);
-    }
-    NameRegistry::instance().emitChanged();
-}
+//TODO-DELETE(RttiNameProvider::clearForModule) void RttiNameProvider::clearForModule(const QString& moduleName) {
+//    if (moduleName.isEmpty()) return;
+//    {
+//        QMutexLocker lock(&m_lock);
+//        QVector<NamedAddress> kept;
+//        kept.reserve(m_hits.size());
+//        QHash<QString, int> newKey;
+//        for (const auto& h : m_hits) {
+//            if (h.source == moduleName) continue;
+//            QString key = h.name + QStringLiteral("@") + QString::number(h.address, 16);
+//            newKey.insert(key, kept.size());
+//            kept.append(h);
+//        }
+//        m_hits = std::move(kept);
+//        m_byKey = std::move(newKey);
+//    }
+//    NameRegistry::instance().emitChanged();
+//}
 
 } // namespace rcx

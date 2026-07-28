@@ -21,7 +21,7 @@ public:
     void stop();
     bool isRunning() const { return m_server != nullptr; }
 
-    bool slowMode() const { return m_slowMode; }
+//TODO-DELETE(slowMode)     bool slowMode() const { return m_slowMode; }
     void setSlowMode(bool v) { m_slowMode = v; }
 
     // Call from controller refresh / data change to notify MCP clients

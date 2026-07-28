@@ -124,7 +124,7 @@ RttiInfo walkRtti(const Provider& prov, uint64_t vtableAddr,
     uint64_t colAddr = 0;
     bool ok = false;
     if (pointerSize == 8) {
-        colAddr = prov.readAs<uint64_t>(metaPtrAddr);
+//TODO-DELETE(colAddr readAs redundant read)         colAddr = prov.readAs<uint64_t>(metaPtrAddr);
         ok = prov.read(metaPtrAddr, &colAddr, 8);
     } else {
         uint32_t v = 0;

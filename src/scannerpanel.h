@@ -53,7 +53,7 @@ public:
     QCheckBox*    skipSystemCheck()     const { return m_skipSystemCheck; }
     QCheckBox*    userModeOnlyCheck()   const { return m_userModeOnlyCheck; }
     QCheckBox*    fastScanCheck()       const { return m_fastScanCheck; }
-    QComboBox*    fastScanCombo()       const { return m_fastScanCombo; }
+//TODO-DELETE(fastScanCombo)     QComboBox*    fastScanCombo()       const { return m_fastScanCombo; }
     QPushButton*  scanButton()   const { return m_scanBtn; }
     QPushButton*  updateButton() const { return m_updateBtn; }
     QPushButton*  newScanButton() const { return m_newScanBtn; }
@@ -66,7 +66,7 @@ public:
     QLineEdit*    resultFilter() const { return m_resultFilter; }
     ScanEngine*   engine()       const { return m_engine; }
     QComboBox*    condCombo()    const { return m_condCombo; }
-    QLabel*       condLabel()    const { return m_condLabel; }
+//TODO-DELETE(condLabel)     QLabel*       condLabel()    const { return m_condLabel; }
     QCheckBox*    structOnlyCheck() const { return m_structOnlyCheck; }
     const QVector<ScanResult>& results() const { return m_results; }
 
@@ -124,10 +124,10 @@ public:
 
     // Accessors for the MCP bridge to build structured responses (formatValue/valueSize are private).
     int       scanGeneration()  const { return m_scanGeneration; }
-    ValueType lastValueType()   const { return m_lastValueType; }
-    int       lastScanMode()    const { return m_lastScanMode; }
+//TODO-DELETE(lastValueType)     ValueType lastValueType()   const { return m_lastValueType; }
+//TODO-DELETE(lastScanMode)     int       lastScanMode()    const { return m_lastScanMode; }
     QString   formatValuePublic(const QByteArray& bytes) const { return formatValue(bytes); }
-    int       valueSizePublic() const { return valueSize(); }
+//TODO-DELETE(valueSizePublic)     int       valueSizePublic() const { return valueSize(); }
 
 signals:
     void goToAddress(uint64_t address);

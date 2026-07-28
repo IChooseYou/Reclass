@@ -29,10 +29,10 @@ class GlobalTooltipBridge : public QObject {
 public:
     explicit GlobalTooltipBridge(QObject* parent = nullptr) : QObject(parent) {}
 
-    // Test accessor — the live app doesn't need this but the flicker
-    // detection test reads it to verify the bridge actually consumed
-    // a given QEvent::ToolTip event.
-    QWidget* tooltipTarget() const { return m_target.data(); }
+//TODO-DELETE(tooltipTarget)     // Test accessor — the live app doesn't need this but the flicker
+//    // detection test reads it to verify the bridge actually consumed
+//    // a given QEvent::ToolTip event.
+//    QWidget* tooltipTarget() const { return m_target.data(); }
 
 protected:
     bool eventFilter(QObject* obj, QEvent* e) override {

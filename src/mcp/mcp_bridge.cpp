@@ -91,14 +91,14 @@ static QString inferPreview(const uint8_t* data, int len, const TypeSuggestion& 
 McpBridge::McpBridge(MainWindow* mainWindow, QObject* parent)
     : QObject(parent), m_mainWindow(mainWindow)
 {
-    m_notifyTimer = new QTimer(this);
-    m_notifyTimer->setSingleShot(true);
-    m_notifyTimer->setInterval(100);
-    connect(m_notifyTimer, &QTimer::timeout, this, [this]() {
-        if (!m_clients.isEmpty())
-            sendNotification("notifications/resources/updated",
-                             QJsonObject{{"uri", "project://tree"}});
-    });
+//TODO-DELETE(m_notifyTimer)     m_notifyTimer = new QTimer(this);
+//    m_notifyTimer->setSingleShot(true);
+//    m_notifyTimer->setInterval(100);
+//    connect(m_notifyTimer, &QTimer::timeout, this, [this]() {
+//        if (!m_clients.isEmpty())
+//            sendNotification("notifications/resources/updated",
+//                             QJsonObject{{"uri", "project://tree"}});
+//    });
 }
 
 McpBridge::~McpBridge() {
@@ -3751,10 +3751,10 @@ void McpBridge::notifyTreeChanged() {
                      QJsonObject{{"uri", "project://tree"}});
 }
 
-void McpBridge::notifyDataChanged() {
-    if (m_clients.isEmpty()) return;
-    sendNotification("notifications/resources/updated",
-                     QJsonObject{{"uri", "project://data"}});
-}
+//TODO-DELETE(notifyDataChanged) void McpBridge::notifyDataChanged() {
+//    if (m_clients.isEmpty()) return;
+//    sendNotification("notifications/resources/updated",
+//                     QJsonObject{{"uri", "project://data"}});
+//}
 
 } // namespace rcx

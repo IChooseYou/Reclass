@@ -648,7 +648,7 @@ void SourceChooserPopup::paintEvent(QPaintEvent* event) {
 
 void SourceChooserPopup::hideEvent(QHideEvent* event) {
     QFrame::hideEvent(event);
-    emit dismissed();
+//TODO-DELETE(dismissed)     // emit dismissed();
 }
 
 bool SourceChooserPopup::eventFilter(QObject* obj, QEvent* event) {

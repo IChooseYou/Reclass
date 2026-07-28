@@ -639,115 +639,115 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         layout->addWidget(m_chipRow);
     }
 
-    // ── Sort toolbar ──
-    {
-        m_sortRow = new QWidget;
-        m_sortRow->setFixedHeight(22);
-        auto* slay = new QHBoxLayout(m_sortRow);
-        slay->setContentsMargins(0, 0, 0, 0);
-        slay->setSpacing(0);
-
-        struct SortDef { const char* label; SortMode mode; };
-        static const SortDef defs[] = {
-            {"group", SortGroup}, {"name", SortName},
-            {"size", SortSize}
-        };
-        for (const auto& d : defs) {
-            auto* btn = new QToolButton;
-            btn->setText(QString::fromLatin1(d.label));
-            btn->setCheckable(true);
-            btn->setCursor(Qt::PointingHandCursor);
-            btn->setFixedHeight(22);
-            btn->setStyleSheet(QStringLiteral(
-                "QToolButton { color: %1; background: transparent; border: none;"
-                " border-right: 1px solid %2; padding: 0 8px; }"
-                "QToolButton:checked { color: %3; background: %4; }"
-                "QToolButton:hover:!checked { color: %5; background: %6; }")
-                .arg(theme.textMuted.name(), theme.border.name(),
-                     theme.syntaxKeyword.name(), theme.selected.name(),
-                     theme.text.name(), theme.hover.name()));
-            if (d.mode == SortGroup) btn->setChecked(true);
-            SortMode sm = d.mode;
-            connect(btn, &QToolButton::clicked, this, [this, btn, sm]() {
-                if (m_sortMode == sm) {
-                    m_sortDir *= -1;
-                } else {
-                    m_sortMode = sm;
-                    m_sortDir = 1;
-                }
-                // Update button labels
-                for (auto* b : m_sortBtns) b->setChecked(false);
-                btn->setChecked(true);
-                // Show direction arrow on active sort
-                static const char* labels[] = {"group", "name", "size"};
-                for (int i = 0; i < m_sortBtns.size(); i++) {
-                    if (m_sortBtns[i] == btn)
-                        m_sortBtns[i]->setText(
-                            QString::fromLatin1(labels[i])
-                            + (m_sortDir == 1 ? QStringLiteral(" \u2191")
-                                              : QStringLiteral(" \u2193")));
-                    else
-                        m_sortBtns[i]->setText(QString::fromLatin1(labels[i]));
-                }
-                applyFilter(m_filterEdit->text());
-            });
-            slay->addWidget(btn);
-            m_sortBtns.append(btn);
-        }
-        slay->addStretch();
-
-        // Density toggle: normal / compact
-        QString vbtnStyle = QStringLiteral(
-            "QToolButton { color: %1; border: none; border-left: 1px solid %2;"
-            " padding: 2px; width: 22px; height: 22px; }"
-            "QToolButton:checked { color: %3; }"
-            "QToolButton:hover { color: %4; background: %5; }")
-            .arg(theme.textMuted.name(), theme.border.name(),
-                 theme.syntaxKeyword.name(), theme.text.name(), theme.hover.name());
-        auto* normBtn = new QToolButton;
-        normBtn->setCheckable(true);
-        normBtn->setChecked(true);
-        normBtn->setText(QStringLiteral("\u2630")); // \u2630 (looser = normal)
-        normBtn->setToolTip(QStringLiteral("Normal density"));
-        normBtn->setStyleSheet(vbtnStyle);
-        auto* compBtn = new QToolButton;
-        compBtn->setCheckable(true);
-        compBtn->setText(QStringLiteral("\u2261")); // \u2261 (tighter = compact)
-        compBtn->setToolTip(QStringLiteral("Compact density"));
-        compBtn->setStyleSheet(vbtnStyle);
-        slay->addWidget(normBtn);
-        slay->addWidget(compBtn);
-        connect(normBtn, &QToolButton::clicked, this, [this, normBtn, compBtn]() {
-            m_compact = false;
-            normBtn->setChecked(true); compBtn->setChecked(false);
-            auto* d = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
-            if (d) { d->setCompact(false); }
-            m_listView->doItemsLayout();
-        });
-        connect(compBtn, &QToolButton::clicked, this, [this, normBtn, compBtn]() {
-            m_compact = true;
-            compBtn->setChecked(true); normBtn->setChecked(false);
-            auto* d = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
-            if (d) { d->setCompact(true); }
-            m_listView->doItemsLayout();
-        });
-
-        // Detail pane toggle
-        m_detailBtn = new QToolButton;
-        m_detailBtn->setCheckable(true);
-        m_detailBtn->setChecked(false);
-        m_detailBtn->setText(QStringLiteral("\u25E8")); // ◨
-        m_detailBtn->setToolTip(QStringLiteral("Toggle detail pane"));
-        m_detailBtn->setStyleSheet(vbtnStyle);
-        slay->addWidget(m_detailBtn);
-        connect(m_detailBtn, &QToolButton::clicked, this, [this]() {
-            m_showDetail = m_detailBtn->isChecked();
-            if (m_detailPane) m_detailPane->setVisible(m_showDetail);
-            if (m_showDetail) updateDetailPane();
-        });
-
-        layout->addWidget(m_sortRow);
-    }
+//TODO-DELETE(sort toolbar block (m_sortRow / m_sortBtns / density + detail buttons))     // ── Sort toolbar ──
+//    {
+//        m_sortRow = new QWidget;
+//        m_sortRow->setFixedHeight(22);
+//        auto* slay = new QHBoxLayout(m_sortRow);
+//        slay->setContentsMargins(0, 0, 0, 0);
+//        slay->setSpacing(0);
+//
+//        struct SortDef { const char* label; SortMode mode; };
+//        static const SortDef defs[] = {
+//            {"group", SortGroup}, {"name", SortName},
+//            {"size", SortSize}
+//        };
+//        for (const auto& d : defs) {
+//            auto* btn = new QToolButton;
+//            btn->setText(QString::fromLatin1(d.label));
+//            btn->setCheckable(true);
+//            btn->setCursor(Qt::PointingHandCursor);
+//            btn->setFixedHeight(22);
+//            btn->setStyleSheet(QStringLiteral(
+//                "QToolButton { color: %1; background: transparent; border: none;"
+//                " border-right: 1px solid %2; padding: 0 8px; }"
+//                "QToolButton:checked { color: %3; background: %4; }"
+//                "QToolButton:hover:!checked { color: %5; background: %6; }")
+//                .arg(theme.textMuted.name(), theme.border.name(),
+//                     theme.syntaxKeyword.name(), theme.selected.name(),
+//                     theme.text.name(), theme.hover.name()));
+//            if (d.mode == SortGroup) btn->setChecked(true);
+//            SortMode sm = d.mode;
+//            connect(btn, &QToolButton::clicked, this, [this, btn, sm]() {
+//                if (m_sortMode == sm) {
+//                    m_sortDir *= -1;
+//                } else {
+//                    m_sortMode = sm;
+//                    m_sortDir = 1;
+//                }
+//                // Update button labels
+//                for (auto* b : m_sortBtns) b->setChecked(false);
+//                btn->setChecked(true);
+//                // Show direction arrow on active sort
+//                static const char* labels[] = {"group", "name", "size"};
+//                for (int i = 0; i < m_sortBtns.size(); i++) {
+//                    if (m_sortBtns[i] == btn)
+//                        m_sortBtns[i]->setText(
+//                            QString::fromLatin1(labels[i])
+//                            + (m_sortDir == 1 ? QStringLiteral(" \u2191")
+//                                              : QStringLiteral(" \u2193")));
+//                    else
+//                        m_sortBtns[i]->setText(QString::fromLatin1(labels[i]));
+//                }
+//                applyFilter(m_filterEdit->text());
+//            });
+//            slay->addWidget(btn);
+//            m_sortBtns.append(btn);
+//        }
+//        slay->addStretch();
+//
+//        // Density toggle: normal / compact
+//        QString vbtnStyle = QStringLiteral(
+//            "QToolButton { color: %1; border: none; border-left: 1px solid %2;"
+//            " padding: 2px; width: 22px; height: 22px; }"
+//            "QToolButton:checked { color: %3; }"
+//            "QToolButton:hover { color: %4; background: %5; }")
+//            .arg(theme.textMuted.name(), theme.border.name(),
+//                 theme.syntaxKeyword.name(), theme.text.name(), theme.hover.name());
+//        auto* normBtn = new QToolButton;
+//        normBtn->setCheckable(true);
+//        normBtn->setChecked(true);
+//        normBtn->setText(QStringLiteral("\u2630")); // \u2630 (looser = normal)
+//        normBtn->setToolTip(QStringLiteral("Normal density"));
+//        normBtn->setStyleSheet(vbtnStyle);
+//        auto* compBtn = new QToolButton;
+//        compBtn->setCheckable(true);
+//        compBtn->setText(QStringLiteral("\u2261")); // \u2261 (tighter = compact)
+//        compBtn->setToolTip(QStringLiteral("Compact density"));
+//        compBtn->setStyleSheet(vbtnStyle);
+//        slay->addWidget(normBtn);
+//        slay->addWidget(compBtn);
+//        connect(normBtn, &QToolButton::clicked, this, [this, normBtn, compBtn]() {
+//            m_compact = false;
+//            normBtn->setChecked(true); compBtn->setChecked(false);
+//            auto* d = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
+//            if (d) { d->setCompact(false); }
+//            m_listView->doItemsLayout();
+//        });
+//        connect(compBtn, &QToolButton::clicked, this, [this, normBtn, compBtn]() {
+//            m_compact = true;
+//            compBtn->setChecked(true); normBtn->setChecked(false);
+//            auto* d = static_cast<TypeSelectorDelegate*>(m_listView->itemDelegate());
+//            if (d) { d->setCompact(true); }
+//            m_listView->doItemsLayout();
+//        });
+//
+//        // Detail pane toggle
+//        m_detailBtn = new QToolButton;
+//        m_detailBtn->setCheckable(true);
+//        m_detailBtn->setChecked(false);
+//        m_detailBtn->setText(QStringLiteral("\u25E8")); // ◨
+//        m_detailBtn->setToolTip(QStringLiteral("Toggle detail pane"));
+//        m_detailBtn->setStyleSheet(vbtnStyle);
+//        slay->addWidget(m_detailBtn);
+//        connect(m_detailBtn, &QToolButton::clicked, this, [this]() {
+//            m_showDetail = m_detailBtn->isChecked();
+//            if (m_detailPane) m_detailPane->setVisible(m_showDetail);
+//            if (m_showDetail) updateDetailPane();
+//        });
+//
+//        layout->addWidget(m_sortRow);
+//    }
 
     // ── List view + detail pane (horizontal split) ──
     {
@@ -983,7 +983,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     // so the dim "<type> · <size> · <group>" line duplicated the same
     // info one band lower without adding anything. Less visual noise,
     // same actionable information.)
-    m_footerLabel = nullptr;
+//TODO-DELETE(m_footerLabel = nullptr)     m_footerLabel = nullptr;
 
     // Apply the initial chrome gating for the default (simple/Common) mode.
     updateModeChrome();
@@ -1239,9 +1239,9 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
 
 }
 
-void TypeSelectorPopup::setTitle(const QString& /*title*/) {
-    // Title is now dynamic — set by updateModifierPreview()
-}
+//TODO-DELETE(TypeSelectorPopup::setTitle) void TypeSelectorPopup::setTitle(const QString& /*title*/) {
+//    // Title is now dynamic — set by updateModifierPreview()
+//}
 
 void TypeSelectorPopup::setMode(TypePopupMode mode) {
     m_mode = mode;
@@ -2034,12 +2034,12 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
                     return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
                 });
                 break;
-            case SortAlign:
-                std::stable_sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
-                    if (a.alignment != b.alignment) return dir * (a.alignment - b.alignment) < 0;
-                    return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
-                });
-                break;
+//TODO-DELETE(case SortAlign in flat-sort switch)             case SortAlign:
+//                std::stable_sort(all.begin(), all.end(), [dir](const TypeEntry& a, const TypeEntry& b) {
+//                    if (a.alignment != b.alignment) return dir * (a.alignment - b.alignment) < 0;
+//                    return a.displayName.compare(b.displayName, Qt::CaseInsensitive) < 0;
+//                });
+//                break;
             default: break;
             }
             for (const auto& c : all) {
@@ -2163,12 +2163,12 @@ void TypeSelectorPopup::acceptIndex(int row) {
     const TypeEntry entry = m_filteredTypes[row];
     // Expand/collapse row: flip the simple/all view and re-render in place.
     // Never emits a selection and never hides the popup.
-    if (entry.isExpandToggle) {
-        m_showAllTypes = !m_showAllTypes;
-        updateModeChrome();
-        applyFilter(m_filterEdit ? m_filterEdit->text() : QString());
-        return;
-    }
+//TODO-DELETE(acceptIndex() isExpandToggle branch)     if (entry.isExpandToggle) {
+//        m_showAllTypes = !m_showAllTypes;
+//        updateModeChrome();
+//        applyFilter(m_filterEdit ? m_filterEdit->text() : QString());
+//        return;
+//    }
     // B1/B5 — create-new action row: create + apply in one step, carrying the
     // typed name (or empty → controller auto-names), the keyword, and the
     // active modifier so the new class lands as value/pointer/array directly.
