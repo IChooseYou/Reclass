@@ -158,7 +158,9 @@ jobs:
           cp -r build/examples AppDir/usr/bin/ 2>/dev/null || true
           mkdir -p AppDir/usr/bin/Plugins
           cp build/Plugins/*.so AppDir/usr/bin/Plugins/ 2>/dev/null || true
-          cp src/icons/class.png AppDir/usr/share/icons/hicolor/256x256/apps/reclass.png
+          # Basename must match Icon= in deploy/REECLASS.desktop, or linuxdeploy
+          # fails with "Could not find suitable icon for Icon entry".
+          cp src/icons/class.png AppDir/usr/share/icons/hicolor/256x256/apps/reeclass.png
 
           # Create AppImage with Qt libs bundled
           # install-qt-action adds Qt bin to PATH; find qmake there
@@ -171,7 +173,7 @@ jobs:
           export LDAI_RUNTIME_FILE=runtime-x86_64
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --desktop-file deploy/REECLASS.desktop \
-            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/reclass.png \
+            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/reeclass.png \
             --plugin qt \
             --output appimage
           # Rename to final name
