@@ -451,7 +451,13 @@ QString WinDbgMemoryProvider::getSymbol(uint64_t addr) const
         ULONG64 displacement = 0;
         HRESULT hr = m_symbols->GetNameByOffset(addr, nameBuf, sizeof(nameBuf),
                                                  &nameSize, &displacement);
-        if (SUCCEEDED(hr) && nameSize > 0) {
+        // nameSize counts the NUL terminator, so it is >= 1 even when dbgeng
+        // resolved nothing — testing it alone let an EMPTY name through, and
+        // the displacement below then became the whole "symbol". On a dump,
+        // every unresolvable heap pointer therefore grew a Symbol chip reading
+        // "+0x<addr>", which rendered right after the pointer's value and
+        // looked like the value had been printed twice. Require real name text.
+        if (SUCCEEDED(hr) && nameBuf[0] != '\0') {
             result = QString::fromUtf8(nameBuf);
             if (displacement > 0)
                 result += QStringLiteral("+0x%1").arg(displacement, 0, 16);

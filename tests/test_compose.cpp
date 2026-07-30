@@ -2990,6 +2990,69 @@ private slots:
         }
         QVERIFY2(found, "rvaField line not found in compose output");
     }
+
+    // ── A symbol that just restates the pointer value must not become a chip ──
+    //
+    // Regression, reported as "the value rendered twice" on a WinDbg dump:
+    //
+    //   NewClass* field_0000 0x2606a70 0x2606a70 {
+    //                        ^value    ^Symbol chip
+    //
+    // The Symbol chip is appended directly after the pointer's value, so a
+    // symbol carrying no name is indistinguishable from a duplicated value.
+    // The dump provider produced exactly that: dbgeng's GetNameByOffset sets
+    // nameSize to include the NUL terminator, so its `nameSize > 0` guard let
+    // an empty name through and the bare displacement became the "symbol".
+    // compose() now drops symbols that add no information, so no provider can
+    // reintroduce the same visual bug.
+    void testUninformativeSymbolIsNotChipped() {
+        // Provider whose getSymbol() mimics the broken dump behaviour.
+        struct EmptySymProvider : Provider {
+            QByteArray data;
+            explicit EmptySymProvider(QByteArray d) : data(std::move(d)) {}
+            bool read(uint64_t addr, void* buf, int len) const override {
+                if (addr + (uint64_t)len > (uint64_t)data.size()) return false;
+                std::memcpy(buf, data.constData() + addr, len);
+                return true;
+            }
+            int size() const override { return data.size(); }
+            QString name() const override { return QStringLiteral("dump"); }
+            QString kind() const override { return QStringLiteral("WinDbg"); }
+            // The degenerate forms: pure displacement, and the address itself.
+            QString getSymbol(uint64_t addr) const override {
+                if (addr == 0x2606a70ULL) return QStringLiteral("+0x2606a70");
+                return QStringLiteral("0x%1").arg(addr, 0, 16);
+            }
+        };
+
+        QByteArray buf(64, '\0');
+        const uint64_t ptrVal = 0x2606a70ULL;
+        std::memcpy(buf.data(), &ptrVal, sizeof(ptrVal));
+        EmptySymProvider prov(buf);
+
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "S";
+        root.parentId = 0; root.collapsed = false;
+        const uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+        Node p; p.kind = NodeKind::Pointer64; p.name = "field_0000";
+        p.parentId = rootId; p.offset = 0;
+        tree.addNode(p);
+
+        ComposeResult r = compose(tree, prov);
+        for (int i = 0; i < r.meta.size(); i++) {
+            if (r.meta[i].lineKind != LineKind::Field) continue;
+            const QString line = r.text.split(QChar('\n')).value(i);
+            if (!line.contains(QStringLiteral("field_0000"))) continue;
+            // The value may legitimately appear once; it must not appear twice.
+            QVERIFY2(line.count(QStringLiteral("2606a70"), Qt::CaseInsensitive) <= 1,
+                     qPrintable(QStringLiteral("pointer value rendered twice: ") + line));
+            for (const auto& c : r.meta[i].chips)
+                QVERIFY2(c.kind != ChipKind::Symbol,
+                         qPrintable(QStringLiteral("uninformative symbol became a chip: ")
+                                    + c.text));
+        }
+    }
 };
 
 QTEST_MAIN(TestCompose)

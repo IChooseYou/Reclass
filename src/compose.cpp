@@ -217,6 +217,26 @@ uint32_t computeMarkers(const Node& node, const Provider& /*prov*/,
     return mask;
 }
 
+// Is this "symbol" actually telling the user anything?
+//
+// A Symbol chip is rendered immediately after the pointer's value, so a symbol
+// that merely restates that value reads as the value being printed twice —
+// exactly what a dump source produced when its GetNameByOffset returned an
+// empty name plus a displacement ("+0x2606a70"). Reject the degenerate forms
+// here too, so no provider can reintroduce the same visual bug.
+static bool symbolAddsInformation(const QString& sym, uint64_t ptrValue) {
+    const QString s = sym.trimmed();
+    if (s.isEmpty()) return false;
+    // Pure displacement, no name: "+0x1234".
+    if (s.startsWith(QLatin1Char('+'))) return false;
+    // Just the address again, with or without an 0x prefix.
+    const QString hex = QString::number(ptrValue, 16);
+    if (!s.compare(hex, Qt::CaseInsensitive)
+        || !s.compare(QStringLiteral("0x") + hex, Qt::CaseInsensitive))
+        return false;
+    return true;
+}
+
 static QString resolvePointerTarget(const NodeTree& tree, uint64_t refId) {
     if (refId == 0) return {};
     int refIdx = tree.indexOfId(refId);
@@ -556,7 +576,10 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                         pv = prov.readU64(absAddr);
                     else
                         pv = (uint64_t)prov.readU32(absAddr);
-                    if (pv != 0) ptrSym = prov.getSymbol(pv);
+                    if (pv != 0) {
+                        ptrSym = prov.getSymbol(pv);
+                        if (!symbolAddsInformation(ptrSym, pv)) ptrSym.clear();
+                    }
                 }
 
                 if (!rttiName.isEmpty()) {
@@ -1172,6 +1195,7 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                             }
                         }
                         ptrSym = prov.getSymbol(candidate);
+                        if (!symbolAddsInformation(ptrSym, candidate)) ptrSym.clear();
                     }
                 }
                 if (!rttiName.isEmpty()) {
