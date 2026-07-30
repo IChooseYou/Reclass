@@ -1017,6 +1017,58 @@ private slots:
     }
 
     // ── Test: no IBeam after click then mouse-move to non-editable area ──
+    // ── Availability: a Value edit that can't reach memory is Forbidden ──
+    // This fixture attaches no provider, so committing a Value has nowhere to
+    // write. The pointer used to show a plain I-beam and the inline editor
+    // still opened — the write was then silently dropped further down.
+    //
+    // The distinction under test: only a Value commit touches the target's
+    // memory. A field RENAME edits the NodeTree, so it must stay available on
+    // a read-only or absent source; forbidding it would be wrong.
+    void testValueForbiddenWithoutProviderButNameStaysEditable() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+
+        // Search only the lines already on screen and never scroll: TestEditor
+        // has no init(), so a GOTOLINE here would leak its scroll position into
+        // every test that runs after this one.
+        const int searchEnd = qMin<int>(m_result.meta.size(), kFirstDataLine + 12);
+        int line = -1;
+        for (int i = kFirstDataLine; i < searchEnd; i++) {
+            const auto& lm = m_result.meta[i];
+            if (lm.lineKind != LineKind::Field || isHexPreview(lm.nodeKind)) continue;
+            auto vs = RcxEditor::valueSpan(lm, 400, lm.effectiveTypeW, lm.effectiveNameW);
+            auto ns = RcxEditor::nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
+            if (!vs.valid || !ns.valid || vs.end - vs.start < 2) continue;
+            if (colToViewport(sci, i, vs.start + 1).y() <= 0) continue;  // offscreen
+            line = i;
+            break;
+        }
+        QVERIFY2(line >= 0, "fixture must contain a visible scalar field with "
+                            "both value and name spans");
+
+        const auto& lm = m_result.meta[line];
+
+        // VALUE column — writes memory, no provider => Forbidden.
+        auto vs = RcxEditor::valueSpan(lm, 400, lm.effectiveTypeW, lm.effectiveNameW);
+        QPoint onValue = colToViewport(sci, line, vs.start + 1);
+        sendMouseMove(sci->viewport(), onValue);
+        QApplication::processEvents();
+        QCOMPARE(viewportCursor(m_editor), Qt::ForbiddenCursor);
+
+        // NAME column — edits the tree, must stay available.
+        auto ns = RcxEditor::nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
+        QPoint onName = colToViewport(sci, line, ns.start + 1);
+        QVERIFY2(onName.y() > 0, "name column should be visible");
+        sendMouseMove(sci->viewport(), onName);
+        QApplication::processEvents();
+        QVERIFY2(viewportCursor(m_editor) != Qt::ForbiddenCursor,
+                 "renaming a field edits the tree — must stay available "
+                 "with no provider attached");
+
+        m_editor->applyDocument(m_result);
+    }
+
     void testNoIBeamAfterClickThenMove() {
         m_editor->applyDocument(m_result);
 

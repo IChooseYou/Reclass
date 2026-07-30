@@ -722,16 +722,20 @@ private slots:
         QCOMPARE(after->second, m_tree.baseAddress + 0xAULL);
     }
 
-    // ── Hover over a hex byte sets I-beam cursor ─────────────────────
+    // ── Hover over a hex byte sets the Cross cursor ──────────────────
     // Telegraphs "drag here = byte selection" before the user presses.
-    // applyHoverCursor() resolves byteAddrAt() the same way the press
+    // resolveHoverAffordance() resolves byteAddrAt() the same way the press
     // handler does, so the cursor matches the press behaviour for free.
-    void testHoverHexByteSetsIBeamCursor() {
+    //
+    // Cross, not I-beam: the press starts a grid drag-select over byte cells
+    // (the hex-editor idiom). I-beam promised a text caret, which is what the
+    // DOUBLE-click does — it was describing the wrong gesture.
+    void testHoverHexByteSetsCrossCursor() {
         auto* vp = m_editor->scintilla()->viewport();
         QPoint hex = hexByteCoord(m_editor, m_h0Line, 1);
         sendMove(vp, hex, Qt::NoButton);
         QApplication::processEvents();
-        QCOMPARE(vp->cursor().shape(), Qt::IBeamCursor);
+        QCOMPARE(vp->cursor().shape(), Qt::CrossCursor);
     }
 
     // ── Status-bar interp for odd-sized selections ─────────────────

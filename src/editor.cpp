@@ -2082,7 +2082,7 @@ void RcxEditor::setupScintilla() {
     m_sci->setFrameShape(QFrame::NoFrame);
 
     // Arrow cursor by default — not the I-beam (this is a structured viewer, not a text editor)
-    m_sci->viewport()->setCursor(Qt::ArrowCursor);
+    setViewportCursor(Qt::ArrowCursor);
 
     m_sci->setTabWidth(2);
     m_sci->setIndentationsUseTabs(false);
@@ -3408,7 +3408,7 @@ void RcxEditor::setHoverEffects(bool on) {
             clearIndicatorLine(IND_HOVER_SPAN, ln);
         m_hoverSpanLines.clear();
         dismissAllPopups();
-        m_sci->viewport()->setCursor(Qt::ArrowCursor);
+        setViewportCursor(Qt::ArrowCursor);
     }
 }
 
@@ -3581,9 +3581,7 @@ void RcxEditor::updateByteSelStatus() {
         data = m_disasmProvider->readBytes(lo, n);
     if (data.size() < n) data.append(QByteArray(n - data.size(), '\0'));
 
-    const bool canWrite = m_disasmProvider
-        && m_disasmProvider->isValid()
-        && m_disasmProvider->isWritable();
+    const bool canWrite = canWriteMemory();
 
     auto u = [&](int width) -> uint64_t {
         uint64_t v = 0;
@@ -4703,7 +4701,7 @@ RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
     m_sci->setReadOnly(true);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETWIDTH, 0);
     // Switch back to Arrow cursor (widget-local, doesn't fight splitters/menus)
-    m_sci->viewport()->setCursor(Qt::ArrowCursor);
+    setViewportCursor(Qt::ArrowCursor);
     // Disable selection rendering again
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELFORE, (long)0, (long)0);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELBACK, (long)0, (long)0);
@@ -4940,7 +4938,13 @@ RcxEditor::HitInfo RcxEditor::hitTest(const QPoint& vp) const {
 
     if (h.line >= 0 && h.line < m_meta.size()) {
         h.nodeId = m_meta[h.line].nodeId;
-        h.inFoldCol = (h.col >= 0 && h.col < kFoldCol + 1 && m_meta[h.line].foldHead);
+        // The fold prefix occupies columns [0, kFoldCol) — " ▸ " is kFoldCol
+        // chars wide (compose.cpp). Column kFoldCol itself is the first
+        // character of the line's real text, so it must NOT count as the fold
+        // toggle: this used to be `< kFoldCol + 1`, which made the first glyph
+        // of a header show the fold cursor while the hover underline (painted
+        // over [0, kFoldCol)) disagreed.
+        h.inFoldCol = (h.col >= 0 && h.col < kFoldCol && m_meta[h.line].foldHead);
     }
     return h;
 }
@@ -5072,6 +5076,19 @@ static bool hitTestTarget(QsciScintilla* sci,
 // ── Event filter ──
 
 bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
+    // Modifier press/release while the pointer is parked: re-resolve the
+    // cursor so the hint tracks the modifier, not just mouse motion.
+    // applyHoverCursor() otherwise only runs on MouseMove, so holding Ctrl
+    // without moving a pixel left the old shape on screen and the "open in a
+    // new tab" affordance stayed invisible until you jiggled the mouse.
+    // Not consumed — the key still reaches its normal handler.
+    if (obj == m_sci
+        && (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease)) {
+        const int k = static_cast<QKeyEvent*>(event)->key();
+        if ((k == Qt::Key_Control || k == Qt::Key_Shift || k == Qt::Key_Alt)
+            && m_hoverInside && !m_editState.active)
+            applyHoverCursor();
+    }
     if (obj == m_sci && event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
         if (ke->matches(QKeySequence::Find)) {
@@ -5272,49 +5289,31 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             // Footer buttons: +1, +10h/+100h/+1000h, +10 (enum), Trim, Top
             if (h.line >= 0 && h.line < m_meta.size()
                 && m_meta[h.line].lineKind == LineKind::Footer) {
-                QString ft = getLineText(m_sci, h.line);
-                uint64_t nid = m_meta[h.line].nodeId;
-                // Single-field add — " +1 " padded so it can't collide with
-                // +10/+10h/+100h/+1000h (digit after +1 in those, not space).
-                int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
-                if (pPlusOne >= 0 && h.col >= pPlusOne && h.col < pPlusOne + 4) {
+                // One shared resolver with the cursor and the hover underline —
+                // see footerPillAt(). Keeping the bounds in a single place is
+                // what guarantees the pointer can't show "clickable" on a pill
+                // whose column range the press handler would miss.
+                const uint64_t nid = m_meta[h.line].nodeId;
+                const FooterPill pill = footerPillAt(h.line, h.col);
+                switch (pill.action) {
+                case FooterPill::Action::AddField:
                     emit appendSingleFieldRequested(nid);
                     return true;
-                }
-                // Struct: +1000h (0x1000 = 4096 bytes)
-                int p1000 = ft.indexOf(QStringLiteral("+1000h"));
-                if (p1000 >= 0 && h.col >= p1000 && h.col < p1000 + 6) {
-                    emit appendBytesRequested(nid, 0x1000);
+                case FooterPill::Action::AddBytes:
+                    emit appendBytesRequested(nid, pill.bytes);
                     return true;
-                }
-                // Struct: +100h (0x100 = 256 bytes)
-                int p100 = ft.indexOf(QStringLiteral("+100h"));
-                if (p100 >= 0 && p100 != p1000 + 1 && h.col >= p100 && h.col < p100 + 5) {
-                    emit appendBytesRequested(nid, 0x100);
-                    return true;
-                }
-                // Struct: +10h (0x10 = 16 bytes)
-                int p10 = ft.indexOf(QStringLiteral("+10h"));
-                if (p10 >= 0 && p10 != p100 && p10 != p1000 && h.col >= p10 && h.col < p10 + 4) {
-                    emit appendBytesRequested(nid, 0x10);
-                    return true;
-                }
-                // Enum: +10 (10 members)
-                int add10Start = ft.indexOf(QStringLiteral("+10"));
-                if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000
-                    && h.col >= add10Start && h.col < add10Start + 3) {
+                case FooterPill::Action::AddEnumMembers:
                     emit appendEnumMembersRequested(nid, 10);
                     return true;
-                }
-                int trimStart = ft.indexOf(QStringLiteral("Trim"));
-                if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4) {
+                case FooterPill::Action::Trim:
                     emit trimHexRequested(nid);
                     return true;
-                }
-                int topStart = ft.indexOf(QStringLiteral("Top"));
-                if (topStart >= 0 && h.col >= topStart && h.col < topStart + 3) {
-                    m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, (unsigned long)0);
+                case FooterPill::Action::Top:
+                    m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                                         (unsigned long)0);
                     return true;
+                case FooterPill::Action::None:
+                    break;
                 }
             }
             // CommandRow: try chevron/ADDR edit or consume
@@ -6882,7 +6881,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     if (target != EditTarget::Type && target != EditTarget::Source
         && target != EditTarget::ArrayElementType && target != EditTarget::PointerTarget
         && target != EditTarget::RootClassType) {
-        m_sci->viewport()->setCursor(Qt::IBeamCursor);
+        setViewportCursor(Qt::IBeamCursor);
     }
 
     // Re-enable selection rendering for inline edit (skip for picker-based targets)
@@ -7136,7 +7135,7 @@ void RcxEditor::showTypeListFiltered(const QString& filter) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_USERLISTSHOW,
                          (uintptr_t)1, list.constData());
     // Force Arrow cursor immediately (don't wait for mouse move)
-    m_sci->viewport()->setCursor(Qt::ArrowCursor);
+    setViewportCursor(Qt::ArrowCursor);
 }
 
 //TODO-DELETE(RcxEditor::showSourcePicker) void RcxEditor::showSourcePicker() {
@@ -7210,7 +7209,7 @@ void RcxEditor::showPointerTargetListFiltered(const QString& filter) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_USERLISTSHOW,
                          (uintptr_t)1, list.constData());
     // Force Arrow cursor immediately (don't wait for mouse move)
-    m_sci->viewport()->setCursor(Qt::ArrowCursor);
+    setViewportCursor(Qt::ArrowCursor);
 }
 
 void RcxEditor::updatePointerTargetFilter() {
@@ -7311,6 +7310,234 @@ void RcxEditor::updateEditableIndicators(int line) {
 
 // ── Hover cursor ──
 
+// Can edits reach the target's memory?
+//
+// Only two things actually write memory: committing a Value, and hex-byte
+// overwrite. Everything else the editor edits — field names, comments, the
+// base address, array counts, the root class name — mutates the NodeTree, so
+// it stays available on a read-only dump or with no source attached at all.
+bool RcxEditor::canWriteMemory() const {
+    return m_disasmProvider
+        && m_disasmProvider->isValid()
+        && m_disasmProvider->isWritable();
+}
+
+// Set the viewport cursor only when the shape actually changes.
+//
+// applyHoverCursor() runs on every mouse move (and on scroll, dwell and each
+// refresh tick), so the unguarded setCursor() it used to end with was one
+// QCursor construction + a Qt cursor-stack update per event for a shape that
+// was almost always identical to the current one.
+// Deliberately compares against the LIVE cursor rather than caching the last
+// shape we set: QScintilla sets the viewport cursor itself on paths we don't
+// consume (notably MouseMove while an inline edit is active), so a cached
+// "current shape" silently goes stale and we then skip a setCursor that was
+// actually needed.
+void RcxEditor::setViewportCursor(Qt::CursorShape shape) {
+    if (!m_sci || !m_sci->viewport()) return;
+    if (m_sci->viewport()->cursor().shape() == shape) return;
+    m_sci->viewport()->setCursor(shape);
+}
+
+// Which footer pill (if any) sits under `col` on `line`.
+//
+// The disambiguation is positional, not semantic: "+1" is a prefix of "+10",
+// "+10h", "+100h" and "+1000h", so each longer form is matched first and the
+// shorter ones must prove they didn't land on a longer one's text. " +1 " is
+// searched space-padded for the same reason. Order and bounds here mirror the
+// press handler exactly — that is the point of having one copy.
+RcxEditor::FooterPill RcxEditor::footerPillAt(int line, int col) const {
+    FooterPill p;
+    if (line < 0 || line >= m_meta.size()
+        || m_meta[line].lineKind != LineKind::Footer)
+        return p;
+
+    const QString ft = getLineText(m_sci, line);
+    auto within = [col](int start, int len) {
+        return start >= 0 && col >= start && col < start + len;
+    };
+
+    const int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
+    const int p1000    = ft.indexOf(QStringLiteral("+1000h"));
+    const int p100     = ft.indexOf(QStringLiteral("+100h"));
+    const int p10      = ft.indexOf(QStringLiteral("+10h"));
+    const int p10enum  = ft.indexOf(QStringLiteral("+10"));
+    const int pTrim    = ft.indexOf(QStringLiteral("Trim"));
+    const int pTop     = ft.indexOf(QStringLiteral("Top"));
+
+    if (within(pPlusOne, 4)) {
+        p.action = FooterPill::Action::AddField;  p.start = pPlusOne; p.len = 4;
+        // paint only the "+1" glyphs, not the surrounding padding
+        p.textStart = pPlusOne + 1; p.textLen = 2;
+    } else if (within(p1000, 6)) {
+        p.action = FooterPill::Action::AddBytes;  p.start = p1000; p.len = 6; p.bytes = 0x1000;
+    } else if (p100 != p1000 + 1 && within(p100, 5)) {
+        p.action = FooterPill::Action::AddBytes;  p.start = p100; p.len = 5; p.bytes = 0x100;
+    } else if (p10 != p100 && p10 != p1000 && within(p10, 4)) {
+        p.action = FooterPill::Action::AddBytes;  p.start = p10; p.len = 4; p.bytes = 0x10;
+    } else if (p10enum != p10 && p10enum != p100 && p10enum != p1000
+               && within(p10enum, 3)) {
+        p.action = FooterPill::Action::AddEnumMembers; p.start = p10enum; p.len = 3;
+    } else if (within(pTrim, 4)) {
+        p.action = FooterPill::Action::Trim;      p.start = pTrim; p.len = 4;
+    } else if (within(pTop, 3)) {
+        p.action = FooterPill::Action::Top;       p.start = pTop;  p.len = 3;
+    }
+    if (p.action != FooterPill::Action::None && p.textStart < 0) {
+        p.textStart = p.start;                    // most pills paint what they hit
+        p.textLen   = p.len;
+    }
+    return p;
+}
+
+// Pure hover resolution — no painting, no setCursor, no popups.
+//
+// This is the single source of truth for "what is the pointer over". The
+// cursor shape and the span to underline come out together so they cannot
+// disagree: previously the shape was decided in one chain and the underline
+// painted in another, and the two used slightly different column tests (the
+// fold column differed by one, and the chip override never checked that the
+// chip was even on the hovered line).
+//
+// Precedence, highest first: drag > edit > not-hovering/list/disabled >
+// chip > hex byte > fold > footer pill > token span > nothing.
+RcxEditor::HoverAffordance RcxEditor::resolveHoverAffordance(const QPoint& pos) const {
+    HoverAffordance a;
+
+    // A drag owns the cursor for its whole duration — re-resolving mid-drag
+    // is what used to make the shape flicker as the pointer crossed columns.
+    // A drag owns the cursor for its whole duration. Requiring the button to
+    // still be down makes the lock self-correcting: the drag flags are cleared
+    // on release, but if one is ever left set (an aborted gesture, a synthetic
+    // event sequence) a stale flag would otherwise hold the cursor hostage for
+    // the rest of the session.
+    const bool buttonHeld = (QApplication::mouseButtons() & Qt::LeftButton) != 0;
+    if (buttonHeld && (m_dragStarted || m_byteSelDragging)) {
+        a.region = HoverRegion::Dragging;
+        a.cursor = Qt::ClosedHandCursor;   // "you are holding this"
+        return a;
+    }
+
+    if (!m_hoverEffects && !m_editState.active)
+        return a;                                   // Arrow, nothing underlined
+
+    if (m_editState.active) {
+        a.region = HoverRegion::Editing;
+        if (!m_sci->isListActive()) {
+            auto h = hitTest(pos);
+            if (h.line == m_editState.line
+                && h.col >= m_editState.spanStart && h.col <= editEndCol())
+                a.cursor = Qt::IBeamCursor;
+        }
+        return a;
+    }
+
+    if (!m_hoverInside || m_sci->isListActive())
+        return a;
+
+    auto h = hitTest(pos);
+    if (h.line < 0 || h.line >= m_meta.size())
+        return a;
+    a.line = h.line;
+
+    int tLine = -1, tCol = -1;
+    EditTarget t = EditTarget::Name;   // only meaningful when tokenHit is true
+    const bool tokenHit = hitTestTarget(m_sci, m_meta, pos, tLine, tCol, t);
+
+    // ── Chip. Only when the chip actually belongs to the hovered line:
+    // m_chipHoverLine is refreshed from the eventFilter's MouseMove path, but
+    // applyHoverCursor() also runs from scroll, dwell and refresh, where it can
+    // still name the row the pointer *used* to be on.
+    if (m_chipHoverLine == h.line) {
+        a.region = HoverRegion::Chip;
+        a.cursor = (m_chipHoverKind == ChipKind::Comment) ? Qt::IBeamCursor
+                                                          : Qt::PointingHandCursor;
+        return a;
+    }
+
+    // Informational chips (RTTI, Symbol) are read-only labels, so
+    // updateChipHover() ignores them — it drives the pressable-pill visual and
+    // painting that on a label would lie. They still deserve their own shape:
+    // WhatsThis says "this is telling you something" instead of leaving them
+    // indistinguishable from empty padding.
+    for (const auto& c : m_meta[h.line].chips) {
+        if (c.startCol < 0 || h.col < c.startCol || h.col >= c.endCol) continue;
+        if (chipIsClickable(c.kind)) break;      // handled above via chip state
+        a.region = HoverRegion::Chip;
+        a.cursor = Qt::WhatsThisCursor;
+        return a;
+    }
+
+    // ── Hex byte. Same test the press handler arms byte-selection with, so the
+    // cursor promises exactly what a press will do.
+    if (byteAddrAt(h.line, h.col).has_value()) {
+        a.region = HoverRegion::HexByte;
+        // Cross, not I-beam: the gesture here is a grid drag-select over byte
+        // cells, the same idiom every hex editor uses. I-beam claimed "text
+        // caret", which is what a double-click does, not what a press starts.
+        // Selecting stays available on a read-only source (copy / save as
+        // binary still work) — only the overwrite needs a writable provider.
+        //
+        // Shift turns the press into "extend the existing selection to here"
+        // rather than "start a new one", so it reads as a range gesture.
+        const bool shift = (QApplication::keyboardModifiers() & Qt::ShiftModifier) != 0;
+        a.cursor = (shift && m_byteSel) ? Qt::SizeHorCursor : Qt::CrossCursor;
+        return a;
+    }
+
+    // ── Fold toggle. The fold prefix is the first kFoldCol columns (" ▸ "),
+    // so the region is [0, kFoldCol) — the same columns the underline paints.
+    if (h.inFoldCol) {
+        a.region = HoverRegion::FoldToggle;
+        a.cursor = Qt::PointingHandCursor;
+        a.span = { 0, kFoldCol, true };
+        return a;
+    }
+
+    // ── Footer pills.
+    if (m_meta[h.line].lineKind == LineKind::Footer) {
+        const FooterPill p = footerPillAt(h.line, h.col);
+        if (p.action != FooterPill::Action::None) {
+            a.region = HoverRegion::FooterPill;
+            a.cursor = Qt::PointingHandCursor;
+            a.span = { p.textStart, p.textStart + p.textLen, true };
+        }
+        return a;                                   // footers have no tokens
+    }
+
+    // ── Editable / clickable token. Must be over real glyphs, not the column
+    // padding that pads every field line out to the value column.
+    if (tokenHit) {
+        NormalizedSpan trimmed;
+        QString lineText;
+        if (resolvedSpanFor(tLine, t, trimmed, &lineText)
+            && h.col >= trimmed.start && h.col < trimmed.end) {
+            a.line = tLine;
+            a.span = trimmed;
+            switch (t) {
+            case EditTarget::Type:
+            case EditTarget::Source:
+            case EditTarget::ArrayElementType:
+            case EditTarget::PointerTarget:
+            case EditTarget::TypeSelector:
+                a.region = HoverRegion::TypePicker;
+                a.cursor = Qt::PointingHandCursor;
+                break;
+            default:
+                a.region = HoverRegion::TextEdit;
+                // A Value commit is the one text edit that writes the target's
+                // memory, so it is the one that can be unavailable. Names,
+                // comments, the base address and array counts all edit the
+                // NodeTree and stay editable on a read-only or absent source.
+                a.available = (t != EditTarget::Value) || canWriteMemory();
+                a.cursor = a.available ? Qt::IBeamCursor : Qt::ForbiddenCursor;
+                break;
+            }
+        }
+    }
+    return a;
+}
+
 void RcxEditor::applyHoverCursor() {
     // Clear previous hover span indicators
     for (int ln : m_hoverSpanLines)
@@ -7319,7 +7546,7 @@ void RcxEditor::applyHoverCursor() {
 
     // Lock cursor to Arrow during drag-selection (prevents flicker)
     if (m_dragStarted) {
-        m_sci->viewport()->setCursor(Qt::ArrowCursor);
+        setViewportCursor(Qt::ArrowCursor);
         return;
     }
 
@@ -7328,21 +7555,21 @@ void RcxEditor::applyHoverCursor() {
     if (!m_hoverEffects && !m_editState.active) {
         if (!m_hoverInside || !m_applyingDocument)
             dismissAllPopups();
-        m_sci->viewport()->setCursor(Qt::ArrowCursor);
+        setViewportCursor(Qt::ArrowCursor);
         return;
     }
 
     // Edit mode: IBeam inside edit span, Arrow outside
     if (m_editState.active) {
         if (m_sci->isListActive()) {
-            m_sci->viewport()->setCursor(Qt::ArrowCursor);
+            setViewportCursor(Qt::ArrowCursor);
         } else {
             auto h = hitTest(m_lastHoverPos);
             if (h.line == m_editState.line &&
                 h.col >= m_editState.spanStart && h.col <= editEndCol()) {
-                m_sci->viewport()->setCursor(Qt::IBeamCursor);
+                setViewportCursor(Qt::IBeamCursor);
             } else {
-                m_sci->viewport()->setCursor(Qt::ArrowCursor);
+                setViewportCursor(Qt::ArrowCursor);
             }
         }
         // Value history — show the UNIFIED host's "Previous Values" page (with
@@ -7404,7 +7631,7 @@ void RcxEditor::applyHoverCursor() {
     if (!m_hoverInside) {
         if (!m_applyingDocument)
             dismissAllPopups();
-        m_sci->viewport()->setCursor(Qt::ArrowCursor);
+        setViewportCursor(Qt::ArrowCursor);
         // Cancel any pending preview popup so a fresh entry starts a
         // new wait. Without this, a long pause outside the editor
         // would let the timer fire and pop a popup the moment the
@@ -7418,7 +7645,7 @@ void RcxEditor::applyHoverCursor() {
 
     // If autocomplete/user list popup is active, use arrow cursor
     if (m_sci->isListActive()) {
-        m_sci->viewport()->setCursor(Qt::ArrowCursor);
+        setViewportCursor(Qt::ArrowCursor);
         return;
     }
 
@@ -7512,34 +7739,16 @@ void RcxEditor::applyHoverCursor() {
         m_hoverSpanLines.append(h.line);
     }
 
-    // Apply hover span on footer pills (+Field, +10h/+100h/+1000h, +10, Trim)
+    // Apply hover span on footer pills — same resolver the cursor and the press
+    // handler use, so the underline marks exactly what a click will act on.
     if (h.line >= 0 && h.line < m_meta.size()
         && m_meta[h.line].lineKind == LineKind::Footer) {
-        QString ft = getLineText(m_sci, h.line);
-        auto tryPill = [&](const QString& text, int pos) {
-            if (pos >= 0 && h.col >= pos && h.col < pos + text.size()) {
-                fillIndicatorCols(IND_HOVER_SPAN, h.line, pos, pos + text.size());
-                m_hoverSpanLines.append(h.line);
-            }
-        };
-        // Search padded token, but hover-paint only the `+1` chars so the
-        // glyph doesn't bleed into the gap before +10h.
-        int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
-        if (pPlusOne >= 0)
-            tryPill(QStringLiteral("+1"), pPlusOne + 1);
-        int p1000 = ft.indexOf(QStringLiteral("+1000h"));
-        tryPill(QStringLiteral("+1000h"), p1000);
-        int p100 = ft.indexOf(QStringLiteral("+100h"));
-        if (p100 >= 0 && p100 != p1000 + 1)
-            tryPill(QStringLiteral("+100h"), p100);
-        int p10 = ft.indexOf(QStringLiteral("+10h"));
-        if (p10 >= 0 && p10 != p100 && p10 != p1000)
-            tryPill(QStringLiteral("+10h"), p10);
-        int add10Start = ft.indexOf(QStringLiteral("+10"));
-        if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000)
-            tryPill(QStringLiteral("+10"), add10Start);
-        tryPill(QStringLiteral("Trim"), ft.indexOf(QStringLiteral("Trim")));
-        tryPill(QStringLiteral("Top"), ft.indexOf(QStringLiteral("Top")));
+        const FooterPill pill = footerPillAt(h.line, h.col);
+        if (pill.action != FooterPill::Action::None && pill.textLen > 0) {
+            fillIndicatorCols(IND_HOVER_SPAN, h.line,
+                              pill.textStart, pill.textStart + pill.textLen);
+            m_hoverSpanLines.append(h.line);
+        }
     }
 
     // ── Hover dwell tracking ──
@@ -7640,79 +7849,11 @@ void RcxEditor::applyHoverCursor() {
             static_cast<HoverPopup*>(m_popupHost)->dismiss();
     }
 
-    // Determine cursor shape based on interaction type
-    Qt::CursorShape desired = Qt::ArrowCursor;
-
-    if (h.inFoldCol) {
-        desired = Qt::PointingHandCursor;  // fold toggle = button
-    } else if (h.line >= 0 && h.line < m_meta.size()
-               && m_meta[h.line].lineKind == LineKind::Footer) {
-        QString ft = getLineText(m_sci, h.line);
-        int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
-        if (pPlusOne >= 0 && h.col >= pPlusOne && h.col < pPlusOne + 4)
-            desired = Qt::PointingHandCursor;
-        int p1000 = ft.indexOf(QStringLiteral("+1000h"));
-        if (p1000 >= 0 && h.col >= p1000 && h.col < p1000 + 6)
-            desired = Qt::PointingHandCursor;
-        int p100 = ft.indexOf(QStringLiteral("+100h"));
-        if (p100 >= 0 && p100 != p1000 + 1 && h.col >= p100 && h.col < p100 + 5)
-            desired = Qt::PointingHandCursor;
-        int p10 = ft.indexOf(QStringLiteral("+10h"));
-        if (p10 >= 0 && p10 != p100 && p10 != p1000 && h.col >= p10 && h.col < p10 + 4)
-            desired = Qt::PointingHandCursor;
-        int add10Start = ft.indexOf(QStringLiteral("+10"));
-        if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000
-            && h.col >= add10Start && h.col < add10Start + 3)
-            desired = Qt::PointingHandCursor;
-        int trimStart = ft.indexOf(QStringLiteral("Trim"));
-        if (trimStart >= 0 && h.col >= trimStart && h.col < trimStart + 4)
-            desired = Qt::PointingHandCursor;
-        int topStart = ft.indexOf(QStringLiteral("Top"));
-        if (topStart >= 0 && h.col >= topStart && h.col < topStart + 3)
-            desired = Qt::PointingHandCursor;
-    } else if (tokenHit) {
-        // Check if mouse is actually over trimmed text content (not column padding)
-        NormalizedSpan trimmed;
-        bool overText = resolvedSpanFor(line, t, trimmed)
-                        && h.col >= trimmed.start && h.col < trimmed.end;
-        if (overText) {
-            switch (t) {
-            case EditTarget::Type:
-            case EditTarget::Source:
-            case EditTarget::ArrayElementType:
-            case EditTarget::PointerTarget:
-            case EditTarget::RootClassType:
-            case EditTarget::TypeSelector:
-                desired = Qt::PointingHandCursor;
-                break;
-            default:
-                desired = Qt::IBeamCursor;
-                break;
-            }
-        }
-        // else: desired stays Arrow (hovering over column padding)
-    }
-
-    // Hex-byte override — wins over the rest of the chain. Hovering over
-    // any hex byte digit in a hex preview row's value column resolves
-    // via byteAddrAt(), which is exactly the press-handler's "this is a
-    // byte-selection arming zone" test. Matching the cursor to the
-    // press behaviour telegraphs the upcoming mode before the user
-    // drags. Falls through to whatever the chain above decided in any
-    // non-byte column.
-    if (h.line >= 0 && byteAddrAt(h.line, h.col).has_value())
-        desired = Qt::IBeamCursor;
-
-    // Clickable chip override — type-hint suggestions ("int32x2"),
-    // enum chips, AddComment all open a dropdown/dialog on click and
-    // get PointingHand. Comment chips are inline-editable text and
-    // get I-beam, matching the cursor convention for hex bytes / name
-    // / value spans.
-    if (m_chipHoverLine >= 0) {
-        desired = (m_chipHoverKind == ChipKind::Comment)
-                  ? Qt::IBeamCursor
-                  : Qt::PointingHandCursor;
-    }
+    // Cursor shape comes from the single resolver — see
+    // resolveHoverAffordance(). Everything the old inline chain did (fold,
+    // footer pills, token spans, hex bytes, chips) now lives there, with the
+    // chip check correctly scoped to the hovered line.
+    Qt::CursorShape desired = resolveHoverAffordance(m_lastHoverPos).cursor;
 
     // ── Arrow tooltip on command row spans ──
     {
@@ -7844,7 +7985,7 @@ void RcxEditor::applyHoverCursor() {
             static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
     }
 
-    m_sci->viewport()->setCursor(desired);
+    setViewportCursor(desired);
 }
 
 // ── Live value validation ──

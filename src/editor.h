@@ -575,12 +575,73 @@ private:
     struct HitInfo { int line = -1; int col = -1; uint64_t nodeId = 0; bool inFoldCol = false; };
     HitInfo hitTest(const QPoint& viewportPos) const;
 
+
     struct EndEditInfo { int nodeIdx; int subLine; EditTarget target; };
     EndEditInfo endInlineEdit();
 
     struct NormalizedSpan { int start = 0; int end = 0; bool valid = false; };
     NormalizedSpan normalizeSpan(const ColumnSpan& raw, const QString& lineText,
                                  EditTarget target, bool skipPrefixes) const;
+
+    // ── Hover affordance ──
+    // What the pointer is over, and therefore what the cursor should say and
+    // which span should underline. resolveHoverAffordance() is PURE: it reads
+    // state and returns a decision — it paints nothing and sets no cursor.
+    // Returning the shape and the underline span together is what stops them
+    // drifting apart; every consumer takes both or neither. applyHoverCursor()
+    // is the only thing that acts on the result.
+    enum class HoverRegion {
+        None,        // padding, blanks, separators — nothing here
+        FoldToggle,  // the ▸/▾ column on a fold head
+        FooterPill,  // +1 / +10h / +100h / +1000h / +10 / Trim / Top
+        TypePicker,  // Type / PointerTarget / ArrayElementType / Source / chevron
+        TextEdit,    // Name / Value / BaseAddress / RootClassName / ArrayElementCount
+        HexByte,     // a byte cell in a hex preview row
+        Chip,        // a LineChip (clickable or informational)
+        Navigate,    // Ctrl held over a header type/name — opens in a new tab
+        Editing,     // an inline edit is active
+        Dragging,    // a row- or byte-drag is in flight
+    };
+    struct HoverAffordance {
+        Qt::CursorShape cursor = Qt::ArrowCursor;
+        HoverRegion     region = HoverRegion::None;
+        // Span to underline with IND_HOVER_SPAN; invalid = underline nothing.
+        NormalizedSpan  span;
+        int             line   = -1;   // line the span belongs to
+        // false => the region exists but the action is unavailable here
+        // (no provider / read-only source) => ForbiddenCursor.
+        bool            available = true;
+    };
+    HoverAffordance resolveHoverAffordance(const QPoint& viewportPos) const;
+
+    // ── Footer pills ──
+    // "};  +1 +10h +100h +1000h Trim Top". The click handler, the cursor and
+    // the hover underline all resolve a pill through this one function, so a
+    // pill can never look clickable somewhere it isn't (they used to carry
+    // three separate copies of the same indexOf() chain).
+    struct FooterPill {
+        enum class Action { None, AddField, AddBytes, AddEnumMembers, Trim, Top };
+        Action   action = Action::None;
+        int      start  = -1;   // hit region: first column that responds to a click
+        int      len    = 0;
+        // Glyph region to underline. Usually identical to the hit region, but
+        // "+1" is searched space-padded (" +1 ") so it can't collide with +10 /
+        // +10h / +100h / +1000h — the padding must stay clickable yet must not
+        // be painted, or the highlight bleeds into the gap before +10h.
+        int      textStart = -1;
+        int      textLen   = 0;
+        uint64_t bytes  = 0;    // AddBytes only: 0x10 / 0x100 / 0x1000
+    };
+    FooterPill footerPillAt(int line, int col) const;
+
+    // Single writer for the viewport cursor — skips the call when the shape is
+    // unchanged (applyHoverCursor runs on every mouse move / scroll / refresh).
+    void setViewportCursor(Qt::CursorShape shape);
+
+    // True when a commit can actually reach the target's memory (a valid,
+    // writable provider is attached). Gates the Forbidden cursor on Value
+    // edits and hex-byte overwrite — not on NodeTree-only edits.
+    bool canWriteMemory() const;
 
     // ── Indicator helpers (dedupe + UTF-8 safe) ──
     void clearIndicatorLine(int indic, int line);

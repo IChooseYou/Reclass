@@ -148,6 +148,100 @@ private slots:
         delete doc2;
     }
 
+    // ── Repro: renaming a field around a virtually-expanded typed pointer
+    //    must not duplicate anything across a save/load round trip ──
+    //
+    // Mirrors a real report: a class whose first field is `NewClass* field_0000`
+    // (refId into a second root class, rendered by virtual expansion). Editing
+    // field_0000 and saving produced a duplicate.
+    //
+    // Two distinct renames are exercised, because they hit different nodes:
+    //   1. the POINTER field itself (a real child of the outer class)
+    //   2. a field inside the referenced class (what the expansion displays —
+    //      its LineMeta points at the ref class's own child, shared by every
+    //      pointer that references it)
+    // After each, the node count and the root-class count must be unchanged:
+    // validate(repair) runs on load and re-roots orphans, so a broken parentId
+    // would surface as an extra top-level class rather than a lost node.
+    void testRenameAroundVirtualPointerDoesNotDuplicateOnSave() {
+        // Build into the controller's own document — renameNode() routes
+        // through m_ctrl's undo stack, which only sees m_doc.
+        RcxDocument* doc = m_doc;
+        auto& tree = doc->tree;
+        tree.nodes.clear();
+        tree.invalidateIdCache();
+
+        Node outer; outer.kind = NodeKind::Struct;
+        outer.structTypeName = "OFFSET_EACMAIN"; outer.parentId = 0; outer.collapsed = false;
+        const uint64_t outerId = tree.nodes[tree.addNode(outer)].id;
+
+        Node refCls; refCls.kind = NodeKind::Struct;
+        refCls.structTypeName = "NewClass"; refCls.parentId = 0; refCls.collapsed = false;
+        const uint64_t refId = tree.nodes[tree.addNode(refCls)].id;
+
+        Node r0; r0.kind = NodeKind::UInt64; r0.name = "field_0000";
+        r0.parentId = refId; r0.offset = 0;   tree.addNode(r0);
+        Node r1; r1.kind = NodeKind::UInt64; r1.name = "field_0008";
+        r1.parentId = refId; r1.offset = 8;   tree.addNode(r1);
+
+        // The pointer that virtually expands NewClass.
+        Node ptr; ptr.kind = NodeKind::Pointer64; ptr.name = "field_0000";
+        ptr.parentId = outerId; ptr.offset = 0; ptr.refId = refId; ptr.collapsed = false;
+        const uint64_t ptrId = tree.nodes[tree.addNode(ptr)].id;
+
+        const int nodesBefore = tree.nodes.size();
+        auto rootCount = [](const NodeTree& t) {
+            int n = 0;
+            for (const auto& x : t.nodes) if (x.parentId == 0) n++;
+            return n;
+        };
+        const int rootsBefore = rootCount(tree);
+
+        auto roundTrip = [&](const char* what) {
+            QTemporaryFile f;
+            QVERIFY2(f.open(), what);
+            const QString path = f.fileName();
+            f.close();
+            QVERIFY2(doc->save(path), what);
+            auto* re = new RcxDocument();
+            QVERIFY2(re->load(path), what);
+            QCOMPARE(re->tree.nodes.size(), nodesBefore);
+            QVERIFY2(rootCount(re->tree) == rootsBefore,
+                     qPrintable(QString("%1: root-class count changed %2 -> %3")
+                                .arg(what).arg(rootsBefore).arg(rootCount(re->tree))));
+            // No two siblings may share a name+offset under the same parent.
+            for (int i = 0; i < re->tree.nodes.size(); i++) {
+                for (int j = i + 1; j < re->tree.nodes.size(); j++) {
+                    const auto& a = re->tree.nodes[i];
+                    const auto& b = re->tree.nodes[j];
+                    if (a.parentId != b.parentId) continue;
+                    QVERIFY2(!(a.name == b.name && a.offset == b.offset && !a.name.isEmpty()),
+                             qPrintable(QString("%1: duplicate sibling '%2' @+0x%3")
+                                        .arg(what).arg(a.name).arg(a.offset, 0, 16)));
+                }
+            }
+            delete re;
+        };
+
+        roundTrip("baseline, before any edit");
+
+        // 1. rename the pointer field itself
+        int ptrIdx = tree.indexOfId(ptrId);
+        QVERIFY(ptrIdx >= 0);
+        m_ctrl->renameNode(ptrIdx, QStringLiteral("m_head"));
+        QCOMPARE(tree.nodes.size(), nodesBefore);
+        roundTrip("after renaming the pointer field");
+
+        // 2. rename a field inside the referenced class
+        int innerIdx = -1;
+        for (int i = 0; i < tree.nodes.size(); i++)
+            if (tree.nodes[i].parentId == refId && tree.nodes[i].offset == 0) innerIdx = i;
+        QVERIFY(innerIdx >= 0);
+        m_ctrl->renameNode(innerIdx, QStringLiteral("m_vtable"));
+        QCOMPARE(tree.nodes.size(), nodesBefore);
+        roundTrip("after renaming a field inside the referenced class");
+    }
+
     // ── Test: expanded-pointer footer carries append pills that target the
     //    REFERENCED class (not the 8-byte pointer → no invalid child) ──
     void testExpandedPointerFooterPillsTargetRefClass() {
