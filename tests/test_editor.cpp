@@ -1465,6 +1465,209 @@ private slots:
         m_editor->applyDocument(m_result);  // restore fixture doc
     }
 
+    // ── Regression: stale M_CMD_ROW leaks onto a data row after a narrow patch ──
+    // build/issue.png: a row drag over 7 rows painted M_ACCENT on all of them
+    // but the M_SELECTED band was missing on the row right AFTER the user's
+    // last edit. Every text patch started at line 0 (setCommandRowText syncs
+    // the real command row into m_prevText while compose re-emits its
+    // placeholder); Scintilla merged the deleted lines' markers — line 0's
+    // M_CMD_ROW included — onto the first line whose text survived, and the
+    // narrow meta-diff marker pass never cleaned that line. M_CMD_ROW (8,
+    // editorBg) outranks M_SELECTED (7), so the band vanished on that row.
+    void testNoStaleCmdRowMarkerAfterNarrowMetaPatch() {
+        auto* sci = m_editor->scintilla();
+        auto markerGet = [sci](int line) {
+            return (int)sci->SendScintilla(QsciScintillaBase::SCI_MARKERGET,
+                                           (unsigned long)line);
+        };
+        auto hasMark = [&](int line, int m) { return (markerGet(line) & (1 << m)) != 0; };
+        auto lineForAddr = [](const ComposeResult& r, uint64_t addr) {
+            for (int i = 0; i < r.meta.size(); ++i)
+                if (r.meta[i].lineKind == LineKind::Field && r.meta[i].offsetAddr == addr)
+                    return i;
+            return -1;
+        };
+        auto cmdRowLeakLine = [&](const ComposeResult& r) {   // -1 = clean
+            for (int i = 1; i < r.meta.size(); ++i)
+                if (hasMark(i, M_CMD_ROW)) return i;
+            return -1;
+        };
+
+        NodeTree tree = makeTestTree();
+        BufferProvider prov = makeTestProvider();
+        ComposeResult r1 = compose(tree, prov);
+
+        // Baseline: apply twice so the second call (identical meta) takes the
+        // patch path with a FULL applyLineAttributes pass — M_CMD_ROW sits on
+        // line 0 only. Then mirror the controller: the real command-row text
+        // replaces compose's placeholder on line 0.
+        m_editor->applyDocument(r1);
+        m_editor->applyDocument(r1);
+        m_editor->applySelectionOverlay(QSet<uint64_t>());
+        const QString real = QStringLiteral("source▾  0x0  struct _PEB64 {");
+        m_editor->setCommandRowText(real);
+        QVERIFY(hasMark(0, M_CMD_ROW));
+        QCOMPARE(cmdRowLeakLine(r1), -1);
+
+        // Frame 2a: NARROW meta change only — same-size kind flip on the
+        // BeingDebugged byte (uint8_t → int8_t; uint64_t still dominates the
+        // type column, so no width cascade touches other lines).
+        NodeTree tree2 = tree;
+        for (auto& n : tree2.nodes)
+            if (n.offset == 0x002 && n.kind == NodeKind::UInt8) { n.kind = NodeKind::Int8; break; }
+        ComposeResult r2 = compose(tree2, prov);
+        const int k = lineForAddr(r2, 0x002);
+        QVERIFY(k > 0);
+        m_editor->applyDocument(r2);
+        m_editor->applySelectionOverlay(QSet<uint64_t>());
+        QVERIFY(hasMark(0, M_CMD_ROW));
+        QVERIFY2(cmdRowLeakLine(r2) < 0,
+                 qPrintable(QString("stale M_CMD_ROW on line %1 after kind change at line %2")
+                            .arg(cmdRowLeakLine(r2)).arg(k)));
+
+        // Frame 2b: narrow meta change (kind flipped back) PLUS a text-only
+        // value change further down (NumberOfProcessors 8 → 9). The text
+        // patch now reaches past the meta diff, so the merged markers land
+        // on a line the narrow marker pass would never visit.
+        m_editor->setCommandRowText(real);
+        BufferProvider prov2 = makeTestProvider();
+        uint32_t nine = 9;
+        QVERIFY(prov2.write(0xB8, &nine, 4));
+        ComposeResult r3 = compose(tree, prov2);
+        const int j = lineForAddr(r3, 0xB8);
+        QVERIFY(j > k);
+        m_editor->applyDocument(r3);
+        m_editor->applySelectionOverlay(QSet<uint64_t>());
+        QVERIFY(hasMark(0, M_CMD_ROW));
+        QVERIFY2(cmdRowLeakLine(r3) < 0,
+                 qPrintable(QString("stale M_CMD_ROW on line %1 (patch ended on line %2)")
+                            .arg(cmdRowLeakLine(r3)).arg(j)));
+
+        // Selecting the row the patch ended on must show the band: M_SELECTED
+        // present and no higher background marker painting editorBg over it.
+        m_editor->applySelectionOverlay(QSet<uint64_t>{ selIdForLine(r3.meta[j]) });
+        QVERIFY(hasMark(j, M_SELECTED));
+        QVERIFY(hasMark(j, M_ACCENT));
+        QVERIFY(!hasMark(j, M_CMD_ROW));
+        QVERIFY(!hasMark(j, M_FOCUS));
+
+        m_editor->applySelectionOverlay(QSet<uint64_t>());
+        m_editor->applyDocument(m_result);  // restore fixture doc
+    }
+
+    // ── Regression: selected rows keep their band across a patch refresh ──
+    // Same defect, other face: a selected row INSIDE the patched range lost
+    // M_SELECTED/M_ACCENT (Scintilla moved them onto the line the patch
+    // ended on, as phantoms) and applySelectionOverlay's steady-tick early
+    // return assumed they had survived and never repainted them.
+    void testSelectionMarkersSurvivePatchRefresh() {
+        auto* sci = m_editor->scintilla();
+        auto markerGet = [sci](int line) {
+            return (int)sci->SendScintilla(QsciScintillaBase::SCI_MARKERGET,
+                                           (unsigned long)line);
+        };
+        auto hasMark = [&](int line, int m) { return (markerGet(line) & (1 << m)) != 0; };
+        auto lineForAddr = [](const ComposeResult& r, uint64_t addr) {
+            for (int i = 0; i < r.meta.size(); ++i)
+                if (r.meta[i].lineKind == LineKind::Field && r.meta[i].offsetAddr == addr)
+                    return i;
+            return -1;
+        };
+
+        NodeTree tree = makeTestTree();
+        BufferProvider prov = makeTestProvider();
+        ComposeResult r1 = compose(tree, prov);
+        m_editor->applyDocument(r1);
+        m_editor->applyDocument(r1);
+        const QString real = QStringLiteral("source▾  0x0  struct _PEB64 {");
+        m_editor->setCommandRowText(real);
+
+        const int a = lineForAddr(r1, 0x010);   // ImageBaseAddress — above the patch
+        const int j = lineForAddr(r1, 0xB8);    // NumberOfProcessors — the patched row
+        QVERIFY(a > 0 && j > a + 1);
+        const QSet<uint64_t> sel{ selIdForLine(r1.meta[a]), selIdForLine(r1.meta[j]) };
+        m_editor->applySelectionOverlay(sel);   // selection change → full rebuild
+        QVERIFY(hasMark(a, M_SELECTED) && hasMark(a, M_ACCENT));
+        QVERIFY(hasMark(j, M_SELECTED) && hasMark(j, M_ACCENT));
+
+        // Live ticks: only the 0xB8 value text changes (9, 8, 9, 8). Each
+        // tick patches lines 0..j; the selection set is unchanged, so
+        // applySelectionOverlay takes its early-return path.
+        for (int cycle = 0; cycle < 4; ++cycle) {
+            BufferProvider p = makeTestProvider();
+            uint32_t v = (cycle % 2) ? 8u : 9u;
+            QVERIFY(p.write(0xB8, &v, 4));
+            ComposeResult r = compose(tree, p);
+            m_editor->applyDocument(r);
+            m_editor->setCommandRowText(real);
+            m_editor->applySelectionOverlay(sel);
+            for (int ln : {a, j}) {
+                QVERIFY2(hasMark(ln, M_SELECTED),
+                         qPrintable(QString("M_SELECTED lost on line %1, cycle %2")
+                                    .arg(ln).arg(cycle)));
+                QVERIFY2(hasMark(ln, M_ACCENT),
+                         qPrintable(QString("M_ACCENT lost on line %1, cycle %2")
+                                    .arg(ln).arg(cycle)));
+            }
+            for (int ln : {a - 1, a + 1, j - 1, j + 1}) {
+                QVERIFY2(!hasMark(ln, M_SELECTED) && !hasMark(ln, M_ACCENT),
+                         qPrintable(QString("phantom selection marker on line %1, cycle %2")
+                                    .arg(ln).arg(cycle)));
+            }
+            for (int ln = 1; ln < r.meta.size(); ++ln)
+                QVERIFY2(!hasMark(ln, M_CMD_ROW),
+                         qPrintable(QString("stale M_CMD_ROW on line %1, cycle %2")
+                                    .arg(ln).arg(cycle)));
+        }
+
+        m_editor->applySelectionOverlay(QSet<uint64_t>());
+        m_editor->applyDocument(m_result);  // restore fixture doc
+    }
+
+    // ── Regression: a patch refresh must not stomp the real command row ──
+    // compose re-emits a placeholder for line 0 while setCommandRowText has
+    // written the real text into Scintilla and m_prevText, so diffing the
+    // raw compose text made every patch start at line 0: the command row
+    // flashed the placeholder until the next updateCommandRow, and every
+    // marker on lines 0..L went through Scintilla's merge/re-insert dance.
+    // applyDocument now diffs against the text Scintilla actually holds.
+    void testPatchKeepsRealCommandRowText() {
+        auto* sci = m_editor->scintilla();
+        auto lineText = [sci](int i) {
+            long len = sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)i);
+            QByteArray buf(len + 1, '\0');
+            sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (uintptr_t)i,
+                               static_cast<const char*>(buf.data()));
+            QString t = QString::fromUtf8(buf.left(len));
+            while (t.endsWith('\n') || t.endsWith('\r')) t.chop(1);
+            return t;
+        };
+
+        NodeTree tree = makeTestTree();
+        BufferProvider prov = makeTestProvider();
+        ComposeResult r1 = compose(tree, prov);
+        m_editor->applyDocument(r1);
+        m_editor->applyDocument(r1);
+        const QString real = QStringLiteral("source▾  0x0  struct _PEB64 {");
+        m_editor->setCommandRowText(real);
+        QCOMPARE(lineText(0), real);
+        const int lineCount = sci->lines();
+
+        // A live tick (value text change only) with NO updateCommandRow
+        // afterwards: line 0 must still read the real command row and the
+        // line structure must be intact.
+        BufferProvider prov2 = makeTestProvider();
+        uint32_t nine = 9;
+        QVERIFY(prov2.write(0xB8, &nine, 4));
+        ComposeResult r2 = compose(tree, prov2);
+        m_editor->applyDocument(r2);
+        QCOMPARE(lineText(0), real);
+        QCOMPARE(sci->lines(), lineCount);
+        QVERIFY(lineText(1) == r2.text.section(QLatin1Char('\n'), 1, 1));
+
+        m_editor->applyDocument(m_result);  // restore fixture doc
+    }
+
     void testMenuItemSizeIsAccessible() {
         // Instantiate the same QProxyStyle used by the app (MenuBarStyle is
         // defined in main.cpp — we replicate the logic here to test it)

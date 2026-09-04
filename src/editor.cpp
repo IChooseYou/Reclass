@@ -2564,6 +2564,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     bool didPatch = false;
     long patchByteStart = 0;
     long patchByteLen = 0;
+    // Scintilla line range the patch rewrote (see the marker wipe below);
+    // -1 on the fullReplace path.
+    int patchLineLo = -1, patchLineHi = -1;
     {
         PROFILE_SCOPE("applyDocument.setText");
         // Diff-and-patch: when the previous-frame text exists and the new
@@ -2572,7 +2575,27 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         // tick, single-field mutation) is one or two changed lines.
         // Falls back to full setText only when the diff covers >50% of
         // the document or the previous text was empty.
-        const QString& newText = result.text;
+        // Diff against the command row Scintilla ACTUALLY holds. compose
+        // emits a constant placeholder for line 0 that setCommandRowText
+        // overwrites (and mirrors into m_prevText), so diffing the raw
+        // compose text made every patch start at line 0 — rewriting the
+        // command row each tick, dragging every marker on lines 0..L
+        // through the merge/re-insert dance below, and flashing the
+        // placeholder until updateCommandRow ran again. Substituting the
+        // real text keeps "m_prevText == Scintilla buffer" and lets
+        // `prefix` land on the first genuine change. An empty cache means
+        // line 0 IS the placeholder (fullReplace just cleared it, or
+        // nothing has been written yet), so the raw text is right then.
+        QString newTextAdj;
+        const QString* newTextPtr = &result.text;
+        if (!m_lastCommandRowText.isEmpty() && !result.text.isEmpty()) {
+            const int nl = result.text.indexOf(QLatin1Char('\n'));
+            const int line0End = nl >= 0 ? nl : result.text.size();
+            newTextAdj = result.text;
+            newTextAdj.replace(0, line0End, m_lastCommandRowText);
+            newTextPtr = &newTextAdj;
+        }
+        const QString& newText = *newTextPtr;
         if (!m_prevText.isEmpty()
             && m_prevText.size() > 0 && newText.size() > 0) {
             PROFILE_SCOPE("applyDocument.diff");
@@ -2655,6 +2678,36 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                 didPatch = true;
                 patchByteStart = bytePrefix;
                 patchByteLen = replacement.size();
+                // Scintilla does NOT keep per-line markers stable across a
+                // multi-line SCI_REPLACETARGET: deleting a line end merges
+                // that line's markers into the previous slot
+                // (LineMarkers::RemoveLine → MergeMarkers(line-1)), and the
+                // re-insert at a line start pushes EMPTY slots in ahead of
+                // the merged one (LineVector::InsertLine, lineStart →
+                // line--). Net: the re-inserted lines come back bare and the
+                // first line whose text survived — the one holding the end
+                // of the replacement, i.e. the row right after an edit —
+                // inherits the union of every deleted line's markers. A
+                // stale M_CMD_ROW from line 0 carried that way outranks
+                // M_SELECTED (highest background marker wins) and hid the
+                // selection band on exactly that row. Wipe the whole patched
+                // range so every owner rebuilds it from scratch below
+                // (applyLineAttributes is widened to this range;
+                // hover/focus/selection rebuild document-wide). Raw
+                // SCI_MARKERDELETE(-1) resets the line's marker set outright;
+                // QsciScintilla::markerDelete(line, -1) expands to
+                // per-number single-HANDLE deletes and would leave merged
+                // duplicates behind.
+                if (oldDiffLen > 0 || newDiffLen > 0) {
+                    patchLineLo = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_LINEFROMPOSITION, (unsigned long)bytePrefix);
+                    patchLineHi = (int)m_sci->SendScintilla(
+                        QsciScintillaBase::SCI_LINEFROMPOSITION,
+                        (unsigned long)(bytePrefix + replacement.size()));
+                    for (int ln = patchLineLo; ln <= patchLineHi; ++ln)
+                        m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERDELETE,
+                                             (unsigned long)ln, (long)-1);
+                }
                 // If the patch covers line 0, it just stomped Scintilla's
                 // command row with compose's placeholder ("[▸] source▾ …").
                 // Invalidate the setCommandRowText skip-cache so the
@@ -2670,7 +2723,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         if (!didPatch) {
             PROFILE_SCOPE("applyDocument.fullReplace");
             m_sci->setReadOnly(false);
-            m_sci->setText(newText);
+            m_sci->setText(result.text);
             m_sci->setReadOnly(true);
             // Full-replace just rewrote line 0 to compose's literal
             // "[▸] source▾  0x0  struct Untitled {" placeholder. Invalidate
@@ -2679,7 +2732,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             // line 0 with the proper text.
             m_lastCommandRowText.clear();
         }
-        m_prevText = newText;
+        // m_prevText must mirror the buffer: the patched text carries the
+        // real command row, a full replace carries the placeholder.
+        m_prevText = didPatch ? newText : result.text;
         m_lastApplyWasPatch = didPatch;
     }
 
@@ -2712,10 +2767,11 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     }
 
     // Compute changed line range by comparing new meta against m_prevMeta.
-    // When small, per-line passes (line attributes, hex dim, heatmap,
-    // indicators) operate only on that range — markers/indicators on
-    // surrounding lines are preserved across SCI_REPLACETARGET, so
-    // there's no need to clear-and-rebuild the entire document.
+    // When small, the marker pass (applyLineAttributes) operates only on
+    // that range, widened to the text-patched lines (see below) — markers
+    // on lines OUTSIDE the patched range are preserved across
+    // SCI_REPLACETARGET, so there's no need to clear-and-rebuild the
+    // entire document.
     int firstChanged = -1, lastChanged = -1;
     if (m_lastApplyWasPatch && !m_prevMeta.isEmpty()) {
         PROFILE_SCOPE("applyDocument.metaDiff");
@@ -2804,7 +2860,15 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // Marker/margin work stays narrowed — that's where the real cost
     // was (~2.6 ms/refresh in production for applyLineAttributes on a
     // 1000-line struct). Indicator work below is forced full-pass.
-    applyLineAttributes(result.meta, firstChanged, lastChanged);
+    // Widen the narrow range to the text-patched lines: their markers were
+    // wiped above, and the meta diff alone need not reach the line after
+    // the replacement that inherited the deleted lines' markers.
+    int attrFirst = firstChanged, attrLast = lastChanged;
+    if (firstChanged >= 0 && patchLineLo >= 0) {
+        attrFirst = qMin(firstChanged, patchLineLo);
+        attrLast  = qMax(lastChanged,  patchLineHi);
+    }
+    applyLineAttributes(result.meta, attrFirst, attrLast);
     applyHexDimming(result.meta, /*firstLine=*/-1, /*lastLine=*/-1);
 
     // Build line-text cache using the lineStarts array compose() already
@@ -2940,7 +3004,10 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     m_prevHoveredLine = -1;
     applyHoverHighlight();
 
-    // Re-apply focus glow markers (setText() clears all markers)
+    // Re-apply focus glow markers. Delete-all first: setText() already
+    // cleared them, but on the patch path they survive outside the patched
+    // range and markerAdd would stack a duplicate handle per tick.
+    m_sci->markerDeleteAll(M_FOCUS);
     if (m_focusNodeId != 0) {
         auto fit = m_nodeLineIndex.constFind(m_focusNodeId);
         if (fit != m_nodeLineIndex.constEnd()) {
@@ -3297,37 +3364,62 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
     // user's next click on the just-changed node — exactly what we want.
     if (selChanged) m_suppressTypePickerForNode = 0;
     if (!selChanged && m_lastApplyWasPatch) {
-        // Selection markers survive the text patch (they're outside the
-        // patched range or move with their line), so skip re-applying them.
-        // BUT SCI_REPLACETARGET clears ALL indicators on the patched lines,
-        // including IND_EDITABLE (editable-span underlines) and IND_HOVER_SPAN.
-        // Repaint editable spans for selected lines so the underlines don't
-        // disappear on the selected node during live refresh. Each selected
-        // node is typically 1-3 lines, so this is fast even for multi-select.
-        for (uint64_t selId : m_currentSelIds) {
-            SelKind sk = selKindOf(selId);
-            uint64_t nodeId = baseNodeIdFromSelId(selId);
-            auto it = m_nodeLineIndex.constFind(nodeId);
-            if (it == m_nodeLineIndex.constEnd()) continue;
-            for (int ln : *it) {
-                if (isSyntheticLine(m_meta[ln])) continue;
-                bool isFooter = (m_meta[ln].lineKind == LineKind::Footer);
-                if ((sk == SelKind::Footer) != isFooter) continue;
-                if (!isFooter) paintEditableSpans(ln);
-            }
-        }
+        // Steady refresh tick: the selection SET is unchanged, but the
+        // markers are not guaranteed to be. SCI_REPLACETARGET merges every
+        // deleted line's markers onto the first surviving line and leaves
+        // the re-inserted lines bare (applyDocument wipes that range for
+        // exactly this reason), and it clears IND_EDITABLE on the patched
+        // lines. Rebuild M_SELECTED/M_ACCENT + the editable-span underlines
+        // for the selected lines; skip only the selection-change work below
+        // (full-doc IND_EDITABLE clear, hint-line reset, tooltip dismiss).
+        // Each selected node is typically 1-3 lines, so this is fast even
+        // for multi-select.
+        paintSelectionMarkers(m_currentSelIds);
         applyHoverHighlight();
         applyHoverCursor();
         return;
     }
     m_currentSelIds = selIds;
-    m_sci->markerDeleteAll(M_SELECTED);
-    m_sci->markerDeleteAll(M_ACCENT);
 
     // Clear all editable indicators, then repaint for selected lines only
     long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_EDITABLE);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (unsigned long)0, docLen);
+
+    paintSelectionMarkers(selIds);
+
+    // Reset hint line - updateEditableIndicators will handle cursor hints
+    // on actual user navigation (not stale restored positions)
+    m_hintLine = -1;
+
+    applyHoverHighlight();
+    applyHoverCursor();
+
+    // Dismiss type tooltip ONLY when the selection actually changed.
+    // The previous code dismissed unconditionally on every call; live
+    // refresh ticks call applySelectionOverlay each frame, and the
+    // early-return above can fail to short-circuit when
+    // m_lastApplyWasPatch is false (e.g., after endInlineEdit clears
+    // m_prevText so the next applyDocument takes the fullReplace
+    // path). Result: the command-row arrow tooltip got dismissed
+    // every refresh tick while the user held still on its anchor —
+    // applyHoverCursor immediately re-showed it on the next event
+    // pump, producing visible show/hide flicker that matched the
+    // refresh cadence ("flickers if the data is updating" — user
+    // verbatim).
+    if (selChanged && m_arrowTooltip)
+        static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
+}
+
+// Rebuild the row-selection markers (M_SELECTED band + M_ACCENT margin bar)
+// and the editable-span underlines for every line that belongs to a
+// selected id. Always delete-all + re-add: Scintilla keeps one HANDLE per
+// markerAdd and SCI_MARKERDELETE removes a single handle, so adding onto a
+// line that already carries the marker would leave a duplicate behind that
+// validateEditLive's lone markerDelete can't remove.
+void RcxEditor::paintSelectionMarkers(const QSet<uint64_t>& selIds) {
+    m_sci->markerDeleteAll(M_SELECTED);
+    m_sci->markerDeleteAll(M_ACCENT);
 
     // Use index: iterate selected IDs, look up their lines
     for (uint64_t selId : selIds) {
@@ -3370,28 +3462,6 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
                 paintEditableSpans(ln);
         }
     }
-
-    // Reset hint line - updateEditableIndicators will handle cursor hints
-    // on actual user navigation (not stale restored positions)
-    m_hintLine = -1;
-
-    applyHoverHighlight();
-    applyHoverCursor();
-
-    // Dismiss type tooltip ONLY when the selection actually changed.
-    // The previous code dismissed unconditionally on every call; live
-    // refresh ticks call applySelectionOverlay each frame, and the
-    // early-return above can fail to short-circuit when
-    // m_lastApplyWasPatch is false (e.g., after endInlineEdit clears
-    // m_prevText so the next applyDocument takes the fullReplace
-    // path). Result: the command-row arrow tooltip got dismissed
-    // every refresh tick while the user held still on its anchor —
-    // applyHoverCursor immediately re-showed it on the next event
-    // pump, producing visible show/hide flicker that matched the
-    // refresh cadence ("flickers if the data is updating" — user
-    // verbatim).
-    if (selChanged && m_arrowTooltip)
-        static_cast<RcxTooltip*>(m_arrowTooltip)->dismiss();
 }
 
 void RcxEditor::setHoverEffects(bool on) {

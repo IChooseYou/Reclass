@@ -282,11 +282,14 @@ private:
     // append/edit case.
     QString           m_prevText;
     QVector<LineMeta> m_prevMeta;
-    // Tracks whether the last applyDocument took the patch path (cheap, no
-    // marker loss outside the patched range) or the full-replace path
-    // (which wipes all markers). applySelectionOverlay uses this together
-    // with set-equality to decide whether it can skip its rebuild on a
-    // refresh tick that didn't actually change anything visible.
+    // Tracks whether the last applyDocument took the patch path (markers
+    // survive OUTSIDE the patched range; inside it Scintilla merges/drops
+    // them and applyDocument wipes + rebuilds that range) or the
+    // full-replace path (which wipes all markers). applySelectionOverlay
+    // uses this together with set-equality to decide whether it can skip
+    // the selection-change work (IND_EDITABLE full clear, hint reset,
+    // tooltip dismiss) on a steady refresh tick — the selection markers
+    // themselves are always rebuilt.
     bool              m_lastApplyWasPatch = false;
     // Skip-on-no-change caches for the refresh-tail path.
     QString           m_lastCommandRowText;
@@ -523,10 +526,14 @@ private:
     void updateOffsetMarginWidth();
 
     // Optional [first, last] line range. When set (>=0), the per-line pass
-    // operates only on those lines; markers/indicators on lines outside
-    // are assumed to have survived the most recent SCI_REPLACETARGET.
+    // operates only on those lines; markers on lines outside are assumed
+    // to have survived the most recent SCI_REPLACETARGET (the caller widens
+    // the range to the text-patched lines, whose markers do NOT survive).
     // When unset (-1), full-doc pass — used by the fullReplace path.
     void applyLineAttributes(const QVector<LineMeta>& meta, int firstLine = -1, int lastLine = -1);
+    // Rebuild M_SELECTED/M_ACCENT + editable-span underlines for every line
+    // of every selected id (delete-all + re-add; see the definition).
+    void paintSelectionMarkers(const QSet<uint64_t>& selIds);
     void reformatMargins(int firstLine = -1, int lastLine = -1);
     void applyHexDimming(const QVector<LineMeta>& meta, int firstLine = -1, int lastLine = -1);
     void applyHeatmapHighlight(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,
