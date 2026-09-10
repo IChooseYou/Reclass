@@ -375,8 +375,21 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
             // Bool is a 1-byte flag, not a float. Under "Float" the caption
             // stated something false about the button beneath it.
             glyph("type.bool", "Bool", "Change to bool — 1 byte", "B", GF::Bits, NodeKind::Bool, true, true, "Other"),
+
         };
         {
+            // A codicon, not a pixel glyph: "ASM" is three wide letters whose
+            // ink overflows the 16-unit square cell by 2 px, which
+            // test_pixel_glyphs pins as a contract. It also sits beside
+            // Custom… in the same visual language, which is the right place
+            // for a specialist type.
+            RibbonItemSpec asmItem = codicon("type.asm", "Asm",
+                                             "Change to asm — disassemble these bytes in place",
+                                             "file-binary", GF::Bits, SZ::Small,
+                                             false, false, int(NodeKind::Asm));
+            asmItem.keepLabel = true;
+            type.items.append(asmItem);
+
             RibbonItemSpec custom = codicon("type.custom", "Custom…",
                                             "Any type by name: opens the inline type editor",
                                             "symbol-misc", GF::Plain, SZ::Small);

@@ -3279,7 +3279,14 @@ void RcxEditor::reformatMargins(int firstLine, int lastLine) {
     for (int i = begin; i < end; i++) {
         auto& lm = m_meta[i];
 
-        if (lm.isContinuation || lm.isMemberLine) {
+        // Member lines carry no address of their own — an enum's members
+        // are named constants and a bitfield's are bit ranges, all at the
+        // node's one address, so the margin shows a dot. Instruction rows
+        // are the exception: each starts at a different byte, and that
+        // address is the most useful thing on the row (it is what you
+        // compare against a debugger). compose already put it there.
+        const bool codeRow = lm.isMemberLine && isCodeKind(lm.nodeKind);
+        if ((lm.isContinuation || lm.isMemberLine) && !codeRow) {
             lm.offsetText = QStringLiteral("  \u00B7 ");
         } else if (lm.offsetText.isEmpty()) {
             continue;
@@ -3805,31 +3812,77 @@ void RcxEditor::applyChipButtonOverlay() {
 
 // ── Byte selection (hex preview rows) ──
 //
-// byteAddrAt returns the absolute address of the individual hex byte under
-// (line, col) in a hex preview row's VALUE column. The hex value column is
-// "XX XX XX..." — 2 hex digits + a 1-char gap per byte — so (col - vs.start)/3
-// is the byte index. Returns nullopt for anything else (incl. the ASCII
-// preview column), so dragging over the ASCII column falls through to normal
-// node/row selection rather than per-byte selection.
+// Both representations address the same bytes. Drags clamp against their
+// original column and scope, including when they leave the byte cells.
 std::optional<uint64_t> RcxEditor::byteAddrAt(int line, int col) const {
     if (line < 0 || line >= m_meta.size()) return std::nullopt;
     const LineMeta& lm = m_meta[line];
     if (lm.lineKind != LineKind::Field) return std::nullopt;
     if (!isHexPreview(lm.nodeKind)) return std::nullopt;
+    int sz = sizeForKind(lm.nodeKind);
+    ColumnSpan ns = nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
+    if (ns.valid && col >= ns.start && col < ns.start + sz)
+        return lm.offsetAddr + static_cast<uint64_t>(col - ns.start);
     QString lineText = getLineText(m_sci, line);
     ColumnSpan vs = valueSpan(lm, lineText.size(),
                               lm.effectiveTypeW, lm.effectiveNameW);
     if (!vs.valid || col < vs.start) return std::nullopt;
-    int sz = sizeForKind(lm.nodeKind);
+    if (col >= vs.start + sz * 3 - 1) return std::nullopt;
     int byteIdx = (col - vs.start) / 3;
     if (byteIdx < 0 || byteIdx >= sz) return std::nullopt;
     return lm.offsetAddr + static_cast<uint64_t>(byteIdx);
 }
 
+std::optional<uint64_t> RcxEditor::byteDragAddrAt(const QPoint& pos) const {
+    if (!m_byteSelAnchor || m_byteDragLine < 0 || m_byteDragLine >= m_meta.size())
+        return std::nullopt;
+    const auto& anchor = m_meta[m_byteDragLine];
+    if (anchor.lineKind != LineKind::Field || !isHexPreview(anchor.nodeKind)
+        || *m_byteSelAnchor < anchor.offsetAddr
+        || *m_byteSelAnchor - anchor.offsetAddr >= uint64_t(sizeForKind(anchor.nodeKind)))
+        return std::nullopt;
+
+    const auto hit = hitTest(pos);
+    const int line = hit.line;
+    // Stay inside the contiguous byte run containing the press. Headers,
+    // typed fields and pointer expansions must not bridge unrelated memory.
+    int row = m_byteDragLine;
+    const int dir = line < row ? -1 : 1;
+    while (row != line) {
+        const int next = row + dir;
+        if (next < 0 || next >= m_meta.size()) break;
+        const auto& a = m_meta[qMin(row, next)];
+        const auto& b = m_meta[qMax(row, next)];
+        const auto& candidate = m_meta[next];
+        if (candidate.lineKind != LineKind::Field || !isHexPreview(candidate.nodeKind)
+            || candidate.depth != anchor.depth || candidate.ptrBase != anchor.ptrBase
+            || candidate.parentAddr != anchor.parentAddr
+            || a.offsetAddr + uint64_t(sizeForKind(a.nodeKind)) != b.offsetAddr
+            || !m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEVISIBLE, (unsigned long)next))
+            break;
+        row = next;
+    }
+    const auto& lm = m_meta[row];
+    const int sz = sizeForKind(lm.nodeKind);
+    if (row != line)
+        return lm.offsetAddr + (dir < 0 ? 0 : uint64_t(sz - 1));
+    ColumnSpan span = m_byteDragAscii
+        ? nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW)
+        : valueSpan(lm, 0, lm.effectiveTypeW, lm.effectiveNameW);
+    const int stride = m_byteDragAscii ? 1 : 3;
+    const long start = posFromCol(m_sci, row, span.start);
+    const long end = posFromCol(m_sci, row, span.start + sz * stride - (stride == 3 ? 1 : 0));
+    const int left = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, start);
+    const int right = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, end);
+    const int index = pos.x() <= left ? 0 : pos.x() >= right ? sz - 1
+        : qBound(0, (hit.col - span.start) / stride, sz - 1);
+    return lm.offsetAddr + uint64_t(index);
+}
+
 void RcxEditor::applyByteSelectionOverlay() {
     // Paint IND_BYTE_SEL (TEXTFORE) across the digits of every selected byte on
-    // every hex preview row that overlaps m_byteSel. Byte selection is a
-    // hex-column-only feature; the ASCII preview column is not selectable.
+    // every hex preview row that overlaps m_byteSel. Byte selection is
+    // shared by the hex and ASCII columns.
     long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_BYTE_SEL);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
@@ -3862,6 +3915,9 @@ void RcxEditor::applyByteSelectionOverlay() {
             // pixels, so the gaps read as contiguous.
             int hiCol = vs.start + (lastByte - 1) * 3 + 2;
             fillIndicatorCols(IND_BYTE_SEL, i, vs.start + firstByte * 3, hiCol);
+            ColumnSpan ns = nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
+            if (ns.valid)
+                fillIndicatorCols(IND_BYTE_SEL, i, ns.start + firstByte, ns.start + lastByte);
         }
     }
 
@@ -5529,6 +5585,10 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 }
             }
 
+            // A modified click that did not extend bytes starts a node gesture.
+            // Do not leave a byte range active behind the new row selection.
+            clearByteSelection();
+
             if (h.inFoldCol) {
                 emit marginClicked(0, h.line, me->modifiers());
                 return true;
@@ -5609,7 +5669,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 }
             }
 
-            // Footer buttons: +1, +10h/+100h/+1000h, +10 (enum), Trim, Top
+            // Footer buttons: +1, +10h, +10 (enum), Trim, Top
             if (h.line >= 0 && h.line < m_meta.size()
                 && m_meta[h.line].lineKind == LineKind::Footer) {
                 // One shared resolver with the cursor and the hover underline —
@@ -5704,23 +5764,20 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 m_dragStartPos = me->pos();
                 m_dragLastLine = h.line;
                 m_dragInitMods = me->modifiers();
+                m_byteSelAnchor.reset();
 
-                // Byte-selection arm: if the press lands on a hex byte
-                // AND no modifier is held (Ctrl/Shift mean "extend node
-                // selection" — row-drag wins there), record the anchor
-                // address. The next MouseMove past the 8-px threshold
-                // upgrades from row-drag to byte-drag. Click-without-
-                // movement falls through to the row-click below.
-                //
-                // The top-level "clear byte selection on non-byte click"
-                // pass earlier in this handler already dropped any
-                // stale m_byteSel when the press wasn't on a hex byte,
-                // so we don't repeat that check here.
+                // A press on hex/ASCII bytes arms a byte drag. Other columns
+                // and Ctrl/Shift gestures retain node selection.
                 auto pressByteAddr = byteAddrAt(h.line, h.col);
                 if (pressByteAddr.has_value()
                     && !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))) {
                     m_byteSelAnchor = pressByteAddr;
                     m_byteSelDragging = false;
+                    m_byteDragLine = h.line;
+                    const auto& lm = m_meta[h.line];
+                    const auto ns = nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
+                    m_byteDragAscii = ns.valid && h.col >= ns.start
+                        && h.col < ns.start + sizeForKind(lm.nodeKind);
                 }
 
                 bool multi = m_currentSelIds.size() > 1;
@@ -5746,6 +5803,8 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         && event->type() == QEvent::MouseMove
         && (m_dragging || m_byteSelDragging || m_byteSelAnchor.has_value())) {
         auto* me = static_cast<QMouseEvent*>(event);
+        m_lastHoverPos = me->pos();
+        m_hoverInside = m_sci->viewport()->rect().contains(me->pos());
         if (me->buttons() & Qt::LeftButton) {
             // Byte-drag upgrade check. Fires once when the press anchor
             // is on a hex byte and the user has moved past the 8-px
@@ -5761,17 +5820,14 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 }
             }
             if (m_byteSelDragging) {
-                auto h2 = hitTest(me->pos());
-                auto cur = byteAddrAt(h2.line, h2.col);
+                auto cur = byteDragAddrAt(me->pos());
                 if (cur.has_value()) {
                     uint64_t lo = qMin(*m_byteSelAnchor, *cur);
                     uint64_t hi = qMax(*m_byteSelAnchor, *cur) + 1; // half-open
                     m_byteSel = QPair<uint64_t,uint64_t>{lo, hi};
                     applyByteSelectionOverlay();
                 }
-                // Cursor drifted off any hex byte column → don't shrink
-                // the selection. Drag-out-and-back-in stays stable. Swallow
-                // the event so row-drag doesn't try to extend underneath.
+                setViewportCursor(Qt::CrossCursor);
                 return true;
             }
             // Byte arm was set but the drag never moved past threshold —
@@ -5798,6 +5854,8 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 emit nodeClicked(h.line, h.nodeId, m_dragInitMods | Qt::ShiftModifier);
                 m_dragLastLine = h.line;
             }
+            setViewportCursor(Qt::ArrowCursor);
+            return true;
         } else {
             m_dragging = false;
             m_dragStarted = false;
@@ -5817,6 +5875,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_dragging        = false;
             m_dragStarted     = false;
             m_pendingClickNodeId = 0;
+            applyHoverCursor();
             return true;
         }
         // Byte arm without drag (click-only on a hex byte) → just drop
@@ -5839,6 +5898,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_chipPressed = false;
             applyChipButtonOverlay();
         }
+        applyHoverCursor();
         return true;  // consume release (prevent QScintilla from acting on it)
     }
     // Double-click on offset margin → toggle absolute/relative
@@ -7704,7 +7764,7 @@ void RcxEditor::setViewportCursor(Qt::CursorShape shape) {
 // Every footer pill on a composed footer line, in ascending column order.
 //
 // The disambiguation is positional, not semantic: "+1" is a prefix of "+10",
-// "+10h", "+100h" and "+1000h", so each longer form is matched first and the
+// and "+10h", so each longer form is matched first and the
 // shorter ones must prove they didn't land on a longer one's text. " +1 " is
 // searched space-padded for the same reason.
 //
@@ -7724,8 +7784,6 @@ QVector<RcxEditor::FooterPill> RcxEditor::footerPillsIn(const QString& ft) {
     };
 
     const int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
-    const int p1000    = ft.indexOf(QStringLiteral("+1000h"));
-    const int p100     = ft.indexOf(QStringLiteral("+100h"));
     const int p10      = ft.indexOf(QStringLiteral("+10h"));
     const int p10enum  = ft.indexOf(QStringLiteral("+10"));
     const int pTrim    = ft.indexOf(QStringLiteral("Trim"));
@@ -7735,15 +7793,11 @@ QVector<RcxEditor::FooterPill> RcxEditor::footerPillsIn(const QString& ft) {
     // only, so the outline doesn't butt against the +10h pill beside it.
     if (pPlusOne >= 0)
         add(FooterPill::Action::AddField, pPlusOne, 4, 0, pPlusOne + 1, 2);
-    if (p1000 >= 0)
-        add(FooterPill::Action::AddBytes, p1000, 6, 0x1000);
-    if (p100 >= 0 && p100 != p1000 + 1)
-        add(FooterPill::Action::AddBytes, p100, 5, 0x100);
-    if (p10 >= 0 && p10 != p100 && p10 != p1000)
+    if (p10 >= 0)
         add(FooterPill::Action::AddBytes, p10, 4, 0x10);
     // Enum footer: +10 (no 'h'). Skip when the +10 we found is actually the
-    // start of "+1000h" / "+100h" / "+10h" we already emitted.
-    if (p10enum >= 0 && p10enum != p10 && p10enum != p100 && p10enum != p1000)
+    // start of "+10h" we already emitted.
+    if (p10enum >= 0 && p10enum != p10)
         add(FooterPill::Action::AddEnumMembers, p10enum, 3);
     if (pTrim >= 0) add(FooterPill::Action::Trim, pTrim, 4);
     if (pTop  >= 0) add(FooterPill::Action::Top,  pTop,  3);
@@ -7810,7 +7864,7 @@ RcxEditor::HoverAffordance RcxEditor::resolveHoverAffordance(const QPoint& pos) 
     const bool buttonHeld = (QApplication::mouseButtons() & Qt::LeftButton) != 0;
     if (buttonHeld && (m_dragStarted || m_byteSelDragging)) {
         a.region = HoverRegion::Dragging;
-        a.cursor = Qt::ClosedHandCursor;   // "you are holding this"
+        a.cursor = m_byteSelDragging ? Qt::CrossCursor : Qt::ArrowCursor;
         return a;
     }
 
@@ -7940,9 +7994,9 @@ void RcxEditor::applyHoverCursor() {
     m_hoverSpanLines.clear();
 
 
-    // Lock cursor to Arrow during drag-selection (prevents flicker)
-    if (m_dragStarted) {
-        setViewportCursor(Qt::ArrowCursor);
+    // Selection owns the cursor even when a refresh resolves hover mid-drag.
+    if (m_dragStarted || m_byteSelDragging) {
+        setViewportCursor(m_byteSelDragging ? Qt::CrossCursor : Qt::ArrowCursor);
         return;
     }
 

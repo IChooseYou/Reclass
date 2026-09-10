@@ -99,7 +99,7 @@ public:
         m_lay = new QHBoxLayout(this);
         // The seam row is layout margin, so the title still centres inside the
         // same 31-px band the document tabs centre their labels in.
-        m_lay->setContentsMargins(kGutter, 0, 0, kDockHeaderSeam);
+        m_lay->setContentsMargins(kGutter, 0, kGutter, kDockHeaderSeam);
         m_lay->setSpacing(0);
 
         m_title = new QLabel(title, this);

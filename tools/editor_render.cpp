@@ -22,6 +22,8 @@
 #include <QMouseEvent>
 #include <QFileInfo>
 #include <QPainter>
+#include <QTimer>
+#include <QMenu>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
 #include <cstdio>
@@ -56,6 +58,53 @@ static NodeTree buildTree() {
         tree.addNode(n);
     }
     return tree;
+}
+
+// A struct with a code window in the middle of it: hex64 before, asm[24],
+// hex64 after. Proves the whole point of the kind in one picture — real
+// instructions inline, and the field after them still at its declared offset.
+static NodeTree buildAsmTree() {
+    NodeTree tree;
+    tree.baseAddress = 0;
+    Node root;
+    root.kind = NodeKind::Struct;
+    root.structTypeName = "Hooked";
+    root.name = "hooked";
+    root.parentId = 0;
+    root.collapsed = false;
+    uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+
+    Node before; before.kind = NodeKind::Hex64; before.name = "vtable";
+    before.parentId = rootId; before.offset = 0;
+    tree.addNode(before);
+
+    Node code; code.kind = NodeKind::Asm; code.name = "trampoline";
+    code.parentId = rootId; code.offset = 8; code.arrayLen = 24;
+    code.collapsed = false;
+    tree.addNode(code);
+
+    Node after; after.kind = NodeKind::Hex64; after.name = "flags";
+    after.parentId = rootId; after.offset = 8 + 24;
+    tree.addNode(after);
+    return tree;
+}
+
+// Real x86-64 at offset 8: a hook prologue that jumps away, then a small
+// function epilogue, then an int3 pad.
+static QByteArray buildAsmBuffer() {
+    QByteArray data(64, '\0');
+    static const unsigned char code[] = {
+        0x55,                                // push rbp
+        0x48, 0x89, 0xE5,                    // mov rbp, rsp
+        0x48, 0x8B, 0x01,                    // mov rax, [rcx]
+        0xE8, 0x10, 0x00, 0x00, 0x00,        // call +0x10
+        0x48, 0x83, 0xC4, 0x20,              // add rsp, 0x20
+        0x5D,                                // pop rbp
+        0xC3,                                // ret
+        0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,  // int3 padding
+    };
+    memcpy(data.data() + 8, code, sizeof(code));
+    return data;
 }
 
 static QByteArray buildBuffer() {
@@ -185,6 +234,46 @@ int main(int argc, char** argv) {
         editor->scintilla()->zoomTo(QString::fromLocal8Bit(argv[3]).toInt());
         app.processEvents();
         editor->grab().save(out);
+        return 0;
+    }
+
+    if (mode == QStringLiteral("menu")) {
+        // The node context menu, grabbed as its own top-level popup.
+        // showContextMenu() exec()s, so a zero-delay timer photographs
+        // the live popup and closes it. Menu icons are the point: a raw
+        // :/vsicons SVG keeps VS Code's #C5C5C5 and washes out on a
+        // light theme, so this sheet has to be read in BOTH polarities.
+        ctrl->refresh();
+        app.processEvents();
+        int line = -1, nodeIdx = -1;
+        const auto& meta = ctrl->lastResult().meta;
+        for (int i = 0; i < meta.size(); i++)
+            if (meta[i].nodeIdx > 0 && meta[i].lineKind == LineKind::Field) {
+                line = i; nodeIdx = meta[i].nodeIdx; break;
+            }
+        QTimer::singleShot(0, [&]() {
+            if (auto* pop = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                pop->grab().save(out);
+                fprintf(stdout, "menu %d items -> %s\n",
+                        (int)pop->actions().size(), qPrintable(out));
+                pop->close();
+            } else {
+                fprintf(stdout, "no popup captured\n");
+            }
+        });
+        ctrl->showContextMenu(editor, line, nodeIdx, 0, QPoint(200, 200));
+        return 0;
+    }
+
+    if (mode == QStringLiteral("asm")) {
+        doc->tree = buildAsmTree();
+        doc->provider = std::make_shared<BufferProvider>(buildAsmBuffer(), "asm.bin");
+        splitter->resize(1080, 420);
+        ctrl->refresh();
+        app.processEvents();
+        app.processEvents();
+        editor->grab().save(out);
+        fprintf(stdout, "asm sheet -> %s\n", qPrintable(out));
         return 0;
     }
 

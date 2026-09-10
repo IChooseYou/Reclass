@@ -113,6 +113,13 @@ QString arrayTypeName(NodeKind elemKind, int count, const QString& structName) {
     return elem + QStringLiteral("[") + QString::number(count) + QStringLiteral("]");
 }
 
+// "asm[16]". The span is the node's declared byte window, not an element
+// count — an instruction is 1..15 bytes, so counting them would make the type
+// name change whenever the target's code did.
+QString asmTypeName(int span) {
+    return QStringLiteral("asm[") + QString::number(qMax(0, span)) + QStringLiteral("]");
+}
+
 // Pointer type string: "void*" or "StructName*"
 QString pointerTypeName(NodeKind kind, const QString& targetName) {
     Q_UNUSED(kind);
@@ -263,7 +270,7 @@ QString fmtStructFooter(const Node& node, int depth, int totalSize) {
     if (node.isEnum())
         footer += QStringLiteral("  +1 +10 Top");
     else
-        footer += QStringLiteral("  +1 +10h +100h +1000h Trim Top");
+        footer += QStringLiteral("  +1 +10h Trim Top");
     if (totalSize > 0)
         footer += QStringLiteral("  // 0x%1 (%2)")
             .arg(QString::number(totalSize, 16).toUpper())
@@ -510,6 +517,10 @@ static QString readValueImpl(const Node& node, const Provider& prov,
         if (end >= 0) s.truncate(end);
         if (display) s = sanitizeString(s);
         return display ? (QStringLiteral("L\"") + s + QStringLiteral("\"")) : s;
+    }
+    case NodeKind::Asm: {
+        const int span = node.byteSize();
+        return display ? QStringLiteral("%1 bytes").arg(span) : QString();
     }
     default:
         return {};
@@ -939,6 +950,33 @@ QString validateBaseAddress(const QString& text) {
 QString fmtEnumMember(const QString& name, int64_t value, int depth, int nameW) {
     QString ind = indent(depth);
     return ind + name.leftJustified(nameW) + QStringLiteral(" = ") + QString::number(value);
+}
+
+// ── Instruction rows ──
+
+// Raw bytes, then the mnemonic, then the target's name when one is known.
+// The byte column is padded to the 15-byte x86 maximum so the mnemonics line
+// up in a column even though the instructions do not — which is the whole
+// point of reading a disassembly: you scan the mnemonics, not the encoding.
+QString fmtAsmLine(const QByteArray& bytes, const QString& text,
+                   const QString& symbol, int depth) {
+    QString hex;
+    for (unsigned char b : bytes) {
+        if (!hex.isEmpty()) hex += QLatin1Char(' ');
+        hex += QStringLiteral("%1").arg(b, 2, 16, QLatin1Char('0'));
+    }
+    // 15 bytes * 3 chars - 1 = 44 would be a very wide column for code that is
+    // almost never near the maximum; clamp to a realistic 8 and let the rare
+    // long instruction push its own row out.
+    constexpr int kBytesW = 8 * 3 - 1;
+    QString line = indent(depth) + hex.leftJustified(kBytesW) + QStringLiteral("  ") + text;
+    if (!symbol.isEmpty())
+        line += QStringLiteral("  ") + symbol;
+    return line;
+}
+
+QString fmtAsmUnreadable(int depth) {
+    return indent(depth) + QStringLiteral("(unreadable)");
 }
 
 // ── Bitfield member formatting ──

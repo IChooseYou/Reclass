@@ -81,6 +81,22 @@ private slots:
         QVERIFY(!c->toolTip().isEmpty());
     }
 
+    void testCloseButtonClearsTheRightBorder() {
+        rcx::DockHeader h(QStringLiteral("Project"));
+        h.setBorderRight(Qt::red);
+        h.resize(260, rcx::kDockHeaderHeight);
+        h.show();
+        QApplication::processEvents();
+        auto* close = h.closeButton();
+        const QRect button = close->geometry();
+        QVERIFY(h.width() - button.right() - 1 >= rcx::kGutter);
+        QTest::mouseMove(close, close->rect().center());
+        QApplication::processEvents();
+        QCOMPARE(close->geometry(), button);
+        const QImage img = h.grab().toImage();
+        QCOMPARE(img.pixelColor(img.width() - 1, img.height() / 2), QColor(Qt::red));
+    }
+
     // Right-slot widgets go BEFORE the close button, so x stays last.
     void testRightSlotSitsLeftOfClose() {
         rcx::DockHeader h(QStringLiteral("Symbols"));

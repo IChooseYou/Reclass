@@ -191,6 +191,11 @@ public:
     // ascending offset order (QSet iteration order is hash order — never
     // let it leak into a user-visible mutation sequence). Restores m_selIds.
     void batchChangeKind(const QVector<int>& nodeIndices, NodeKind newKind);
+    // Replace a contiguous run of sibling fields with ONE asm node spanning
+    // exactly their bytes. Machine code is a byte window, not a per-field
+    // type: converting row by row leaves a column of asm[1] nodes and cuts
+    // every instruction that crosses a field boundary in half.
+    void mergeToCodeWindow(const QVector<uint64_t>& orderedIds);
     void deleteRootStruct(uint64_t structId);
 
     // ── Selection-level operations ──
@@ -214,6 +219,11 @@ public:
     // array-element rows, root structs and containers are skipped). One
     // node → applyQuickTypeChange; several → batchChangeKind in offset order.
     void retypeSelection(NodeKind kind);
+    // Lay N nodes of `kind` end to end across exactly [selLo, selHi), rebuilding
+    // the fields the range cuts through and padding whatever of them falls
+    // outside it. A byte selection names BYTES, not the fields containing them.
+    // Returns false (with a status hint) if the range cannot be retyped.
+    bool retypeByteRange(uint64_t selLo, uint64_t selHi, NodeKind kind);
     // Append `byteCount` raw bytes to the end of a container: Array → grow
     // arrayLen; embedded struct with refId → redirect to the referenced
     // root class; Struct → byteCount/8 × Hex64 + byteCount%8 × Hex8 in one

@@ -15,6 +15,7 @@
 #include <cstring>
 #include "providerregistry.h"
 #include "themes/thememanager.h"
+#include "svgicon.h"          // themedVsIcon — menu icons must be inked
 #include "widgets/themed_messagebox.h"
 #include "widgets/themed_inputdialog.h"
 #include "widgets/dialog_button.h"
@@ -637,7 +638,9 @@ void RcxController::addByteSubmenu(QMenu& menu, RcxEditor* editor) {
     // (above the "Selected bytes ▸" submenu) so breaking a byte range into a
     // new class is always one click away whenever bytes are selected, not
     // buried. Mirrors the node menu's top-level "Carve".
-    menu.addAction(QIcon(QStringLiteral(":/vsicons/symbol-structure.svg")),
+    menu.addAction(themedVsIcon(QStringLiteral(":/vsicons/symbol-structure.svg"),
+                                ThemeManager::instance().current().text, 16,
+                                editor->devicePixelRatioF()),
                    tr("Carve"), [this, editor]() {
         auto r = editor->byteSelectionRange();
         extractByteSelectionToNewClass(r.first, r.second);
@@ -1317,8 +1320,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
         }
         // Footer "+1" pill literally means +1 byte — the label drove
         // user expectations. Previous version appended a Hex64 (+8) which
-        // surprised everyone. For grow-by-multiple-bytes use the +10h /
-        // +100h / +1000h pills which call appendBytesRequested instead.
+        // surprised everyone. For grow-by-multiple-bytes use the +10h
+        // pill which calls appendBytesRequested instead.
         int align = alignmentFor(NodeKind::Hex8);
         Node n;
         n.kind     = NodeKind::Hex8;
@@ -1338,7 +1341,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         emit selectionChanged(m_selIds.size());
     });
 
-    // Footer "+10h / +100h / +1000h" pills — shared with the ribbon's Add
+    // Footer "+10h" pill — shared with the ribbon's Add
     // panel and the Append Bytes… dialog via appendBytes.
     connect(editor, &RcxEditor::appendBytesRequested,
             this, [this](uint64_t structId, int byteCount) {
@@ -1369,18 +1372,20 @@ void RcxController::connectEditor(RcxEditor* editor) {
         });
 
         // Collect trailing hex nodes to remove
-        QVector<int> toRemove;
+        QVector<uint64_t> toRemove;
         for (int ci : children) {
             const Node& n = m_doc->tree.nodes[ci];
             if (!isHexNode(n.kind)) break;
-            toRemove.append(ci);
+            toRemove.append(n.id);
         }
         if (toRemove.isEmpty()) return;
 
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Trim %1 trailing hex nodes").arg(toRemove.size()));
-        for (int ni : toRemove)
-            removeNode(ni);
+        // Retyping can append padding out of offset order. Each deletion
+        // shifts storage indices, so resolve the saved ID immediately before use.
+        for (uint64_t id : toRemove)
+            removeNode(m_doc->tree.indexOfId(id));
         m_doc->undoStack.endMacro();
         m_suppressRefresh = false;
         refresh();
@@ -2596,6 +2601,15 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
     if (newKind == NodeKind::Struct || newKind == NodeKind::Array)
         newSize = 0;
 
+    // Asm takes its footprint from arrayLen, like a string takes it from
+    // strLen. Converting TO it is size-preserving: the window becomes exactly
+    // the bytes the node already occupied, so nothing after it moves and no
+    // padding is invented. (byteSize() would otherwise read a stale arrayLen
+    // from whatever the node used to be — usually 0.)
+    const bool toAsm = (newKind == NodeKind::Asm && node.kind != NodeKind::Asm);
+    const int asmSpan = toAsm ? qMax(1, oldSize) : 0;
+    if (toAsm) newSize = asmSpan;
+
     if (newSize > 0 && newSize < oldSize) {
         // Shrinking: insert hex padding to fill gap (no offset shift)
         int gap = oldSize - newSize;
@@ -2684,18 +2698,36 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
             }
         }
         bool needsRename = isHexNode(node.kind) && !isHexNode(newKind);
-        if (needsRename) {
+        // One macro when the change needs more than the kind itself: the
+        // rename, and asm's window + expansion.
+        const bool multi = needsRename || toAsm;
+        if (multi) {
             m_doc->undoStack.beginMacro(QStringLiteral("Change type"));
         }
+        const NodeKind oldKind = node.kind;
+        const int oldArrayLen = node.arrayLen;
+        const NodeKind oldElemKind = node.elementKind;
+        const bool wasCollapsed = node.collapsed;
         m_doc->undoStack.push(new RcxCommand(this,
-            cmd::ChangeKind{node.id, node.kind, newKind, adjs}));
+            cmd::ChangeKind{node.id, oldKind, newKind, adjs}));
+        if (toAsm) {
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::ChangeArrayMeta{node.id, oldElemKind, oldElemKind,
+                                     oldArrayLen, asmSpan}));
+            // collapsed defaults to true (it exists for containers), so a
+            // fresh asm node would show a header and no instructions — the
+            // opposite of why you made it.
+            if (wasCollapsed)
+                m_doc->undoStack.push(new RcxCommand(this,
+                    cmd::Collapse{node.id, true, false}));
+        }
         if (needsRename) {
             QString autoName = QStringLiteral("field_%1")
                 .arg(node.offset, 4, 16, QChar('0'));
             m_doc->undoStack.push(new RcxCommand(this,
                 cmd::Rename{node.id, node.name, autoName}));
-            m_doc->undoStack.endMacro();
         }
+        if (multi) m_doc->undoStack.endMacro();
     }
 }
 
@@ -4389,7 +4421,32 @@ static QWidgetAction* makeCycleRow(QMenu* menu,
 
 void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                                      int subLine, const QPoint& globalPos) {
-    auto icon = [](const char* name) { return QIcon(QStringLiteral(":/vsicons/%1").arg(name)); };
+    // Menu icons must be INKED for the theme. The raw :/vsicons SVGs carry VS
+    // Code's #C5C5C5, which reads correctly on a dark menu and washes out to a
+    // pale grey on a light one — the item TEXT comes from the palette and is
+    // black, so the icons beside it looked disabled. themedVsIcon swaps that
+    // grey for the theme's text colour and caches on (path, tint, size, dpr).
+    // A context menu is rebuilt on every right-click, so this picks up a theme
+    // switch for free — unlike the menu bar, which needs retintMenuIcons.
+    const QColor menuInk = ThemeManager::instance().current().text;
+    const qreal menuDpr = editor ? editor->devicePixelRatioF()
+                                 : qApp->devicePixelRatio();
+    auto icon = [menuInk, menuDpr](const char* name) {
+        return themedVsIcon(QStringLiteral(":/vsicons/%1").arg(name), menuInk, 16, menuDpr);
+    };
+    // Destructive rows are red — theme.markerPtr, the same token the dialogs
+    // use for a destructive button. The icon is tinted here; the LABEL is
+    // painted by MenuBarStyle, which reads this property off the action
+    // (QStyleOptionMenuItem carries no QAction of its own).
+    const QColor destructiveInk = ThemeManager::instance().current().markerPtr;
+    auto destructiveIcon = [destructiveInk, menuDpr](const char* name) {
+        return themedVsIcon(QStringLiteral(":/vsicons/%1").arg(name),
+                            destructiveInk, 16, menuDpr);
+    };
+    auto markDestructive = [](QAction* a) {
+        if (a) a->setProperty("rcxDestructive", true);
+        return a;
+    };
 
     const bool hasNode = nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size();
 
@@ -4428,6 +4485,30 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     if (hasNode && m_selIds.size() > 1) {
         QMenu menu;
         addByteSubmenu(menu, editor);  // "Selected bytes (N) ▸" at top, if any
+
+        int count = m_selIds.size();
+        QSet<uint64_t> ids = m_selIds;
+
+        // Helper: collect indices from selected ids
+        auto collectIndices = [this, &ids]() {
+            QVector<int> indices;
+            for (uint64_t id : ids) {
+                int idx = m_doc->tree.indexOfId(id);
+                if (idx >= 0) indices.append(idx);
+            }
+            return indices;
+        };
+
+        // ── Delete ──
+        // Above Carve, matching the single-node menu: the common destructive
+        // action first, the rare structural one after it.
+        markDestructive(menu.addAction(destructiveIcon("trash.svg"),
+                                       QString("Delete %1 nodes").arg(count),
+                                       [this, collectIndices]() {
+            batchRemoveNodes(collectIndices());
+        }));
+        menu.addSeparator();
+
         // Break the multi-node selection into a new class. Only when there's no
         // byte selection — addByteSubmenu already added the top-level action in
         // that case. regionFromCurrentSelection unions the selected rows' spans.
@@ -4455,18 +4536,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             });
             menu.addSeparator();
         }
-        int count = m_selIds.size();
-        QSet<uint64_t> ids = m_selIds;
-
-        // Helper: collect indices from selected ids
-        auto collectIndices = [this, &ids]() {
-            QVector<int> indices;
-            for (uint64_t id : ids) {
-                int idx = m_doc->tree.indexOfId(id);
-                if (idx >= 0) indices.append(idx);
-            }
-            return indices;
-        };
 
         // Quick-convert shortcuts when all selected nodes share the same kind
         NodeKind commonKind = NodeKind::Hex64;
@@ -4563,7 +4632,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // "Next Type →" for multi-select (same size, filtered variants)
         if (allSame) {
             int sz = sizeForKind(commonKind);
-            if (sz > 0) {
+            if (sz > 0 && !isCodeKind(commonKind)) {
                 bool curStr = isStringKind(commonKind);
                 bool curVec = isVectorKind(commonKind);
                 QVector<NodeKind> variants;
@@ -4571,6 +4640,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     if (m.size != sz || isContainerKind(m.kind)) continue;
                     if (!curStr && isStringKind(m.kind)) continue;
                     if (!curVec && isVectorKind(m.kind)) continue;
+                    // Never: asm's table size is 1 but its real footprint is
+                    // arrayLen, so it does not belong in a by-size cycle in
+                    // either direction.
+                    if (isCodeKind(m.kind)) continue;
                     variants.append(m.kind);
                 }
                 int ci = variants.indexOf(commonKind);
@@ -4693,9 +4766,6 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 int idx = m_doc->tree.indexOfId(id);
                 if (idx >= 0) duplicateNode(idx);
             }
-        });
-        menu.addAction(icon("trash.svg"), QString("Delete %1 nodes").arg(count), [this, collectIndices]() {
-            batchRemoveNodes(collectIndices());
         });
 
         menu.addSeparator();
@@ -4945,13 +5015,30 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 emit statusHint(QStringLiteral("Copied path: %1").arg(p));
             });
             menu.addSeparator();
-            menu.addAction(icon("trash.svg"), "&Delete", [this, nodeId]() {
+            markDestructive(menu.addAction(destructiveIcon("trash.svg"), "&Delete",
+                                           [this, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni >= 0) removeNode(ni);
-            });
+            }));
             menu.addSeparator();
             // Fall through to always-available actions
         } else {
+
+        // ── Delete ──
+        // Above Carve deliberately: it is what people open this menu for,
+        // and it used to sit at the very bottom under every type conversion
+        // while the far rarer, far more specialised Carve held the top.
+        markDestructive(menu.addAction(destructiveIcon("trash.svg"), "&Delete\tDelete",
+                                       [this, nodeId, editor]() {
+            int ni = m_doc->tree.indexOfId(nodeId);
+            if (ni < 0) return;
+            // A delete is a structural change: drop any active byte selection
+            // so it doesn't re-paint onto the node that shifts up (see
+            // batchRemoveNodes). No-op when nothing is byte-selected.
+            if (editor) editor->clearByteSelection();
+            removeNode(ni);
+        }));
+        menu.addSeparator();
 
         // ── New Class / Ptr to New Class (promoted near top) ──
         if (node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
@@ -5053,7 +5140,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // "← prev | current (N/M) | next →" type cycling row
         {
             int sz = sizeForKind(node.kind);
-            if (sz > 0) {
+            if (sz > 0 && !isCodeKind(node.kind)) {
                 bool curStr = isStringKind(node.kind);
                 bool curVec = isVectorKind(node.kind);
                 QVector<NodeKind> variants;
@@ -5061,6 +5148,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     if (m.size != sz || isContainerKind(m.kind)) continue;
                     if (!curStr && isStringKind(m.kind)) continue;
                     if (!curVec && isVectorKind(m.kind)) continue;
+                    // Never: asm's table size is 1 but its real footprint is
+                    // arrayLen, so it does not belong in a by-size cycle in
+                    // either direction.
+                    if (isCodeKind(m.kind)) continue;
                     variants.append(m.kind);
                 }
                 int ci = variants.indexOf(node.kind);
@@ -5376,19 +5467,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addSeparator();
 
-        // ── Duplicate / Delete ──
+        // ── Duplicate ── (Delete is promoted above Carve, near the top)
         menu.addAction(icon("files.svg"), "D&uplicate\tCtrl+D", [this, nodeId]() {
             int ni = m_doc->tree.indexOfId(nodeId);
             if (ni >= 0) duplicateNode(ni);
-        });
-        menu.addAction(icon("trash.svg"), "&Delete\tDelete", [this, nodeId, editor]() {
-            int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni < 0) return;
-            // A delete is a structural change: drop any active byte selection
-            // so it doesn't re-paint onto the node that shifts up (see
-            // batchRemoveNodes). No-op when nothing is byte-selected.
-            if (editor) editor->clearByteSelection();
-            removeNode(ni);
         });
 
 
@@ -5654,6 +5736,85 @@ void RcxController::batchRemoveNodes(const QVector<int>& nodeIndices) {
     refresh();
 }
 
+// Replace a contiguous run of sibling fields with a single asm node covering
+// exactly their bytes. `ordered` is in ascending offset order (batchChangeKind
+// sorts it). Modelled on joinHexNodes, which does the same remove-many /
+// insert-one dance for hex resizing.
+void RcxController::mergeToCodeWindow(const QVector<uint64_t>& ordered) {
+    if (ordered.size() < 2) return;
+
+    // Every node must be a plain field under one parent. A container would
+    // take its children with it, and this is not the place to decide what
+    // that means — Carve is.
+    const int firstIdx = m_doc->tree.indexOfId(ordered.first());
+    if (firstIdx < 0) return;
+    const uint64_t parentId = m_doc->tree.nodes[firstIdx].parentId;
+    const int startOffset   = m_doc->tree.nodes[firstIdx].offset;
+    const QString name      = m_doc->tree.nodes[firstIdx].name;
+
+    int expected = startOffset;
+    for (uint64_t id : ordered) {
+        const int i = m_doc->tree.indexOfId(id);
+        if (i < 0) return;
+        const Node& n = m_doc->tree.nodes[i];
+        if (isContainerKind(n.kind)) {
+            emit statusHint(QStringLiteral(
+                "Can't disassemble a selection containing a struct or array — "
+                "select plain fields."));
+            return;
+        }
+        if (n.parentId != parentId) {
+            emit statusHint(QStringLiteral(
+                "Can't disassemble a selection spanning two classes."));
+            return;
+        }
+        // Contiguous: no holes, no overlaps. A byte selection is contiguous by
+        // construction; a ctrl-clicked scatter is not, and silently swallowing
+        // the bytes between would be the wrong kind of helpful.
+        if (n.offset != expected) {
+            emit statusHint(QStringLiteral(
+                "Can't disassemble a broken selection — the fields must be "
+                "back to back."));
+            return;
+        }
+        expected += n.byteSize();
+    }
+    const int span = expected - startOffset;
+    if (span <= 0) return;
+
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Disassemble %1 bytes").arg(span));
+
+    // Remove in reverse so the indices stay valid as the tree shrinks.
+    for (int j = ordered.size() - 1; j >= 0; j--) {
+        const int idx = m_doc->tree.indexOfId(ordered[j]);
+        if (idx < 0) continue;
+        QVector<Node> subtree{ m_doc->tree.nodes[idx] };
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::Remove{m_doc->tree.nodes[idx].id, subtree, {}}));
+    }
+
+    Node code;
+    code.kind      = NodeKind::Asm;
+    code.name      = name;
+    code.parentId  = parentId;
+    code.offset    = startOffset;
+    code.arrayLen  = span;      // the declared window — see Node::byteSize
+    code.collapsed = false;     // a collapsed code node shows nothing at all
+    code.id        = m_doc->tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{code, {}}));
+
+    // The merged rows are gone; carry the selection to what replaced them.
+    bool wasSelected = false;
+    for (uint64_t id : ordered) wasSelected |= m_selIds.remove(id);
+    if (wasSelected) m_selIds.insert(code.id);
+
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = false;
+    refresh();
+    emit selectionChanged(m_selIds.size());
+}
+
 void RcxController::batchChangeKind(const QVector<int>& nodeIndices, NodeKind newKind) {
     QSet<uint64_t> idSet;
     for (int idx : nodeIndices) {
@@ -5675,6 +5836,20 @@ void RcxController::batchChangeKind(const QVector<int>& nodeIndices, NodeKind ne
         const int64_t ob = ib >= 0 ? m_doc->tree.computeOffset(ib) : 0;
         return oa != ob ? oa < ob : a < b;
     });
+
+    // ── Code is a WINDOW, so a multi-row selection merges into ONE node ──
+    //
+    // Every other kind converts row by row: eight selected bytes become eight
+    // uint8s, which is what you asked for. Machine code is different — an
+    // instruction is 1..15 bytes and pays no attention to where the fields it
+    // sits in happen to start, so converting per row gives a column of
+    // `asm[1]` nodes each holding one instruction-fragment, and any
+    // instruction spanning a field boundary is cut in half and rendered as a
+    // `db` byte. The selection is a byte RANGE; the node has to be one too.
+    if (isCodeKind(newKind) && ordered.size() > 1) {
+        mergeToCodeWindow(ordered);
+        return;
+    }
 
     // Preserve selection across batch change so user can keep pressing ←→
     QSet<uint64_t> savedSel = m_selIds;
@@ -5771,7 +5946,174 @@ void RcxController::applyQuickTypeChange(int nodeIdx, NodeKind targetKind) {
     quickTypeChangeSingle(nodeIdx, targetKind);
 }
 
+// ── Retype an exact byte RANGE ──
+//
+// A byte selection says which BYTES you mean, not which fields happen to
+// contain them. Converting the covering fields instead is what produced the
+// mess this exists to fix: select three bytes inside a hex64, ask for hex8,
+// and you got ONE hex8 plus a seven-byte pad ladder, because the whole field
+// was retyped and the leftovers filled in. Select seven hex64s and ask for
+// bool and you got seven bools and twenty-one pad nodes.
+//
+// What you asked for is the bytes: N nodes of `kind` laid end to end across
+// exactly the selected range. The fields the range cuts through are rebuilt
+// around it — whatever of them falls outside the selection comes back as
+// padding, so no byte is lost and nothing after the range moves.
+//
+// Deliberately NOT an array: `kind[N]` is one node with one type, and the
+// point of doing this is to look at the bytes individually.
+bool RcxController::retypeByteRange(uint64_t selLo, uint64_t selHi, NodeKind kind) {
+    auto& tree = m_doc->tree;
+    if (selHi <= selLo) return false;
+    if (isContainerKind(kind) || isStringKind(kind)) return false;
+    // Machine code is a window over the whole range, not one node per
+    // element — see mergeToCodeWindow for the same reasoning on rows.
+    const bool asWindow = isCodeKind(kind);
+    const int elemSz = asWindow ? 1 : sizeForKind(kind);
+    if (elemSz <= 0) return false;
+
+    const uint64_t base = tree.baseAddress;
+    if (selLo < base) {
+        emit statusHint(QStringLiteral("Selection starts before the base address"));
+        return false;
+    }
+    const int relLo = static_cast<int>(selLo - base);
+    const int relHi = static_cast<int>(selHi - base);
+
+    // Every leaf the range touches, fully or partially. Containers are
+    // refused: rebuilding one means deciding what happens to its children,
+    // which is Carve's job, not this one.
+    uint64_t parentId = 0;
+    bool parentSet = false;
+    QVector<uint64_t> covered;
+    int coveredLo = INT_MAX, coveredHi = INT_MIN;
+    for (int i = 0; i < tree.nodes.size(); ++i) {
+        const Node& n = tree.nodes[i];
+        if (n.parentId == 0) continue;                  // root containers
+        const int lo = n.offset;
+        const int hi = n.offset + n.byteSize();
+        if (hi <= relLo || lo >= relHi) continue;        // no overlap
+        if (isContainerKind(n.kind)) {
+            emit statusHint(QStringLiteral(
+                "Selection crosses a struct or array — use Carve for that."));
+            return false;
+        }
+        if (!parentSet) { parentId = n.parentId; parentSet = true; }
+        else if (n.parentId != parentId) {
+            emit statusHint(QStringLiteral("Selection crosses a class boundary."));
+            return false;
+        }
+        covered.append(n.id);
+        coveredLo = qMin(coveredLo, lo);
+        coveredHi = qMax(coveredHi, hi);
+    }
+    if (covered.isEmpty()) {
+        emit statusHint(QStringLiteral("No fields in the selection"));
+        return false;
+    }
+
+    // How many whole elements fit. A 1-byte type always divides; a 7-byte
+    // range asked to hold int32s gets one, and the odd 3 bytes come back as
+    // padding rather than being silently rounded away.
+    const int rangeLen = relHi - relLo;
+    const int count = rangeLen / elemSz;
+    if (count < 1) {
+        emit statusHint(QStringLiteral("%1 needs %2 bytes; only %3 selected")
+                            .arg(QString::fromLatin1(kindMeta(kind)->typeName))
+                            .arg(elemSz).arg(rangeLen));
+        return false;
+    }
+
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(
+        QStringLiteral("Change %1 bytes to %2")
+            .arg(rangeLen).arg(QString::fromLatin1(kindMeta(kind)->typeName)));
+
+    // Out with the fields the range touched (reverse, so indices stay valid).
+    std::sort(covered.begin(), covered.end(), [&tree](uint64_t a, uint64_t b) {
+        const int ia = tree.indexOfId(a), ib = tree.indexOfId(b);
+        return (ia >= 0 ? tree.nodes[ia].offset : 0) < (ib >= 0 ? tree.nodes[ib].offset : 0);
+    });
+    for (int j = covered.size() - 1; j >= 0; --j) {
+        const int idx = tree.indexOfId(covered[j]);
+        if (idx < 0) continue;
+        QVector<Node> subtree{ tree.nodes[idx] };
+        m_doc->undoStack.push(new RcxCommand(this, cmd::Remove{covered[j], subtree, {}}));
+    }
+
+    // Largest-first hex, the same ladder the shrink path lays down.
+    auto pad = [this, parentId](int from, int to) {
+        while (from < to) {
+            const int gap = to - from;
+            NodeKind k; int sz;
+            if      (gap >= 8) { k = NodeKind::Hex64; sz = 8; }
+            else if (gap >= 4) { k = NodeKind::Hex32; sz = 4; }
+            else if (gap >= 2) { k = NodeKind::Hex16; sz = 2; }
+            else               { k = NodeKind::Hex8;  sz = 1; }
+            insertNode(parentId, from, k,
+                       QStringLiteral("pad_%1").arg(from, 2, 16, QChar('0')));
+            from += sz;
+        }
+    };
+
+    pad(coveredLo, relLo);                       // before the selection
+    if (asWindow) {
+        Node code;
+        code.kind      = kind;
+        code.name      = QStringLiteral("field_%1").arg(relLo, 4, 16, QChar('0'));
+        code.parentId  = parentId;
+        code.offset    = relLo;
+        code.arrayLen  = rangeLen;   // the declared window
+        code.collapsed = false;      // a collapsed code node shows nothing
+        code.id        = tree.reserveId();
+        m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{code, {}}));
+    } else {
+        for (int i = 0; i < count; ++i) {
+            const int off = relLo + i * elemSz;
+            insertNode(parentId, off, kind,
+                       QStringLiteral("field_%1").arg(off, 4, 16, QChar('0')));
+        }
+    }
+    pad(relLo + count * elemSz, coveredHi);      // the odd tail, and after
+
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = false;
+
+    // The old rows are gone, so any selection pointing at them is stale.
+    m_selIds.clear();
+    for (int i = 0; i < tree.nodes.size(); ++i) {
+        const Node& n = tree.nodes[i];
+        if (n.parentId == parentId && n.kind == kind
+            && n.offset >= relLo && n.offset < relLo + count * elemSz)
+            m_selIds.insert(n.id);
+    }
+    refresh();
+    emit selectionChanged(m_selIds.size());
+    return true;
+}
+
 void RcxController::retypeSelection(NodeKind kind) {
+    // A byte selection is the more specific instruction: it names the BYTES,
+    // so the type lands on exactly those and the fields around them are
+    // rebuilt. Without this the covering ROWS were retyped instead, which is
+    // why three selected bytes produced one field plus a pad ladder.
+    // Strings and containers have no byte-range meaning (a string's footprint
+    // is strLen, a container's is its children), so those fall through to the
+    // row path unchanged.
+    const bool rangeApplies = !isContainerKind(kind) && !isStringKind(kind);
+    if (rangeApplies) {
+        for (RcxEditor* ed : m_editors) {
+            if (!ed || !ed->hasByteSelection()) continue;
+            const auto r = ed->byteSelectionRange();
+            if (retypeByteRange(r.first, r.second, kind))
+                ed->clearByteSelection();   // those bytes are fields now
+            // Either way this was the instruction: a refusal has already
+            // explained itself, and falling through to the row path would do
+            // something different from what was asked.
+            return;
+        }
+    }
+
     const QVector<uint64_t> ids = orderedSelectedIds(SF_SkipRoots | SF_SkipContainers);
     if (ids.isEmpty()) {
         emit statusHint(QStringLiteral("Select a field to change its type"));
@@ -6188,6 +6530,60 @@ void RcxController::commentSelection(RcxEditor* editor) {
     }
 }
 
+// Project a range's endpoints to siblings in the displayed tree. Using the
+// display ancestry also handles virtual pointer children and array elements.
+static QSet<uint64_t> nodeRangeSelection(const QVector<LineMeta>& meta,
+                                       RcxEditor* source, int anchor, int target) {
+    auto selectable = [&](int line) {
+        const auto& lm = meta[line];
+        return lm.nodeId != 0 && lm.nodeId != kCommandRowId && !lm.isContinuation
+            && (lm.lineKind == LineKind::Field || lm.lineKind == LineKind::Header)
+            && (!source || source->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_GETLINEVISIBLE, (unsigned long)line));
+    };
+    auto pathTo = [&](int line) {
+        QVector<int> path;
+        if (line < 0 || line >= meta.size()) return path;
+        if (meta[line].lineKind == LineKind::Footer) {
+            for (int i = line - 1; i >= 0; --i) {
+                if (meta[i].nodeId == meta[line].nodeId && selectable(i)) {
+                    line = i;
+                    break;
+                }
+            }
+        }
+        while (line >= 0 && !selectable(line)) --line;
+        if (line < 0) return path;
+        path.append(line);
+        int depth = meta[line].depth;
+        for (int i = line - 1; i >= 0; --i) {
+            if (meta[i].depth < depth && meta[i].foldHead && selectable(i)) {
+                path.prepend(i);
+                depth = meta[i].depth;
+            }
+        }
+        return path;
+    };
+    const auto a = pathTo(anchor);
+    const auto b = pathTo(target);
+    if (a.isEmpty() || b.isEmpty()) return {};
+    int common = 0;
+    while (common < a.size() && common < b.size() && a[common] == b[common])
+        ++common;
+    if (common == a.size() || common == b.size()) {
+        const int parent = common == a.size() ? a.back() : b.back();
+        return {selIdForLine(meta[parent])};
+    }
+    const int from = qMin(a[common], b[common]);
+    const int to = qMax(a[common], b[common]);
+    QSet<uint64_t> selected;
+    for (int i = from; i <= to; ++i) {
+        if (selectable(i) && meta[i].depth == meta[from].depth)
+            selected.insert(selIdForLine(meta[i]));
+    }
+    return selected;
+}
+
 void RcxController::handleNodeClick(RcxEditor* source, int line,
                                      uint64_t nodeId,
                                      Qt::KeyboardModifiers mods) {
@@ -6236,25 +6632,14 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
             m_selIds.insert(selId);
             m_anchorLine = line;
         } else {
-            m_selIds.clear();
-            int from = qMin(m_anchorLine, line);
-            int to   = qMax(m_anchorLine, line);
-            for (int i = from; i <= to && i < m_lastResult.meta.size(); i++) {
-                uint64_t nid = m_lastResult.meta[i].nodeId;
-                if (nid != 0 && nid != kCommandRowId) m_selIds.insert(effectiveId(i, nid));
-            }
+            m_selIds = nodeRangeSelection(m_lastResult.meta, source, m_anchorLine, line);
         }
     } else { // Ctrl+Shift
         if (m_anchorLine < 0) {
             m_selIds.insert(selId);
             m_anchorLine = line;
         } else {
-            int from = qMin(m_anchorLine, line);
-            int to   = qMax(m_anchorLine, line);
-            for (int i = from; i <= to && i < m_lastResult.meta.size(); i++) {
-                uint64_t nid = m_lastResult.meta[i].nodeId;
-                if (nid != 0 && nid != kCommandRowId) m_selIds.insert(effectiveId(i, nid));
-            }
+            m_selIds.unite(nodeRangeSelection(m_lastResult.meta, source, m_anchorLine, line));
         }
     }
 

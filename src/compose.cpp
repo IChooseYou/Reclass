@@ -3,6 +3,7 @@
 #include "addressparser.h"
 #include "profiler.h"
 #include "rtti.h"
+#include "disasm.h"
 #include "providers/provider.h"
 #include <QRegularExpression>
 #include <algorithm>
@@ -356,6 +357,11 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
     // Resolve pointer target name for display
     QString ptrTypeOverride;
     QString ptrTargetName;
+    // "asm[16]" rather than the bare "asm" in the table: the span is the whole
+    // point of the node, and it is per-node data the KindMeta typeName cannot
+    // carry. Same override channel arrays and pointers use.
+    if (isCodeKind(node.kind))
+        ptrTypeOverride = fmt::asmTypeName(node.byteSize());
     if (node.kind == NodeKind::Pointer32 || node.kind == NodeKind::Pointer64) {
         if (node.ptrDepth > 0 && node.refId == 0 && isValidPrimitivePtrTarget(node.elementKind)) {
             // Primitive pointer: e.g. "int32*" or "f64**"
@@ -416,6 +422,12 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             // address itself is unreadable", matching the displayed value.
             if (isStringKind(node.kind))
                 valSz = (node.kind == NodeKind::UTF16) ? 2 : 1;
+            // Same reasoning for a code window: arrayLen is a declared span,
+            // and one running off the end of a region must not strike the
+            // instructions that ARE readable. The per-instruction rows below
+            // carry their own strike.
+            if (isCodeKind(node.kind))
+                valSz = 1;
             if (valSz > 0 && prov.isValid() && !prov.isReadable(absAddr, valSz))
                 lm.unreadable = true;
         }
@@ -682,6 +694,86 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         }
 
         state.emitLine(lineText, std::move(lm));
+    }
+
+    // ── Machine code: one row per decoded instruction ──
+    //
+    // Emitted directly, the way enum and bitfield members are, rather than
+    // through KindMeta::lines. That constant is a compile-time per-KIND value
+    // and this count is per-NODE and data-dependent; routing it through
+    // linesForKind would have made a constexpr contract lie.
+    //
+    // These are MEMBER lines, which buys the read-only behaviour for free:
+    // typeSpanFor / nameSpanFor / valueSpanFor already refuse them, so no
+    // inline edit can start on an instruction.
+    if (isCodeKind(node.kind) && !node.collapsed) {
+        const int span = node.byteSize();
+        if (span > 0 && prov.isValid()) {
+            QByteArray bytes(span, Qt::Uninitialized);
+            const bool got = prov.isReadable(absAddr, span)
+                          && prov.read(absAddr, bytes.data(), span);
+            const int childDepth = depth + 1;
+            const int bitness = (tree.pointerSize == 4) ? 32 : 64;
+            const QVector<Instruction> ins =
+                got ? decodeRange(bytes, absAddr, bitness, span)
+                    : QVector<Instruction>();
+
+            if (!got) {
+                // Nothing to decode: say so on one row rather than printing a
+                // column of `db 00` that looks like real, zeroed code.
+                LineMeta lm;
+                lm.nodeIdx      = nodeIdx;
+                lm.nodeId       = node.id;
+                lm.subLine      = 0;
+                lm.depth        = childDepth;
+                lm.lineKind     = LineKind::Field;
+                lm.isMemberLine = true;
+                lm.nodeKind     = node.kind;
+                lm.unreadable   = true;
+                lm.foldLevel    = computeFoldLevel(childDepth, false);
+                lm.offsetText   = fmt::fmtOffsetMargin(absAddr, true, state.offsetHexDigits);
+                lm.offsetAddr   = absAddr;
+                lm.ptrBase      = state.currentPtrBase;
+                lm.parentAddr   = parentAbsAddr;
+                state.emitLine(fmt::fmtAsmUnreadable(childDepth), std::move(lm));
+            }
+
+            for (int i = 0; i < ins.size(); i++) {
+                const Instruction& in = ins[i];
+                state.setTreeSibling(childDepth, i < ins.size() - 1);
+                const uint64_t rowAddr = absAddr + (uint64_t)in.offset;
+                LineMeta lm;
+                lm.nodeIdx      = nodeIdx;
+                lm.nodeId       = node.id;
+                lm.subLine      = i;
+                lm.depth        = childDepth;
+                lm.lineKind     = LineKind::Field;
+                lm.isMemberLine = true;
+                lm.nodeKind     = node.kind;
+                lm.foldLevel    = computeFoldLevel(childDepth, false);
+                lm.markerMask   = 0;
+                // Each row owns its address, so the offset margin needs no
+                // special casing and a click lands on the right instruction.
+                lm.offsetText   = fmt::fmtOffsetMargin(rowAddr, false, state.offsetHexDigits);
+                lm.offsetAddr   = rowAddr;
+                lm.ptrBase      = state.currentPtrBase;
+                lm.parentAddr   = parentAbsAddr;
+                lm.lineByteCount = in.length;
+
+                // The target, named if anything knows it. symbolLookup is
+                // already in this hot path for other rows, so a `call` costs
+                // nothing extra; symbolAddsInformation suppresses "names" that
+                // are just the address printed twice.
+                QString sym;
+                if (in.target && state.symbolLookup) {
+                    const QString s = state.symbolLookup(in.target);
+                    if (symbolAddsInformation(s, in.target)) sym = s;
+                }
+                state.emitLine(
+                    fmt::fmtAsmLine(bytes.mid(in.offset, in.length), in.text, sym, childDepth),
+                    std::move(lm));
+            }
+        }
     }
 }
 
@@ -1475,6 +1567,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
                 ? resolvePointerTarget(tree, n.refId) : QString();
             return fmt::arrayTypeName(n.elementKind, n.arrayLen, sn);
         }
+        if (n.kind == NodeKind::Asm)
+            return fmt::asmTypeName(n.byteSize());
         if (n.kind == NodeKind::Struct)
             return fmt::structTypeName(n);
         if (n.kind == NodeKind::Pointer32 || n.kind == NodeKind::Pointer64)

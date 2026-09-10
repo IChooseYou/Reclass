@@ -452,7 +452,7 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
                         "dissolve_union: {op:'dissolve_union', nodeId:'ID'} — flattens a union back to parent scope. "
                         "Insert ops get auto-assigned IDs; use $0, $1 etc. to reference them in later ops. "
                         "Kinds: Hex8 Hex16 Hex32 Hex64 Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64 "
-                        "Float Double Bool Pointer32 Pointer64 FuncPtr32 FuncPtr64 Vec2 Vec3 Vec4 Mat4x4 UTF8 UTF16 Struct Array"},
+                        "Float Double Bool Pointer32 Pointer64 FuncPtr32 FuncPtr64 Vec2 Vec3 Vec4 Mat4x4 UTF8 UTF16 Struct Array Asm"},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{

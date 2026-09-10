@@ -100,6 +100,7 @@ QColor kindGroupColor(const QString& group) {
     if (group == QStringLiteral("Vec"))   return t.syntaxType;     // teal
     if (group == QStringLiteral("Str"))   return t.syntaxString;   // salmon
     if (group == QStringLiteral("Ctr"))   return t.indDataChanged; // green
+    if (group == QStringLiteral("Asm"))   return t.markerCycle;     // amber, like Float
     if (group == QStringLiteral("Common")) return t.syntaxPreproc;  // grey
     return t.text;
 }
@@ -129,6 +130,9 @@ QString kindGroupFor(NodeKind k) {
     if (isVectorKind(k) || isMatrixKind(k)) return QStringLiteral("Vec");
     if (isStringKind(k))                  return QStringLiteral("Str");
     if (isContainerKind(k))               return QStringLiteral("Ctr");
+    // Without this asm falls through to the default and files itself under
+    // Hex, which is where you would never look for it.
+    if (isCodeKind(k))                    return QStringLiteral("Asm");
     return QStringLiteral("Hex");
 }
 
@@ -2067,8 +2071,8 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     } else {
         // ── No filter: build list with current sort mode ──
         // Bucket by kindGroup, count all, filter by enabled groups
-        static const char* kGroupOrder[] = {"Hex","Int","Float","Ptr","Vec","Str","Ctr","Common"};
-        static const char* kGroupLabels[] = {"Hex","Int / Bool","Float","Pointer / FuncPtr","Vec / Mat","String","Type","Common Types"};
+        static const char* kGroupOrder[] = {"Hex","Int","Float","Ptr","Vec","Str","Asm","Ctr","Common"};
+        static const char* kGroupLabels[] = {"Hex","Int / Bool","Float","Pointer / FuncPtr","Vec / Mat","String","Code","Type","Common Types"};
         QHash<QString, QVector<TypeEntry>> buckets;
         for (const auto& t : m_allTypes) {
             if (t.entryKind == TypeEntry::Section) continue;

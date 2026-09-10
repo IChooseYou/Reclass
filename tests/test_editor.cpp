@@ -4116,7 +4116,9 @@ private slots:
         QVERIFY(line >= 0);
         const QString ft = sci->text(line);
         scrollLineIntoView(sci, line);
-        for (const char* token : { " +1 ", "+10h", "+100h", "+1000h", "Trim", "Top" }) {
+        QVERIFY(!ft.contains(QStringLiteral("+100h")));
+        QVERIFY(!ft.contains(QStringLiteral("+1000h")));
+        for (const char* token : { " +1 ", "+10h", "Trim", "Top" }) {
             const int at = ft.indexOf(QString::fromLatin1(token));
             QVERIFY2(at >= 0, token);
             const int col = at + (QString::fromLatin1(token).startsWith(' ') ? 1 : 0);

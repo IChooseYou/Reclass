@@ -35,6 +35,11 @@ static int xmlTypeForKind(NodeKind kind) {
     case NodeKind::Vec4:      return 24;
     case NodeKind::Mat4x4:    return 25;
     case NodeKind::Array:     return 27;  // ClassInstanceArray
+    // ReClass has no code type. A byte array keeps the file valid for other
+    // tools and, with nodeSizeForExport below, keeps the LAYOUT right — which
+    // matters more than the label, since every later field's offset depends
+    // on it.
+    case NodeKind::Asm:       return 7;   // Hex8, sized by nodeSizeForExport
     }
     return 7; // fallback to Hex8
 }
@@ -43,6 +48,7 @@ static int nodeSizeForExport(const Node& node) {
     switch (node.kind) {
     case NodeKind::UTF8:  return node.strLen;
     case NodeKind::UTF16: return node.strLen * 2;
+    case NodeKind::Asm:   return node.byteSize();   // the declared code window
     case NodeKind::Array: {
         int elemSz = sizeForKind(node.elementKind);
         return node.arrayLen * (elemSz > 0 ? elemSz : 0);

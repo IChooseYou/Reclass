@@ -30,7 +30,8 @@ enum class NodeKind : uint8_t {
     FuncPtr32, FuncPtr64,
     Vec2, Vec3, Vec4, Mat4x4,
     UTF8, UTF16,
-    Struct, Array
+    Struct, Array,
+    Asm
 };
 
 } // namespace rcx (temporarily close for qHash)
@@ -47,6 +48,7 @@ enum KindFlags : uint32_t {
     KF_Container  = 1 << 1,  // Struct/Array
     KF_String     = 1 << 2,  // UTF8/UTF16
     KF_Vector     = 1 << 3,  // Vec2/3/4
+    KF_Code       = 1 << 4,  // Asm — machine code, rendered as instructions
 };
 
 // ── Unified kind metadata table (single source of truth) ──
@@ -94,9 +96,15 @@ inline constexpr KindMeta kKindMeta[] = {
     {NodeKind::UTF16,     "UTF16",     "wstr",        2,  1,  2, KF_String},
     {NodeKind::Struct,    "Struct",    "struct",      0,  1,  1, KF_Container},
     {NodeKind::Array,     "Array",     "array",       0,  1,  1, KF_Container},
+    // Size 1 with the real footprint in arrayLen, exactly as UTF8 does with
+    // strLen: an `asm[16]` node always occupies 16 bytes whatever the code in
+    // it decodes to, so the fields after it never move. `lines` stays 1 — the
+    // instruction rows are emitted directly by compose, the way enum members
+    // are, so the row count never passes through this constant.
+    {NodeKind::Asm,       "Asm",       "asm",         1,  1,  1, KF_Code},
 };
 
-static_assert(std::size(kKindMeta) == static_cast<size_t>(NodeKind::Array) + 1,
+static_assert(std::size(kKindMeta) == static_cast<size_t>(NodeKind::Asm) + 1,
               "kKindMeta table must match NodeKind enum");
 
 inline constexpr const KindMeta* kindMeta(NodeKind k) {
@@ -158,6 +166,12 @@ inline constexpr bool isContainerKind(NodeKind k) {
 }
 inline constexpr bool isStringKind(NodeKind k) {
     return k == NodeKind::UTF8 || k == NodeKind::UTF16;
+}
+// Machine code: the node's own bytes are instructions, not data. Read-only,
+// and deliberately kept out of the type-cycling and endian-swap paths that
+// enumerate kinds by byte size.
+inline constexpr bool isCodeKind(NodeKind k) {
+    return k == NodeKind::Asm;
 }
 // The everyday "common" primitive set shown by default in the type chooser
 // (the rest are reachable via the chooser's "Show all" toggle, or by typing
@@ -263,6 +277,12 @@ struct Node {
             if (elemSz <= 0) return 0;
             return qMin(arrayLen, INT_MAX / elemSz) * elemSz;
         }
+        // A declared byte window, like a string's. Decoding cannot decide it:
+        // the size has to be knowable without reading target memory (byteSize
+        // takes no Provider and has ~40 callers, several of them const tree
+        // walks), and a size that moved with the target's code would
+        // desynchronise every sibling offset after it on each refresh.
+        case NodeKind::Asm:     return qMax(0, arrayLen);
         case NodeKind::Struct:
             if (classKeyword == QStringLiteral("bitfield")) {
                 int sz = sizeForKind(elementKind);
@@ -1646,6 +1666,16 @@ namespace fmt {
     QByteArray parseAsciiValue(const QString& text, int expectedSize, bool* ok);
     QString validateValue(NodeKind kind, const QString& text);
     QString fmtEnumMember(const QString& name, int64_t value, int depth, int nameW);
+    // One decoded instruction: raw bytes, then the mnemonic, then the name of
+    // the branch target when anything knows it. `bytes` is the instruction's
+    // own span, so the hex column width tracks the instruction, not a fixed
+    // stride.
+    QString fmtAsmLine(const QByteArray& bytes, const QString& text,
+                       const QString& symbol, int depth);
+    // Stands in for the instruction rows when the span could not be read.
+    QString fmtAsmUnreadable(int depth);
+    // "asm[16]" — the type column for a code window.
+    QString asmTypeName(int span);
     QString fmtBitfieldMember(const QString& name, uint8_t bitWidth,
                               uint64_t value, int depth, int nameW);
     uint64_t extractBits(const Provider& prov, uint64_t addr,

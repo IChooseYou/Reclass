@@ -29,6 +29,7 @@
 #include <QClipboard>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QScopedValueRollback>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
 #include "editor.h"
@@ -160,8 +161,8 @@ class TestByteSelection : public QObject {
     int m_h2Line = -1;
     int m_iLine  = -1;
 
-    void refreshDocument() {
-        m_result = compose(m_tree, m_prov);
+    void refreshDocument(bool compact = false) {
+        m_result = compose(m_tree, m_prov, 0, compact);
         m_editor->applyDocument(m_result);
         // Hook the provider into the editor so updateByteSelStatus reads
         // the real bytes from m_prov (needed for the 3/5/6-byte interp
@@ -195,6 +196,7 @@ private slots:
     void init() {
         // Fresh document per test so a previous test's selection / edit
         // state can't leak forward.
+        m_editor->scintilla()->zoomTo(0);
         refreshDocument();
         m_editor->clearByteSelection();
         QVERIFY(!m_editor->byteSelection().has_value());
@@ -297,6 +299,140 @@ private slots:
         // Selection spans [base+4, base+0xB) — 4..7 from row 0 + 0..2 from row 1
         QCOMPARE(sel->first, m_tree.baseAddress + 4ULL);
         QCOMPARE(sel->second, m_tree.baseAddress + 0xBULL);
+    }
+
+    void testDragClampsToColumnEdges_data() {
+        QTest::addColumn<bool>("ascii");
+        QTest::addColumn<bool>("compact");
+        QTest::addColumn<int>("zoom");
+        QTest::newRow("hex") << false << false << 0;
+        QTest::newRow("ascii") << true << false << 0;
+        QTest::newRow("compact-hex") << false << true << 0;
+        QTest::newRow("compact-ascii") << true << true << 0;
+        QTest::newRow("zoomed-hex") << false << true << 5;
+        QTest::newRow("zoomed-ascii") << true << true << 5;
+    }
+
+    void testDragClampsToColumnEdges() {
+        QFETCH(bool, ascii);
+        QFETCH(bool, compact);
+        QFETCH(int, zoom);
+        refreshDocument(compact);
+        auto* sci = m_editor->scintilla();
+        sci->zoomTo(zoom);
+        auto* vp = sci->viewport();
+        auto point = [&](int line, int byte) {
+            if (!ascii) return hexByteCoord(m_editor, line, byte);
+            const auto& lm = *m_editor->metaForLine(line);
+            const auto ns = RcxEditor::nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
+            long pos = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                (unsigned long)line, (long)(ns.start + byte));
+            return QPoint((int)sci->SendScintilla(
+                QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos) + 2,
+                hexByteCoord(m_editor, line, 0).y());
+        };
+        const QPoint anchor = point(m_h1Line, 3);
+        const QPoint left(2, point(m_h0Line, 0).y());
+        const QPoint right(vp->width() - 5, point(m_h2Line, 0).y());
+        QSignalSpy clicks(m_editor, &RcxEditor::nodeClicked);
+        sendPress(vp, anchor);
+        sendMove(vp, point(m_h0Line, 1));
+        sendMove(vp, left);
+        QVERIFY(m_editor->byteSelection());
+        QCOMPARE(m_editor->byteSelectionRange(), (QPair<uint64_t, uint64_t>{0, 12}));
+        QCOMPARE(vp->cursor().shape(), Qt::CrossCursor);
+        sendMove(vp, right);
+        QCOMPARE(m_editor->byteSelectionRange(), (QPair<uint64_t, uint64_t>{11, 24}));
+        QCOMPARE(vp->cursor().shape(), Qt::CrossCursor);
+        QCOMPARE(clicks.count(), 1);  // crossing columns never changes to node selection
+        sendRelease(vp, right);
+        QCOMPARE(vp->cursor().shape(), Qt::ArrowCursor);
+    }
+
+    void testModifiedNodeClickLeavesByteMode_data() {
+        QTest::addColumn<int>("modifiers");
+        QTest::newRow("ctrl") << int(Qt::ControlModifier);
+        QTest::newRow("shift") << int(Qt::ShiftModifier);
+        QTest::newRow("ctrl-shift") << int(Qt::ControlModifier | Qt::ShiftModifier);
+    }
+
+    void testModifiedNodeClickLeavesByteMode() {
+        QFETCH(int, modifiers);
+        QVERIFY(m_editor->setByteSelection(0, 8));
+        const QPoint node(2, hexByteCoord(m_editor, m_iLine, 0).y());
+        auto* vp = m_editor->scintilla()->viewport();
+        sendPress(vp, node, Qt::KeyboardModifiers(modifiers));
+        sendRelease(vp, node, Qt::KeyboardModifiers(modifiers));
+        QVERIFY(!m_editor->hasByteSelection());
+    }
+
+    void testMixedWidthRunReachesFirstByteAfterTypedFields() {
+        QScopedValueRollback<NodeTree> restore(m_tree);
+        m_tree.nodes[1].kind = NodeKind::Hex32;
+        m_tree.nodes[1].offset = 0x32;
+        m_tree.nodes[2].kind = NodeKind::Hex16;
+        m_tree.nodes[2].offset = 0x36;
+        m_tree.nodes[3].offset = 0x38;
+        m_tree.nodes[4].offset = 0x40;
+        m_tree.nodes[5].kind = NodeKind::Bool;
+        m_tree.nodes[5].offset = 0x31;
+        m_tree.invalidateIdCache();
+        refreshDocument();
+        const int first = lineForNodeOffset(m_editor, 0, 0x32);
+        const int last = lineForNodeOffset(m_editor, 0, 0x38);
+        const int typed = lineForNodeOffset(m_editor, 0, 0x31);
+        QVERIFY(first >= 0 && last > first && typed < first);
+        auto* vp = m_editor->scintilla()->viewport();
+        const QPoint anchor = hexByteCoord(m_editor, last, 2);
+        sendPress(vp, anchor);
+        sendMove(vp, hexByteCoord(m_editor, first, 1));
+        QCOMPARE(m_editor->byteSelectionRange().first, uint64_t(0x33));
+        const QPoint above = hexByteCoord(m_editor, typed, 0);
+        sendMove(vp, above);
+        QCOMPARE(m_editor->byteSelectionRange(), (QPair<uint64_t, uint64_t>{0x32, 0x3b}));
+        sendRelease(vp, above);
+    }
+
+    void testByteDragStopsAtNestedClassBoundary() {
+        QScopedValueRollback<NodeTree> restore(m_tree);
+        Node nested;
+        nested.kind = NodeKind::Struct;
+        nested.name = "nested";
+        nested.structTypeName = "Nested";
+        nested.parentId = m_tree.nodes[0].id;
+        nested.offset = 0x24;
+        nested.collapsed = false;
+        const uint64_t id = m_tree.nodes[m_tree.addNode(nested)].id;
+        Node field;
+        field.kind = NodeKind::Hex64;
+        field.parentId = id;
+        field.offset = 0;
+        m_tree.addNode(field);
+        refreshDocument();
+        const int child = lineForNodeOffset(m_editor, 0, 0x24);
+        QVERIFY(child > m_iLine);
+        auto* vp = m_editor->scintilla()->viewport();
+        const QPoint anchor = hexByteCoord(m_editor, child, 3);
+        const QPoint parentBytes = hexByteCoord(m_editor, m_h0Line, 0);
+        sendPress(vp, anchor);
+        sendMove(vp, parentBytes);
+        QCOMPARE(m_editor->byteSelectionRange(), (QPair<uint64_t, uint64_t>{0x24, 0x28}));
+        sendMove(vp, hexByteCoord(m_editor, child, 7));
+        QCOMPARE(m_editor->byteSelectionRange(), (QPair<uint64_t, uint64_t>{0x27, 0x2c}));
+        sendRelease(vp, anchor);
+    }
+
+    void testNodeDragStaysNodeSelectionAcrossByteColumns() {
+        auto* vp = m_editor->scintilla()->viewport();
+        QSignalSpy clicks(m_editor, &RcxEditor::nodeClicked);
+        const QPoint anchor(2, hexByteCoord(m_editor, m_h0Line, 0).y());
+        const QPoint bytes = hexByteCoord(m_editor, m_h2Line, 3);
+        sendPress(vp, anchor);
+        sendMove(vp, bytes);
+        QVERIFY(!m_editor->hasByteSelection());
+        QCOMPARE(vp->cursor().shape(), Qt::ArrowCursor);
+        QCOMPARE(clicks.count(), 2);
+        sendRelease(vp, bytes);
     }
 
     // ── Shift+Right extends the right edge ──────────────────────────

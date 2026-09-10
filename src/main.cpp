@@ -24,6 +24,7 @@
 #include "paintutil.h"
 #include <QApplication>
 #include <QMainWindow>
+#include <QMenu>
 #include <QMenuBar>
 #include <QToolBar>
 #include <QStatusBar>
@@ -84,6 +85,7 @@
 #include "widgets/unified_symbol_panel.h"
 #include "widgets/empty_overlay.h"
 #include "widgets/pane_tabs.h"
+#include "widgets/font_choices.h"
 #include "widgets/selection_status.h"
 #include "widgets/dock_header.h"
 #include "widgets/panel_search_field.h"
@@ -465,6 +467,23 @@ static constexpr double kWindowOverSplash = 1.33;
 // rules (and tests/test_hairline_dpr.cpp for the phase-sweep regression pin).
 using rcx::fillBottomDeviceRowOfRect;
 using rcx::fillLeftDeviceColOfRect;
+
+// The editor/Code container outline sits against the doc-tab strip, the dock
+// edge and the splitter handle — all of which already carry border-weight
+// colours. At full theme.border the outline competes with them and the panes
+// read as a stack of parallel lines. Blend it toward the editor paper so it
+// reads as a seam between surfaces rather than a fourth line. DERIVED, not a
+// new token: it tracks the theme automatically.
+static constexpr qreal kContainerBorderFade = 0.35;  // 0 = full border, 1 = gone
+static QColor containerBorderColor(const rcx::Theme& t) {
+    const QColor a = t.border;
+    const QColor b = rcx::editorPaperColor(t);
+    const qreal  k = kContainerBorderFade;
+    return QColor::fromRgbF(a.redF()   + (b.redF()   - a.redF())   * k,
+                            a.greenF() + (b.greenF() - a.greenF()) * k,
+                            a.blueF()  + (b.blueF()  - a.blueF())  * k,
+                            a.alphaF());
+}
 using rcx::fillRightDeviceColOfRect;
 
 class MenuBarStyle : public QProxyStyle {
@@ -715,6 +734,22 @@ public:
                     p->drawLine(mi->rect.left() + 4, y, mi->rect.right() - 4, y);
                     return;
                 }
+                // Destructive items paint their label in theme.markerPtr, and
+                // KEEP it when hovered — a red that disappears the moment you
+                // point at the row is a warning that vanishes exactly when it
+                // matters. QStyleOptionMenuItem carries no QAction, so the
+                // action is recovered from the menu by matching this item's
+                // rect against the geometry the menu just laid out.
+                bool destructive = false;
+                if (const auto* menu = qobject_cast<const QMenu*>(w)) {
+                    for (QAction* a : menu->actions()) {
+                        if (menu->actionGeometry(a) != mi->rect) continue;
+                        destructive = a->property("rcxDestructive").toBool();
+                        break;
+                    }
+                }
+                const QColor destructiveInk = mi->palette.color(QPalette::LinkVisited);
+
                 // Hover highlight — flat fill (no Fusion border) then delegate
                 // for text/icon/arrow with Selected cleared
                 if ((mi->state & State_Selected)) {
@@ -722,7 +757,19 @@ public:
                     QStyleOptionMenuItem patched = *mi;
                     patched.state &= ~State_Selected;
                     patched.palette.setColor(QPalette::Text,
-                        mi->palette.color(QPalette::Link));          // theme.indHoverSpan
+                        destructive ? destructiveInk
+                                    : mi->palette.color(QPalette::Link));  // theme.indHoverSpan
+                    QProxyStyle::drawControl(element, &patched, p, w);
+                    return;
+                }
+                if (destructive) {
+                    QStyleOptionMenuItem patched = *mi;
+                    // Fusion reads the label colour from Text for an enabled
+                    // item and ButtonText in some paths; set both rather than
+                    // depend on which branch it takes.
+                    patched.palette.setColor(QPalette::Text,       destructiveInk);
+                    patched.palette.setColor(QPalette::ButtonText, destructiveInk);
+                    patched.palette.setColor(QPalette::WindowText, destructiveInk);
                     QProxyStyle::drawControl(element, &patched, p, w);
                     return;
                 }
@@ -961,6 +1008,12 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
     pal.setColor(QPalette::Dark,            theme.border);
     pal.setColor(QPalette::Light,           theme.textFaint);
     pal.setColor(QPalette::Link,            theme.indHoverSpan);
+    // LinkVisited is otherwise unused, so it carries the DESTRUCTIVE colour to
+    // the styles: theme.markerPtr, the same red the dialogs use for a
+    // destructive button (#800000 light, #f44747 dark). Routing it through the
+    // palette keeps MenuBarStyle painting from theme tokens rather than
+    // reaching into ThemeManager mid-paint.
+    pal.setColor(QPalette::LinkVisited,     theme.markerPtr);
 
     // Disabled group: Fusion reads these for disabled menu items, buttons, etc.
     pal.setColor(QPalette::Disabled, QPalette::WindowText,      theme.textMuted);
@@ -1243,8 +1296,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // MenuBarStyle is set as app style in main() — covers both QMenuBar and QMenu
 
-    connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
-            this, &MainWindow::applyTheme);
+    connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this,
+            [this](const Theme& t) {
+        applyTheme(t);
+        // A theme's `font` field is a DEFAULT it brings with it when you
+        // switch TO it (tw.json / Light asks for IBM Plex Mono) — not a lock
+        // it re-imposes forever. It used to live inside applyTheme(), which
+        // setEditorFont()'s own tail calls back into (the pane-tab font has
+        // to go through the stylesheet), so on any theme declaring a font
+        // every View > Font pick was reverted one call later, settings and
+        // all. That re-entry also ran a full theme apply over a half-built
+        // window at startup, which is what crashed launching with a saved
+        // font the theme disagreed with. This connection fires only on a
+        // real switch — never on the initial apply below, never from
+        // setEditorFont — so a pick made afterwards stands, restarts
+        // included.
+        if (!t.font.isEmpty() && rcx::RcxEditor::globalFontName() != t.font)
+            setEditorFont(t.font);
+    });
 
     // Apply theme once at startup (the signal only fires on change, not initial load)
     {
@@ -1516,7 +1585,7 @@ void MainWindow::createMenus() {
 
     // Edit
     auto* edit = m_menuBar->addMenu("&Edit");
-    // Undo / Redo = the `discard` arrow and its mirror, the same pair the
+    // Undo / Redo = the return arrow and its mirror, the same pair the
     // title-strip quick-access buttons show. arrow-left / arrow-right here
     // meant one command had two icons depending on where you looked.
     {
@@ -1528,8 +1597,8 @@ void MainWindow::createMenus() {
         // TitleBarWidget::applyTheme.)
         auto retint = [this, undoAct, redoAct](const rcx::Theme& t) {
             const qreal dpr = devicePixelRatioF();
-            undoAct->setIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"), t.text, 16, dpr));
-            redoAct->setIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"), t.text, 16, dpr, true));
+            undoAct->setIcon(rcx::themedVsIcon(QStringLiteral(":/vsicons/reply.svg"), t.text, 16, dpr));
+            redoAct->setIcon(rcx::themedVsIcon(QStringLiteral(":/vsicons/reply.svg"), t.text, 16, dpr, true));
         };
         retint(ThemeManager::instance().current());
         connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this, retint);
@@ -1683,27 +1752,71 @@ void MainWindow::createMenus() {
         reconcileDockTabBars();
     });
     view->addSeparator();
+    // ── View ▸ Font ──
+    //
+    // The list is DISCOVERED, never written down. It used to be three
+    // hard-coded names, one of which — Consolas — is a Windows font: off
+    // Windows that entry did not fail, it silently resolved to whatever the
+    // matcher substituted, so the menu offered a face the user could neither
+    // identify nor have asked for, and there was no way to reach any of the
+    // good monospace faces that WERE installed. Now the two bundled families
+    // are pinned (they live in resources.qrc, so they are offerable on any
+    // machine with no fonts installed at all) and everything under them comes
+    // from the font database. Nothing here names an operating system.
+    //
+    // Rebuilt on every open rather than in the constructor: enumerating
+    // families is cheap but startup is where this app counts milliseconds,
+    // and a font installed while REECLASS is running then shows up without a
+    // restart. See src/widgets/font_choices.h for the filtering (monospace
+    // only — the editor lays every column out on one advance).
     auto* fontMenu = view->addMenu(makeIcon(":/vsicons/text-size.svg"), "&Font");
-    auto* fontGroup = new QActionGroup(this);
-    fontGroup->setExclusive(true);
-    auto* actConsolas = fontMenu->addAction("Consolas");
-    actConsolas->setCheckable(true);
-    actConsolas->setActionGroup(fontGroup);
-    auto* actJetBrains = fontMenu->addAction("JetBrains Mono");
-    actJetBrains->setCheckable(true);
-    actJetBrains->setActionGroup(fontGroup);
-    auto* actIbmPlex = fontMenu->addAction("IBM Plex Mono");
-    actIbmPlex->setCheckable(true);
-    actIbmPlex->setActionGroup(fontGroup);
-    // Load saved preference
+    fontMenu->setObjectName(QStringLiteral("rcxViewFontMenu"));   // --screenshot fontmenu
+    connect(fontMenu, &QMenu::aboutToShow, this, [this, fontMenu] {
+        fontMenu->clear();
+        auto* group = new QActionGroup(fontMenu);   // dies with the rows it owns
+        group->setExclusive(true);
+        const QString current = rcx::RcxEditor::globalFontName();
+        auto addFamily = [&](const QString& family) -> QAction* {
+            QAction* a = fontMenu->addAction(family);
+            a->setCheckable(true);
+            a->setActionGroup(group);
+            a->setChecked(family.compare(current, Qt::CaseInsensitive) == 0);
+            // Each row wears its own face, so the menu IS the specimen sheet:
+            // picking between 30-odd monospace names you have never seen
+            // rendered is picking blind.
+            QFont sample(family, 10);
+            sample.setFixedPitch(true);
+            a->setFont(sample);
+            connect(a, &QAction::triggered, this, [this, family] { setEditorFont(family); });
+            return a;
+        };
+
+        const QStringList bundled = rcx::bundledMonoFamilies();
+        const QStringList system  = rcx::systemMonoFamilies();
+        // The two that ship with REECLASS, then a rule, then what this
+        // machine has. Plain separators, not addSection: MenuBarStyle draws
+        // a section as a bare line and swallows its label, so a heading here
+        // would be an invisible promise.
+        for (const QString& f : bundled) addFamily(f);
+        // The face in force, when it is neither bundled nor installed — a
+        // settings file carried from another machine, or a font uninstalled
+        // since. Without a row the menu would show nothing checked and
+        // quietly disagree with what is on screen; the suffix is on the row
+        // because a heading would not survive the style.
+        if (rcx::fontMenuNeedsInForceRow(current, bundled, system)) {
+            fontMenu->addSeparator();
+            addFamily(current)->setText(tr("%1  (not installed)").arg(current));
+        }
+        if (!system.isEmpty()) {
+            fontMenu->addSeparator();
+            for (const QString& f : system) addFamily(f);
+        }
+    });
+
+    // The rest of the View menu reads its checkboxes from here. This used to
+    // be declared by the font block above, which no longer needs it — the
+    // font in force comes from RcxEditor::globalFontName(), not from disk.
     QSettings settings("REECLASS", "REECLASS");
-    QString savedFont = settings.value("font", "JetBrains Mono").toString();
-    if      (savedFont == "JetBrains Mono")  actJetBrains->setChecked(true);
-    else if (savedFont == "IBM Plex Mono")   actIbmPlex->setChecked(true);
-    else                                      actConsolas->setChecked(true);
-    connect(actConsolas, &QAction::triggered, this, [this]() { setEditorFont("Consolas"); });
-    connect(actJetBrains, &QAction::triggered, this, [this]() { setEditorFont("JetBrains Mono"); });
-    connect(actIbmPlex, &QAction::triggered, this, [this]() { setEditorFont("IBM Plex Mono"); });
 
     // Theme submenu
     auto* themeMenu = view->addMenu("&Theme");
@@ -1716,6 +1829,9 @@ void MainWindow::createMenus() {
         act->setCheckable(true);
         act->setActionGroup(themeGroup);
         if (i == tm.currentIndex()) act->setChecked(true);
+        connect(&tm, &ThemeManager::themeChanged, act, [act, i](const Theme&) {
+            act->setChecked(i == ThemeManager::instance().currentIndex());
+        });
         connect(act, &QAction::triggered, this, [i]() {
             ThemeManager::instance().setCurrent(i);
         });
@@ -1735,7 +1851,7 @@ void MainWindow::createMenus() {
 
     auto* actTreeLines = view->addAction("&Tree Lines");
     actTreeLines->setCheckable(true);
-    actTreeLines->setChecked(settings.value("treeLines", true).toBool());
+    actTreeLines->setChecked(settings.value("treeLines", false).toBool());
     connect(actTreeLines, &QAction::triggered, this, [this](bool checked) {
         QSettings("REECLASS", "REECLASS").setValue("treeLines", checked);
         for (auto& tab : m_tabs)
@@ -2286,6 +2402,58 @@ static void fillBottomDeviceRow(QPainter& p, const QWidget* w, const QColor& c) 
 }
 static void fillRightDeviceCol(QPainter& p, const QWidget* w, const QColor& c) {
     fillRightDeviceColOfRect(p, QRectF(w->rect()), c);
+}
+
+// Style the minimap to match the main editor at 4pt.
+//
+// ORDER MATTERS, and getting it wrong is why this used to render BLACK text on
+// the dark paper. QsciScintilla::setColor() only writes style 0, and only when
+// there is no lexer; QsciScintilla::setPaper() then issues its own
+// SCI_STYLECLEARALL, which copies STYLE_DEFAULT over every style — including
+// style 0. STYLE_DEFAULT's foreground was never assigned, so it defaulted to
+// black and clobbered the colour setColor() had just set. Configuring a lexer
+// up front sidesteps both no-lexer paths entirely.
+//
+// The lexer stays even though the minimap is deliberately NOT syntax-coloured:
+// it is the thing that keeps STYLE_DEFAULT out of the picture. Mirroring the
+// editor's full palette here was tried and reads as noise at 4pt — a 110px
+// strip of confetti competing with the editor for attention. What the minimap
+// is for is SHAPE (where the dense blocks are, where the blank runs are), so
+// it renders in the theme's existing grey tiers: three tones, enough to keep
+// structure legible, no hues. Reuses textDim/textMuted/textFaint rather than
+// introducing minimap-specific colours, so it follows the theme for free.
+static void styleMinimap(QsciScintilla* mm, const rcx::Theme& t) {
+    if (!mm) return;
+    const QColor paper = rcx::editorPaperColor(t);
+    // Very small font so a ~100-line struct fits vertically at a glance.
+    QFont mf(QStringLiteral("JetBrains Mono"), 4);
+    mf.setFixedPitch(true);
+
+    auto* lex = qobject_cast<QsciLexerCPP*>(mm->lexer());
+    if (!lex) lex = new QsciLexerCPP(mm);
+
+    lex->setDefaultFont(mf);
+    lex->setDefaultPaper(paper);
+    lex->setDefaultColor(t.textMuted);
+    // Flatten every style to one of three greys first, so any lexer style not
+    // named below (there are ~40) can never fall back to STYLE_DEFAULT black.
+    for (int i = 0; i <= 127; i++) {
+        lex->setPaper(paper, i);
+        lex->setFont(mf, i);
+        lex->setColor(t.textMuted, i);
+    }
+    // Structure reads slightly stronger; commentary recedes. That is the whole
+    // vocabulary — no hues.
+    lex->setColor(t.textDim,   QsciLexerCPP::Keyword);
+    lex->setColor(t.textDim,   QsciLexerCPP::KeywordSet2);
+    lex->setColor(t.textDim,   QsciLexerCPP::GlobalClass);
+    lex->setColor(t.textFaint, QsciLexerCPP::Comment);
+    lex->setColor(t.textFaint, QsciLexerCPP::CommentLine);
+    lex->setColor(t.textFaint, QsciLexerCPP::CommentDoc);
+    if (mm->lexer() != lex) mm->setLexer(lex);
+    // Selection colours muted — the user can't actually select text here.
+    mm->setSelectionForegroundColor(t.text);
+    mm->setSelectionBackgroundColor(t.selected);
 }
 
 // 1-logical-px horizontal separator that always renders as exactly ONE
@@ -3239,7 +3407,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         auto* ec = new EditorContainer;
         ec->setObjectName(QStringLiteral("rcxEditorContainer"));
         ec->setProperty("borderColor",
-                        ThemeManager::instance().current().border);
+                        containerBorderColor(ThemeManager::instance().current()));
         pane.editorContainer = ec;
     }
     auto* ecLayout = new QHBoxLayout(pane.editorContainer);
@@ -3259,24 +3427,9 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     mm->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);  // hide both
     mm->setFixedWidth(110);
     mm->setCursor(Qt::PointingHandCursor);
-    {
-        // Very small font so a ~100-line struct fits vertically at a glance.
-        QFont mf("JetBrains Mono", 4);
-        mf.setFixedPitch(true);
-        mm->setFont(mf);
-    }
-    // Theme: paper + default-style fore so the minimap reads on dark
-    // themes (Scintilla's default white-on-black would clash). Selection
-    // colours muted because the user can't actually select text here.
-    {
-        const auto& tt = ThemeManager::instance().current();
-        mm->setColor(tt.text);
-        mm->setPaper(rcx::editorPaperColor(tt));  // mirror the editor's paper
-        // Wipe Scintilla's per-style overrides so STYLE_DEFAULT wins.
-        mm->SendScintilla(QsciScintillaBase::SCI_STYLECLEARALL);
-        mm->setSelectionForegroundColor(tt.text);
-        mm->setSelectionBackgroundColor(tt.selected);
-    }
+    // Font, paper and syntax colours all come from styleMinimap() so the
+    // construction path and the theme-change path can never drift.
+    styleMinimap(mm, ThemeManager::instance().current());
     mm->setVisible(
         QSettings("REECLASS", "REECLASS").value("minimap", false).toBool());
     ecLayout->addWidget(mm);
@@ -3355,7 +3508,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         auto* rc = new EditorContainer;
         rc->setObjectName(QStringLiteral("rcxCodeContainer"));
         rc->setProperty("borderColor",
-                        ThemeManager::instance().current().border);
+                        containerBorderColor(ThemeManager::instance().current()));
         pane.renderedContainer = rc;
     }
     auto* rvLayout = new QVBoxLayout(pane.renderedContainer);
@@ -3977,7 +4130,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     // Apply global compact columns setting to new tab
     ctrl->setCompactColumns(QSettings("REECLASS", "REECLASS").value("compactColumns", true).toBool());
-    ctrl->setTreeLines(QSettings("REECLASS", "REECLASS").value("treeLines", true).toBool());
+    ctrl->setTreeLines(QSettings("REECLASS", "REECLASS").value("treeLines", false).toBool());
     ctrl->setBraceWrap(QSettings("REECLASS", "REECLASS").value("braceWrap", false).toBool());
     ctrl->setTypeHints(QSettings("REECLASS", "REECLASS").value("typeHints", false).toBool());
     ctrl->setShowComments(QSettings("REECLASS", "REECLASS").value("showComments", false).toBool());
@@ -5499,6 +5652,38 @@ void MainWindow::previewCodeView() {
 
 // --screenshot symbols: open the Symbols dock at the narrow width the header
 // chips / sort row have to survive (the user's dock is ~270 px).
+// --screenshot fontmenu: pop View ▸ Font where the capture can see it.
+// The rows are built in the menu's aboutToShow handler from whatever the
+// font database reports, so this is the only way to check what the list
+// actually looks like on a given machine — the families differ per platform
+// by design, and each row wears its own face.
+// --screenshot nodemenu: pop the editor's right-click menu where the capture
+// can see it. showContextMenu() exec()s, so the caller arms a timer that
+// photographs the live popup and closes it. This is the only way to check
+// the DESTRUCTIVE red on a menu label: it is painted by MenuBarStyle, which
+// is installed on the application, so no render harness can show it.
+void MainWindow::previewNodeMenu() {
+    auto* tab = activeTab();
+    if (!tab || tab->panes.isEmpty() || !tab->ctrl) return;
+    rcx::RcxEditor* ed = tab->panes.first().editor;
+    if (!ed) return;
+    tab->ctrl->refresh();
+    const auto& meta = tab->ctrl->lastResult().meta;
+    for (int i = 0; i < meta.size(); i++) {
+        if (meta[i].nodeIdx <= 0 || meta[i].lineKind != rcx::LineKind::Field) continue;
+        tab->ctrl->showContextMenu(ed, i, meta[i].nodeIdx, 0,
+                                   mapToGlobal(QPoint(160, 160)));
+        return;
+    }
+}
+
+void MainWindow::previewFontMenu() {
+    auto* m = findChild<QMenu*>(QStringLiteral("rcxViewFontMenu"));
+    if (!m) return;
+    // popup(), not exec(): exec() blocks and the capture never runs.
+    m->popup(mapToGlobal(QPoint(120, 90)));
+}
+
 void MainWindow::previewSymbolsDock() {
     createSymbolsDock();
     if (!m_symbolsDock) return;
@@ -5933,17 +6118,10 @@ void MainWindow::applyTheme(const Theme& theme) {
     // Empty-workspace hatch repaints itself from the new theme colours.
     if (m_centralPlaceholder) m_centralPlaceholder->update();
 
-    // Theme-level font override. When the theme JSON declares a `font`
-    // field, switching to it pushes that family through the standard
-    // setEditorFont() path — which iterates every editor, every pane,
-    // and persists the choice. The XP Luna theme uses this to lock the
-    // editor to IBM Plex Mono regardless of what the user had picked.
-    // Font-less themes don't touch the font, so the user's preference
-    // simply remains in effect.
-    if (!theme.font.isEmpty()
-        && rcx::RcxEditor::globalFontName() != theme.font) {
-        setEditorFont(theme.font);
-    }
+    // (A theme's `font` field is applied by the themeChanged connection in
+    // the constructor, not here: here it would also fire on the initial
+    // apply and on the re-apply setEditorFont ends with, which is what made
+    // View > Font self-undoing.)
 
 #ifdef __APPLE__
     applyMacTitleBarTheme(this, theme);
@@ -6067,9 +6245,16 @@ void MainWindow::applyTheme(const Theme& theme) {
                 // custom paint. Both the hex editor and the Code view use it.
                 for (QWidget* ec : { pane.editorContainer, pane.renderedContainer }) {
                     if (ec) {
-                        ec->setProperty("borderColor", theme.border);
+                        ec->setProperty("borderColor", containerBorderColor(theme));
                         ec->update();
                     }
+                }
+                // The minimap was absent from this path entirely, so its
+                // paper/text stayed on the theme that was active when the
+                // pane was built until the tab was reopened.
+                if (pane.minimap) {
+                    styleMinimap(pane.minimap, theme);
+                    pane.minimap->update();
                 }
             }
         }
@@ -6564,9 +6749,15 @@ void MainWindow::createRibbon() {
             [this]() { if (m_actRtti) m_actRtti->trigger(); });
 
     // Undo / Redo live in the title strip now — same actions, no ribbon panel.
-    if (m_titleBar)
+    if (m_titleBar) {
         m_titleBar->setQuickActions(m_ribbonActions->action(QStringLiteral("edit.undo")),
                                     m_ribbonActions->action(QStringLiteral("edit.redo")));
+        connect(m_titleBar, &TitleBarWidget::darkThemeRequested, this, [this](bool dark) {
+            auto& tm = ThemeManager::instance();
+            tm.setDarkMode(dark);
+            m_titleBar->setDarkTheme(tm.current().isDark());
+        });
+    }
 
     syncRibbonController();
 }
@@ -7460,11 +7651,12 @@ void MainWindow::showTypeAliasesDialog() {
     table->setSelectionMode(QAbstractItemView::SingleSelection);
     table->verticalHeader()->setVisible(false);
 
-    // Skip types that nobody aliases (Vec, Mat, Struct, Array)
+    // Skip types that nobody aliases (Vec, Mat, Struct, Array, Asm)
     auto shouldSkip = [](NodeKind k) {
         return k == NodeKind::Vec2  || k == NodeKind::Vec3
             || k == NodeKind::Vec4  || k == NodeKind::Mat4x4
-            || k == NodeKind::Struct || k == NodeKind::Array;
+            || k == NodeKind::Struct || k == NodeKind::Array
+            || isCodeKind(k);   // "asm" is the disassembler's word, not a typedef
     };
 
     // Build filtered row→meta index mapping
@@ -8601,9 +8793,25 @@ void MainWindow::createWorkspaceDock() {
         // Node.refId == target or Node.structTypeName == target.typeName and
         // opens a results dialog. Inverse of the "rename struct → fields
         // auto-update" flow; useful when untangling a cross-class refactor.
+        // Inked for the theme, like every other menu icon: a raw :/vsicons SVG
+        // keeps VS Code's #C5C5C5 and washes out beside black item text on a
+        // light theme. Rebuilt per right-click, so no retint pass is needed.
+        const qreal mdpr = devicePixelRatioF();
+        auto menuIcon = [mdpr](const QString& path) {
+            return rcx::themedVsIcon(path, ThemeManager::instance().current().text, 16, mdpr);
+        };
+        // Delete is the one row here that destroys work, so it wears the
+        // destructive red — theme.markerPtr, the token the dialogs already use
+        // for a destructive button. The icon is tinted here; the LABEL is
+        // painted by MenuBarStyle off the rcxDestructive property, because a
+        // QStyleOptionMenuItem carries no QAction to ask.
+        auto destructiveIcon = [mdpr](const QString& path) {
+            return rcx::themedVsIcon(path, ThemeManager::instance().current().markerPtr, 16, mdpr);
+        };
+
         QAction* actFindRefs = nullptr;
         if (items.size() == 1) {
-            actFindRefs = menu.addAction(QIcon(":/vsicons/search.svg"),
+            actFindRefs = menu.addAction(menuIcon(":/vsicons/search.svg"),
                                           QStringLiteral("Find References"));
         }
 
@@ -8612,7 +8820,7 @@ void MainWindow::createWorkspaceDock() {
         for (const auto& item : items)
             if (!m_pinnedIds.contains(item.structId)) { allPinned = false; break; }
         auto* actPin = menu.addAction(
-            QIcon(QStringLiteral(":/vsicons/pin.svg")),
+            menuIcon(QStringLiteral(":/vsicons/pin.svg")),
             allPinned ? QStringLiteral("Unpin") : QStringLiteral("Pin"));
 
         menu.addSeparator();
@@ -8621,7 +8829,8 @@ void MainWindow::createWorkspaceDock() {
         QString delLabel = items.size() == 1
             ? QStringLiteral("Delete")
             : QStringLiteral("Delete %1 items").arg(items.size());
-        auto* actDelete = menu.addAction(QIcon(":/vsicons/remove.svg"), delLabel);
+        auto* actDelete = menu.addAction(destructiveIcon(":/vsicons/remove.svg"), delLabel);
+        actDelete->setProperty("rcxDestructive", true);
 
         QAction* chosen = menu.exec(m_workspaceTree->viewport()->mapToGlobal(pos));
 
@@ -11063,6 +11272,10 @@ int main(int argc, char* argv[]) {
                                  && args[ssIdx + 2] == "splash");
             bool showSymbols = (ssIdx + 2 < args.size()
                                  && args[ssIdx + 2] == "symbols");
+            bool showFontMenu = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "fontmenu");
+            bool showNodeMenu = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "nodemenu");
             // Ribbon captures: force a tab / the collapsed state for the shot.
             // The pre-existing settings are restored before quitting so a
             // screenshot run never rewrites the user's ribbon preferences.
@@ -11082,7 +11295,7 @@ int main(int argc, char* argv[]) {
                 // below, same as the ribbon keys.
                 if (showCode) savedScope = rs.value("codeScope");
             }
-            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, ribbonMode, ribbonShot, savedTab, savedState, savedScope]() {
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, showFontMenu, showNodeMenu, ribbonMode, ribbonShot, savedTab, savedState, savedScope]() {
                 if (showSplash) {
                     // Capture the start page itself — skip project_new so it
                     // shows the no-tabs landing.
@@ -11101,6 +11314,27 @@ int main(int argc, char* argv[]) {
                         window.previewCloseViaX();
                     if (showSymbols)
                         window.previewSymbolsDock();
+                    if (showFontMenu)
+                        window.previewFontMenu();
+                    if (showNodeMenu) {
+                        // exec() blocks, so the photograph is taken from a
+                        // timer and the popup closed to let it return. Zero
+                        // delay, not a wait: with no pointer on the capture
+                        // desktop the popup dismisses itself within a frame,
+                        // so the grab has to happen in exec()'s first turn.
+                        QTimer::singleShot(0, &window, [&window, ssPath]() {
+                            if (auto* pop = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                                pop->grab().save(ssPath);
+                                fprintf(stderr, "nodemenu %d items -> %s\n",
+                                        (int)pop->actions().size(), qPrintable(ssPath));
+                                pop->close();
+                            } else {
+                                fprintf(stderr, "nodemenu: no popup\n");
+                            }
+                            QApplication::quit();
+                        });
+                        window.previewNodeMenu();
+                    }
                     if (ribbonShot && window.ribbon()) {
                         if (ribbonMode == "collapsed") window.ribbon()->setMinimized(true);
                         else window.ribbon()->setCurrentTab(ribbonMode);
@@ -11108,13 +11342,19 @@ int main(int argc, char* argv[]) {
                 }
                 // Defer the grab so the dock layout settles + the panel
                 // paints its initial state before we capture.
-                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash, ribbonShot, savedTab, savedState, showCode, savedScope]() {
+                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash, showFontMenu, ribbonShot, savedTab, savedState, showCode, savedScope]() {
                     QPixmap px;
                     if (showSplash) {
                         if (auto* sp = window.findChild<rcx::StartPageWidget*>())
                             px = sp->grab();   // the splash is a top-level dialog
                         else
                             px = window.grab();
+                    } else if (showFontMenu) {
+                        // A QMenu is its own top-level window, so window.grab()
+                        // never contains it (the same reason tooltip_render
+                        // exists). Grab the popup itself.
+                        auto* m = window.findChild<QMenu*>(QStringLiteral("rcxViewFontMenu"));
+                        px = m ? m->grab() : window.grab();
                     } else {
                         px = window.grab();
                     }
@@ -11169,4 +11409,3 @@ int main(int argc, char* argv[]) {
 }
 
 #include "main.moc"
-

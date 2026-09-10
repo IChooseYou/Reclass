@@ -1,6 +1,7 @@
 #pragma once
 #include "themes/theme.h"
 #include <QAction>
+#include <QAbstractButton>
 #include <QWidget>
 #include <QMenuBar>
 #include <QToolButton>
@@ -31,6 +32,8 @@ public:
     // the actions — enabled state, icons and tooltips all come from them.
     void setQuickActions(QAction* undo, QAction* redo);
     QToolButton* quickButton(int index) const;   // 0 = undo, 1 = redo (nullptr before setQuickActions)
+    QAbstractButton* themeSwitch() const { return m_themeSwitch; }
+    void setDarkTheme(bool enabled);
     void applyTheme(const Theme& theme);
     void setShowIcon(bool show);
     void setMenuBarTitleCase(bool titleCase);
@@ -38,6 +41,9 @@ public:
     void finalizeMenuBar();
 
     void updateMaximizeIcon();
+
+signals:
+    void darkThemeRequested(bool enabled);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -51,9 +57,11 @@ private:
     QHBoxLayout* m_menuBtnLayout = nullptr;
     QVector<QToolButton*> m_menuButtons;
     QHBoxLayout* m_quickLayout = nullptr;   // spacer + hairline + undo/redo, right of the menus
+    QHBoxLayout* m_themeLayout = nullptr;   // theme switch, immediately before window controls
     QWidget*     m_quickRule   = nullptr;   // 1-device-px vertical `border` line
     QToolButton* m_btnUndo     = nullptr;
     QToolButton* m_btnRedo     = nullptr;
+    QAbstractButton* m_themeSwitch = nullptr;
     QToolButton* m_btnMin     = nullptr;
     QToolButton* m_btnMax     = nullptr;
     QToolButton* m_btnClose   = nullptr;

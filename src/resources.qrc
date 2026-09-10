@@ -91,6 +91,8 @@
         <file alias="book.svg">vsicons/book.svg</file>
         <!-- Ribbon (src/ribbon.cpp) Codicons -->
         <file alias="discard.svg">vsicons/discard.svg</file>
+        <file alias="reply.svg">vsicons/reply.svg</file>
+        <file alias="color-mode.svg">vsicons/color-mode.svg</file>
         <file alias="console.svg">vsicons/console.svg</file>
         <file alias="ellipsis.svg">vsicons/ellipsis.svg</file>
         <file alias="symbol-array.svg">vsicons/symbol-array.svg</file>

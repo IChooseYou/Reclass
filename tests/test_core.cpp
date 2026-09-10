@@ -25,7 +25,10 @@ private slots:
     }
 
     void testKindStringRoundTrip() {
-        for (int i = 0; i <= static_cast<int>(rcx::NodeKind::Array); i++) {
+        // Bounded by the LAST enumerator: the .rcx format is name-keyed, and
+        // kindFromString falls back to Hex8 with no error signal, so a kind
+        // missing from the table round-trips to the wrong type in silence.
+        for (int i = 0; i <= static_cast<int>(rcx::NodeKind::Asm); i++) {
             auto kind = static_cast<rcx::NodeKind>(i);
             QString s = rcx::kindToString(kind);
             QCOMPARE(rcx::kindFromString(s), kind);
@@ -368,8 +371,11 @@ private slots:
     }
 
     void testKindMetaCompleteness() {
-        // Every NodeKind enum value must have a KindMeta entry
-        for (int i = 0; i <= static_cast<int>(rcx::NodeKind::Array); i++) {
+        // Every NodeKind enum value must have a KindMeta entry. The bound is
+        // the LAST enumerator, not a named middle one: kindMeta() indexes the
+        // table by ordinal, so a row that is out of order or missing is silent
+        // corruption, and a loop that stops early cannot see it.
+        for (int i = 0; i <= static_cast<int>(rcx::NodeKind::Asm); i++) {
             auto kind = static_cast<rcx::NodeKind>(i);
             const rcx::KindMeta* m = rcx::kindMeta(kind);
             QVERIFY2(m != nullptr,

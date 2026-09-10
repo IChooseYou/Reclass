@@ -4,8 +4,12 @@
 // `-platform offscreen`, so the chrome-button icon vertical centering can be
 // eyeballed deterministically. The qrc is linked (see CMake) so :/vsicons load.
 //
-// Usage: titlebar_render <out.png> [icon]
+// Usage: titlebar_render <out.png> [icon|text] [theme.json] [width]
 #include <QApplication>
+#include <QFile>
+#include <QFontDatabase>
+#include <QJsonDocument>
+#include <QMenu>
 #include "titlebar.h"
 #include "themes/thememanager.h"
 
@@ -13,13 +17,27 @@ using namespace rcx;
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    app.setStyle(QStringLiteral("Fusion"));
+    QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/JetBrainsMono.ttf"));
+    app.setFont(QFont(QStringLiteral("JetBrains Mono"), 10));
 
     TitleBarWidget bar;
-    bar.applyTheme(ThemeManager::instance().current());
+    Theme theme = ThemeManager::instance().current();
+    if (argc > 3) {
+        QFile file(QString::fromLocal8Bit(argv[3]));
+        if (file.open(QIODevice::ReadOnly))
+            theme = Theme::fromJson(QJsonDocument::fromJson(file.readAll()).object());
+    }
+    for (const char* name : {"File", "Edit", "View", "Tools", "Plugins", "Help"})
+        bar.menuBar()->addMenu(QString::fromLatin1(name));
+    bar.finalizeMenuBar();
+    QAction undo(QStringLiteral("Undo")), redo(QStringLiteral("Redo"));
+    bar.setQuickActions(&undo, &redo);
+    bar.applyTheme(theme);
     if (argc > 2 && QString::fromLocal8Bit(argv[2]) == QStringLiteral("icon"))
         bar.setShowIcon(true);
 
-    bar.resize(760, bar.sizeHint().height());
+    bar.resize(argc > 4 ? QString::fromLocal8Bit(argv[4]).toInt() : 1080, bar.sizeHint().height());
     bar.show();
     app.processEvents();
     app.processEvents();

@@ -106,6 +106,361 @@ private slots:
         QApplication::processEvents();
     }
 
+    int findNodeByName(const char* name) const {
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == QLatin1String(name)) return i;
+        return -1;
+    }
+
+    void testFooterTrimAfterShrinkingAppendedHex_data() {
+        QTest::addColumn<int>("kind");
+        QTest::newRow("hex32") << int(NodeKind::Hex32);
+        QTest::newRow("hex16") << int(NodeKind::Hex16);
+        QTest::newRow("hex8") << int(NodeKind::Hex8);
+    }
+
+    void testFooterTrimAfterShrinkingAppendedHex() {
+        QFETCH(int, kind);
+        auto& tree = m_doc->tree;
+        tree = NodeTree();
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "Test123";
+        const uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+        auto add = [&](NodeKind k, int offset) {
+            Node n;
+            n.kind = k;
+            n.parentId = rootId;
+            n.offset = offset;
+            n.name = QStringLiteral("field_%1").arg(offset, 4, 16, QChar('0'));
+            return tree.nodes[tree.addNode(n)].id;
+        };
+        const QSet<uint64_t> typed = {add(NodeKind::Pointer64, 0),
+            add(NodeKind::UInt128, 8), add(NodeKind::Int8, 0x18)};
+        m_ctrl->refresh();
+        auto clickFooter = [&](const QString& token) {
+            auto* sci = m_editor->scintilla();
+            for (int line = 0; const auto* lm = m_editor->metaForLine(line); ++line) {
+                if (lm->lineKind != LineKind::Footer || lm->nodeId != rootId) continue;
+                const int col = sci->text(line).indexOf(token);
+                QVERIFY(col >= 0);
+                const long pos = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                    (unsigned long)line, (long)(col + 1));
+                const QPoint p((int)sci->SendScintilla(
+                    QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos) + 2,
+                    (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos) + 4);
+                QTest::mouseClick(sci->viewport(), Qt::LeftButton, Qt::NoModifier, p);
+                return;
+            }
+            QFAIL("No class footer");
+        };
+        clickFooter(QStringLiteral("+10h"));
+        int firstHex = -1;
+        for (int i : tree.childrenOf(rootId))
+            if (isHexNode(tree.nodes[i].kind)
+                && (firstHex < 0 || tree.nodes[i].offset < tree.nodes[firstHex].offset)) firstHex = i;
+        QVERIFY(firstHex >= 0);
+        m_ctrl->changeNodeKind(firstHex, NodeKind(kind));
+        const NodeTree beforeTrim = tree;
+        const int beforeUndo = m_doc->undoStack.count();
+        clickFooter(QStringLiteral("Trim"));
+        QCOMPARE(tree.childrenOf(rootId).size(), 3);
+        for (int i : tree.childrenOf(rootId)) QVERIFY(typed.contains(tree.nodes[i].id));
+        QCOMPARE(tree.structSpan(rootId), 0x19);
+        QCOMPARE(m_doc->undoStack.count(), beforeUndo + 1);
+        m_doc->undoStack.undo();
+        QCOMPARE(tree.nodes.size(), beforeTrim.nodes.size());
+        for (const Node& node : beforeTrim.nodes) {
+            const int restored = tree.indexOfId(node.id);
+            QVERIFY(restored >= 0);
+            QCOMPARE(tree.nodes[restored].toJson(), node.toJson());
+        }
+        QCOMPARE(tree.structSpan(rootId), beforeTrim.structSpan(rootId));
+        m_doc->undoStack.redo();
+        QCOMPARE(tree.childrenOf(rootId).size(), 3);
+    }
+
+    void testDragAcrossParentBoundarySelectsWholeContainers() {
+        auto& tree = m_doc->tree;
+        const uint64_t root = tree.nodes[0].id;
+        auto add = [&](NodeKind kind, uint64_t parent, int offset, const char* name) {
+            Node n;
+            n.kind = kind;
+            n.parentId = parent;
+            n.offset = offset;
+            n.name = name;
+            n.structTypeName = name;
+            n.collapsed = false;
+            return tree.nodes[tree.addNode(n)].id;
+        };
+        const uint64_t nested = add(NodeKind::Struct, root, 16, "Nested");
+        const uint64_t child0 = add(NodeKind::UInt32, nested, 0, "child0");
+        const uint64_t child1 = add(NodeKind::UInt32, nested, 4, "child1");
+        const uint64_t after = add(NodeKind::UInt32, root, 24, "after");
+        const uint64_t before = tree.nodes[findNodeByName("field_hex")].id;
+        m_ctrl->refresh();
+        auto* sci = m_editor->scintilla();
+        auto* vp = sci->viewport();
+        auto lineOf = [&](uint64_t id) {
+            for (int i = 0; const auto* lm = m_editor->metaForLine(i); ++i) {
+                if (lm->nodeId == id && (lm->lineKind == LineKind::Field
+                    || lm->lineKind == LineKind::Header)) return i;
+            }
+            return -1;
+        };
+        auto point = [&](uint64_t id) {
+            const int line = lineOf(id);
+            Q_ASSERT(line >= 0);
+            const long pos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
+                (unsigned long)line);
+            return QPoint(2, (int)sci->SendScintilla(
+                QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos) + 4);
+        };
+        auto send = [&](QEvent::Type type, uint64_t id) {
+            const QPoint p = point(id);
+            QMouseEvent ev(type, QPointF(p), QPointF(p),
+                type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                Qt::NoModifier);
+            QApplication::sendEvent(vp, &ev);
+        };
+        send(QEvent::MouseButtonPress, child1);
+        send(QEvent::MouseMove, child0);
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{child0, child1}));
+        send(QEvent::MouseMove, nested);
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{nested}));
+        send(QEvent::MouseMove, before);
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{before, nested}));
+        send(QEvent::MouseMove, after);
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{nested, after}));
+        send(QEvent::MouseMove, child0);
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{child0, child1}));
+        send(QEvent::MouseButtonRelease, child0);
+        QVERIFY(!m_editor->hasByteSelection());
+
+        // Shift-click uses the same range rules in either direction.
+        m_ctrl->handleNodeClick(m_editor, lineOf(after), after, Qt::NoModifier);
+        m_ctrl->handleNodeClick(m_editor, lineOf(child0), child0, Qt::ShiftModifier);
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{nested, after}));
+    }
+
+    // ── Selecting a byte range and choosing Asm makes ONE window ──
+    //
+    // Every other kind converts row by row, which is right: eight selected
+    // bytes become eight uint8s. Machine code is not like that. An instruction
+    // is 1..15 bytes and ignores where the fields it sits in start, so a
+    // per-row conversion produced a column of asm[1] nodes — and any
+    // instruction crossing a field boundary was cut in half and rendered as a
+    // stray `db` byte. The selection is a byte range; the node must be too.
+    void testRetypeToAsmMergesTheSelectionIntoOneWindow() {
+        // field_u32 (4) + field_float (4) + field_u8 (1) = 9 contiguous bytes
+        const int a = findNodeByName("field_u32");
+        const int b = findNodeByName("field_float");
+        const int c = findNodeByName("field_u8");
+        QVERIFY(a >= 0 && b >= 0 && c >= 0);
+        const uint64_t ida = m_doc->tree.nodes[a].id;
+        const uint64_t idb = m_doc->tree.nodes[b].id;
+        const uint64_t idc = m_doc->tree.nodes[c].id;
+        const int before = m_doc->tree.nodes.size();
+
+        m_ctrl->onByteSelectionRows({ida, idb, idc});
+        m_ctrl->retypeSelection(NodeKind::Asm);
+        QApplication::processEvents();
+
+        // Three nodes became one.
+        QCOMPARE(m_doc->tree.nodes.size(), before - 2);
+        int asmCount = 0, asmIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].kind == NodeKind::Asm) { asmCount++; asmIdx = i; }
+        QCOMPARE(asmCount, 1);
+
+        // ...spanning exactly the bytes that were selected, at the first
+        // one's offset, expanded so its instructions are actually visible.
+        const Node& code = m_doc->tree.nodes[asmIdx];
+        QCOMPARE(code.offset, 0);
+        QCOMPARE(code.byteSize(), 9);
+        QCOMPARE(code.collapsed, false);
+
+        // The fields after it did not move.
+        const int after = findNodeByName("field_hex");
+        QVERIFY(after >= 0);
+        QCOMPARE(m_doc->tree.nodes[after].offset, 12);
+
+        // One undo puts all three back.
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.nodes.size(), before);
+        for (uint64_t id : {ida, idb, idc})
+            QVERIFY2(m_doc->tree.indexOfId(id) >= 0, "undo did not restore a merged field");
+    }
+
+    // A single row is not a merge: it keeps its own bytes, exactly as every
+    // other type change does.
+    void testRetypeSingleFieldToAsmKeepsItsOwnBytes() {
+        const int a = findNodeByName("field_u32");
+        QVERIFY(a >= 0);
+        const uint64_t id = m_doc->tree.nodes[a].id;
+        const int before = m_doc->tree.nodes.size();
+
+        m_ctrl->onByteSelectionRows({id});
+        m_ctrl->retypeSelection(NodeKind::Asm);
+        QApplication::processEvents();
+
+        QCOMPARE(m_doc->tree.nodes.size(), before);      // nothing merged away
+        const int idx = m_doc->tree.indexOfId(id);
+        QVERIFY(idx >= 0);
+        QCOMPARE(m_doc->tree.nodes[idx].kind, NodeKind::Asm);
+        QCOMPARE(m_doc->tree.nodes[idx].byteSize(), 4);  // the UInt32's own size
+    }
+
+    // A scattered selection is refused rather than silently swallowing the
+    // bytes in between.
+    void testRetypeToAsmRefusesABrokenSelection() {
+        const int a = findNodeByName("field_u32");   // +0, 4 bytes
+        const int c = findNodeByName("field_u8");    // +8, 1 byte  (gap at +4)
+        QVERIFY(a >= 0 && c >= 0);
+        const int before = m_doc->tree.nodes.size();
+        QSignalSpy hint(m_ctrl, &RcxController::statusHint);
+
+        m_ctrl->onByteSelectionRows({ m_doc->tree.nodes[a].id, m_doc->tree.nodes[c].id });
+        m_ctrl->retypeSelection(NodeKind::Asm);
+        QApplication::processEvents();
+
+        QCOMPARE(m_doc->tree.nodes.size(), before);   // nothing removed
+        int asmCount = 0;
+        for (const Node& n : m_doc->tree.nodes)
+            if (n.kind == NodeKind::Asm) asmCount++;
+        QCOMPARE(asmCount, 0);
+        QVERIFY2(hint.count() > 0, "refused silently, with no explanation");
+    }
+
+    // ── A byte selection names BYTES, not the fields holding them ──
+    //
+    // Select three bytes inside a hex64 and ask for hex8 and you want three
+    // hex8s. What happened before: the whole covering FIELD was retyped, so
+    // you got one hex8 and a seven-byte pad ladder. The selection is the
+    // instruction — "I'm ready to look at these bytes this way".
+    void testByteRangeRetypeMakesOneNodePerByte() {
+        // field_hex is a Hex32 at +12. Select 3 of its 4 bytes: +12..+15.
+        const int h = findNodeByName("field_hex");
+        QVERIFY(h >= 0);
+        QCOMPARE(m_doc->tree.nodes[h].offset, 12);
+        const int before = m_doc->tree.nodes.size();
+
+        QVERIFY(m_ctrl->retypeByteRange(12, 15, NodeKind::Hex8));
+        QApplication::processEvents();
+
+        // Three hex8s, one per selected byte, at +12 +13 +14.
+        for (int off : {12, 13, 14}) {
+            int found = -1;
+            for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+                const Node& n = m_doc->tree.nodes[i];
+                if (n.parentId != 0 && n.offset == off && n.kind == NodeKind::Hex8)
+                    { found = i; break; }
+            }
+            QVERIFY2(found >= 0, qPrintable(QStringLiteral("no hex8 at +%1").arg(off)));
+        }
+        // The 4th byte of the original Hex32 comes back as padding, so the
+        // field after it has not moved and no byte is lost.
+        int at15 = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].parentId != 0 && m_doc->tree.nodes[i].offset == 15)
+                { at15 = i; break; }
+        QVERIFY2(at15 >= 0, "the unselected 4th byte vanished");
+        QCOMPARE(m_doc->tree.nodes[at15].byteSize(), 1);
+
+        // Hex32 (1 node) became 3 hex8 + 1 pad = 4.
+        QCOMPARE(m_doc->tree.nodes.size(), before + 3);
+
+        // And one undo puts the Hex32 back.
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.nodes.size(), before);
+        const int again = findNodeByName("field_hex");
+        QVERIFY(again >= 0);
+        QCOMPARE(m_doc->tree.nodes[again].kind, NodeKind::Hex32);
+    }
+
+    // Spanning several fields works the same way — the range is the unit,
+    // not the rows. This is the "same thing with multiline" case.
+    void testByteRangeRetypeSpansFieldsWithoutAnArray() {
+        // field_u32 (+0, 4) and field_float (+4, 4): select all 8 bytes.
+        const int before = m_doc->tree.nodes.size();
+        QVERIFY(m_ctrl->retypeByteRange(0, 8, NodeKind::Hex8));
+        QApplication::processEvents();
+
+        int hex8s = 0, arrays = 0;
+        for (const Node& n : m_doc->tree.nodes) {
+            if (n.kind == NodeKind::Hex8 && n.offset >= 0 && n.offset < 8) hex8s++;
+            if (n.kind == NodeKind::Array) arrays++;
+        }
+        QCOMPARE(hex8s, 8);        // eight separate byte nodes...
+        QCOMPARE(arrays, 0);       // ...NOT one hex8[8]
+        QCOMPARE(m_doc->tree.nodes.size(), before + 6);   // 2 fields -> 8 nodes
+
+        // Everything after the range is where it was.
+        const int u8 = findNodeByName("field_u8");
+        QVERIFY(u8 >= 0);
+        QCOMPARE(m_doc->tree.nodes[u8].offset, 8);
+    }
+
+    // A range that is not a whole multiple of the type keeps what fits and
+    // pads the remainder, rather than silently rounding the selection.
+    void testByteRangeRetypeKeepsWhatFitsAndPadsTheRest() {
+        // 7 bytes at +0, as int32 (4): one int32, then 3 bytes of padding.
+        QVERIFY(m_ctrl->retypeByteRange(0, 7, NodeKind::Int32));
+        QApplication::processEvents();
+
+        int at0 = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].parentId != 0 && m_doc->tree.nodes[i].offset == 0)
+                { at0 = i; break; }
+        QVERIFY(at0 >= 0);
+        QCOMPARE(m_doc->tree.nodes[at0].kind, NodeKind::Int32);
+
+        // Bytes 4..7 are still accounted for, and field_u8 has not moved.
+        int covered = 0;
+        for (const Node& n : m_doc->tree.nodes)
+            if (n.parentId != 0 && n.offset >= 4 && n.offset < 8) covered += n.byteSize();
+        QCOMPARE(covered, 4);
+        const int u8 = findNodeByName("field_u8");
+        QVERIFY(u8 >= 0);
+        QCOMPARE(m_doc->tree.nodes[u8].offset, 8);
+    }
+
+    // Too small to hold even one element: refuse, and say so.
+    void testByteRangeRetypeRefusesARangeSmallerThanTheType() {
+        const int before = m_doc->tree.nodes.size();
+        QSignalSpy hint(m_ctrl, &RcxController::statusHint);
+        QVERIFY(!m_ctrl->retypeByteRange(0, 2, NodeKind::Int32));   // 2 bytes, int32
+        QCOMPARE(m_doc->tree.nodes.size(), before);
+        QVERIFY2(hint.count() > 0, "refused silently");
+    }
+
+    // Code is the exception to "one node per element": it is a window, so a
+    // byte range becomes ONE asm node spanning exactly the selected bytes.
+    void testByteRangeRetypeToAsmMakesOneWindow() {
+        // 6 bytes at +8, crossing field_u8 (+8,1), pad0 (+9,2), pad1 (+11,1)
+        // and into field_hex (+12,4).
+        QVERIFY(m_ctrl->retypeByteRange(8, 14, NodeKind::Asm));
+        QApplication::processEvents();
+
+        int asmCount = 0, asmIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].kind == NodeKind::Asm) { asmCount++; asmIdx = i; }
+        QCOMPARE(asmCount, 1);
+        QCOMPARE(m_doc->tree.nodes[asmIdx].offset, 8);
+        QCOMPARE(m_doc->tree.nodes[asmIdx].byteSize(), 6);   // exactly the range
+        QCOMPARE(m_doc->tree.nodes[asmIdx].collapsed, false);
+
+        // The two bytes of field_hex that were NOT selected come back as
+        // padding, so nothing after the range moved.
+        int tail = 0;
+        for (const Node& n : m_doc->tree.nodes)
+            if (n.parentId != 0 && n.offset >= 14 && n.offset < 16) tail += n.byteSize();
+        QCOMPARE(tail, 2);
+    }
+
     void cleanup() {
         // Delete controller first (disconnects from editor signals)
         delete m_ctrl;

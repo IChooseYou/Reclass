@@ -81,7 +81,24 @@ void ThemeManager::setCurrent(int index) {
     m_currentIdx = index;
     QSettings settings("REECLASS", "REECLASS");
     settings.setValue("theme", all[index].name);
+    settings.setValue(all[index].isDark() ? "darkTheme" : "lightTheme", all[index].name);
     emit themeChanged(current());
+}
+
+void ThemeManager::setDarkMode(bool dark) {
+    if (current().isDark() == dark) return;
+    QSettings settings("REECLASS", "REECLASS");
+    settings.setValue(current().isDark() ? "darkTheme" : "lightTheme", current().name);
+    const QString saved = settings.value(dark ? "darkTheme" : "lightTheme",
+        dark ? "VS2022 Dark" : "Light").toString();
+    const auto all = themes();
+    int fallback = -1;
+    for (int i = 0; i < all.size(); ++i) {
+        if (all[i].isDark() != dark) continue;
+        if (all[i].name == saved) { setCurrent(i); return; }
+        if (fallback < 0) fallback = i;
+    }
+    if (fallback >= 0) setCurrent(fallback);
 }
 
 void ThemeManager::addTheme(const Theme& theme) {

@@ -413,6 +413,8 @@ private:
     // selection target.
     std::optional<uint64_t> m_byteSelAnchor;
     bool     m_byteSelDragging = false;
+    int      m_byteDragLine = -1;
+    bool     m_byteDragAscii = false;
     // Last set of covered-row selIds emitted via byteSelectionRowsChanged.
     // De-dups the emit so a multi-pixel drag only re-syncs when it crosses
     // a row boundary, and a passive refresh repaint doesn't re-emit.
@@ -733,7 +735,7 @@ private:
 
     // ── Byte selection helpers ──
     // byteAddrAt: returns the absolute byte address if (line, col) lands
-    //   inside a hex preview row's value column, else nullopt. Each byte
+    //   inside a hex preview row's hex or ASCII column, else nullopt. Each byte
     //   occupies 3 chars ("XX ") in the value column. Optional (rather
     //   than a 0 sentinel) so a struct based at virtual address 0 —
     //   common in kernel-paging tabs that view physical memory — can
@@ -761,6 +763,7 @@ private:
     //   half-open range covering the union; the paint pass naturally
     //   skips non-hex rows in between.
     std::optional<uint64_t> byteAddrAt(int line, int col) const;
+    std::optional<uint64_t> byteDragAddrAt(const QPoint& pos) const;
     void applyByteSelectionOverlay();
     void updateByteSelStatus();
     void extendByteSelection(int dByte);

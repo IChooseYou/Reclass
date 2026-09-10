@@ -107,6 +107,8 @@ public:
     // sibling). Used by `--screenshot <png> closetest`.
     void previewCloseViaX();
     void previewSymbolsDock();   // --screenshot symbols: Symbols dock at 270 px
+    void previewFontMenu();      // --screenshot fontmenu: View ▸ Font, open
+    void previewNodeMenu();      // --screenshot nodemenu: the node right-click menu
 
     // Pin the bottom-right resize grip + the edge/corner resize zones to the
     // current window size. Called from resizeEvent AND explicitly after the

@@ -96,6 +96,101 @@ private slots:
     void testDisasm64_addrWidth()    { QCOMPARE(disassemble(QByteArray("\x90",1), 0, 64).indexOf("  "), 16); }
     void testDisasm32_addrWidth()    { QCOMPARE(disassemble(QByteArray("\x90",1), 0, 32).indexOf("  "), 8); }
 
+
+    // ──────────────────────────────────────────────────
+    //  decodeRange() — the structured form the asm node renders
+    // ──────────────────────────────────────────────────
+
+    // Every instruction carries its own offset and byte span, because each one
+    // becomes a row with its own address in the offset margin.
+    void testDecodeRange_offsetsAndLengths() {
+        // push rbp (1) ; mov rbp,rsp (3) ; nop (1)
+        QByteArray code("\x55\x48\x89\xe5\x90", 5);
+        const auto ins = decodeRange(code, 0x401000, 64);
+        QCOMPARE(ins.size(), 3);
+        QCOMPARE(ins[0].offset, 0);  QCOMPARE(ins[0].length, 1);
+        QCOMPARE(ins[1].offset, 1);  QCOMPARE(ins[1].length, 3);
+        QCOMPARE(ins[2].offset, 4);  QCOMPARE(ins[2].length, 1);
+        QCOMPARE(ins[0].text, QStringLiteral("push rbp"));
+        QCOMPARE(ins[1].text, QStringLiteral("mov rbp, rsp"));
+        QCOMPARE(ins[2].text, QStringLiteral("nop"));
+        for (const auto& i : ins) QVERIFY(i.ok);
+    }
+
+    // THE property a fixed byte span depends on: the decoded lengths add up to
+    // exactly the span, so a node declaring 16 bytes always renders 16 bytes.
+    void testDecodeRange_lengthsFillTheSpanExactly() {
+        const QList<QByteArray> cases = {
+            QByteArray("\x55\x48\x89\xe5\x90", 5),           // clean
+            QByteArray("\xcc\xcc\xcc", 3),                    // all int3
+            QByteArray("\x0f\x0b\x90\xff\xff\xff", 6),        // ud2 then junk
+            QByteArray("\x48\x8b", 2),                        // truncated mov
+        };
+        for (const QByteArray& code : cases) {
+            int sum = 0;
+            for (const auto& i : decodeRange(code, 0x1000, 64)) sum += i.length;
+            QCOMPARE(sum, code.size());
+        }
+        // ...and honours maxBytes as the span, not the buffer.
+        int sum = 0;
+        for (const auto& i : decodeRange(QByteArray(200, '\x90'), 0, 64, 16)) sum += i.length;
+        QCOMPARE(sum, 16);
+    }
+
+    // The behaviour the old flat wrapper could not have: a byte that does not
+    // decode is one `db` row and the sweep CONTINUES. Real code is full of
+    // data — jump tables, padding, literals — and stopping at the first of
+    // them showed two instructions and gave up.
+    void testDecodeRange_resyncsAfterAnUndecodableByte() {
+        // 0xff 0xff is not a valid instruction; a nop follows it.
+        QByteArray code("\xff\xff\x90\x90", 4);
+        const auto ins = decodeRange(code, 0x2000, 64);
+        QVERIFY2(ins.size() >= 2, "the sweep stopped at the bad byte");
+        QVERIFY(!ins.first().ok);
+        QCOMPARE(ins.first().length, 1);
+        QCOMPARE(ins.first().text, QStringLiteral("db 0xff"));
+        // A real instruction is reached after the junk.
+        bool foundNop = false;
+        for (const auto& i : ins) if (i.ok && i.text == QStringLiteral("nop")) foundNop = true;
+        QVERIFY2(foundNop, "never resynchronised onto the nop");
+        // And the old flat listing still stops there, unchanged.
+        QVERIFY(disassemble(code, 0x2000, 64).isEmpty());
+    }
+
+    // A span whose last instruction is cut off: the tail comes out as raw
+    // bytes rather than being silently dropped, so the span stays filled.
+    void testDecodeRange_truncatedTailBecomesRawBytes() {
+        QByteArray code("\x90\x48\x8b", 3);   // nop, then a truncated mov
+        const auto ins = decodeRange(code, 0x3000, 64);
+        QVERIFY(ins.size() >= 2);
+        QVERIFY(ins[0].ok);
+        QCOMPARE(ins[0].text, QStringLiteral("nop"));
+        QVERIFY2(!ins[1].ok, "the cut-off instruction was decoded anyway");
+        int sum = 0;
+        for (const auto& i : ins) sum += i.length;
+        QCOMPARE(sum, 3);
+    }
+
+    // Branch targets are resolved absolutely, which is what makes a `call`
+    // row worth clicking.
+    void testDecodeRange_branchTargetIsAbsolute() {
+        // e8 rel32 = call. rel32 = 0x00000005 -> target = next insn + 5.
+        QByteArray code("\xe8\x05\x00\x00\x00", 5);
+        const auto ins = decodeRange(code, 0x401000, 64);
+        QCOMPARE(ins.size(), 1);
+        QVERIFY(ins[0].ok);
+        QCOMPARE(ins[0].target, (uint64_t)(0x401000 + 5 + 5));
+        // A non-branch reports no target at all.
+        const auto nop = decodeRange(QByteArray("\x90", 1), 0x401000, 64);
+        QCOMPARE(nop.size(), 1);
+        QCOMPARE(nop[0].target, (uint64_t)0);
+    }
+
+    void testDecodeRange_emptyAndBadBitness() {
+        QVERIFY(decodeRange({}, 0, 64).isEmpty());
+        QVERIFY(decodeRange(QByteArray("\x90", 1), 0, 16).isEmpty());
+    }
+
     // ──────────────────────────────────────────────────
     //  hexDump() unit tests
     // ──────────────────────────────────────────────────
@@ -125,6 +220,215 @@ private slots:
         QStringList lines = hexDump(QByteArray(32,'\x42'), 0x2000, 128).split('\n');
         QCOMPARE(lines.size(), 2);
         QVERIFY(lines[1].startsWith("00002010"));
+    }
+
+
+    // ──────────────────────────────────────────────────
+    //  The Asm node kind — instruction rows, in place
+    // ──────────────────────────────────────────────────
+
+    // Builds: struct { hex64 before; asm[N] code; hex64 after; }
+    // and returns the composed lines. `code` is written at offset 8.
+    static ComposeResult composeAsmStruct(QByteArray code, int span,
+                                          BufferProvider** provOut, NodeTree* treeOut) {
+        static QByteArray mem;
+        mem = QByteArray(256, '\0');
+        memcpy(mem.data() + 8, code.constData(), qMin(code.size(), (qsizetype)span));
+        static BufferProvider prov(mem);
+        prov = BufferProvider(mem);
+        if (provOut) *provOut = &prov;
+
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct; root.name = "Obj";
+        root.parentId = 0; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node before; before.kind = NodeKind::Hex64; before.name = "before";
+        before.parentId = rootId; before.offset = 0;
+        tree.addNode(before);
+
+        Node asmNode; asmNode.kind = NodeKind::Asm; asmNode.name = "code";
+        asmNode.parentId = rootId; asmNode.offset = 8; asmNode.arrayLen = span;
+        // Node::collapsed defaults to TRUE (it exists for containers). The
+        // controller clears it when it creates an asm node; do the same here.
+        asmNode.collapsed = false;
+        tree.addNode(asmNode);
+
+        Node after; after.kind = NodeKind::Hex64; after.name = "after";
+        after.parentId = rootId; after.offset = 8 + span;
+        tree.addNode(after);
+
+        if (treeOut) *treeOut = tree;
+        return compose(tree, prov);
+    }
+
+    // THE invariant a fixed byte window exists to protect: whatever the code
+    // in the span decodes to, the field after it does not move.
+    void testAsmNode_spanIsFixedSoSiblingsNeverMove() {
+        // Three very different codes in the same 16-byte window.
+        const QList<QByteArray> codes = {
+            QByteArray("\x55\x48\x89\xe5\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90", 16),
+            QByteArray("\xe9\x00\x00\x00\x00\xcc\xcc\xcc\xcc\xcc\xcc\xcc\xcc\xcc\xcc\xcc", 16),
+            QByteArray("\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 16),
+        };
+        for (const QByteArray& code : codes) {
+            NodeTree tree;
+            ComposeResult r = composeAsmStruct(code, 16, nullptr, &tree);
+            // Find the "after" row and check its address.
+            bool found = false;
+            for (const LineMeta& lm : r.meta) {
+                if (lm.nodeIdx < 0 || lm.nodeIdx >= tree.nodes.size()) continue;
+                if (tree.nodes[lm.nodeIdx].name != QStringLiteral("after")) continue;
+                QCOMPARE(lm.offsetAddr, (uint64_t)(8 + 16));
+                found = true;
+                break;
+            }
+            QVERIFY2(found, "the field after the asm node vanished");
+        }
+    }
+
+    // One row per instruction, each carrying its own address, so a click lands
+    // on the right instruction and the offset margin needs no special casing.
+    void testAsmNode_oneRowPerInstructionWithItsOwnAddress() {
+        // push rbp (1) ; mov rbp,rsp (3) ; ret (1) ; then padding
+        QByteArray code("\x55\x48\x89\xe5\xc3", 5);
+        code.append(QByteArray(11, '\x90'));   // nops fill the rest of the 16
+        NodeTree tree;
+        ComposeResult r = composeAsmStruct(code, 16, nullptr, &tree);
+
+        QVector<uint64_t> addrs;
+        QStringList texts;
+        const QStringList lines = r.text.split('\n');
+        for (int i = 0; i < r.meta.size(); i++) {
+            const LineMeta& lm = r.meta[i];
+            if (lm.nodeIdx < 0 || lm.nodeIdx >= tree.nodes.size()) continue;
+            if (tree.nodes[lm.nodeIdx].kind != NodeKind::Asm) continue;
+            if (!lm.isMemberLine) continue;
+            addrs << lm.offsetAddr;
+            if (i < lines.size()) texts << lines[i];
+        }
+        QVERIFY2(addrs.size() >= 3, qPrintable(QStringLiteral("only %1 instruction rows").arg(addrs.size())));
+        // Addresses are the node's, plus each instruction's own offset.
+        QCOMPARE(addrs[0], (uint64_t)8);
+        QCOMPARE(addrs[1], (uint64_t)9);
+        QCOMPARE(addrs[2], (uint64_t)12);
+        // Strictly increasing, and every one inside the declared span.
+        for (int i = 1; i < addrs.size(); i++) QVERIFY(addrs[i] > addrs[i-1]);
+        QVERIFY(addrs.last() < 8 + 16);
+        // The mnemonics really are there, with their raw bytes beside them.
+        QVERIFY2(texts[0].contains(QStringLiteral("push rbp")), qPrintable(texts[0]));
+        QVERIFY2(texts[0].contains(QStringLiteral("55")), qPrintable(texts[0]));
+        QVERIFY2(texts[1].contains(QStringLiteral("mov rbp, rsp")), qPrintable(texts[1]));
+        QVERIFY2(texts[2].contains(QStringLiteral("ret")), qPrintable(texts[2]));
+    }
+
+    // Instruction rows are MEMBER lines, which is what makes them read-only —
+    // typeSpanFor / nameSpanFor / valueSpanFor all refuse a member line, so no
+    // inline edit can start on one. This is the whole reason for modelling the
+    // emission on enum members rather than on Mat4x4's continuations.
+    void testAsmNode_instructionRowsAreNotEditable() {
+        QByteArray code("\x55\x48\x89\xe5", 4);
+        code.append(QByteArray(12, '\x90'));
+        NodeTree tree;
+        ComposeResult r = composeAsmStruct(code, 16, nullptr, &tree);
+        int checked = 0;
+        for (const LineMeta& lm : r.meta) {
+            if (lm.nodeIdx < 0 || lm.nodeIdx >= tree.nodes.size()) continue;
+            if (tree.nodes[lm.nodeIdx].kind != NodeKind::Asm || !lm.isMemberLine) continue;
+            QVERIFY2(!typeSpanFor(lm).valid,  "an instruction row offered a type edit");
+            QVERIFY2(!nameSpanFor(lm).valid,  "an instruction row offered a name edit");
+            QVERIFY2(!valueSpanFor(lm, 200).valid, "an instruction row offered a value edit");
+            checked++;
+        }
+        QVERIFY(checked > 0);
+    }
+
+    // Collapsed: the header only. The node keeps its footprint either way.
+    void testAsmNode_collapsedHidesTheInstructions() {
+        QByteArray code("\x55\x48\x89\xe5", 4);
+        code.append(QByteArray(12, '\x90'));
+        NodeTree tree;
+        ComposeResult open = composeAsmStruct(code, 16, nullptr, &tree);
+        int openRows = 0;
+        for (const LineMeta& lm : open.meta)
+            if (lm.nodeIdx >= 0 && lm.nodeIdx < tree.nodes.size()
+                && tree.nodes[lm.nodeIdx].kind == NodeKind::Asm && lm.isMemberLine) openRows++;
+        QVERIFY(openRows > 0);
+
+        // Same tree, node collapsed.
+        for (Node& n : tree.nodes) if (n.kind == NodeKind::Asm) n.collapsed = true;
+        QByteArray mem(256, '\0');
+        memcpy(mem.data() + 8, code.constData(), 16);
+        BufferProvider prov(mem);
+        ComposeResult shut = compose(tree, prov);
+        int shutRows = 0;
+        for (const LineMeta& lm : shut.meta)
+            if (lm.nodeIdx >= 0 && lm.nodeIdx < tree.nodes.size()
+                && tree.nodes[lm.nodeIdx].kind == NodeKind::Asm && lm.isMemberLine) shutRows++;
+        QCOMPARE(shutRows, 0);
+    }
+
+    // The type column carries the span, because the span is the point of the
+    // node and KindMeta::typeName cannot hold per-node data.
+    void testAsmNode_typeColumnShowsTheSpan() {
+        QCOMPARE(fmt::asmTypeName(16), QStringLiteral("asm[16]"));
+        QCOMPARE(fmt::asmTypeName(0),  QStringLiteral("asm[0]"));
+        Node n; n.kind = NodeKind::Asm; n.arrayLen = 24;
+        QCOMPARE(n.byteSize(), 24);
+        QByteArray code(24, '\x90');
+        NodeTree tree;
+        ComposeResult r = composeAsmStruct(code, 24, nullptr, &tree);
+        QVERIFY2(r.text.contains(QStringLiteral("asm[24]")), qPrintable(r.text.left(400)));
+    }
+
+
+    // The window is the only thing that must survive a save: everything else
+    // about the node is recomputed from the target's bytes on load.
+    void testAsmNode_roundTripsThroughJson() {
+        Node n;
+        n.kind      = NodeKind::Asm;
+        n.name      = QStringLiteral("hook");
+        n.offset    = 8;
+        n.arrayLen  = 24;
+        n.collapsed = false;
+        n.comment   = QStringLiteral("inline patch");
+
+        Node back = Node::fromJson(n.toJson());
+        QCOMPARE(back.kind, NodeKind::Asm);
+        QCOMPARE(back.name, QStringLiteral("hook"));
+        QCOMPARE(back.offset, 8);
+        QCOMPARE(back.arrayLen, 24);
+        QCOMPARE(back.comment, QStringLiteral("inline patch"));
+        // Collapsed state deliberately does NOT survive: core.h's fromJson
+        // loads every node collapsed ("user expands as needed") so a big
+        // document cannot explode on open. An asm node is no exception — its
+        // span is user-set and could be thousands of rows.
+        QCOMPARE(back.collapsed, true);
+        QCOMPARE(back.byteSize(), 24);
+        // Name-keyed, so the string in the file is the contract.
+        QCOMPARE(n.toJson()["kind"].toString(), QStringLiteral("Asm"));
+        QCOMPARE(kindFromString(QStringLiteral("Asm")), NodeKind::Asm);
+    }
+
+    // The footprint is arrayLen and nothing else — not the table's size, not
+    // the number of instructions that happen to fit.
+    void testAsmNode_footprintIsTheDeclaredWindow() {
+        Node n; n.kind = NodeKind::Asm;
+        for (int span : {0, 1, 15, 16, 4096}) {
+            n.arrayLen = span;
+            QCOMPARE(n.byteSize(), span);
+        }
+        // The table entry stays 1: the real size lives on the node, exactly
+        // as it does for UTF8/strLen.
+        QCOMPARE(sizeForKind(NodeKind::Asm), 1);
+        QCOMPARE(linesForKind(NodeKind::Asm), 1);
+        QVERIFY(isCodeKind(NodeKind::Asm));
+        QVERIFY(!isCodeKind(NodeKind::Hex8));
+        // And it is NOT a container, so structSpan's short-circuit gives the
+        // window rather than walking children it does not have.
+        QVERIFY(!isContainerKind(NodeKind::Asm));
     }
 
     // ──────────────────────────────────────────────────

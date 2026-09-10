@@ -386,6 +386,10 @@ if(BUILD_TESTING)
     enable_testing()
 
     # Disasm/Fadec sources needed by any test that links editor.cpp
+    # Disasm/Fadec sources. compose.cpp needs these directly now: the Asm node
+    # kind decodes its own bytes into instruction rows, so EVERY target that
+    # compiles compose.cpp must link them, not just the ones that pull in
+    # editor.cpp for the hover popup.
     set(DISASM_SRCS src/disasm.cpp third_party/fadec/decode.c third_party/fadec/format.c)
 
     # Themed dialog widget sources — required by every test that links
@@ -399,8 +403,9 @@ if(BUILD_TESTING)
 
     # ── Headless tests (Qt::Core only — safe for CI without a display) ──
 
-    add_executable(test_core tests/test_core.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_core PRIVATE src)
+    add_executable(test_core tests/test_core.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_core PRIVATE src third_party/fadec)
     target_link_libraries(test_core PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_core COMMAND test_core)
 
@@ -419,16 +424,18 @@ if(BUILD_TESTING)
     target_link_libraries(test_format PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_format COMMAND test_format)
 
-    add_executable(test_compose tests/test_compose.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_compose PRIVATE src)
+    add_executable(test_compose tests/test_compose.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_compose PRIVATE src third_party/fadec)
     target_link_libraries(test_compose PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_compose COMMAND test_compose)
 
     # Unit tests for the unified tail-chip model (Enum / TypeHint / Rtti /
     # Comment chips emitted by compose). Same source set as test_compose
     # since chips are populated entirely inside compose.cpp.
-    add_executable(test_chips tests/test_chips.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_chips PRIVATE src)
+    add_executable(test_chips tests/test_chips.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_chips PRIVATE src third_party/fadec)
     target_link_libraries(test_chips PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_chips COMMAND test_chips)
 
@@ -481,8 +488,9 @@ if(BUILD_TESTING)
     # tests — here we just lock in the chip emission contract.
     add_executable(test_overlay_null_rtti tests/test_overlay_null_rtti.cpp
         src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_overlay_null_rtti PRIVATE src)
+        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_overlay_null_rtti PRIVATE src third_party/fadec)
     target_link_libraries(test_overlay_null_rtti PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_overlay_null_rtti COMMAND test_overlay_null_rtti)
 
@@ -555,15 +563,25 @@ if(BUILD_TESTING)
     target_link_libraries(test_address_bar_model PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_address_bar_model COMMAND test_address_bar_model)
 
+    # What the View > Font menu may offer. Needs Widgets + the resource
+    # bundle: the two guaranteed families are loaded out of resources.qrc,
+    # and the monospace check measures real glyph advances.
+    add_executable(test_font_choices tests/test_font_choices.cpp src/resources.qrc)
+    target_include_directories(test_font_choices PRIVATE src)
+    target_link_libraries(test_font_choices PRIVATE ${QT}::Widgets ${QT}::Test)
+    add_test(NAME test_font_choices COMMAND test_font_choices)
+
     add_executable(test_generator tests/test_generator.cpp
-        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_generator PRIVATE src)
+        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_generator PRIVATE src third_party/fadec)
     target_link_libraries(test_generator PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_generator COMMAND test_generator)
 
     add_executable(test_import_xml tests/test_import_xml.cpp
-        src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_import_xml PRIVATE src)
+        src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_import_xml PRIVATE src third_party/fadec)
     target_link_libraries(test_import_xml PRIVATE ${QT}::Core ${QT}::Test)
     if(TARGET ${QT}::GuiPrivate)
         target_link_libraries(test_import_xml PRIVATE ${QT}::GuiPrivate)
@@ -572,14 +590,16 @@ if(BUILD_TESTING)
     add_test(NAME test_import_xml COMMAND test_import_xml)
 
     add_executable(test_import_source tests/test_import_source.cpp
-        src/imports/import_source.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_import_source PRIVATE src)
+        src/imports/import_source.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_import_source PRIVATE src third_party/fadec)
     target_link_libraries(test_import_source PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_import_source COMMAND test_import_source)
 
     add_executable(test_export_xml tests/test_export_xml.cpp
-        src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_export_xml PRIVATE src)
+        src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_export_xml PRIVATE src third_party/fadec)
     target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test)
     if(TARGET ${QT}::GuiPrivate)
         target_link_libraries(test_export_xml PRIVATE ${QT}::GuiPrivate)
@@ -613,8 +633,9 @@ if(BUILD_TESTING)
     # including the per-pass module cache (one enumerateModules call).
     add_executable(test_rtti_hint tests/test_rtti_hint.cpp
         src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_rtti_hint PRIVATE src)
+        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_rtti_hint PRIVATE src third_party/fadec)
     target_link_libraries(test_rtti_hint PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_rtti_hint COMMAND test_rtti_hint)
 
@@ -625,8 +646,9 @@ if(BUILD_TESTING)
     # tree.initialClass round-trips through JSON.
     add_executable(test_tutorial tests/test_tutorial.cpp
         src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-    target_include_directories(test_tutorial PRIVATE src)
+        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+    target_include_directories(test_tutorial PRIVATE src third_party/fadec)
     target_link_libraries(test_tutorial PRIVATE ${QT}::Core ${QT}::Test)
     if(WIN32)
         # psapi for the SelfProvider's EnumProcessModulesEx probe.
@@ -789,8 +811,9 @@ if(BUILD_TESTING)
     add_executable(coderender EXCLUDE_FROM_ALL tools/coderender.cpp
         src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
         src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp)
-    target_include_directories(coderender PRIVATE src)
+        src/themes/theme.cpp src/themes/thememanager.cpp
+        ${DISASM_SRCS})
+    target_include_directories(coderender PRIVATE src third_party/fadec)
     target_link_libraries(coderender PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Svg
         QScintilla::QScintilla)
@@ -820,15 +843,17 @@ if(BUILD_TESTING)
 
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
-            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-        target_include_directories(test_import_pdb PRIVATE src)
+            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+        target_include_directories(test_import_pdb PRIVATE src third_party/fadec)
         target_link_libraries(test_import_pdb PRIVATE
             ${QT}::Core ${QT}::Test raw_pdb)
         add_test(NAME test_import_pdb COMMAND test_import_pdb)
 
         add_executable(bench_import_pdb tests/bench_import_pdb.cpp
-            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-        target_include_directories(bench_import_pdb PRIVATE src)
+            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+        target_include_directories(bench_import_pdb PRIVATE src third_party/fadec)
         target_link_libraries(bench_import_pdb PRIVATE
             ${QT}::Core ${QT}::Test raw_pdb)
         add_test(NAME bench_import_pdb COMMAND bench_import_pdb)
@@ -1005,8 +1030,9 @@ if(BUILD_TESTING)
         add_test(NAME test_lenient_hex COMMAND test_lenient_hex)
 
         add_executable(test_rendered_view tests/test_rendered_view.cpp
-        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
-        target_include_directories(test_rendered_view PRIVATE src)
+        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        ${DISASM_SRCS})
+        target_include_directories(test_rendered_view PRIVATE src third_party/fadec)
         target_link_libraries(test_rendered_view PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)

@@ -2,6 +2,7 @@
 #include <QApplication>
 #include <QSplitter>
 #include <QMenu>
+#include <QTimer>
 #include <Qsci/qsciscintilla.h>
 #include "controller.h"
 #include "core.h"
@@ -940,6 +941,80 @@ private slots:
         QCOMPARE(region->first, (uint64_t)8);
         QCOMPARE(region->second, (uint64_t)16);
         Q_UNUSED(t);
+    }
+
+    // ── Delete sits above Carve ──
+    //
+    // User-directed placement, like testByteSelection_ExtractClassIsTopLevel
+    // below it. Delete is what people open this menu for; Carve is a rare,
+    // specialised structural op that happened to be promoted "near the top"
+    // while Delete sat at the very bottom under every type conversion.
+    //
+    // showContextMenu() exec()s its menu, so the order is read from the live
+    // popup on a timer and the menu is closed again.
+    int lineForNode(int nodeIdx) const {
+        const auto& meta = m_ctrl->lastResult().meta;
+        for (int i = 0; i < meta.size(); i++)
+            if (meta[i].nodeIdx == nodeIdx && meta[i].lineKind == LineKind::Field) return i;
+        return -1;
+    }
+
+    QStringList grabMenuOrder(int line, int nodeIdx) {
+        QStringList texts;
+        QTimer::singleShot(0, [&texts]() {
+            if (auto* pop = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                for (QAction* a : pop->actions())
+                    if (!a->isSeparator()) texts << a->text();
+                pop->close();
+            }
+        });
+        m_ctrl->showContextMenu(m_editor, line, nodeIdx, 0, QPoint(10, 10));
+        return texts;
+    }
+
+    void testDeleteSitsAboveCarve_singleNode() {
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        const int idx = findNode("speed");        // a plain Float field
+        QVERIFY(idx >= 0);
+        const int line = lineForNode(idx);
+        QVERIFY2(line >= 0, "no rendered line for the node");
+
+        const QStringList texts = grabMenuOrder(line, idx);
+        QVERIFY2(!texts.isEmpty(), "context menu came up empty");
+
+        int del = -1, carve = -1;
+        for (int i = 0; i < texts.size(); i++) {
+            if (del < 0 && texts[i].contains(QStringLiteral("Delete"))) del = i;
+            if (carve < 0 && texts[i].contains(QStringLiteral("Carve"))) carve = i;
+        }
+        QVERIFY2(del >= 0, qPrintable(QStringLiteral("no Delete: ") + texts.join('|')));
+        QVERIFY2(carve >= 0, qPrintable(QStringLiteral("no Carve: ") + texts.join('|')));
+        QVERIFY2(del < carve,
+                 qPrintable(QStringLiteral("Delete at %1, Carve at %2: %3")
+                                .arg(del).arg(carve).arg(texts.join('|'))));
+    }
+
+    void testDeleteSitsAboveCarve_multiSelect() {
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        const int a = findNode("health"), b = findNode("armor");
+        QVERIFY(a >= 0 && b >= 0);
+        m_ctrl->onByteSelectionRows({ m_doc->tree.nodes[a].id, m_doc->tree.nodes[b].id });
+        QApplication::processEvents();
+
+        const QStringList texts = grabMenuOrder(lineForNode(a), a);
+        QVERIFY(!texts.isEmpty());
+        int del = -1, carve = -1;
+        for (int i = 0; i < texts.size(); i++) {
+            if (del < 0 && texts[i].contains(QStringLiteral("Delete"))) del = i;
+            if (carve < 0 && texts[i].contains(QStringLiteral("Carve"))) carve = i;
+        }
+        QVERIFY2(del >= 0 && carve >= 0,
+                 qPrintable(QStringLiteral("missing entry: ") + texts.join('|')));
+        QVERIFY2(del < carve,
+                 qPrintable(QStringLiteral("Delete at %1, Carve at %2: %3")
+                                .arg(del).arg(carve).arg(texts.join('|'))));
     }
 
     // The byte-selection "Carve" must sit at the TOP of the context

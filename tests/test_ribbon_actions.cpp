@@ -18,6 +18,8 @@
 #include <QAction>
 #include <QApplication>
 #include <QSplitter>
+#include <QMouseEvent>
+#include <Qsci/qsciscintilla.h>
 #include "controller.h"
 #include "core.h"
 #include "editor.h"
@@ -199,7 +201,7 @@ private slots:
     // ── Every id exists, carries data where promised ──
     void testIdsAndData() {
         const QStringList ids = m_ra->ids();
-        QCOMPARE(ids.size(), 47);   // + home.panels.rtti (moved off the Home tab)
+        QCOMPARE(ids.size(), 48);   // + type.asm   // + home.panels.rtti (moved off the Home tab)
         for (const char* id : {"type.hex64", "type.int32", "type.pointer", "type.custom",
                                "add.4", "add.2048", "insert.64", "sel.delete", "sel.swap",
                                "home.panels.rtti", "edit.undo", "edit.redo"})
@@ -246,6 +248,49 @@ private slots:
         m_a.doc->undoStack.undo();
         QCOMPARE(m_a.children().size(), 4);
         QCOMPARE(int(m_a.node(m_a.h[1]).kind), int(NodeKind::Hex64));
+    }
+
+    void testByteDragThenFloatConvertsExactlyTwentyFourBytes() {
+        auto* sci = m_a.editor->scintilla();
+        auto* vp = sci->viewport();
+        auto point = [&](uint64_t id, int byte) {
+            const int line = m_a.lineOf(id);
+            const auto& lm = *m_a.editor->metaForLine(line);
+            const auto span = RcxEditor::valueSpan(lm, 0, lm.effectiveTypeW, lm.effectiveNameW);
+            const long pos = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                (unsigned long)line, (long)(span.start + byte * 3));
+            return QPoint((int)sci->SendScintilla(
+                QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos) + 2,
+                (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos) + 4);
+        };
+        const QPoint anchor = point(m_a.h[2], 7);
+        const QPoint first(2, point(m_a.h[0], 0).y());
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(anchor), QPointF(anchor),
+            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(vp, &press);
+        QMouseEvent move(QEvent::MouseMove, QPointF(first), QPointF(first),
+            Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(vp, &move);
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(first), QPointF(first),
+            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(vp, &release);
+        QCOMPARE(m_a.editor->byteSelectionRange(), (QPair<uint64_t, uint64_t>{0, 24}));
+        const int before = m_a.undoCount();
+        trig("type.float");
+        const auto children = m_a.children();
+        QCOMPARE(children.size(), 7);
+        for (int i = 0; i < 6; ++i) {
+            QCOMPARE(children[i].kind, NodeKind::Float);
+            QCOMPARE(children[i].offset, i * 4);
+        }
+        QCOMPARE(children[6].id, m_a.h[3]);
+        QCOMPARE(children[6].offset, 24);
+        QCOMPARE(children[6].kind, NodeKind::Hex64);
+        QVERIFY(!m_a.editor->hasByteSelection());
+        QCOMPARE(m_a.undoCount(), before + 1);
+        m_a.doc->undoStack.undo();
+        QCOMPARE(m_a.children().size(), 4);
+        for (uint64_t id : m_a.h) QCOMPARE(m_a.node(id).kind, NodeKind::Hex64);
     }
 
     // Single-node retype goes through the quick-type rule: hex → smaller hex pads.

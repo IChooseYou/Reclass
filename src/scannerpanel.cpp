@@ -1,6 +1,7 @@
 #include "scannerpanel.h"
 #include "addressparser.h"
 #include "themes/thememanager.h"
+#include "svgicon.h"          // themedVsIcon — menu icons must be inked
 #include <cstring>
 #include <QElapsedTimer>
 #include <QDebug>
@@ -977,14 +978,21 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         if (idxResolved < 0 || idxResolved >= m_results.size()) return;
         const int row_actual_index = idxResolved;
         QMenu menu;
-        auto* copyAddr = menu.addAction(QIcon(QStringLiteral(":/vsicons/clippy.svg")),
+        // Inked for the theme: a raw :/vsicons SVG keeps VS Code's #C5C5C5,
+        // which washes out beside black item text on a light theme.
+        const QColor mInk = ThemeManager::instance().current().text;
+        const qreal mDpr = devicePixelRatioF();
+        auto menuIcon = [mInk, mDpr](const QString& p) {
+            return rcx::themedVsIcon(p, mInk, 16, mDpr);
+        };
+        auto* copyAddr = menu.addAction(menuIcon(QStringLiteral(":/vsicons/clippy.svg")),
                                         QStringLiteral("Copy Address"));
-        auto* copyVal = menu.addAction(QIcon(QStringLiteral(":/vsicons/clippy.svg")),
+        auto* copyVal = menu.addAction(menuIcon(QStringLiteral(":/vsicons/clippy.svg")),
                                        QStringLiteral("Copy Value"));
         // Rebases the active editor tab so its struct view starts at this
         // result's address. Old label was "Go to Address" — confusingly
         // sounded like navigation, but the underlying action is a rebase.
-        auto* goTo = menu.addAction(QIcon(QStringLiteral(":/vsicons/arrow-right.svg")),
+        auto* goTo = menu.addAction(menuIcon(QStringLiteral(":/vsicons/arrow-right.svg")),
                                     QStringLiteral("Set as Base Address"));
         menu.addSeparator();
         auto* changeAll = menu.addAction(QStringLiteral("Change All Values (%1)").arg(m_results.size()));

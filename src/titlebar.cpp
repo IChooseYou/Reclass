@@ -1,6 +1,5 @@
 #include "titlebar.h"
 #include "paintutil.h"
-#include "ribbon_icons.h"   // tintedSvgIcon: the mirrored `discard` = Redo
 #include "svgicon.h"
 #include "themes/thememanager.h"
 #include <QMenu>
@@ -9,8 +8,14 @@
 #include <QStyle>
 #include <QTimer>
 #include <QWindow>
+#include <QKeyEvent>
+#include <QFocusEvent>
+#include <QVariantAnimation>
+#include <QSignalBlocker>
 
 namespace rcx {
+
+static const QString kAppWordmark = QStringLiteral("RC");
 
 TitleBarWidget::TitleBarWidget(QWidget* parent)
     : QWidget(parent)
@@ -23,7 +28,7 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
     layout->setSpacing(0);
 
     // App name
-    m_appLabel = new QLabel(QStringLiteral("REECLASS"), this);
+    m_appLabel = new QLabel(kAppWordmark, this);
     // The stylesheet owns the left gutter (a QSS-styled QLabel ignores
     // contentsMargins) — two competing margins put the brand 14 px in.
     m_appLabel->setContentsMargins(0, 0, 0, 0);
@@ -56,6 +61,10 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
     layout->addLayout(m_quickLayout);
 
     layout->addStretch();
+    m_themeLayout = new QHBoxLayout;
+    m_themeLayout->setContentsMargins(0, 0, 0, 0);
+    m_themeLayout->setSpacing(0);
+    layout->addLayout(m_themeLayout);
 
     // Chrome buttons. (The workspace show/hide toggle pair that used to sit
     // left of these is gone — the Project dock's close button + the
@@ -116,6 +125,107 @@ private:
     QColor m_colour;
 };
 
+class ThemeSwitch : public QAbstractButton {
+public:
+    explicit ThemeSwitch(QWidget* parent) : QAbstractButton(parent) {
+        setObjectName(QStringLiteral("themeSwitch"));
+        setCheckable(true);
+        setFixedSize(31, 32);
+        setFocusPolicy(Qt::TabFocus);
+        setMouseTracking(true);
+        setAccessibleName(tr("Dark theme"));
+        updateDescription();
+        m_animation.setDuration(100);
+        m_animation.setEasingCurve(QEasingCurve::OutCubic);
+        connect(&m_animation, &QVariantAnimation::valueChanged, this, [this](const QVariant& v) {
+            m_darkMix = v.toReal();
+            update();
+        });
+        connect(this, &QAbstractButton::toggled, this, [this](bool dark) {
+            updateDescription();
+            m_animation.stop();
+            if (isVisible()) {
+                m_animation.setStartValue(m_darkMix);
+                m_animation.setEndValue(dark ? 1.0 : 0.0);
+                m_animation.start();
+            } else {
+                m_darkMix = dark ? 1.0 : 0.0;
+                update();
+            }
+        });
+    }
+
+    void applyTheme(const Theme& theme) {
+        m_theme = theme;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        if (!isEnabled()) p.setOpacity(0.45);
+        if (isEnabled() && (underMouse() || isDown()))
+            p.fillRect(rect(), isDown() ? m_theme.selected : m_theme.hover);
+        if (hasFocus() && m_keyboardFocus)
+            fillDeviceFrameOfRect(p, QRectF((width() - 20) / 2, 6, 20, 20), m_theme.textDim);
+
+        // The icon's 14-unit circle occupies 12 px inside this 14-px cell.
+        const QRect iconRect((width() - 14) / 2, (height() - 14) / 2, 14, 14);
+        const qreal opacity = p.opacity();
+        for (int i = 0; i < 2; ++i) {
+            p.setOpacity(opacity * (i == 0 ? 1.0 - m_darkMix : m_darkMix));
+            themedVsIcon(QStringLiteral(":/vsicons/color-mode.svg"), m_theme.text,
+                14, devicePixelRatioF(), i != 0).paint(&p, iconRect);
+        }
+    }
+
+    bool event(QEvent* e) override {
+        if (e->type() == QEvent::ToolTip) return true;
+        if (e->type() == QEvent::Enter || e->type() == QEvent::Leave) update();
+        return QAbstractButton::event(e);
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* e) override {
+        mousePressEvent(e);
+        e->accept();
+    }
+    void mousePressEvent(QMouseEvent* e) override {
+        m_keyboardFocus = false;
+        update();
+        QAbstractButton::mousePressEvent(e);
+    }
+    void focusInEvent(QFocusEvent* e) override {
+        m_keyboardFocus = e->reason() == Qt::TabFocusReason
+            || e->reason() == Qt::BacktabFocusReason || e->reason() == Qt::ShortcutFocusReason;
+        QAbstractButton::focusInEvent(e);
+        update();
+    }
+    void focusOutEvent(QFocusEvent* e) override {
+        m_keyboardFocus = false;
+        QAbstractButton::focusOutEvent(e);
+        update();
+    }
+    void keyPressEvent(QKeyEvent* e) override {
+        m_keyboardFocus = true;
+        update();
+        if (e->key() == Qt::Key_Left || e->key() == Qt::Key_Right) {
+            setChecked(e->key() == Qt::Key_Right);
+            e->accept();
+            return;
+        }
+        QAbstractButton::keyPressEvent(e);
+    }
+
+private:
+    Theme m_theme;
+    QVariantAnimation m_animation;
+    qreal m_darkMix = 0;
+    bool m_keyboardFocus = false;
+    void updateDescription() {
+        setAccessibleDescription(isChecked() ? tr("Dark theme") : tr("Light theme"));
+    }
+};
+
 }  // namespace
 
 QToolButton* TitleBarWidget::makeChromeButton(const QString& iconPath) {
@@ -154,7 +264,17 @@ void TitleBarWidget::setQuickActions(QAction* undo, QAction* redo) {
     };
     m_btnUndo = makeQuick(undo);
     m_btnRedo = makeQuick(redo);
+    m_themeSwitch = new ThemeSwitch(this);
+    m_themeLayout->addWidget(m_themeSwitch, 0, Qt::AlignVCenter);
+    m_themeLayout->addSpacing(8);
+    connect(m_themeSwitch, &QAbstractButton::toggled,
+            this, &TitleBarWidget::darkThemeRequested);
     applyTheme(m_theme);   // pick up the chrome button sheet
+}
+
+void TitleBarWidget::setDarkTheme(bool enabled) {
+    const QSignalBlocker blocker(this);
+    if (m_themeSwitch) m_themeSwitch->setChecked(enabled);
 }
 
 QToolButton* TitleBarWidget::quickButton(int index) const {
@@ -214,15 +334,12 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     m_btnMin->setStyleSheet(btnStyle);
     m_btnMax->setStyleSheet(btnStyle);
 
-    // Quick access: same flat chrome as the window buttons, icons re-tinted
-    // with the theme like every other chrome SVG. Redo is the discard arrow
-    // mirrored — the same pair the Edit menu shows, so one command reads the
-    // same everywhere (they used to be arrow-left / arrow-right in the menu).
+    // Undo and Redo share a horizontal return arrow, mirrored for Redo.
     if (m_btnUndo || m_btnRedo) {
         const qreal qdpr = devicePixelRatioF();
-        const QIcon undoIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"),
+        const QIcon undoIcon(rcx::themedVsIcon(QStringLiteral(":/vsicons/reply.svg"),
                                                 theme.text, 16, qdpr));
-        const QIcon redoIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"),
+        const QIcon redoIcon(rcx::themedVsIcon(QStringLiteral(":/vsicons/reply.svg"),
                                                 theme.text, 16, qdpr, true));
         if (m_btnUndo) {
             m_btnUndo->setStyleSheet(btnStyle);
@@ -237,6 +354,10 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     // file is the only writer), and a Q_OBJECT in a .cpp would need its own
     // moc include for qobject_cast.
     if (m_quickRule) static_cast<QuickAccessRule*>(m_quickRule)->setColour(theme.border);
+    if (m_themeSwitch) {
+        static_cast<ThemeSwitch*>(m_themeSwitch)->applyTheme(theme);
+        setDarkTheme(theme.isDark());
+    }
 
     // Linux menu tool buttons
     if (m_useToolButtons) {
@@ -281,7 +402,7 @@ void TitleBarWidget::setShowIcon(bool show) {
         setFixedHeight(34);
     } else {
         m_appLabel->setPixmap(QPixmap());
-        m_appLabel->setText(QStringLiteral("REECLASS"));
+        m_appLabel->setText(kAppWordmark);
         m_appLabel->setStyleSheet(appLabelSheet(m_theme.text));
         setFixedHeight(32);
     }

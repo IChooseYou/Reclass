@@ -15,6 +15,7 @@ public:
     const Theme& current() const;
 
     void setCurrent(int index);
+    void setDarkMode(bool dark);
     void addTheme(const Theme& theme);
     void updateTheme(int index, const Theme& theme);
     void removeTheme(int index);

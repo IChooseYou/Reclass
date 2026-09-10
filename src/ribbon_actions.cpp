@@ -189,6 +189,7 @@ void RibbonActions::buildActions() {
     }
     typeAct(QStringLiteral("type.utf8"),  NodeKind::UTF8);
     typeAct(QStringLiteral("type.utf16"), NodeKind::UTF16);
+    typeAct(QStringLiteral("type.asm"),   NodeKind::Asm);
 
     // ── Add / Insert panels ──
     static const int kByteCounts[] = {4, 8, 64, 1024, 2048};

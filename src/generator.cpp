@@ -186,6 +186,13 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
         return ind + QStringLiteral("%1 %2[4];").arg(ctx.cType(NodeKind::Float), name) + oc;
     case NodeKind::Mat4x4:
         return ind + QStringLiteral("%1 %2[4][4];").arg(ctx.cType(NodeKind::Float), name) + oc;
+    case NodeKind::Asm:
+        // Machine code has no C equivalent. Emit the byte WINDOW so every
+        // offset after it in the generated struct stays correct — the default
+        // arm would emit a 1-byte scalar (the table size) and silently shift
+        // the rest of the struct.
+        return ind + QStringLiteral("uint8_t %1[%2];  /* raw code bytes */")
+                         .arg(name).arg(node.byteSize()) + oc;
     case NodeKind::UTF8:
         return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF8), name).arg(node.strLen) + oc;
     case NodeKind::UTF16:
@@ -557,6 +564,9 @@ static QString emitRustField(GenContext& ctx, const Node& node, int depth, int b
         return ind + QStringLiteral("pub %1: [f32; 4],").arg(name) + oc;
     case NodeKind::Mat4x4:
         return ind + QStringLiteral("pub %1: [[f32; 4]; 4],").arg(name) + oc;
+    case NodeKind::Asm:
+        return ind + QStringLiteral("pub %1: [u8; %2],  // raw code bytes")
+                         .arg(name).arg(node.byteSize()) + oc;
     case NodeKind::UTF8:
         return ind + QStringLiteral("pub %1: [u8; %2],").arg(name).arg(node.strLen) + oc;
     case NodeKind::UTF16:
@@ -968,6 +978,11 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
                 ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[16];")
                     .arg(QString::number(absOffset, 16).toUpper(), name) + oc + QStringLiteral("\n");
                 break;
+            case NodeKind::Asm:
+                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed byte %2[%3];  // raw code bytes")
+                    .arg(QString::number(absOffset, 16).toUpper(), name)
+                    .arg(child.byteSize()) + oc + QStringLiteral("\n");
+                break;
             case NodeKind::UTF8:
                 ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed byte %2[%3];")
                     .arg(QString::number(absOffset, 16).toUpper(), name)
@@ -1223,6 +1238,10 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
             case NodeKind::Mat4x4:
                 ctx.output += ind + QStringLiteral("(\"%1\", (ctypes.c_float * 4) * 4),").arg(name)
                     + oc + QStringLiteral("\n");
+                break;
+            case NodeKind::Asm:
+                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_uint8 * %2),  # raw code bytes").arg(name)
+                    .arg(child.byteSize()) + oc + QStringLiteral("\n");
                 break;
             case NodeKind::UTF8:
                 ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_char * %2),").arg(name)

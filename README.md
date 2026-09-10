@@ -12,6 +12,8 @@
 
 </div>
 
+![Current editor](docs/README_PIC7.png)
+
 ![The main editor, annotated](docs/README_ANNOTATED.png)
 
 ![Base address tooltip with expression cheat sheet](docs/README_PIC5.png)

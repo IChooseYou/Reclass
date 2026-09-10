@@ -22,18 +22,19 @@ namespace rcx {
 // 150-200% displays and reads visibly blurry, so we render at device pixels and
 // stamp setDevicePixelRatio.
 //
-// Results are cached by (path, tint, size, dpr). Callers re-tint on every theme
+// Results are cached by (path, tint, size, dpr, mirror). Callers re-tint on every theme
 // apply/refresh and the :/vsicons resources are immutable at runtime, so every
 // input that affects the pixels is in the key and the cache never needs
 // invalidation. Shared by titlebar.cpp window controls and dock_tab_buttons.h
 // tab close buttons (previously two divergent copies — the titlebar copy had
 // lost the dpr handling, which is the blur bug this consolidation prevents).
 inline QIcon themedVsIcon(const QString& path, const QColor& tint,
-                          int logicalSize, qreal dpr) {
+                          int logicalSize, qreal dpr, bool mirrorH = false) {
     const qreal s = dpr > 0 ? dpr : 1.0;
     const QString key = path + QLatin1Char('|') + tint.name()
                       + QLatin1Char('|') + QString::number(logicalSize)
-                      + QLatin1Char('|') + QString::number(s, 'f', 3);
+                      + QLatin1Char('|') + QString::number(s, 'f', 3)
+                      + (mirrorH ? QStringLiteral("|mirrored") : QString());
     static QHash<QString, QIcon> cache;
     auto it = cache.constFind(key);
     if (it != cache.constEnd()) return it.value();
@@ -63,6 +64,10 @@ inline QIcon themedVsIcon(const QString& path, const QColor& tint,
     p.setRenderHint(QPainter::SmoothPixmapTransform, true);
     r.render(&p, QRectF(0, 0, logicalSize, logicalSize));
     p.end();
+    if (mirrorH) {
+        pm = QPixmap::fromImage(pm.toImage().mirrored(true, false));
+        pm.setDevicePixelRatio(s);
+    }
     QIcon icon(pm);
     cache.insert(key, icon);
     return icon;
