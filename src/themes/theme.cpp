@@ -74,12 +74,23 @@ Theme Theme::fromJson(const QJsonObject& o) {
                       qBound(0, a.blue()  + int((b.blue()  - a.blue())  * f), 255));
     };
     QColor dim = t.textDim.isValid() ? t.textDim : QColor(133, 133, 133);
+    // The ramp has to sit against the PAPER it is drawn on. One amber for
+    // every theme meant the value that glows on near-black washes out to a
+    // pale orange on white — unreadable on the light theme, and louder than
+    // the data it annotates on the dark ones. So: on dark paper a muted amber
+    // (enough to catch the eye with dozens of rows moving, not enough to
+    // glare); on light paper a deep amber, darker than the paper, which reads
+    // as ink rather than as a highlighter.
+    const bool darkPaper = !t.background.isValid() || t.background.lightnessF() < 0.5;
     if (!t.indHeatCold.isValid())
-        t.indHeatCold = lerpRgb(dim, QColor(220, 180, 120), 0.35);
+        t.indHeatCold = darkPaper ? lerpRgb(dim, QColor(198, 160, 110), 0.35)
+                                  : lerpRgb(dim, QColor(166, 96, 16), 0.55);
     if (!t.indHeatWarm.isValid())
-        t.indHeatWarm = QColor(225, 170, 90);   // clear amber
+        t.indHeatWarm = darkPaper ? QColor(205, 152, 82)    // clear amber
+                                  : QColor(166, 96, 16);    // deep amber
     if (!t.indHeatHot.isValid())
-        t.indHeatHot = QColor(232, 165, 92);    // saturated amber, not red
+        t.indHeatHot = darkPaper ? QColor(214, 141, 66)     // saturated, not red
+                                 : QColor(140, 62, 8);
 
     if (!t.focusGlow.isValid())
         t.focusGlow = t.borderFocused.isValid() ? t.borderFocused : QColor("#4fc3f7");

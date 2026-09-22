@@ -519,6 +519,11 @@ ScanEngine::ScanEngine(QObject* parent)
     qRegisterMetaType<QVector<ScanResult>>("QVector<rcx::ScanResult>");
 }
 
+ScanEngine::~ScanEngine() {
+    abort();
+    if (m_watcher) m_watcher->waitForFinished();
+}
+
 bool ScanEngine::isRunning() const {
     return m_watcher && m_watcher->isRunning();
 }

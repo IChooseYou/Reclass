@@ -1464,17 +1464,18 @@ public:
     QString tabLabel() const override { return QStringLiteral("Previous Values"); }
     bool eligible(const LineMeta& lm, const Node& node,
                   const HoverContext& ctx) const override {
-        if (lm.lineKind != LineKind::Field) return false;
+        // A matrix's rows 1–3 are continuation lines with a history each.
+        if (lm.lineKind != LineKind::Field && lm.lineKind != LineKind::Continuation) return false;
         if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) return false;
         if (isFuncPtr(node.kind)) return false;
         if (lm.heatLevel <= 0 || lm.nodeId == 0 || !ctx.history) return false;
-        auto it = ctx.history->find(lm.nodeId);
+        auto it = ctx.history->find(valueHistoryKey(lm));
         return it != ctx.history->end() && it->uniqueCount() > 1;
     }
     QWidget* widget(const LineMeta& lm, const Node& /*node*/,
                     const HoverContext& ctx, QWidget* parent) override {
         if (!ctx.history) return nullptr;
-        auto it = ctx.history->find(lm.nodeId);
+        auto it = ctx.history->find(valueHistoryKey(lm));
         if (it == ctx.history->end()) return nullptr;
         return buildValueHistoryBody(*it, ctx.editorFont, *ctx.theme, parent,
                                      ctx.editMode, ctx.onValueSet);
@@ -1601,8 +1602,8 @@ public:
 
         // Two-pass build. Pass 1 collects up to kMaxLines candidate
         // rows (skipping continuation lines + blanks), records each
-        // row's NodeKind, and pre-strips the leading whitespace + tree
-        // connectors. Pass 2 detects whether every row shares the same
+        // row's NodeKind, and pre-strips the leading whitespace + fold
+        // arrows. Pass 2 detects whether every row shares the same
         // NodeKind — vtables and similar homogeneous structs do — and
         // if so, drops the now-redundant per-row type column and
         // promotes it to a single header line. Heterogeneous structs
@@ -1619,10 +1620,7 @@ public:
             int j = 0;
             while (j < trimmed.size()) {
                 QChar c = trimmed[j];
-                if (c.isSpace()
-                    || c == QChar(u'├') || c == QChar(u'└')
-                    || c == QChar(u'│') || c == QChar(u'▸')
-                    || c == QChar(u'▾')) {
+                if (c.isSpace()) {
                     ++j;
                 } else {
                     break;
@@ -1744,12 +1742,10 @@ static constexpr int IND_CHIP_PRESSED = 24; // Stronger pill overlay while the m
                                             // (it used to be darker, which made a press read as
                                             // the chip going dead), so pressed reads as a
                                             // firmer version of hover, not an inversion.
-static constexpr int IND_TREE_CONN    = 25; // Tree-connector glyphs (├ │ └) tinted
-                                            // theme.textMuted. Connectors are structure, not
-                                            // data: one step under the type column and one
-                                            // above the braces on the document tone ladder, so
-                                            // the hierarchy stays legible without competing
-                                            // with the actual type/name/value content.
+                                            // Slot 25 is retired: it tinted the old box-drawing
+                                            // tree glyphs. Tree lines are drawn now
+                                            // (paintTreeGuides); tests mirror slot numbers, so
+                                            // the others keep theirs.
 static constexpr int IND_EDIT_BOUNDS  = 27; // STRAIGHTBOX background fill on the byte ranges
                                             // covered by an active byte-range inline edit. Tints
                                             // the editable digits with a faded indHoverSpan so the
@@ -1783,6 +1779,10 @@ static constexpr int IND_UNREADABLE   = 28; // Strike-through (INDIC_STRIKE) in 
                                             // strike marks it as "not real data" without flooding
                                             // the whole row red. Set from LineMeta::unreadable;
                                             // painted by applyUnreadableHighlight.
+static constexpr int IND_NOT_CAPTURED = 12; // INDIC_TEXTFORE in theme.textFaint over the value span
+                                            // of a row shown from the timeline's past whose bytes
+                                            // nobody was watching then. Distinct from the strike:
+                                            // a failed read is an error, "not captured" is not.
 
 static QString g_fontName = "JetBrains Mono";
 
@@ -1791,6 +1791,32 @@ static QFont editorFont() {
     f.setFixedPitch(true);
     return f;
 }
+
+// The editor's Scintilla, with the tree lines painted over its text in the
+// same paint pass. QsciScintillaQt::paintEvent paints unbuffered through a
+// local painter and draws nothing after it returns, and every scroll is a full
+// repaint (never a blit), so lines painted here can't lag, smear or flicker.
+//
+// The frame is read AFTER the base paint: Scintilla refreshes stale styles at
+// the start of its paint (a slider zoom leaves them stale), which can move the
+// first visible line — reading before would draw the lines for rows it didn't.
+// Its painter is gone by then, and measuring text opens no painter.
+class RcxSciView final : public QsciScintilla {
+public:
+    explicit RcxSciView(RcxEditor* owner) : QsciScintilla(owner), m_owner(owner) {}
+
+protected:
+    void paintEvent(QPaintEvent* e) override {
+        QsciScintilla::paintEvent(e);
+        m_owner->snapshotTreeGuideFrame();
+        if (!m_owner->m_guideFrame.valid) return;
+        QPainter p(viewport());
+        m_owner->paintTreeGuides(p);
+    }
+
+private:
+    RcxEditor* m_owner;
+};
 
 RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     PROFILE_SCOPE("RcxEditor::ctor");
@@ -1858,11 +1884,13 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         cb.onUp          = [this] { emit navUpRequested(); };
         cb.onHistoryJump = [this](int i) { emit historyJumpRequested(i); };
         cb.onRefresh     = [this] { emit refreshRequested(); };
+        cb.onTimelineBackToLive = [this] { emit timelineBackToLiveRequested(); };
+        cb.onTimelineRecord = [this] { emit timelineRecordRequested(); };
         m_addressBar->setCallbacks(std::move(cb));
     }
     layout->addWidget(m_addressBar);
 
-    m_sci = new QsciScintilla(this);
+    m_sci = new RcxSciView(this);
     layout->addWidget(m_sci);
 
     // Find bar (hidden by default, shown with Ctrl+F)
@@ -2174,7 +2202,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     host->setOnActiveChanged([](const LineMeta& lm, QString id) {
         const KindMeta* km = kindMeta(lm.nodeKind);
         if (!km) return;
-        QSettings("REECLASS","REECLASS").setValue(
+        QSettings("RC","RC").setValue(
             QStringLiteral("hoverPreview/kind/") + QString::fromLatin1(km->name),
             id);
     });
@@ -2219,7 +2247,7 @@ void RcxEditor::setupScintilla() {
     // key "compactRowSpacing" (View menu toggle in a follow-up) — defaults
     // to false / standard spacing.
     {
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         const bool compact = s.value("compactRowSpacing", false).toBool();
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETEXTRAASCENT,
                              (long)(compact ? 1 : 4));
@@ -2263,12 +2291,8 @@ void RcxEditor::setupScintilla() {
     // failed read reads as "not real data" rather than a silent zero-fill.
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_UNREADABLE, 4 /*INDIC_STRIKE*/);
-
-    // Tree connector dim — same INDIC_TEXTFORE at theme.textMuted: the
-    // connectors are structure, so they sit one step below the type column
-    // (textDim) and one above the braces (textFaint).
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
-                         IND_TREE_CONN, 17 /*INDIC_TEXTFORE*/);
+                         IND_NOT_CAPTURED, 17 /*INDIC_TEXTFORE*/);
 
     // Hover span indicator — link-like text
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
@@ -2399,11 +2423,9 @@ void RcxEditor::setupMargins() {
 }
 
 void RcxEditor::setupFolding() {
-    // Hide fold margin (fold indicators are text-based now)
+    // Hide fold margin: the fold boxes are drawn on the tree (treeguides.h),
+    // so no Scintilla markers are needed for fold state.
     m_sci->setMarginWidth(2, 0);
-
-    // Fold indicators are now text in the line content (kFoldCol prefix),
-    // so no Scintilla markers needed for fold state.
 
     // Keep Scintilla fold markers invisible (fold levels still used for click detection)
     for (int i = 25; i <= 31; i++)
@@ -2513,11 +2535,23 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_UNREADABLE, theme.markerError);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_NOT_CAPTURED, theme.textFaint);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HEX_TYPE, theme.textDim);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_ZERO, theme.textMuted);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_TREE_CONN, theme.textMuted);
+    // Drawn tree lines: structure, one step under the type column (textDim)
+    // and one above the braces (textFaint). Opaque — a partial repaint would
+    // blend a translucent line again over pixels Scintilla didn't repaint.
+    m_treeGuideColor = theme.textMuted.alpha() == 255
+        ? theme.textMuted
+        : mixColor(editorBg, QColor(theme.textMuted.rgb()), theme.textMuted.alphaF());
+    // Tree columns sit half way between the paper and the tree lines: always
+    // a step quieter than the structure, on every theme.
+    m_treeColumnColor = mixColor(editorBg, m_treeGuideColor, 0.5);
+    // A fold box under the pointer steps up from the lines' tone to the text's.
+    m_foldBoxHoverColor = QColor(theme.text.rgb());
+    m_sci->viewport()->update();
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HOVER_SPAN, theme.indHoverSpan);
     // Heatmap colors
@@ -2663,6 +2697,16 @@ void RcxEditor::applyTheme(const Theme& theme) {
     }
 }
 
+// The rows the focus glow marks: the first place the node is shown (the row
+// scrollNodeToTop brings up) and its value's extra rows — one instance.
+static QVector<int> focusGlowLines(const QVector<LineMeta>& meta, const QVector<int>& nodeLines) {
+    for (int ln : nodeLines)
+        if (ln >= 0 && ln < meta.size() && meta[ln].lineKind != LineKind::Footer
+            && !isSyntheticLine(meta[ln]))
+            return instanceBlock(meta, ln);
+    return {};
+}
+
 void RcxEditor::applyDocument(const ComposeResult& result) {
     PROFILE_SCOPE("applyDocument");
     // Silently deactivate inline edit (no signal — refresh is already happening)
@@ -2679,6 +2723,25 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
 
     m_meta = result.meta;
     m_layout = result.layout;
+
+    // Drawn tree lines follow the rows, not the text: a sibling appended
+    // below turns a └ into a ├ without changing a character, which the patch
+    // path would never repaint. Rebuild, and repaint the viewport whenever
+    // the lines changed (update() is deferred, so the new text is in by then).
+    // Tree columns likewise: a column moves when a width or an overflow does.
+    // And the fold boxes: a collapse flips a [−] to a [+] on the same row.
+    {
+        PROFILE_SCOPE("applyDocument.treeGuides");
+        TreeGuides guides = m_layout.treeLines ? buildTreeGuides(m_meta) : TreeGuides();
+        TreeColumns columns = m_treeColumnsOn ? buildTreeColumns(m_meta, result.text) : TreeColumns();
+        FoldBoxes boxes = buildFoldBoxes(m_meta);
+        if (guides != m_treeGuides || columns != m_treeColumns || boxes != m_foldBoxes) {
+            m_treeGuides = std::move(guides);
+            m_treeColumns = std::move(columns);
+            m_foldBoxes = std::move(boxes);
+            m_sci->viewport()->update();
+        }
+    }
 
     // The deferred single-click (set on press at the "already-selected" branch,
     // fired on release) caches a LINE index. A refresh/re-layout between press
@@ -2963,6 +3026,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                 && a.effectiveTypeW == b.effectiveTypeW
                 && a.effectiveNameW == b.effectiveNameW
                 && a.unreadable == b.unreadable
+                && a.notCaptured == b.notCaptured
                 && a.pointerTargetName == b.pointerTargetName;
         };
         int first = 0;
@@ -2997,8 +3061,8 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                         IND_LOCAL_OFF, IND_HEAT_WARM, IND_HEAT_HOT,
                         IND_TYPE_HINT, IND_RTTI_HINT, IND_CHIP_BG,
                         IND_CHIP_HOVER, IND_CHIP_PRESSED,
-                        IND_TREE_CONN, IND_BYTE_SEL, IND_EDIT_BOUNDS,
-                        IND_UNREADABLE}) {
+                        IND_BYTE_SEL, IND_EDIT_BOUNDS,
+                        IND_UNREADABLE, IND_NOT_CAPTURED}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
             m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
         }
@@ -3135,10 +3199,8 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     if (m_focusNodeId != 0) {
         auto fit = m_nodeLineIndex.constFind(m_focusNodeId);
         if (fit != m_nodeLineIndex.constEnd()) {
-            for (int ln : *fit) {
-                if (ln < m_meta.size() && m_meta[ln].lineKind != LineKind::Footer)
-                    m_sci->markerAdd(ln, M_FOCUS);
-            }
+            for (int ln : focusGlowLines(m_meta, *fit))
+                m_sci->markerAdd(ln, M_FOCUS);
         } else {
             // Node was removed — clear focus
             clearFocusNode();
@@ -3321,9 +3383,8 @@ void RcxEditor::reformatMargins(int firstLine, int lastLine) {
     }
 
     // ── Pass 2: inline local offsets in the text indent area ──
-    // Skip when tree lines are active — the compose step already placed
-    // Unicode tree connectors in the indent area; overwriting with spaces
-    // or offsets would destroy them.
+    // Skip when tree lines are on: they are drawn over the indent
+    // (paintTreeGuides), and an offset written there would sit under them.
     if (m_layout.treeLines)
         return;
     m_sci->setReadOnly(false);
@@ -3457,10 +3518,6 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta,
     int end = full ? meta.size() : qMin(lastLine + 1, (int)meta.size());
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HEX_DIM);
     for (int i = begin; i < end; i++) {
-        // Furniture: fold arrows (▸/▾) on fold head lines
-        if (meta[i].foldHead && meta[i].lineKind != LineKind::CommandRow)
-            fillIndicatorCols(IND_HEX_DIM, i, 0, kFoldCol);
-
         // Furniture: struct/array braces — the whole footer line ("};  +1 …
         // // 0x80 (128)") minus the pill glyphs, and the trailing "{" on
         // headers. The pills are affordances, not furniture: they get the
@@ -3578,26 +3635,6 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta,
         if (runStart >= 0)
             fillIndicatorCols(IND_ZERO, i, runStart, vsEnd);
     }
-
-    // Tree-connector tint — apply IND_TREE_CONN (theme.textMuted; structure
-    // sits one step under the type column, one above the braces) ONLY
-    // to the row's own innermost connector glyph (├ / └ in the last
-    // kTreeIndent chars of the indent region). Ancestor │ pipes from
-    // outer levels stay at default theme.text. The indent region is
-    // [prefixWidth, prefixWidth + depth*kTreeIndent); each level is
-    // kTreeIndent chars wide, so the innermost connector occupies the
-    // trailing kTreeIndent chars — we paint only those. CommandRow +
-    // flush-left footer lines have depth 0 here so they're skipped.
-    for (int i = begin; i < end; i++) {
-        const LineMeta& lm = meta[i];
-        if (lm.depth <= 0) continue;
-        if (lm.lineKind == LineKind::CommandRow) continue;
-        LineGeometry g = LineGeometry::forLine(lm);
-        const int colA = g.prefixWidth + g.indentWidth - kTreeIndent;
-        const int colB = g.prefixWidth + g.indentWidth;
-        if (colB > colA)
-            fillIndicatorCols(IND_TREE_CONN, i, colA, colB);
-    }
 }
 
 void RcxEditor::applyUnreadableHighlight(const QVector<LineMeta>& meta,
@@ -3613,21 +3650,24 @@ void RcxEditor::applyUnreadableHighlight(const QVector<LineMeta>& meta,
     const int n = qMin(meta.size(), lineTexts.size());
     for (int i = 0; i < n; i++) {
         const LineMeta& lm = meta[i];
-        if (!lm.unreadable) continue;
+        if (!lm.unreadable && !lm.notCaptured) continue;
         ColumnSpan vs = valueSpan(lm, lineTexts[i].size(),
                                   lm.effectiveTypeW, lm.effectiveNameW);
         if (vs.valid && vs.end > vs.start)
-            fillIndicatorCols(IND_UNREADABLE, i, vs.start, vs.end);
+            fillIndicatorCols(lm.notCaptured ? IND_NOT_CAPTURED : IND_UNREADABLE, i, vs.start, vs.end);
     }
 }
 
-void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
+void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds,
+                                      const QHash<uint64_t, SelectionAnchor>& anchors) {
     PROFILE_SCOPE("applySelectionOverlay");
     // Skip when nothing changed since the last call AND the previous
     // applyDocument took the patch path (so markers outside the patched
     // range are still intact). Saves ~22 µs/refresh during rapid editing
     // when selection holds steady. Full-replace path always invalidates.
-    const bool selChanged = (selIds != m_currentSelIds);
+    // Clicking another place the same node is shown moves the anchor only:
+    // that is a selection change too.
+    const bool selChanged = (selIds != m_currentSelIds) || (anchors != m_currentSelAnchors);
     // A genuine selection change cancels the one-shot "don't reopen the type
     // picker" guard. The same-selection recompose after a type change keeps
     // selIds identical (selChanged == false), so the guard survives until the
@@ -3650,6 +3690,7 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
         return;
     }
     m_currentSelIds = selIds;
+    m_currentSelAnchors = anchors;
 
     // Clear all editable indicators, then repaint for selected lines only
     long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
@@ -3682,53 +3723,37 @@ void RcxEditor::applySelectionOverlay(const QSet<uint64_t>& selIds) {
 }
 
 // Rebuild the row-selection markers (M_SELECTED band + M_ACCENT margin bar)
-// and the editable-span underlines for every line that belongs to a
-// selected id. Always delete-all + re-add: Scintilla keeps one HANDLE per
-// markerAdd and SCI_MARKERDELETE removes a single handle, so adding onto a
-// line that already carries the marker would leave a duplicate behind that
+// and the editable-span underlines for the rows of every selected id. Always
+// delete-all + re-add: Scintilla keeps one HANDLE per markerAdd and
+// SCI_MARKERDELETE removes a single handle, so adding onto a line that
+// already carries the marker would leave a duplicate behind that
 // validateEditLive's lone markerDelete can't remove.
+//
+// One instance per id (row_instances.h): a node shown in several places is
+// marked only where it was selected — its anchor — or, under a byte
+// selection, on the rows the bytes cover; without either, where it is first
+// shown. selIdForLine decides which rows are the id's (footer, array element
+// and member rows carry their own ids), the one rule the click uses too.
 void RcxEditor::paintSelectionMarkers(const QSet<uint64_t>& selIds) {
     m_sci->markerDeleteAll(M_SELECTED);
     m_sci->markerDeleteAll(M_ACCENT);
 
-    // Use index: iterate selected IDs, look up their lines
+    const bool byBytes = m_byteSel.has_value();
     for (uint64_t selId : selIds) {
-        // Classify by PRIORITY via selKindOf (the single source of truth) —
-        // NOT independent flag-bit tests: a high array index (>= 2^19) sets
-        // bit 61 (= kMemberBit), so `selId & kMemberBit` would misread it as
-        // a member and the member branch below would skip painting the row.
-        SelKind sk = selKindOf(selId);
-        bool isFooterSel = sk == SelKind::Footer;
-        bool isArrayElemSel = sk == SelKind::ArrayElem;
-        bool isMemberSel = sk == SelKind::Member;
-        int arrayElemIdx = isArrayElemSel ? arrayElemIdxFromSelId(selId) : -1;
-        int memberSubLine = isMemberSel ? memberSubFromSelId(selId) : -1;
-        uint64_t nodeId = baseNodeIdFromSelId(selId);
-        auto it = m_nodeLineIndex.constFind(nodeId);
+        auto it = m_nodeLineIndex.constFind(baseNodeIdFromSelId(selId));
         if (it == m_nodeLineIndex.constEnd()) continue;
-        for (int ln : *it) {
-            if (isSyntheticLine(m_meta[ln])) continue;
-            bool isFooter = (m_meta[ln].lineKind == LineKind::Footer);
-            // Match selection type to line type
-            if (isFooterSel && !isFooter) continue;
-            if (!isFooterSel && isFooter) continue;
-            // Array element: match by element index
-            if (isArrayElemSel) {
-                if (!m_meta[ln].isArrayElement || m_meta[ln].arrayElementIdx != arrayElemIdx)
-                    continue;
-            } else if (m_meta[ln].isArrayElement) {
-                continue;
-            }
-            // Member line: match by subLine index
-            if (isMemberSel) {
-                if (!m_meta[ln].isMemberLine || m_meta[ln].subLine != memberSubLine)
-                    continue;
-            } else if (m_meta[ln].isMemberLine) {
-                continue;
-            }
+        QVector<int> lines;
+        if (byBytes)
+            lines = selectionLines(m_meta, *it, selId, nullptr, &m_byteCoveredLines);
+        if (lines.isEmpty()) {
+            const auto at = m_currentSelAnchors.constFind(selId);
+            lines = selectionLines(m_meta, *it, selId,
+                                   at != m_currentSelAnchors.constEnd() ? &*at : nullptr);
+        }
+        for (int ln : lines) {
             m_sci->markerAdd(ln, M_SELECTED);
             m_sci->markerAdd(ln, M_ACCENT);
-            if (!isFooter)
+            if (m_meta[ln].lineKind != LineKind::Footer)
                 paintEditableSpans(ln);
         }
     }
@@ -3744,9 +3769,11 @@ void RcxEditor::setHoverEffects(bool on) {
         m_prevHoveredNodeId = 0;
         m_prevHoveredLine = -1;
         m_sci->markerDeleteAll(M_HOVER);
+        m_hoverMarkedLines.clear();
         for (int ln : m_hoverSpanLines)
             clearIndicatorLine(IND_HOVER_SPAN, ln);
         m_hoverSpanLines.clear();
+        setHoverFoldLine(-1);
         dismissAllPopups();
         setViewportCursor(Qt::ArrowCursor);
     }
@@ -3812,77 +3839,31 @@ void RcxEditor::applyChipButtonOverlay() {
 
 // ── Byte selection (hex preview rows) ──
 //
-// Both representations address the same bytes. Drags clamp against their
-// original column and scope, including when they leave the byte cells.
+// byteAddrAt returns the absolute address of the individual hex byte under
+// (line, col) in a hex preview row's VALUE column. The hex value column is
+// "XX XX XX..." — 2 hex digits + a 1-char gap per byte — so (col - vs.start)/3
+// is the byte index. Returns nullopt for anything else (incl. the ASCII
+// preview column), so dragging over the ASCII column falls through to normal
+// node/row selection rather than per-byte selection.
 std::optional<uint64_t> RcxEditor::byteAddrAt(int line, int col) const {
     if (line < 0 || line >= m_meta.size()) return std::nullopt;
     const LineMeta& lm = m_meta[line];
     if (lm.lineKind != LineKind::Field) return std::nullopt;
     if (!isHexPreview(lm.nodeKind)) return std::nullopt;
-    int sz = sizeForKind(lm.nodeKind);
-    ColumnSpan ns = nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
-    if (ns.valid && col >= ns.start && col < ns.start + sz)
-        return lm.offsetAddr + static_cast<uint64_t>(col - ns.start);
     QString lineText = getLineText(m_sci, line);
     ColumnSpan vs = valueSpan(lm, lineText.size(),
                               lm.effectiveTypeW, lm.effectiveNameW);
     if (!vs.valid || col < vs.start) return std::nullopt;
-    if (col >= vs.start + sz * 3 - 1) return std::nullopt;
+    int sz = sizeForKind(lm.nodeKind);
     int byteIdx = (col - vs.start) / 3;
     if (byteIdx < 0 || byteIdx >= sz) return std::nullopt;
     return lm.offsetAddr + static_cast<uint64_t>(byteIdx);
 }
 
-std::optional<uint64_t> RcxEditor::byteDragAddrAt(const QPoint& pos) const {
-    if (!m_byteSelAnchor || m_byteDragLine < 0 || m_byteDragLine >= m_meta.size())
-        return std::nullopt;
-    const auto& anchor = m_meta[m_byteDragLine];
-    if (anchor.lineKind != LineKind::Field || !isHexPreview(anchor.nodeKind)
-        || *m_byteSelAnchor < anchor.offsetAddr
-        || *m_byteSelAnchor - anchor.offsetAddr >= uint64_t(sizeForKind(anchor.nodeKind)))
-        return std::nullopt;
-
-    const auto hit = hitTest(pos);
-    const int line = hit.line;
-    // Stay inside the contiguous byte run containing the press. Headers,
-    // typed fields and pointer expansions must not bridge unrelated memory.
-    int row = m_byteDragLine;
-    const int dir = line < row ? -1 : 1;
-    while (row != line) {
-        const int next = row + dir;
-        if (next < 0 || next >= m_meta.size()) break;
-        const auto& a = m_meta[qMin(row, next)];
-        const auto& b = m_meta[qMax(row, next)];
-        const auto& candidate = m_meta[next];
-        if (candidate.lineKind != LineKind::Field || !isHexPreview(candidate.nodeKind)
-            || candidate.depth != anchor.depth || candidate.ptrBase != anchor.ptrBase
-            || candidate.parentAddr != anchor.parentAddr
-            || a.offsetAddr + uint64_t(sizeForKind(a.nodeKind)) != b.offsetAddr
-            || !m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEVISIBLE, (unsigned long)next))
-            break;
-        row = next;
-    }
-    const auto& lm = m_meta[row];
-    const int sz = sizeForKind(lm.nodeKind);
-    if (row != line)
-        return lm.offsetAddr + (dir < 0 ? 0 : uint64_t(sz - 1));
-    ColumnSpan span = m_byteDragAscii
-        ? nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW)
-        : valueSpan(lm, 0, lm.effectiveTypeW, lm.effectiveNameW);
-    const int stride = m_byteDragAscii ? 1 : 3;
-    const long start = posFromCol(m_sci, row, span.start);
-    const long end = posFromCol(m_sci, row, span.start + sz * stride - (stride == 3 ? 1 : 0));
-    const int left = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, start);
-    const int right = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, end);
-    const int index = pos.x() <= left ? 0 : pos.x() >= right ? sz - 1
-        : qBound(0, (hit.col - span.start) / stride, sz - 1);
-    return lm.offsetAddr + uint64_t(index);
-}
-
 void RcxEditor::applyByteSelectionOverlay() {
     // Paint IND_BYTE_SEL (TEXTFORE) across the digits of every selected byte on
-    // every hex preview row that overlaps m_byteSel. Byte selection is
-    // shared by the hex and ASCII columns.
+    // every hex preview row that overlaps m_byteSel. Byte selection is a
+    // hex-column-only feature; the ASCII preview column is not selectable.
     long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)IND_BYTE_SEL);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
@@ -3891,6 +3872,7 @@ void RcxEditor::applyByteSelectionOverlay() {
     // overlaps; mirrored into the controller's row selection below so the
     // grey M_SELECTED highlight tracks the byte selection across all rows.
     QSet<uint64_t> covered;
+    QVector<int> coveredLines;
     if (m_byteSel.has_value()) {
         const uint64_t selLo = m_byteSel->first;
         const uint64_t selHi = m_byteSel->second;
@@ -3903,6 +3885,7 @@ void RcxEditor::applyByteSelectionOverlay() {
             uint64_t lineHi = lineLo + static_cast<uint64_t>(sz);
             if (selHi <= lineLo || selLo >= lineHi) continue;  // no overlap
             covered.insert(selIdForLine(lm));
+            coveredLines.append(i);
             QString lineText = getLineText(m_sci, i);
             ColumnSpan vs = valueSpan(lm, lineText.size(),
                                       lm.effectiveTypeW, lm.effectiveNameW);
@@ -3915,9 +3898,6 @@ void RcxEditor::applyByteSelectionOverlay() {
             // pixels, so the gaps read as contiguous.
             int hiCol = vs.start + (lastByte - 1) * 3 + 2;
             fillIndicatorCols(IND_BYTE_SEL, i, vs.start + firstByte * 3, hiCol);
-            ColumnSpan ns = nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
-            if (ns.valid)
-                fillIndicatorCols(IND_BYTE_SEL, i, ns.start + firstByte, ns.start + lastByte);
         }
     }
 
@@ -3925,6 +3905,7 @@ void RcxEditor::applyByteSelectionOverlay() {
     // in its refresh tail (byteCoveredRows()) and reconcile m_selIds — kept
     // current every call, even when the emit below is deduped/suppressed.
     m_byteCoveredRows = covered;
+    m_byteCoveredLines = coveredLines;
 
     // Mirror the covered rows into the controller's row selection so the
     // grey M_SELECTED highlight tracks the byte selection. De-duped (only
@@ -4390,61 +4371,28 @@ void RcxEditor::applyHoverHighlight() {
     if (prevId == m_hoveredNodeId && prevLine == m_hoveredLine
         && m_hoveredNodeId != 0) return;
 
-    // Remove old hover markers
-    if (prevId != 0) {
-        // Check if old hovered line was a single-line highlight (footer or array element)
-        bool prevSingleLine = (prevLine >= 0 && prevLine < m_meta.size() &&
-            (m_meta[prevLine].lineKind == LineKind::Footer || m_meta[prevLine].isArrayElement
-             || m_meta[prevLine].isMemberLine));
-        if (prevSingleLine) {
-            m_sci->markerDelete(prevLine, M_HOVER);
-        } else {
-            auto it = m_nodeLineIndex.constFind(prevId);
-            if (it != m_nodeLineIndex.constEnd()) {
-                for (int ln : *it)
-                    m_sci->markerDelete(ln, M_HOVER);
-            }
-        }
-    }
+    // Take the band off the rows it was on.
+    for (int ln : std::as_const(m_hoverMarkedLines))
+        m_sci->markerDelete(ln, M_HOVER);
+    m_hoverMarkedLines.clear();
 
     if (m_editState.active) return;
     if (!m_hoverInside) return;
     if (m_hoveredNodeId == 0) return;
+    if (m_hoveredLine < 0 || m_hoveredLine >= m_meta.size()) return;
 
-    // Footer, array elements, and member lines highlight only the specific line
-    bool hoveringFooter = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size() &&
-                           m_meta[m_hoveredLine].lineKind == LineKind::Footer);
-    bool hoveringArrayElem = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size() &&
-                              m_meta[m_hoveredLine].isArrayElement);
-    bool hoveringMember = (m_hoveredLine >= 0 && m_hoveredLine < m_meta.size() &&
-                           m_meta[m_hoveredLine].isMemberLine);
-
-    // Check if the hovered item is already selected (using appropriate ID)
-    uint64_t checkId;
-    if (hoveringFooter)
-        checkId = m_hoveredNodeId | kFooterIdBit;
-    else if (hoveringArrayElem)
-        checkId = makeArrayElemSelId(m_hoveredNodeId, m_meta[m_hoveredLine].arrayElementIdx);
-    else if (hoveringMember)
-        checkId = makeMemberSelId(m_hoveredNodeId, m_meta[m_hoveredLine].subLine);
-    else
-        checkId = m_hoveredNodeId;
-    if (m_currentSelIds.contains(checkId)) return;
-
-    if (hoveringFooter || hoveringArrayElem || hoveringMember) {
-        // Single-line highlight for footers, array elements, and member lines
-        m_sci->markerAdd(m_hoveredLine, M_HOVER);
-    } else {
-        // Non-footer, non-array-element: highlight all lines for this node
-        auto it = m_nodeLineIndex.constFind(m_hoveredNodeId);
-        if (it != m_nodeLineIndex.constEnd()) {
-            for (int ln : *it) {
-                if (m_meta[ln].lineKind != LineKind::Footer &&
-                    !m_meta[ln].isArrayElement)
-                    m_sci->markerAdd(ln, M_HOVER);
-            }
-        }
-    }
+    // The row under the pointer and its value's extra rows (a matrix's rows
+    // 1–3) — one instance (row_instances.h). Never the other places the same
+    // node is shown, and never an enum field's member rows.
+    const QVector<int> block = instanceBlock(m_meta, m_hoveredLine);
+    if (block.isEmpty()) return;
+    // A selected row keeps its selection band.
+    const long marks = m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERGET,
+                                            (unsigned long)block.first());
+    if (marks & (1L << M_SELECTED)) return;
+    for (int ln : block)
+        m_sci->markerAdd(ln, M_HOVER);
+    m_hoverMarkedLines = block;
 }
 
 ViewState RcxEditor::saveViewState() const {
@@ -4560,7 +4508,7 @@ QString RcxEditor::hoverPopupActiveId() const {
     return p ? p->id() : QString();
 }
 
-// pickLastUsedPreviewIdx — read QSettings("REECLASS","REECLASS")
+// pickLastUsedPreviewIdx — read QSettings("RC","RC")
 // "hoverPreview/kind/<kindName>" and return the index of the matching
 // preview in `eligible`. Falls back to 0 (registry-order default) when
 // nothing is stored or the stored id is no longer eligible.
@@ -4569,7 +4517,7 @@ int RcxEditor::pickLastUsedPreviewIdx(
     if (eligible.isEmpty()) return -1;
     const KindMeta* km = kindMeta(kind);
     if (!km) return 0;
-    QString stored = QSettings("REECLASS","REECLASS")
+    QString stored = QSettings("RC","RC")
         .value(QStringLiteral("hoverPreview/kind/") + QString::fromLatin1(km->name))
         .toString();
     if (stored.isEmpty()) return 0;
@@ -4722,13 +4670,11 @@ void RcxEditor::setFocusNode(uint64_t nodeId) {
     m_glowBright = blendColor(m_focusGlowColor, editorBg, 0.55);
     m_sci->setMarkerBackgroundColor(m_glowBright, M_FOCUS);
 
-    // Apply M_FOCUS on all lines for this node
+    // Apply M_FOCUS on the node's first instance
     auto it = m_nodeLineIndex.constFind(nodeId);
     if (it != m_nodeLineIndex.constEnd()) {
-        for (int ln : *it) {
-            if (ln < m_meta.size() && m_meta[ln].lineKind != LineKind::Footer)
-                m_sci->markerAdd(ln, M_FOCUS);
-        }
+        for (int ln : focusGlowLines(m_meta, *it))
+            m_sci->markerAdd(ln, M_FOCUS);
     }
 
     // Start glow timer — cycles between dim and bright (both opaque)
@@ -4828,8 +4774,8 @@ static QString getLineText(QsciScintilla* sci, int line) {
 static QPoint popupAnchorAt(QsciScintilla* sci, int line, int col,
                             const QString& lineText, int* outLineHeight) {
     // Convert char column → UTF-8 byte position. Lines contain
-    // multi-byte glyphs (fold arrows ▸/▾, tree connectors, middle
-    // dots), so a column index ≠ byte offset; left(col).toUtf8().size()
+    // multi-byte glyphs (the command-row chevron, ◀ on enum members,
+    // middle dots), so a column index ≠ byte offset; left(col).toUtf8().size()
     // does the right thing for any BMP content we emit.
     long linePos = sci->SendScintilla(
         QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)line);
@@ -4997,6 +4943,9 @@ void RcxEditor::applyCommandRowPills() {
 RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
     // Dismiss any open user list / autocomplete popup
     m_sci->SendScintilla(QsciScintillaBase::SCI_AUTOCCANCEL);
+    // The column lines held back on the edited row come back (deferred, so
+    // they paint with the edit already over).
+    if (m_treeColumnsOn) m_sci->viewport()->update();
     if (m_exprResultLabel) m_exprResultLabel->hide();
     // Clear edit comment and error marker before deactivating
     if (m_editState.target == EditTarget::Value
@@ -5307,13 +5256,23 @@ RcxEditor::HitInfo RcxEditor::hitTest(const QPoint& vp) const {
 
     if (h.line >= 0 && h.line < m_meta.size()) {
         h.nodeId = m_meta[h.line].nodeId;
-        // The fold prefix occupies columns [0, kFoldCol) — " ▸ " is kFoldCol
-        // chars wide (compose.cpp). Column kFoldCol itself is the first
-        // character of the line's real text, so it must NOT count as the fold
-        // toggle: this used to be `< kFoldCol + 1`, which made the first glyph
-        // of a header show the fold cursor while the hover underline (painted
-        // over [0, kFoldCol)) disagreed.
-        h.inFoldCol = (h.col >= 0 && h.col < kFoldCol && m_meta[h.line].foldHead);
+        // The drawn fold box sits on the row's elbow: its slot is the box's
+        // cell and the arm's cell, up to (never including) the type text.
+        // Tested by the character CELL under the pointer — h.col is the
+        // nearest caret column, which puts the right half of the arm's cell
+        // in the type text.
+        const ColumnSpan fs = foldSlotFor(m_meta[h.line]);
+        if (fs.valid) {
+            const long cpos = m_sci->SendScintilla(QsciScintillaBase::SCI_CHARPOSITIONFROMPOINTCLOSE,
+                                                   (unsigned long)vp.x(), (long)vp.y());
+            if (cpos >= 0
+                && (int)m_sci->SendScintilla(QsciScintillaBase::SCI_LINEFROMPOSITION,
+                                             (unsigned long)cpos) == h.line) {
+                const int cell = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETCOLUMN,
+                                                           (unsigned long)cpos);
+                h.inFoldBox = cell >= fs.start && cell < fs.end;
+            }
+        }
     }
     return h;
 }
@@ -5528,7 +5487,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         m_currentSelIds.clear();
         return true;  // consume — metadata was recomposed; stale coords unsafe
     }
-    // Single-click on fold column (" - " / " + ") toggles fold
+    // Single-click on a fold box's slot toggles the fold
     // Other left-clicks emit nodeClicked for selection
     if (obj == m_sci->viewport() && !m_editState.active
         && event->type() == QEvent::MouseButtonPress) {
@@ -5585,11 +5544,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 }
             }
 
-            // A modified click that did not extend bytes starts a node gesture.
-            // Do not leave a byte range active behind the new row selection.
-            clearByteSelection();
-
-            if (h.inFoldCol) {
+            if (h.inFoldBox) {
                 emit marginClicked(0, h.line, me->modifiers());
                 return true;
             }
@@ -5669,7 +5624,7 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 }
             }
 
-            // Footer buttons: +1, +10h, +10 (enum), Trim, Top
+            // Footer buttons: +1, +10h/+100h/+1000h, +10 (enum), Trim, Top
             if (h.line >= 0 && h.line < m_meta.size()
                 && m_meta[h.line].lineKind == LineKind::Footer) {
                 // One shared resolver with the cursor and the hover underline —
@@ -5714,7 +5669,13 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 return true;  // consume all CommandRow clicks
             }
             if (h.nodeId != 0) {
-                bool alreadySelected = m_currentSelIds.contains(h.nodeId);
+                // A member row is selected under its own encoded id, not its
+                // owner's: clicking an enum field's member row while the field
+                // is selected only selects that row.
+                const bool memberRow = h.line >= 0 && h.line < m_meta.size()
+                                    && m_meta[h.line].isMemberLine;
+                bool alreadySelected = m_currentSelIds.contains(
+                    memberRow ? selIdForLine(m_meta[h.line]) : h.nodeId);
                 bool plain = !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
 
                 // Ctrl+Click on Type/Name of a navigable parent — open the
@@ -5764,20 +5725,23 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 m_dragStartPos = me->pos();
                 m_dragLastLine = h.line;
                 m_dragInitMods = me->modifiers();
-                m_byteSelAnchor.reset();
 
-                // A press on hex/ASCII bytes arms a byte drag. Other columns
-                // and Ctrl/Shift gestures retain node selection.
+                // Byte-selection arm: if the press lands on a hex byte
+                // AND no modifier is held (Ctrl/Shift mean "extend node
+                // selection" — row-drag wins there), record the anchor
+                // address. The next MouseMove past the 8-px threshold
+                // upgrades from row-drag to byte-drag. Click-without-
+                // movement falls through to the row-click below.
+                //
+                // The top-level "clear byte selection on non-byte click"
+                // pass earlier in this handler already dropped any
+                // stale m_byteSel when the press wasn't on a hex byte,
+                // so we don't repeat that check here.
                 auto pressByteAddr = byteAddrAt(h.line, h.col);
                 if (pressByteAddr.has_value()
                     && !(me->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))) {
                     m_byteSelAnchor = pressByteAddr;
                     m_byteSelDragging = false;
-                    m_byteDragLine = h.line;
-                    const auto& lm = m_meta[h.line];
-                    const auto ns = nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
-                    m_byteDragAscii = ns.valid && h.col >= ns.start
-                        && h.col < ns.start + sizeForKind(lm.nodeKind);
                 }
 
                 bool multi = m_currentSelIds.size() > 1;
@@ -5803,8 +5767,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         && event->type() == QEvent::MouseMove
         && (m_dragging || m_byteSelDragging || m_byteSelAnchor.has_value())) {
         auto* me = static_cast<QMouseEvent*>(event);
-        m_lastHoverPos = me->pos();
-        m_hoverInside = m_sci->viewport()->rect().contains(me->pos());
         if (me->buttons() & Qt::LeftButton) {
             // Byte-drag upgrade check. Fires once when the press anchor
             // is on a hex byte and the user has moved past the 8-px
@@ -5820,14 +5782,17 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 }
             }
             if (m_byteSelDragging) {
-                auto cur = byteDragAddrAt(me->pos());
+                auto h2 = hitTest(me->pos());
+                auto cur = byteAddrAt(h2.line, h2.col);
                 if (cur.has_value()) {
                     uint64_t lo = qMin(*m_byteSelAnchor, *cur);
                     uint64_t hi = qMax(*m_byteSelAnchor, *cur) + 1; // half-open
                     m_byteSel = QPair<uint64_t,uint64_t>{lo, hi};
                     applyByteSelectionOverlay();
                 }
-                setViewportCursor(Qt::CrossCursor);
+                // Cursor drifted off any hex byte column → don't shrink
+                // the selection. Drag-out-and-back-in stays stable. Swallow
+                // the event so row-drag doesn't try to extend underneath.
                 return true;
             }
             // Byte arm was set but the drag never moved past threshold —
@@ -5854,8 +5819,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 emit nodeClicked(h.line, h.nodeId, m_dragInitMods | Qt::ShiftModifier);
                 m_dragLastLine = h.line;
             }
-            setViewportCursor(Qt::ArrowCursor);
-            return true;
         } else {
             m_dragging = false;
             m_dragStarted = false;
@@ -5875,7 +5838,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_dragging        = false;
             m_dragStarted     = false;
             m_pendingClickNodeId = 0;
-            applyHoverCursor();
             return true;
         }
         // Byte arm without drag (click-only on a hex byte) → just drop
@@ -5898,7 +5860,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             m_chipPressed = false;
             applyChipButtonOverlay();
         }
-        applyHoverCursor();
         return true;  // consume release (prevent QScintilla from acting on it)
     }
     // Double-click on offset margin → toggle absolute/relative
@@ -5954,6 +5915,11 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
             // Narrow selection to this node before editing
             if (h.nodeId != 0 && h.nodeId != kCommandRowId)
                 emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
+            // Double-clicking an enum field's member row — its name or its
+            // value — picks that member.
+            if (t == EditTarget::Name && line >= 0 && line < m_meta.size()
+                && m_meta[line].isMemberLine && m_meta[line].enumRefId != 0)
+                t = EditTarget::Value;
             return beginInlineEdit(t, line, tCol);
         }
         return true;  // consume even on miss (prevent QScintilla word-select)
@@ -7079,6 +7045,28 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     }
     auto* lm = metaForLine(line);
     if (!lm) return false;
+    // An enum field is set by choosing a member, never by typing a number:
+    // editing its value opens the member picker under it, and a member row
+    // under an open field sets the field to that member.
+    if (lm->enumRefId != 0 && lm->nodeIdx >= 0) {
+        if (lm->isMemberLine) {
+            // Enter / double-click on a member row picks it; nothing renames it.
+            if (target != EditTarget::Value) return false;
+            emit enumMemberChosen(lm->nodeIdx, lm->enumValue);
+            return true;
+        }
+        if (!lm->isMemberLine && target == EditTarget::Value) {
+            const ColumnSpan vs = valueSpan(*lm, getLineText(m_sci, line).size(),
+                                            lm->effectiveTypeW, lm->effectiveNameW);
+            long pos = posFromCol(m_sci, line, vs.valid ? vs.start : 0);
+            int x = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
+            int y = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos);
+            int lh = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, (unsigned long)line);
+            emit enumChipClicked(lm->nodeIdx, lm->enumRefId, lm->enumValue,
+                                 m_sci->viewport()->mapToGlobal(QPoint(x, y + lh)));
+            return true;
+        }
+    }
     // Allow nodeIdx=-1 only for the CommandRow's root-class edits (the
     // base address is the address bar's edit, not a Scintilla one)
     if (lm->nodeIdx < 0 && !(lm->lineKind == LineKind::CommandRow &&
@@ -7134,22 +7122,31 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
 
     // Helper: parse comma-separated components, narrow span to clicked one
     auto narrowToComponent = [&](const QString& inner, int innerAbsStart) {
-        QVector<int> compStarts, compEnds;
+        // compStarts: where a component's text starts (past its blank sign
+        // column); hitStarts: where its clickable area starts (right after
+        // the comma), so a click on the blank a positive value keeps for its
+        // sign edits THAT value, not the one before it.
+        QVector<int> compStarts, compEnds, hitStarts{0};
         for (int i = 0; i < inner.size(); i++) {
             if (inner[i] == ',') {
                 compEnds.append(i);
+                hitStarts.append(i + 1);
                 int next = i + 1;
                 while (next < inner.size() && inner[next] == ' ') next++;
                 compStarts.append(next);
             }
         }
-        compStarts.prepend(0);
+        // The first component may start with the blank sign column a
+        // non-negative value keeps (" 0.5000f"): the edit starts at its digit.
+        int firstStart = 0;
+        while (firstStart < inner.size() && inner[firstStart] == ' ') firstStart++;
+        compStarts.prepend(firstStart);
         compEnds.append(inner.size());
 
         int relCol = col - innerAbsStart;
         vecComponent = 0;
-        for (int i = 0; i < compStarts.size(); i++) {
-            if (relCol >= compStarts[i] && (i == compStarts.size() - 1 || relCol < compStarts[i + 1]))
+        for (int i = 0; i < hitStarts.size(); i++) {
+            if (relCol >= hitStarts[i] && (i == hitStarts.size() - 1 || relCol < hitStarts[i + 1]))
                 { vecComponent = i; break; }
         }
         if (vecComponent >= compStarts.size()) vecComponent = compStarts.size() - 1;
@@ -7162,20 +7159,54 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         trimmed = lineText.mid(norm.start, norm.end - norm.start);
     };
 
-    // For vector value editing: narrow span to the clicked component
-    if (target == EditTarget::Value && isVectorKind(lm->nodeKind)) {
-        narrowToComponent(trimmed, norm.start);
-    }
-
-    // For Mat4x4 value editing: skip "rowN [...]" and narrow to clicked component
-    if (target == EditTarget::Value && isMatrixKind(lm->nodeKind)) {
+    // Vectors ("[ x, y, z]") and matrix rows ("rowN [ a, b, c, d]"): edit the
+    // component under the click, inside the brackets.
+    if (target == EditTarget::Value
+        && (isVectorKind(lm->nodeKind) || isMatrixKind(lm->nodeKind))) {
         int bracketOpen = trimmed.indexOf('[');
         int bracketClose = trimmed.lastIndexOf(']');
-        if (bracketOpen < 0 || bracketClose <= bracketOpen)
+        if (bracketOpen >= 0 && bracketClose > bracketOpen) {
+            narrowToComponent(trimmed.mid(bracketOpen + 1, bracketClose - bracketOpen - 1),
+                              norm.start + bracketOpen + 1);
+        } else if (isMatrixKind(lm->nodeKind)) {
             return false;
-        QString inner = trimmed.mid(bracketOpen + 1, bracketClose - bracketOpen - 1);
-        int innerAbsStart = norm.start + bracketOpen + 1;
-        narrowToComponent(inner, innerAbsStart);
+        } else {
+            narrowToComponent(trimmed, norm.start);   // a bracket-free vector
+        }
+    }
+
+    // The line shows a float rounded to the display decimals; the edit starts
+    // from every digit of it (the shortest text that reads back exactly), so
+    // changing one digit never rounds the others away. endInlineEdit makes the
+    // next refresh rewrite the whole text, so the swap leaves nothing behind.
+    if (target == EditTarget::Value && !isHexEdit && m_disasmProvider && m_disasmTree
+        && lm->nodeIdx >= 0 && lm->nodeIdx < m_disasmTree->nodes.size()) {
+        const uint64_t base = lm->offsetAddr;
+        QString full;
+        if ((lm->nodeKind == NodeKind::Float || lm->nodeKind == NodeKind::Double)
+            && m_disasmProvider->isReadable(base, sizeForKind(lm->nodeKind))) {
+            full = fmt::editableValue(m_disasmTree->nodes[lm->nodeIdx], *m_disasmProvider,
+                                      base, lm->subLine);
+        } else if (isVectorKind(lm->nodeKind) || isMatrixKind(lm->nodeKind)) {
+            const uint64_t at = base + uint64_t(isMatrixKind(lm->nodeKind)
+                                                    ? lm->subLine * 4 + vecComponent
+                                                    : vecComponent) * 4;
+            if (m_disasmProvider->isReadable(at, 4))
+                full = fmt::fmtFloatExact(m_disasmProvider->readF32(at));
+        }
+        if (!full.isEmpty() && full != trimmed) {
+            const bool wasReadOnly = m_sci->isReadOnly();
+            if (wasReadOnly) m_sci->setReadOnly(false);
+            const QByteArray bytes = full.toUtf8();
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, posFromCol(m_sci, line, norm.start));
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, posFromCol(m_sci, line, norm.end));
+            m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
+                                 (uintptr_t)bytes.size(), bytes.constData());
+            if (wasReadOnly) m_sci->setReadOnly(true);
+            lineText = getLineText(m_sci, line);
+            norm.end = norm.start + full.size();
+            trimmed = full;
+        }
     }
 
     // Comment editing: strip the chip-marker prefix ("/ ", "/", or legacy
@@ -7502,6 +7533,17 @@ void RcxEditor::commitInlineEdit() {
     if (m_editState.target == EditTarget::Type && editedText.isEmpty())
         editedText = m_editState.original;
 
+    // A float value's text is rounded to the display decimals: committing it
+    // unchanged would write the rounded value back. Nothing changed, nothing
+    // is written.
+    if (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite
+        && (m_editState.editKind == NodeKind::Float || m_editState.editKind == NodeKind::Double
+            || m_editState.editKind == NodeKind::Float16)
+        && editedText == m_editState.original.trimmed()) {
+        cancelInlineEdit();
+        return;
+    }
+
     // Grab resolved address from LineMeta before endInlineEdit clears state
     const LineMeta* lm = metaForLine(m_editState.line);
     uint64_t addr = lm ? lm->offsetAddr : 0;
@@ -7764,7 +7806,7 @@ void RcxEditor::setViewportCursor(Qt::CursorShape shape) {
 // Every footer pill on a composed footer line, in ascending column order.
 //
 // The disambiguation is positional, not semantic: "+1" is a prefix of "+10",
-// and "+10h", so each longer form is matched first and the
+// "+10h", "+100h" and "+1000h", so each longer form is matched first and the
 // shorter ones must prove they didn't land on a longer one's text. " +1 " is
 // searched space-padded for the same reason.
 //
@@ -7784,6 +7826,8 @@ QVector<RcxEditor::FooterPill> RcxEditor::footerPillsIn(const QString& ft) {
     };
 
     const int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
+    const int p1000    = ft.indexOf(QStringLiteral("+1000h"));
+    const int p100     = ft.indexOf(QStringLiteral("+100h"));
     const int p10      = ft.indexOf(QStringLiteral("+10h"));
     const int p10enum  = ft.indexOf(QStringLiteral("+10"));
     const int pTrim    = ft.indexOf(QStringLiteral("Trim"));
@@ -7793,11 +7837,15 @@ QVector<RcxEditor::FooterPill> RcxEditor::footerPillsIn(const QString& ft) {
     // only, so the outline doesn't butt against the +10h pill beside it.
     if (pPlusOne >= 0)
         add(FooterPill::Action::AddField, pPlusOne, 4, 0, pPlusOne + 1, 2);
-    if (p10 >= 0)
+    if (p1000 >= 0)
+        add(FooterPill::Action::AddBytes, p1000, 6, 0x1000);
+    if (p100 >= 0 && p100 != p1000 + 1)
+        add(FooterPill::Action::AddBytes, p100, 5, 0x100);
+    if (p10 >= 0 && p10 != p100 && p10 != p1000)
         add(FooterPill::Action::AddBytes, p10, 4, 0x10);
     // Enum footer: +10 (no 'h'). Skip when the +10 we found is actually the
-    // start of "+10h" we already emitted.
-    if (p10enum >= 0 && p10enum != p10)
+    // start of "+1000h" / "+100h" / "+10h" we already emitted.
+    if (p10enum >= 0 && p10enum != p10 && p10enum != p100 && p10enum != p1000)
         add(FooterPill::Action::AddEnumMembers, p10enum, 3);
     if (pTrim >= 0) add(FooterPill::Action::Trim, pTrim, 4);
     if (pTop  >= 0) add(FooterPill::Action::Top,  pTop,  3);
@@ -7864,6 +7912,11 @@ RcxEditor::HoverAffordance RcxEditor::resolveHoverAffordance(const QPoint& pos) 
     const bool buttonHeld = (QApplication::mouseButtons() & Qt::LeftButton) != 0;
     if (buttonHeld && (m_dragStarted || m_byteSelDragging)) {
         a.region = HoverRegion::Dragging;
+        // A drag keeps the cursor it started with: the grid cross over byte
+        // cells, the plain arrow over rows. A closed hand says "you are
+        // carrying this", and neither gesture carries anything — nothing
+        // moves, a range grows. The lock is still what stops the shape
+        // flickering as the pointer crosses columns mid-drag.
         a.cursor = m_byteSelDragging ? Qt::CrossCursor : Qt::ArrowCursor;
         return a;
     }
@@ -7935,12 +7988,11 @@ RcxEditor::HoverAffordance RcxEditor::resolveHoverAffordance(const QPoint& pos) 
         return a;
     }
 
-    // ── Fold toggle. The fold prefix is the first kFoldCol columns (" ▸ "),
-    // so the region is [0, kFoldCol) — the same columns the underline paints.
-    if (h.inFoldCol) {
+    // ── Fold toggle: the drawn box's slot (foldSlotFor), the same columns the
+    // press handler toggles on. Nothing is underlined — the box itself lights.
+    if (h.inFoldBox) {
         a.region = HoverRegion::FoldToggle;
         a.cursor = Qt::PointingHandCursor;
-        a.span = { 0, kFoldCol, true };
         return a;
     }
 
@@ -7993,10 +8045,21 @@ void RcxEditor::applyHoverCursor() {
         clearIndicatorLine(IND_HOVER_SPAN, ln);
     m_hoverSpanLines.clear();
 
+    // The fold box under the pointer lights (it is drawn, so its row repaints).
+    {
+        int foldLine = -1;
+        if (m_hoverEffects && m_hoverInside && !m_editState.active && !m_dragStarted
+            && !m_sci->isListActive()) {
+            const HitInfo fh = hitTest(m_lastHoverPos);
+            if (fh.inFoldBox) foldLine = fh.line;
+        }
+        setHoverFoldLine(foldLine);
+    }
 
-    // Selection owns the cursor even when a refresh resolves hover mid-drag.
-    if (m_dragStarted || m_byteSelDragging) {
-        setViewportCursor(m_byteSelDragging ? Qt::CrossCursor : Qt::ArrowCursor);
+
+    // Lock cursor to Arrow during drag-selection (prevents flicker)
+    if (m_dragStarted) {
+        setViewportCursor(Qt::ArrowCursor);
         return;
     }
 
@@ -8036,7 +8099,7 @@ void RcxEditor::applyHoverCursor() {
                 const LineMeta& lm = m_meta[m_editState.line];
                 if (lm.heatLevel > 0 && lm.nodeId != 0
                     && lm.nodeIdx >= 0 && lm.nodeIdx < m_disasmTree->nodes.size()) {
-                    auto it = m_valueHistory->find(lm.nodeId);
+                    auto it = m_valueHistory->find(valueHistoryKey(lm));
                     if (it != m_valueHistory->end() && it->uniqueCount() > 1) {
                         const Node& node = m_disasmTree->nodes[lm.nodeIdx];
                         HoverContext ctx;
@@ -8051,10 +8114,28 @@ void RcxEditor::applyHoverCursor() {
                             m_valueHistoryPreview, lm, node, ctx,
                             [this](const QString& val) {
                                 if (!m_editState.active) return;
+                                // A vector or matrix edits ONE component, but its
+                                // history holds the whole value ("1.0f, 2.0f, 3.0f",
+                                // "row2 [0.0f, 0.35f, …]"): set just that component.
+                                QString text = val;
+                                if (m_editState.line >= 0 && m_editState.line < m_meta.size()) {
+                                    const NodeKind k = m_meta[m_editState.line].nodeKind;
+                                    const bool mat = isMatrixKind(k);
+                                    if (mat || isVectorKind(k)) {
+                                        QString inner = val;
+                                        const int open = inner.indexOf(QLatin1Char('['));
+                                        const int close = inner.lastIndexOf(QLatin1Char(']'));
+                                        if (open >= 0 && close > open) inner = inner.mid(open + 1, close - open - 1);
+                                        const QStringList parts = inner.split(QLatin1Char(','));
+                                        const int comp = mat ? m_editState.subLine % 4 : m_editState.subLine;
+                                        if (comp < 0 || comp >= parts.size()) return;
+                                        text = parts[comp].trimmed();
+                                    }
+                                }
                                 long endPos = posFromCol(m_sci, m_editState.line, editEndCol());
                                 m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL,
                                                      m_editState.posStart, endPos);
-                                QByteArray utf8 = val.toUtf8();
+                                QByteArray utf8 = text.toUtf8();
                                 m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
                                                      (uintptr_t)0, utf8.constData());
                             });
@@ -8121,18 +8202,25 @@ void RcxEditor::applyHoverCursor() {
                     QString val = lineText.mid(span.start, span.end - span.start);
                     int innerStart = span.start;
                     QString inner = val;
-                    if (isMatrixKind(lm.nodeKind)) {
+                    // Vectors and matrix rows both wrap their components in [ ].
+                    {
                         int bo = val.indexOf('['), bc = val.lastIndexOf(']');
                         if (bo >= 0 && bc > bo) {
                             inner = val.mid(bo + 1, bc - bo - 1);
                             innerStart = span.start + bo + 1;
                         }
                     }
-                    QVector<int> starts, ends;
-                    starts.append(0);
+                    // starts: a component's text (past its blank sign column);
+                    // hits: its hover area, from right after the comma — the
+                    // same split beginInlineEdit clicks with.
+                    QVector<int> starts, ends, hits{0};
+                    int first = 0;
+                    while (first < inner.size() && inner[first] == ' ') first++;
+                    starts.append(first);
                     for (int i = 0; i < inner.size(); i++) {
                         if (inner[i] == ',') {
                             ends.append(i);
+                            hits.append(i + 1);
                             int n = i + 1;
                             while (n < inner.size() && inner[n] == ' ') n++;
                             starts.append(n);
@@ -8148,8 +8236,8 @@ void RcxEditor::applyHoverCursor() {
                         narrowed = true;  // suppress highlight entirely
                     } else {
                         int comp = 0;
-                        for (int i = 0; i < starts.size(); i++) {
-                            if (relCol >= starts[i] && (i == starts.size() - 1 || relCol < starts[i + 1])) {
+                        for (int i = 0; i < hits.size(); i++) {
+                            if (relCol >= hits[i] && (i == hits.size() - 1 || relCol < hits[i + 1])) {
                                 comp = i; break;
                             }
                         }
@@ -8181,12 +8269,6 @@ void RcxEditor::applyHoverCursor() {
                 m_hoverSpanLines.append(line);
             }
         }
-    }
-
-    // Apply hover span on fold arrows (▸/▾) — same visual feedback as editable tokens
-    if (h.inFoldCol && h.line >= 0 && h.line < m_meta.size()) {
-        fillIndicatorCols(IND_HOVER_SPAN, h.line, 0, kFoldCol);
-        m_hoverSpanLines.append(h.line);
     }
 
     // Apply hover span on footer pills — same resolver the cursor and the press
@@ -8614,6 +8696,7 @@ void RcxEditor::setCommandRowText(const QString& line) {
 
 void RcxEditor::setEditorFont(const QString& fontName) {
     g_fontName = fontName;
+    ++m_fontGeneration;   // the tree lines' column advance is measured again
     QFont f = editorFont();
 
     m_sci->setFont(f);
@@ -8645,10 +8728,163 @@ QString RcxEditor::textWithMargins() const {
         QString margin;
         if (i < m_meta.size())
             margin = m_meta[i].offsetText;
-        QString lineText = getLineText(m_sci, i);
-        lines.append(margin + lineText);
+        lines.append(margin + lineTextForCopy(i));
     }
     return lines.join('\n');
+}
+
+QString RcxEditor::treePrefixForLine(int line) const {
+    if (!m_layout.treeLines) return {};
+    return treePrefixAscii(m_treeGuides, m_meta, line);
+}
+
+QString RcxEditor::lineTextForCopy(int line) const {
+    QString text = getLineText(m_sci, line);
+    const QString prefix = treePrefixForLine(line);
+    if (prefix.isEmpty() || line < 0 || line >= m_meta.size()) return text;
+    const int at = LineGeometry::forLine(m_meta[line]).prefixWidth;
+    if (text.size() >= at + prefix.size())
+        text.replace(at, prefix.size(), prefix);
+    return text;
+}
+
+// ── Drawn tree lines ──
+
+void RcxEditor::snapshotTreeGuideFrame() {
+    m_guideFrame.valid = false;
+    m_lastGuideRects.clear();
+    m_lastColumnRects.clear();
+    m_lastFoldBoxRects.clear();
+    m_lastFoldBoxHoverRects.clear();
+    const bool lines = m_layout.treeLines && !m_treeGuides.isEmpty();
+    const bool columns = m_treeColumnsOn && !m_treeColumns.isEmpty();
+    const bool boxes = !m_foldBoxes.isEmpty();   // drawn with or without the lines
+    if (!lines && !columns && !boxes) return;
+
+    TreeGuideFrame f;
+    f.lineCount = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
+    if ((lines && f.lineCount != m_treeGuides.lineCount)
+        || (columns && f.lineCount != m_treeColumns.lineCount)
+        || (boxes && f.lineCount != m_foldBoxes.lineCount))
+        return;   // mid-apply; a repaint is queued
+    f.first = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+    f.lh = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+    f.ea = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETEXTRAASCENT);
+    f.ed = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETEXTRADESCENT);
+    // Column 0 of the first visible line: margin width minus the horizontal
+    // scroll. Exact — its layout position is 0, so there is nothing to truncate.
+    const long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
+                                          (unsigned long)f.first);
+    f.xOrigin = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
+    f.textStart = f.xOrigin + (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETXOFFSET);
+
+    // One column's advance, from a long run of spaces so SCI_TEXTWIDTH's
+    // integer truncation vanishes (the indent cells are spaces). Styles
+    // 0-127 all carry the editor font, at the current zoom.
+    const int zoom = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
+    const qreal dpr = m_sci->viewport()->devicePixelRatioF();
+    if (m_advCache.zoom != zoom || m_advCache.lh != f.lh || m_advCache.dpr != dpr
+        || m_advCache.fontGen != m_fontGeneration) {
+        static constexpr int kRun = 1024;
+        const QByteArray spaces(kRun, ' ');
+        const unsigned long style = 0;   // a named zero: a literal 0 is also a null pointer
+        const long w = m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTWIDTH, style,
+                                            spaces.constData());
+        m_advCache = {zoom, f.lh, dpr, m_fontGeneration, qreal(w) / kRun};
+    }
+    f.adv = m_advCache.adv;
+    f.valid = f.lh > 0 && f.adv > 0;
+    m_guideFrame = f;
+}
+
+void RcxEditor::paintTreeGuides(QPainter& p) {
+    const TreeGuideFrame& f = m_guideFrame;
+    if (!f.valid) return;
+    const QTransform dt = p.deviceTransform();
+    if (dt.m12() != 0 || dt.m21() != 0) return;   // never rotated or sheared
+
+    TreeGuideGeom g;
+    g.sx = dt.m11();
+    g.sy = dt.m22();
+    g.ox = dt.dx();
+    g.oy = dt.dy();
+    g.first = f.first;
+    g.lh = f.lh;
+    g.ea = f.ea;
+    g.ed = f.ed;
+    g.xOrigin = f.xOrigin;
+    g.adv = f.adv;
+    g.t = treeStrokeDevPx(g.sx, g.adv);
+
+    // The text area in device px: never over the offset margin.
+    const QRect vp = m_sci->viewport()->rect();
+    const int left   = treegeom::snapEdge(g.ox + g.sx * f.textStart);
+    const int top    = treegeom::snapEdge(g.oy + g.sy * vp.top());
+    const int right  = treegeom::snapEdge(g.ox + g.sx * (vp.left() + vp.width()));
+    const int bottom = treegeom::snapEdge(g.oy + g.sy * (vp.top() + vp.height()));
+    g.clipDev = QRect(left, top, right - left, bottom - top);
+
+    const int lastLine = f.first + (vp.height() + f.lh - 1) / f.lh;
+    const bool boxes = !m_foldBoxes.isEmpty() && m_foldBoxes.lineCount == f.lineCount;
+    if (m_layout.treeLines && !m_treeGuides.isEmpty())
+        treeGuideDeviceRects(g, m_treeGuides, f.first, lastLine, m_lastGuideRects,
+                             boxes ? &m_foldBoxes : nullptr);
+    if (boxes)
+        foldBoxDeviceRects(g, m_foldBoxes, f.first, lastLine, m_lastFoldBoxRects,
+                           m_hoverFoldLine, &m_lastFoldBoxHoverRects);
+    if (m_treeColumnsOn && !m_treeColumns.isEmpty()) {
+        // Typing into a name pushes the rest of its row right or pulls it left
+        // until the edit ends; the cells from there on are stale, so they wait.
+        // Byte and ASCII overwrite edits never shift anything.
+        const bool shifting = m_editState.active && !m_editState.hexOverwrite;
+        treeColumnDeviceRects(g, m_treeColumns, f.first, lastLine, m_lastColumnRects,
+                              shifting ? m_editState.line : -1,
+                              shifting ? m_editState.spanStart : 0x7fffffff);
+    }
+    if (m_lastGuideRects.isEmpty() && m_lastColumnRects.isEmpty()
+        && m_lastFoldBoxRects.isEmpty() && m_lastFoldBoxHoverRects.isEmpty())
+        return;
+
+    // None of them share a pixel (the lines break around the boxes, and the
+    // columns live in the separators after the indent), so the order doesn't
+    // matter.
+    const QTransform inv = dt.inverted();
+    p.setRenderHint(QPainter::Antialiasing, false);
+    const QColor columnColor = m_treeColumnColorOverride.isValid() ? m_treeColumnColorOverride
+                                                                   : m_treeColumnColor;
+    for (const QRect& r : m_lastColumnRects)
+        p.fillRect(inv.mapRect(QRectF(r)), columnColor);
+    const QColor lineColor = m_treeGuideColorOverride.isValid() ? m_treeGuideColorOverride
+                                                                : m_treeGuideColor;
+    for (const QRect& r : m_lastGuideRects)
+        p.fillRect(inv.mapRect(QRectF(r)), lineColor);
+    for (const QRect& r : m_lastFoldBoxRects)
+        p.fillRect(inv.mapRect(QRectF(r)), lineColor);
+    for (const QRect& r : m_lastFoldBoxHoverRects)
+        p.fillRect(inv.mapRect(QRectF(r)), m_foldBoxHoverColor);
+}
+
+void RcxEditor::setHoverFoldLine(int line) {
+    if (line == m_hoverFoldLine) return;
+    const int old = m_hoverFoldLine;
+    m_hoverFoldLine = line;
+    // Repaint just the rows whose box changed tone.
+    const int first = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+    const int lh = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+    QWidget* vp = m_sci->viewport();
+    for (int ln : {old, line}) {
+        if (ln < 0) continue;
+        if (lh <= 0) { vp->update(); return; }
+        vp->update(QRect(0, (ln - first) * lh, vp->width(), lh));
+    }
+}
+
+void RcxEditor::setTreeColumns(bool on) {
+    if (m_treeColumnsOn == on) return;
+    m_treeColumnsOn = on;
+    // m_prevText is the document as last applied, line for line with m_meta.
+    m_treeColumns = on ? buildTreeColumns(m_meta, m_prevText) : TreeColumns();
+    m_sci->viewport()->update();
 }
 
 } // namespace rcx

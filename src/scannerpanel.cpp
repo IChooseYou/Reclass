@@ -994,6 +994,10 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         // sounded like navigation, but the underlying action is a rebase.
         auto* goTo = menu.addAction(menuIcon(QStringLiteral(":/vsicons/arrow-right.svg")),
                                     QStringLiteral("Set as Base Address"));
+        auto* beside = menu.addAction(menuIcon(QStringLiteral(":/vsicons/split-vertical.svg")),
+                                       QStringLiteral("Open Beside"));
+        beside->setObjectName(QStringLiteral("openInstanceBeside"));
+        beside->setEnabled(m_resultProvider && m_resultProvider->isValid());
         menu.addSeparator();
         auto* changeAll = menu.addAction(QStringLiteral("Change All Values (%1)").arg(m_results.size()));
         auto* chosen = menu.exec(m_resultTable->viewport()->mapToGlobal(pos));
@@ -1007,6 +1011,8 @@ ScannerPanel::ScannerPanel(QWidget* parent)
             m_statusLabel->setText(QStringLiteral("Copied value"));
         } else if (chosen == goTo) {
             emit goToAddress(m_results[row_actual_index].address);
+        } else if (chosen == beside) {
+            emit openBesideRequested(m_results[row_actual_index].address);
         } else if (chosen == changeAll) {
             QString hint = m_lastScanMode == 0
                 ? QStringLiteral("hex bytes (e.g. 90 90 90)")
@@ -1018,7 +1024,7 @@ ScannerPanel::ScannerPanel(QWidget* parent)
             const QString text = *textOpt;
 
             std::shared_ptr<Provider> prov;
-            if (m_providerGetter) prov = m_providerGetter();
+            prov = m_resultProvider;
             if (!prov || !prov->isWritable()) {
                 m_statusLabel->setText(QStringLiteral("Provider is read-only"));
                 return;
@@ -1368,6 +1374,7 @@ void ScannerPanel::onScanClicked() {
     m_progressBar->setValue(0);
     m_progressBar->show();
 
+    setResultProvider(provider);
     m_engine->start(provider, req);
 }
 
@@ -1499,6 +1506,7 @@ QVector<ScanResult> ScannerPanel::runValueScanAndWait(ValueType valueType, const
         results = r;
         loop.quit();
     }, Qt::SingleShotConnection);
+    setResultProvider(provider);
     m_engine->start(provider, req);
     loop.exec();
 
@@ -1548,6 +1556,7 @@ QVector<ScanResult> ScannerPanel::runPatternScanAndWait(std::shared_ptr<Provider
         results = r;
         loop.quit();
     }, Qt::SingleShotConnection);
+    setResultProvider(provider);
     m_engine->start(provider, req);
     loop.exec();
 
@@ -1642,6 +1651,7 @@ QVector<ScanResult> ScannerPanel::runValueScanAndWait(ValueType valueType, ScanC
         loop.quit();         // safety net if the scan never started / never emits
     });
     timer.start(qMax(1000, timeoutMs));
+    setResultProvider(provider);
     m_engine->start(provider, req);
     loop.exec();
     timer.stop();
@@ -1662,7 +1672,7 @@ QVector<ScanResult> ScannerPanel::runRescanAndWait(ScanCondition condition, cons
         m_statusLabel->setText(QStringLiteral("Scan already in progress"));
         return m_results;
     }
-    std::shared_ptr<Provider> prov = m_providerGetter ? m_providerGetter() : nullptr;
+    std::shared_ptr<Provider> prov = m_resultProvider;
     if (!prov) {
         m_statusLabel->setText(QStringLiteral("No source attached"));
         return m_results;
@@ -1792,6 +1802,7 @@ QVector<ScanResult> ScannerPanel::runMatrixScanAndWait(const MatrixScanParams& p
         loop.quit();         // safety net if the scan never started / never emits
     });
     timer.start(qMax(1000, timeoutMs));
+    setResultProvider(provider);
     m_engine->start(provider, req);
     loop.exec();
     timer.stop();
@@ -2001,8 +2012,7 @@ void ScannerPanel::onUpdateClicked() {
     if (m_results.isEmpty() || m_engine->isRunning()) return;
 
     std::shared_ptr<Provider> prov;
-    if (m_providerGetter)
-        prov = m_providerGetter();
+    prov = m_resultProvider;
     if (!prov) {
         m_statusLabel->setText(QStringLiteral("No source attached"));
         return;
@@ -2171,8 +2181,7 @@ void ScannerPanel::onCellEdited(int row, int col) {
         // Address column — evaluate expression via AddressParser
         AddressParserCallbacks cbs;
         std::shared_ptr<Provider> prov;
-        if (m_providerGetter)
-            prov = m_providerGetter();
+        prov = m_resultProvider;
         if (prov) {
             auto* p = prov.get();
             cbs.resolveModule = [p](const QString& name, bool* ok) -> uint64_t {
@@ -2217,8 +2226,7 @@ void ScannerPanel::onCellEdited(int row, int col) {
     } else if (col == 1) {
         // Preview column — parse hex bytes and write to provider
         std::shared_ptr<Provider> prov;
-        if (m_providerGetter)
-            prov = m_providerGetter();
+        prov = m_resultProvider;
         if (!prov || !prov->isWritable()) {
             m_statusLabel->setText(QStringLiteral("Provider is read-only"));
             return;
@@ -2619,6 +2627,20 @@ QString ScannerPanel::formatValue(const QByteArray& bytes) const {
 
 // ── New-scan / result-filter / module-column / save-load / persistence ──
 
+void ScannerPanel::setResultProvider(std::shared_ptr<Provider> provider) {
+    if (provider != m_resultProvider) {
+        // A new scan can run while the old table is still visible. Never let
+        // those old addresses become editable against the newly chosen source.
+        m_results.clear();
+        m_resultTable->setRowCount(0);
+        m_undoStack.clear();
+        m_undoBtn->setEnabled(false);
+        m_updateBtn->setEnabled(false);
+    }
+    m_resultProvider = std::move(provider);
+    emit resultSourceChanged();
+}
+
 void ScannerPanel::onNewScanClicked() {
     // [iter 41] Avoid the implicit "you just nuked thousands of results"
     // surprise: when the active result list is large, the first Reset
@@ -2650,6 +2672,7 @@ void ScannerPanel::onNewScanClicked() {
 
     // Drop the result list so the next First Scan truly starts from scratch.
     m_results.clear();
+    setResultProvider(nullptr);
     m_undoStack.clear();
     m_undoBtn->setEnabled(false);
     m_resultTable->setRowCount(0);
@@ -2869,6 +2892,11 @@ bool ScannerPanel::loadResultsFrom(const QString& path) {
     auto root = doc.object();
     if (root["version"].toInt() != 1) return false;
 
+    // Imported absolute addresses are interpreted against the source selected
+    // at load time, never a provider left over from an earlier scan.
+    setResultProvider(m_providerGetter ? m_providerGetter() : nullptr);
+    m_undoStack.clear();
+    m_undoBtn->setEnabled(false);
     m_lastScanMode = root["scanMode"].toInt(0);
     m_lastValueType = (ValueType)root["valueType"].toInt((int)ValueType::Int32);
     auto arr = root["results"].toArray();
@@ -2893,7 +2921,7 @@ bool ScannerPanel::loadResultsFrom(const QString& path) {
 }
 
 void ScannerPanel::saveSettings(const QString& key) const {
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     s.beginGroup(key);
     s.setValue("mode",         m_modeCombo->currentIndex());
     s.setValue("valueType",    m_typeCombo->currentIndex());
@@ -2911,7 +2939,7 @@ void ScannerPanel::saveSettings(const QString& key) const {
 }
 
 void ScannerPanel::loadSettings(const QString& key) {
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     s.beginGroup(key);
     auto clampIndex = [](QComboBox* c, int idx) {
         if (idx >= 0 && idx < c->count()) c->setCurrentIndex(idx);

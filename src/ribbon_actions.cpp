@@ -340,7 +340,7 @@ RibbonActions::SelectionSummary RibbonActions::summarize() const {
     s.canUndo = doc->undoStack.canUndo();
     s.canRedo = doc->undoStack.canRedo();
     s.showComments = c->showComments();
-    s.writable = doc->provider && doc->provider->isWritable() && !c->readOnlyOverride();
+    s.writable = c->provider() && c->provider()->isWritable() && !c->readOnlyOverride();
 
     RcxEditor* ed = editor();
     s.editing = anyEditorEditing(c, ed);
@@ -389,7 +389,7 @@ RibbonActions::SelectionSummary RibbonActions::summarize() const {
             s.anyFooter = true;
             // Only Struct / Array containers take raw bytes; an enum or
             // bitfield footer is never an append target.
-            if (!n.isEnum() && !n.isBitfield()
+            if (!n.isEnum() && !n.isBitfield() && !enumTypeOf(tree, n)   // nor an enum field's "}"
                 && std::none_of(footers.begin(), footers.end(),
                                 [nid](const P& p) { return p.id == nid; }))
                 footers.append({nid, tree.computeOffset(idx)});

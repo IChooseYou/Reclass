@@ -432,7 +432,7 @@ private:
 
     void applyTheme() {
         const auto& t = ThemeManager::instance().current();
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         QFont mono(s.value("font", "JetBrains Mono").toString(), 10);
         mono.setFixedPitch(true);
         setFont(mono);

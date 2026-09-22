@@ -69,23 +69,23 @@ if(TARGET ${QT}::windeployqt)
     # Standalone "deploy" target (can still be invoked manually)
     add_custom_target(deploy
         COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/deploy.cmake
-            $<TARGET_FILE:REECLASS>
+            $<TARGET_FILE:RC>
             $<TARGET_FILE:${QT}::windeployqt>
-        DEPENDS REECLASS
+        DEPENDS RC
         COMMENT "Deploying Qt runtime DLLs..."
     )
 
     # Force re-deploy on rebuild
     set_target_properties(deploy PROPERTIES
-        ADDITIONAL_CLEAN_FILES $<TARGET_FILE_DIR:REECLASS>/.qt_deployed
+        ADDITIONAL_CLEAN_FILES $<TARGET_FILE_DIR:RC>/.qt_deployed
     )
 
     # Auto-deploy as post-build step so the correct Qt DLLs are always next
     # to the exe.  Without this, MSVC builds load whatever Qt DLLs happen to
     # be in PATH (often MinGW ones), causing instant ABI-mismatch crashes.
-    add_custom_command(TARGET REECLASS POST_BUILD
+    add_custom_command(TARGET RC POST_BUILD
         COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/deploy.cmake
-            $<TARGET_FILE:REECLASS>
+            $<TARGET_FILE:RC>
             $<TARGET_FILE:${QT}::windeployqt>
         COMMENT "Auto-deploying Qt runtime DLLs...")
 endif()

@@ -141,6 +141,8 @@ xcopy /Y /I "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(C
   <ItemGroup>
     <ClInclude Include="..\src\addressparser.h" />
     <ClInclude Include="..\src\core.h" />
+    <ClInclude Include="..\src\treeguides.h" />
+    <ClInclude Include="..\src\row_instances.h" />
     <ClInclude Include="..\src\disasm.h" />
     <QtMoc Include="..\src\dock_tab_buttons.h" />
     <ClInclude Include="..\src\generator.h" />
@@ -157,12 +159,37 @@ xcopy /Y /I "$(SolutionDir)..\src\examples\*.rcx" "$(SolutionDir)$(Platform)\$(C
     <ClInclude Include="..\src\providers\null_provider.h" />
     <ClInclude Include="..\src\providers\provider.h" />
     <ClInclude Include="..\src\providers\snapshot_provider.h" />
+    <ClInclude Include="..\src\timeline\tl_types.h" />
+    <ClInclude Include="..\src\timeline\tl_varint.h" />
+    <ClInclude Include="..\src\timeline\tl_hash.h" />
+    <ClInclude Include="..\src\timeline\tl_xorrun.h" />
+    <ClInclude Include="..\src\timeline\tl_pyramid.h" />
+    <ClInclude Include="..\src\timeline\tl_store.h" />
+    <ClInclude Include="..\src\timeline\tl_clock.h" />
+    <ClInclude Include="..\src\timeline\tl_model.h" />
+    <ClInclude Include="..\src\timeline\executor.h" />
+    <ClInclude Include="..\src\timeline\capture_context.h" />
+    <ClInclude Include="..\src\timeline\timeline_service.h" />
+    <ClInclude Include="..\src\timeline\timeline_hub.h" />
+    <ClInclude Include="..\src\timeline\frame_provider.h" />
+    <ClInclude Include="..\src\timeline\class_changes.h" />
+    <ClInclude Include="..\src\timeline\spill_store.h" />
+    <ClInclude Include="..\src\widgets\timeline_strip.h" />
+    <ClInclude Include="..\src\widgets\timeline_glyphs.h" />
+    <ClInclude Include="..\src\demo_simulation.h" />
+    <ClInclude Include="..\src\widgets\timeline_strip_model.h" />
+    <ClInclude Include="..\src\widgets\chrome_fallback_theme.h" />
     <ClInclude Include="..\src\themes\theme.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\addressparser.cpp" />
     <ClCompile Include="..\src\compose.cpp" />
     <ClCompile Include="..\src\controller.cpp" />
+    <ClCompile Include="..\src\timeline\tl_store.cpp" />
+    <ClCompile Include="..\src\timeline\capture_context.cpp" />
+    <ClCompile Include="..\src\timeline\timeline_service.cpp" />
+    <ClCompile Include="..\src\timeline\timeline_hub.cpp" />
+    <ClCompile Include="..\src\timeline\spill_store.cpp" />
     <ClCompile Include="..\src\disasm.cpp" />
     <ClCompile Include="..\src\editor.cpp" />
     <ClCompile Include="..\src\format.cpp" />

@@ -3,6 +3,7 @@
 #include "core.h"
 #include "controller.h"
 #include "address_callbacks.h"
+#include "providers/file_provider.h"
 #include "generator.h"
 #include "mainwindow.h"
 #include "scanner.h"
@@ -113,9 +114,9 @@ void McpBridge::start() {
     m_server->setSocketOptions(QLocalServer::WorldAccessOption);
 
     // Remove stale socket (Linux/Mac leave files behind)
-    QLocalServer::removeServer("REECLASSMcpBridge");
+    QLocalServer::removeServer("RCMcpBridge");
 
-    if (!m_server->listen("REECLASSMcpBridge")) {
+    if (!m_server->listen("RCMcpBridge")) {
         qWarning() << "[MCP] Failed to start server:" << m_server->errorString();
         delete m_server;
         m_server = nullptr;
@@ -124,7 +125,7 @@ void McpBridge::start() {
 
     connect(m_server, &QLocalServer::newConnection,
             this, &McpBridge::onNewConnection);
-    qDebug() << "[MCP] Server listening on pipe: REECLASSMcpBridge";
+    qDebug() << "[MCP] Server listening on pipe: RCMcpBridge";
 }
 
 void McpBridge::stop() {
@@ -354,7 +355,7 @@ QJsonObject McpBridge::handleInitialize(const QJsonValue& id, const QJsonObject&
         {"protocolVersion", "2024-11-05"},
         {"capabilities", caps},
         {"serverInfo", QJsonObject{
-            {"name", "REECLASS-mcp"},
+            {"name", "RC-mcp"},
             {"version", "1.0.0"}
         }},
         {"instructions",
@@ -844,8 +845,8 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     // 11. mcp.reconnect
     tools.append(QJsonObject{
         {"name", "mcp.reconnect"},
-        {"description", "Disconnect the current MCP client so it can reconnect to REECLASS (e.g. after REECLASS was restarted or to reset connection state). "
-                        "The client process will exit; your IDE may restart it automatically, reconnecting to REECLASS like at startup."},
+        {"description", "Disconnect the current MCP client so it can reconnect to RC (e.g. after RC was restarted or to reset connection state). "
+                        "The client process will exit; your IDE may restart it automatically, reconnecting to RC like at startup."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{}}
@@ -932,7 +933,8 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         {"name", "node.read_value"},
         {"description", "Read the formatted typed value for one or more nodes. Unlike hex.read (which returns raw bytes), "
                         "this returns the value as the user sees it in the editor: e.g. '120.0f' for Float, '0x7FF61234' for Pointer64, "
-                        "'true' for Bool, '1.0, 2.0, 3.0' for Vec3. "
+                        "'true' for Bool, '[ 1.000f,  2.000f,  3.000f]' for Vec3, the member name for an enum-typed field "
+                        "(also given as enumType / enumMember). Floats show the user's display decimals. "
                         "For Hex nodes returns the hex byte preview. For Struct/Array returns the computed size. "
                         "Requires a live provider for meaningful values."},
         {"inputSchema", QJsonObject{
@@ -1311,7 +1313,7 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
 
     auto* doc = tab->doc;
     auto* ctrl = tab->ctrl;
-    const auto& tree = doc->tree;
+    const auto& tree = ctrl->viewTree();
 
     int maxDepth = (int)parseInteger(args.value("depth"), 1);
     bool includeTree = args.contains("includeTree") ? args.value("includeTree").toBool() : true;
@@ -1322,20 +1324,23 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
     uint64_t filterParentId = parentIdStr.isEmpty() ? 0 : parentIdStr.toULongLong();
 
     QJsonObject state;
-    state["baseAddress"] = "0x" + QString::number(tree.baseAddress, 16).toUpper();
-    if (!tree.baseAddressFormula.isEmpty())
-        state["baseAddressFormula"] = tree.baseAddressFormula;
+    state["baseAddress"] = "0x" + QString::number(tab->ctrl->baseAddress(), 16).toUpper();
+    if (!tab->ctrl->baseAddressFormula().isEmpty())
+        state["baseAddressFormula"] = tab->ctrl->baseAddressFormula();
     state["viewRootId"] = QString::number(ctrl->viewRootId());
     state["nodeCount"] = tree.nodes.size();
 
     // Provider info
     QJsonObject provInfo;
-    if (doc->provider) {
-        provInfo["name"] = doc->provider->name();
-        provInfo["writable"] = doc->provider->isWritable();
-        provInfo["live"] = doc->provider->isLive();
-        provInfo["size"] = doc->provider->size();
-        provInfo["kind"] = doc->provider->kind();
+    if (tab->ctrl->provider()) {
+        provInfo["name"] = tab->ctrl->provider()->name();
+        provInfo["writable"] = tab->ctrl->provider()->isWritable();
+        provInfo["live"] = tab->ctrl->provider()->isLive();
+        if (const auto* file = dynamic_cast<const FileProvider*>(tab->ctrl->provider().get()))
+            provInfo["size"] = static_cast<double>(file->byteSize());
+        else
+            provInfo["size"] = tab->ctrl->provider()->size();
+        provInfo["kind"] = tab->ctrl->provider()->kind();
     }
     state["provider"] = provInfo;
 
@@ -1439,9 +1444,9 @@ QJsonObject McpBridge::toolProjectState(const QJsonObject& args) {
         }
 
         QJsonObject treeObj;
-        treeObj["baseAddress"] = QString::number(tree.baseAddress, 16);
-        if (!tree.baseAddressFormula.isEmpty())
-            treeObj["baseAddressFormula"] = tree.baseAddressFormula;
+        treeObj["baseAddress"] = QString::number(tab->ctrl->baseAddress(), 16);
+        if (!tab->ctrl->baseAddressFormula().isEmpty())
+            treeObj["baseAddressFormula"] = tab->ctrl->baseAddressFormula();
         treeObj["nextId"] = QString::number(tree.m_nextId);
         treeObj["nodes"] = nodeArr;
         treeObj["returned"] = emitted;
@@ -1641,14 +1646,14 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             const QString formula = op.value("formula").toString().trimmed();
             const QString baseStr = op.value("baseAddress").toString().trimmed();
             const QString expr = formula.isEmpty() ? baseStr : formula;
-            const bool haveSource = doc->provider && doc->provider->isValid();
+            const bool haveSource = tab->ctrl->provider() && tab->ctrl->provider()->isValid();
             const bool canEvaluate = !expr.isEmpty()
                                   && (haveSource || isBareAddressLiteral(expr));
             QString err;
             if (!canEvaluate || !ctrl->rebaseTo(expr, &err)) {
                 uint64_t newBase = baseStr.toULongLong(nullptr, 16);
                 doc->undoStack.push(new RcxCommand(ctrl,
-                    cmd::ChangeBase{tree.baseAddress, newBase, tree.baseAddressFormula, formula}));
+                    cmd::ChangeBase{tab->ctrl->baseAddress(), newBase, tab->ctrl->baseAddressFormula(), formula}));
             }
             applied++;
         }
@@ -1712,7 +1717,7 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             if (idx >= 0) {
                 bool newState = op.value("collapsed").toBool();
                 doc->undoStack.push(new RcxCommand(ctrl,
-                    cmd::Collapse{tree.nodes[idx].id, tree.nodes[idx].collapsed, newState}));
+                    cmd::Collapse{tree.nodes[idx].id, ctrl->isCollapsed(tree.nodes[idx]), newState}));
                 applied++;
             } else {
                 skippedOps.append(QStringLiteral("op[%1]: collapse nodeId '%2' not found").arg(i).arg(nid));
@@ -1901,10 +1906,10 @@ QJsonObject McpBridge::toolSourceSwitch(const QJsonObject& args) {
         if (name.isEmpty()) name = QString("PID %1").arg(pid);
         QString target = QString("%1:%2").arg(pid).arg(name);
         ctrl->attachViaPlugin(QStringLiteral("processmemory"), target);
-        // attachViaPlugin does not set tree.baseAddress; set it from the new provider (like selectSource does).
-        if (doc->provider && doc->provider->base() != 0) {
-            doc->tree.baseAddress = doc->provider->base();
-            doc->tree.baseAddressFormula.clear();
+        // attachViaPlugin does not set tab->ctrl->baseAddress(); set it from the new provider (like selectSource does).
+        if (ctrl->baseAddressFormula().isEmpty() && tab->ctrl->provider() && tab->ctrl->provider()->base() != 0) {
+            tab->ctrl->baseAddress() = tab->ctrl->provider()->base();
+            tab->ctrl->baseAddressFormula().clear();
             ctrl->refresh();
         }
         return makeTextResult("Attached to process " + name + " (PID " + QString::number(pid) + ")");
@@ -1912,7 +1917,7 @@ QJsonObject McpBridge::toolSourceSwitch(const QJsonObject& args) {
 
     if (args.contains("filePath")) {
         QString path = args.value("filePath").toString();
-        doc->loadData(path);
+        if (!ctrl->loadSourceFile(path)) return makeTextResult("Couldn't open file: " + path, true);
         ctrl->refresh();
         return makeTextResult("Loaded file: " + path);
     }
@@ -1928,7 +1933,7 @@ QJsonObject McpBridge::toolSourceModules(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
 
-    auto* prov = tab->doc->provider.get();
+    auto* prov = tab->ctrl->provider().get();
     if (!prov) return makeTextResult("No data source attached", true);
 
     QVector<MemoryRegion> regions = prov->enumerateRegions();
@@ -1976,7 +1981,7 @@ QJsonObject McpBridge::toolHexRead(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
 
-    auto* prov = tab->doc->provider.get();
+    auto* prov = tab->ctrl->provider().get();
     if (!prov) return makeTextResult("No provider", true);
 
     int64_t offset = parseInteger(args.value("offset"));
@@ -1984,7 +1989,7 @@ QJsonObject McpBridge::toolHexRead(const QJsonObject& args) {
     bool baseRel = args.value("baseRelative").toBool();
 
     if (baseRel)
-        offset += (int64_t)tab->doc->tree.baseAddress;
+        offset += (int64_t)tab->ctrl->baseAddress();
 
     if (offset < 0 || !prov->isReadable((uint64_t)offset, length))
         return makeTextResult("Cannot read at offset " + QString::number(offset), true);
@@ -2034,7 +2039,7 @@ QJsonObject McpBridge::toolHexRead(const QJsonObject& args) {
             dump += "f64: " + QString::number(dv) + "\n";
 
             // Pointer-likeness
-            uint64_t base = tab->doc->tree.baseAddress;
+            uint64_t base = tab->ctrl->baseAddress();
             int provSize = prov->size();
             if (v >= base && v < base + (uint64_t)provSize)
                 dump += "ptr?: LIKELY (within provider range)\n";
@@ -2085,13 +2090,13 @@ QJsonObject McpBridge::toolHexWrite(const QJsonObject& args) {
 
     auto* ctrl = tab->ctrl;
     auto* doc = tab->doc;
-    auto* prov = doc->provider.get();
+    auto* prov = tab->ctrl->provider().get();
 
     int64_t offset = parseInteger(args.value("offset"));
     QString hexStr = args.value("hexBytes").toString().remove(' ');
 
     if (args.value("baseRelative").toBool())
-        offset += (int64_t)doc->tree.baseAddress;
+        offset += (int64_t)tab->ctrl->baseAddress();
 
     if (hexStr.size() % 2 != 0)
         return makeTextResult("Hex string must have even length", true);
@@ -2197,7 +2202,7 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
     if (action == "export_cpp") {
         if (!doc) return makeTextResult("No active tab", true);
         const QHash<NodeKind, QString>* aliases = doc->typeAliases.isEmpty() ? nullptr : &doc->typeAliases;
-        bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
+        bool asserts = QSettings("RC", "RC").value("generatorAsserts", false).toBool();
         QString code;
         if (!nodeIdStr.isEmpty()) {
             // Per-struct export
@@ -2238,7 +2243,7 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
         int idx = doc->tree.indexOfId(nodeIdStr.toULongLong());
         if (idx < 0) return makeTextResult("Node not found: " + nodeIdStr, true);
         doc->undoStack.push(new RcxCommand(ctrl,
-            cmd::Collapse{doc->tree.nodes[idx].id, doc->tree.nodes[idx].collapsed, true}));
+            cmd::Collapse{doc->tree.nodes[idx].id, ctrl->isCollapsed(doc->tree.nodes[idx]), true}));
         ctrl->refresh();
         return makeTextResult("Collapsed " + nodeIdStr);
     }
@@ -2247,7 +2252,7 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
         int idx = doc->tree.indexOfId(nodeIdStr.toULongLong());
         if (idx < 0) return makeTextResult("Node not found: " + nodeIdStr, true);
         doc->undoStack.push(new RcxCommand(ctrl,
-            cmd::Collapse{doc->tree.nodes[idx].id, doc->tree.nodes[idx].collapsed, false}));
+            cmd::Collapse{doc->tree.nodes[idx].id, ctrl->isCollapsed(doc->tree.nodes[idx]), false}));
         ctrl->refresh();
         return makeTextResult("Expanded " + nodeIdStr);
     }
@@ -2282,7 +2287,7 @@ QJsonObject McpBridge::toolTreeSearch(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
 
-    const auto& tree = tab->doc->tree;
+    const auto& tree = tab->ctrl->viewTree();
     QString query = args.value("query").toString();
     QString kindFilter = args.value("kindFilter").toString();
     int limit = qBound(1, (int)parseInteger(args.value("limit"), 20), 100);
@@ -2574,7 +2579,7 @@ QJsonObject McpBridge::toolScannerResults(const QJsonObject& args) {
     // can eyeball a contiguous Mat4x4 (16 floats) block near a candidate.
     if (floatWindow > 0) {
         floatWindow = qBound(4, floatWindow, 64);
-        std::shared_ptr<rcx::Provider> provider = (tab->doc && tab->doc->provider) ? tab->doc->provider : nullptr;
+        std::shared_ptr<rcx::Provider> provider = (tab->doc && tab->ctrl->provider()) ? tab->ctrl->provider() : nullptr;
         if (provider) {
             int o = qMax(0, offset);
             int end = qMin(results.size(), o + qBound(1, limit, 500));
@@ -2674,7 +2679,7 @@ QJsonObject McpBridge::toolScannerScanPattern(const QJsonObject& args) {
 
     // Use the resolved tab's provider so the scan runs on the same tab we attached to (source_switch).
     // If we used the panel's default getter we'd get the *active* tab's provider, which may be different.
-    std::shared_ptr<rcx::Provider> provider = (tab->doc && tab->doc->provider) ? tab->doc->provider : nullptr;
+    std::shared_ptr<rcx::Provider> provider = (tab->doc && tab->ctrl->provider()) ? tab->ctrl->provider() : nullptr;
     if (!provider) {
         return makeTextResult("No provider on this tab — the scan did not run. Use source_switch to attach to a process (or open a file), then run the pattern scan again. If you already ran source_switch, ensure the tab that was switched is the one used (e.g. pass tabIndex: 0 for the first tab).", true);
     }
@@ -2717,7 +2722,7 @@ QJsonObject McpBridge::toolReconnect(const QJsonObject&) {
         if (findClient(sock))
             sock->disconnectFromServer();
     });
-    return makeTextResult("Disconnected. The MCP client will exit; your IDE may restart it and reconnect to REECLASS.");
+    return makeTextResult("Disconnected. The MCP client will exit; your IDE may restart it and reconnect to RC.");
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -2728,7 +2733,7 @@ QJsonObject McpBridge::toolProcessInfo(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
 
-    auto* prov = tab->doc->provider.get();
+    auto* prov = tab->ctrl->provider().get();
     if (!prov) return makeTextResult("No data source attached", true);
     if (!prov->isLive()) return makeTextResult("Not a live provider", true);
 
@@ -2807,10 +2812,10 @@ QJsonObject McpBridge::toolSymbolsLookup(const QJsonObject& args) {
         return makeTextResult("symbol is required", true);
 
     auto* tab = resolveTab(args);
-    if (!tab || !tab->doc->provider)
+    if (!tab || !tab->ctrl->provider())
         return makeTextResult("No active tab or provider", true);
 
-    auto* prov = tab->doc->provider.get();
+    auto* prov = tab->ctrl->provider().get();
     bool ok = false;
     uint64_t addr = SymbolStore::instance().resolve(symbol, prov, &ok);
     if (!ok || addr == 0)
@@ -2908,8 +2913,8 @@ QJsonObject McpBridge::toolNodeReadValue(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
 
-    const auto& tree = tab->doc->tree;
-    auto* prov = tab->doc->provider.get();
+    const auto& tree = tab->ctrl->viewTree();
+    auto* prov = tab->ctrl->provider().get();
     if (!prov) return makeTextResult("No provider", true);
 
     QJsonArray requestedIds = args.value("nodeIds").toArray();
@@ -2933,7 +2938,7 @@ QJsonObject McpBridge::toolNodeReadValue(const QJsonObject& args) {
         // Compute absolute address
         int64_t signedOff = tree.computeOffset(idx);
         uint64_t addr = (signedOff >= 0)
-            ? tree.baseAddress + static_cast<uint64_t>(signedOff) : 0;
+            ? tab->ctrl->baseAddress() + static_cast<uint64_t>(signedOff) : 0;
 
         QJsonObject entry;
         entry["kind"] = kindToString(node.kind);
@@ -2952,6 +2957,14 @@ QJsonObject McpBridge::toolNodeReadValue(const QJsonObject& args) {
             int numLines = linesForKind(node.kind);
             if (numLines <= 1) {
                 entry["value"] = fmt::readValue(node, *prov, addr, 0);
+                // An enum-typed field: which enum, and the member it holds.
+                if (const Node* def = enumTypeOf(tree, node)) {
+                    const QString member = fmt::enumMemberName(
+                        *def, fmt::readEnumRaw(*prov, node.kind, addr));
+                    entry["enumType"] = def->structTypeName.isEmpty() ? def->name : def->structTypeName;
+                    entry["enumMember"] = member.isEmpty() ? QJsonValue() : QJsonValue(member);
+                    if (!member.isEmpty()) entry["value"] = member;
+                }
             } else {
                 // Multi-line types (Mat4x4): return all sub-lines
                 QJsonArray lines;
@@ -2978,8 +2991,8 @@ QJsonObject McpBridge::toolAnalysisInferTypes(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
 
-    const auto& tree = tab->doc->tree;
-    auto* prov = tab->doc->provider.get();
+    const auto& tree = tab->ctrl->viewTree();
+    auto* prov = tab->ctrl->provider().get();
     if (!prov) return makeTextResult("No provider", true);
 
     QJsonArray requestedIds = args.value("nodeIds").toArray();
@@ -3010,7 +3023,7 @@ QJsonObject McpBridge::toolAnalysisInferTypes(const QJsonObject& args) {
 
         int64_t signedOff = tree.computeOffset(idx);
         uint64_t addr = (signedOff >= 0)
-            ? tree.baseAddress + static_cast<uint64_t>(signedOff) : 0;
+            ? tab->ctrl->baseAddress() + static_cast<uint64_t>(signedOff) : 0;
 
         if (addr == 0 || !prov->isReadable(addr, sz)) {
             output += QStringLiteral("node %1 (%2): not readable at 0x%3\n")
@@ -3150,12 +3163,12 @@ QJsonObject McpBridge::toolAnalysisPointerChain(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
 
-    auto* prov = tab->doc->provider.get();
+    auto* prov = tab->ctrl->provider().get();
     if (!prov) return makeTextResult("No provider", true);
 
     int64_t addr = parseInteger(args.value("address"));
     if (args.value("baseRelative").toBool())
-        addr += (int64_t)tab->doc->tree.baseAddress;
+        addr += (int64_t)tab->ctrl->baseAddress();
 
     int maxDepth = qBound(1, (int)parseInteger(args.value("maxDepth"), 3), 8);
     int readLen = qBound(8, (int)parseInteger(args.value("readLength"), 64), 512);
@@ -3329,7 +3342,7 @@ QJsonObject McpBridge::toolAnalysisPointerChain(const QJsonObject& args) {
 QJsonObject McpBridge::toolAnalysisFindOverlaps(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
-    const auto& tree = tab->doc->tree;
+    const auto& tree = tab->ctrl->viewTree();
     auto pairs = tree.findOverlaps();
 
     QJsonArray jsonPairs;
@@ -3386,7 +3399,7 @@ QJsonObject McpBridge::toolAnalysisFindOverlaps(const QJsonObject& args) {
 QJsonObject McpBridge::toolAnalysisTreeSummary(const QJsonObject& args) {
     auto* tab = resolveTab(args);
     if (!tab) return makeTextResult("No active tab", true);
-    const auto& tree = tab->doc->tree;
+    const auto& tree = tab->ctrl->viewTree();
 
     int totalNodes = tree.nodes.size();
     int topLevelClasses = 0;

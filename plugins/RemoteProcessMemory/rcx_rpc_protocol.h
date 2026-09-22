@@ -88,25 +88,25 @@ struct RcxRpcHeader {
 
 static inline void rcx_rpc_shm_name(char* buf, int n, uint32_t pid) {
 #ifdef _WIN32
-    snprintf(buf, n, "Local\\REECLASS_SHM_%u", pid);
+    snprintf(buf, n, "Local\\RC_SHM_%u", pid);
 #else
-    snprintf(buf, n, "/reeclass_shm_%u", pid);
+    snprintf(buf, n, "/rc_shm_%u", pid);
 #endif
 }
 
 static inline void rcx_rpc_req_name(char* buf, int n, uint32_t pid) {
 #ifdef _WIN32
-    snprintf(buf, n, "Local\\REECLASS_REQ_%u", pid);
+    snprintf(buf, n, "Local\\RC_REQ_%u", pid);
 #else
-    snprintf(buf, n, "/reeclass_req_%u", pid);
+    snprintf(buf, n, "/rc_req_%u", pid);
 #endif
 }
 
 static inline void rcx_rpc_rsp_name(char* buf, int n, uint32_t pid) {
 #ifdef _WIN32
-    snprintf(buf, n, "Local\\REECLASS_RSP_%u", pid);
+    snprintf(buf, n, "Local\\RC_RSP_%u", pid);
 #else
-    snprintf(buf, n, "/reeclass_rsp_%u", pid);
+    snprintf(buf, n, "/rc_rsp_%u", pid);
 #endif
 }
 

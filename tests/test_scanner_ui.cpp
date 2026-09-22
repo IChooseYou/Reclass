@@ -1426,7 +1426,7 @@ private slots:
         QCOMPARE(m_panel->condCombo()->currentText(), QStringLiteral("Bigger Than"));
 
         // Clean up the test settings group.
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         s.remove(key);
     }
 

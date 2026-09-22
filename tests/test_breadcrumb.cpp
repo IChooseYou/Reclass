@@ -214,7 +214,7 @@ static QVector<Crumb> twoLevel() {
 // A live process source over the given trail — what a real push looks like.
 static AddressBarState stateWith(const QVector<Crumb>& crumbs) {
     AddressBarState s;
-    s.sourceName   = QStringLiteral("REECLASS.exe");
+    s.sourceName   = QStringLiteral("RCTarget.exe");
     s.sourceKindId = QStringLiteral("processmemory");
     s.liveness     = liveness::Live;
     s.baseAddress  = 0x7FF600000000ULL;
@@ -303,7 +303,7 @@ private:
 private slots:
     void init() {
         {
-            QSettings s("REECLASS", "REECLASS");
+            QSettings s("RC", "RC");
             m_hadRecent = s.contains(GotoAddressDialog::kSettingsKey);
             m_savedRecent = s.value(GotoAddressDialog::kSettingsKey).toStringList();
         }
@@ -339,7 +339,7 @@ private slots:
         m_editor = nullptr;
         delete m_splitter; m_splitter = nullptr;
         delete m_doc; m_doc = nullptr;
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         if (m_hadRecent) s.setValue(GotoAddressDialog::kSettingsKey, m_savedRecent);
         else             s.remove(GotoAddressDialog::kSettingsKey);
     }
@@ -880,6 +880,142 @@ private slots:
         QVERIFY(!bar.isEditing());
     }
 
+    // The timeline's buttons close the bar after a divider, pinned right, each
+    // named for what a click does: Record (a red dot) — Stop (a red square,
+    // red words) while recording — and, only while looking back at a
+    // recording, Back to live (a green play triangle). There is no Pause:
+    // values are live unless you look back. No time is written on either.
+    void testTimelineButtonsSayWhatTheyDo() {
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        AddressBarState s = stateWith(twoLevel());
+        bar.setState(s);
+        showBar(bar, 1080);
+        // Timeline switched off: nothing there.
+        QVERIFY(bar.itemRect(QStringLiteral("tl.live")).isNull());
+        QVERIFY(bar.itemRect(QStringLiteral("tl.rec")).isNull());
+
+        s.timeline = true;
+        s.canRecord = true;
+        bar.setState(s);
+        QApplication::processEvents();
+        const QRect crumb = bar.itemRect(QStringLiteral("crumb:1"));
+        QRect rec = bar.itemRect(QStringLiteral("tl.rec"));
+        QVERIFY(!rec.isNull());
+        QVERIFY2(bar.itemRect(QStringLiteral("tl.live")).isNull(), "Back to live offered while live");
+        QCOMPARE(bar.cellText(QStringLiteral("tl.rec")), QStringLiteral("Record"));
+        QCOMPARE(rec.right() + 1 + AddressBar::kRightMargin, bar.width());
+        QVERIFY(bar.itemRect(QStringLiteral("recent")).right() + 2 * AddressBar::kDividerPad < rec.left());
+        QVERIFY(bar.traversalIds().contains(QStringLiteral("tl.rec")));
+        QImage img = grabOf(bar);
+        QVERIFY2(countColour(img, devRect(img, rec), bar.theme().markerPtr) > 0, "Record has no red dot");
+
+        int lives = 0, records = 0;
+        AddressBar::Callbacks cb;
+        cb.onTimelineBackToLive = [&lives]() { ++lives; };
+        cb.onTimelineRecord = [&records]() { ++records; };
+        bar.setCallbacks(cb);
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, rec.center());
+        QApplication::processEvents();
+        QCOMPARE(records, 1);
+
+        // Recording: "Stop", still pinned right, and nothing counts.
+        s.recording = true;
+        bar.setState(s);
+        QApplication::processEvents();
+        QCOMPARE(bar.cellText(QStringLiteral("tl.rec")), QStringLiteral("Stop"));
+        rec = bar.itemRect(QStringLiteral("tl.rec"));
+        QCOMPARE(rec.right() + 1 + AddressBar::kRightMargin, bar.width());
+        img = grabOf(bar);
+        QVERIFY(countColour(img, devRect(img, rec), bar.theme().markerPtr) > 0);
+        QVERIFY(bar.itemRect(QStringLiteral("tl.live")).isNull());
+
+        // Looking back at a recording: "Back to live" appears, green, beside
+        // Record; the crumbs stay where they were.
+        s.past = true;
+        bar.setState(s);
+        QApplication::processEvents();
+        const QRect live = bar.itemRect(QStringLiteral("tl.live"));
+        QVERIFY(!live.isNull());
+        QCOMPARE(bar.cellText(QStringLiteral("tl.live")), QStringLiteral("Back to live"));
+        QVERIFY(live.right() < bar.itemRect(QStringLiteral("tl.rec")).left());
+        QCOMPARE(bar.itemRect(QStringLiteral("crumb:1")), crumb);
+        img = grabOf(bar);
+        QVERIFY2(countColour(img, devRect(img, live), bar.theme().indHintGreen) > 0, "Back to live is not green");
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, live.center());
+        QApplication::processEvents();
+        QCOMPARE(lives, 1);
+
+        // Live again: it goes.
+        s.past = false;
+        bar.setState(s);
+        QApplication::processEvents();
+        QVERIFY(bar.itemRect(QStringLiteral("tl.live")).isNull());
+
+        // A narrow pane never lays a button past its right edge: the words go
+        // first (the glyphs stay), then one glyph is left — Back to live while
+        // looking back, Record while live — then none.
+        bool sawGlyphOnly = false;
+        for (int w : {520, 420, 320, 290, 260, 240}) {
+            bar.resize(w, bar.height());
+            bool shownLookingBack = false;
+            for (bool lookingBack : {true, false}) {
+                s.past = lookingBack;
+                bar.setState(s);
+                QApplication::processEvents();
+                for (const char* id : {"tl.live", "tl.rec", "recent"}) {
+                    const QRect r = bar.itemRect(QString::fromLatin1(id));
+                    QVERIFY2(r.isNull() || r.right() < bar.width(),
+                             qPrintable(QStringLiteral("%1 past the edge at %2 px").arg(QLatin1String(id)).arg(w)));
+                }
+                const bool live = !bar.itemRect(QStringLiteral("tl.live")).isNull();
+                const bool rec = !bar.itemRect(QStringLiteral("tl.rec")).isNull();
+                if (lookingBack) {
+                    if (rec) QVERIFY(live);                        // Back to live outlives Record
+                    shownLookingBack = live || rec;
+                    if (live && bar.cellText(QStringLiteral("tl.live")).isEmpty()) sawGlyphOnly = true;
+                } else {
+                    QVERIFY(!live);
+                    // Live, the slot Back to live would take holds Record.
+                    QVERIFY2(rec == shownLookingBack,
+                             qPrintable(QStringLiteral("Record %1 live at %2 px").arg(rec ? "shown" : "dropped").arg(w)));
+                }
+            }
+        }
+        QVERIFY2(sawGlyphOnly, "the buttons never went glyph-only before dropping");
+    }
+
+    // Record → Stop, and Back to live coming and going, never move the rest
+    // of the bar: at any width no crumb moves, folds or comes back.
+    void testTimelineButtonStatesNeverReflowTheBar() {
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        AddressBarState s = stateWith(twoLevel());
+        s.timeline = true;
+        s.canRecord = true;
+        bar.setState(s);
+        showBar(bar, 1080);
+        for (int w : {300, 360, 420, 480, 560, 720}) {
+            bar.resize(w, bar.height());
+            QHash<QString, QRect> first;
+            for (int state = 0; state < 4; ++state) {
+                AddressBarState t = s;
+                t.past = state == 1 || state == 3;
+                t.recording = state >= 2;
+                bar.setState(t);
+                QApplication::processEvents();
+                for (const char* id : {"back", "fwd", "hist", "up", "src", "base", "overflow",
+                                       "crumb:0", "crumb:1", "chev:0", "chev:1"}) {
+                    const QString key = QString::fromLatin1(id);
+                    const QRect r = bar.itemRect(key);
+                    if (state == 0) first.insert(key, r);
+                    else QVERIFY2(r == first.value(key),
+                                  qPrintable(QStringLiteral("%1 moved at %2 px in state %3").arg(key).arg(w).arg(state)));
+                }
+            }
+        }
+    }
+
     void testFirstInkLandsOnTheGutter() {
         // The bar's leftmost ink — the Back arrow, enabled so it paints in
         // full — sits on the device column kGutter maps to, the column the
@@ -1096,7 +1232,7 @@ private slots:
     // and `recent` end inside the strip down to kNarrowFloorW.
     void testNarrowPanesKeepTheDeepestCrumbAndRecent() {
         AddressBar bar;
-        const QString formula = QStringLiteral("<REECLASS.exe>+0x1234");
+        const QString formula = QStringLiteral("<RCTarget.exe>+0x1234");
         AddressBarState s = stateWith({ crumb(QStringLiteral("RcxEditor.vptr"), 0, 1),
                                         crumb(QStringLiteral("QWidgetPrivate.parent"), 1, 2),
                                         crumb(QStringLiteral("QWidget"), 2, 3) });
@@ -1132,9 +1268,9 @@ private slots:
         showBar(bar, 480);
         QVERIFY2(holdsAt(480).isEmpty(), holdsAt(480).constData());
         // The chip still names its source — possibly middle-elided already
-        // ("REEC….exe": with three crumbs and a formula base step 2 turns
+        // ("RCTa….exe": with three crumbs and a formula base step 2 turns
         // at 480), but 7a has not: the name is on the chip, not in the tip.
-        QVERIFY2(bar.sourceDisplayText().startsWith(QStringLiteral("REEC")), qPrintable(bar.sourceDisplayText()));
+        QVERIFY2(bar.sourceDisplayText().startsWith(QStringLiteral("RCTa")), qPrintable(bar.sourceDisplayText()));
         QVERIFY(!rect("back").isNull());
         QVERIFY(!rect("fwd").isNull());
         QVERIFY2(bar.baseDisplayText() != QStringLiteral("0x7FF6DEAD1234"), qPrintable(bar.baseDisplayText()));
@@ -1151,7 +1287,7 @@ private slots:
         QVERIFY(!rect("src.chev").isNull());
         QCOMPARE(rect("src").width(), AddressBar::kChipPad + AddressBar::kChipIconPx + AddressBar::kChipChevGap);
         hoverAt(bar, rect("src").center());
-        QVERIFY2(bar.toolTip().contains(QStringLiteral("REECLASS.exe")), qPrintable(bar.toolTip()));
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("RCTarget.exe")), qPrintable(bar.toolTip()));
         // Back / Forward survive 300 px (7d / 7e are the last resorts, not this).
         QVERIFY(!rect("back").isNull());
         QVERIFY(!rect("fwd").isNull());
@@ -1232,11 +1368,11 @@ private slots:
         // Wide again: everything comes back.
         bar.resize(800, AddressBar::kAddressBarHeight);
         QApplication::processEvents();
-        QCOMPARE(bar.sourceDisplayText(), QStringLiteral("REECLASS.exe"));
+        QCOMPARE(bar.sourceDisplayText(), QStringLiteral("RCTarget.exe"));
         QVERIFY(!rect("back").isNull());
         QVERIFY(!rect("up").isNull());
         QVERIFY(rect("overflow").isNull());
-        QVERIFY2(bar.baseDisplayText().startsWith(QStringLiteral("<REE")), qPrintable(bar.baseDisplayText()));
+        QVERIFY2(bar.baseDisplayText().startsWith(QStringLiteral("<RCT")), qPrintable(bar.baseDisplayText()));
     }
 
     void testEqualStatePushAppliesOnce() {
@@ -1285,7 +1421,7 @@ private slots:
         hoverAt(bar, bar.itemRect(QStringLiteral("back")).center());
         QCOMPARE(bar.toolTip(), QStringLiteral("Back  Alt+Left"));
         hoverAt(bar, bar.itemRect(QStringLiteral("src")).center());
-        QVERIFY2(bar.toolTip().contains(QStringLiteral("Process REECLASS.exe")), qPrintable(bar.toolTip()));
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("Process RCTarget.exe")), qPrintable(bar.toolTip()));
         QVERIFY(bar.toolTip().contains(QStringLiteral("Live")));
         hoverAt(bar, bar.itemRect(QStringLiteral("chev:0")).center());
         QCOMPARE(bar.toolTip(), QStringLiteral("Fields of RcxEditor"));
@@ -1330,15 +1466,15 @@ private slots:
 
     void testSourceChipTooltipNamesKindAndStatus() {
         AddressBar bar;
-        bar.setState(stateWith(twoLevel()));   // Process REECLASS.exe, Live
+        bar.setState(stateWith(twoLevel()));   // Process RCTarget.exe, Live
         showBar(bar, 800);
         hoverAt(bar, bar.itemRect(QStringLiteral("src")).center());
         const QString tip = bar.toolTip();
         QVERIFY2(tip.contains(kindLabelFor(QStringLiteral("processmemory"))), qPrintable(tip));
-        QVERIFY(tip.contains(QStringLiteral("REECLASS.exe")));
+        QVERIFY(tip.contains(QStringLiteral("RCTarget.exe")));
         QVERIFY(tip.contains(QStringLiteral("Live — reading")));   // the status chip's words
         QVERIFY(tip.contains(QStringLiteral("click to change source")));
-        QCOMPARE(bar.sourceDisplayText(), QStringLiteral("REECLASS.exe"));
+        QCOMPARE(bar.sourceDisplayText(), QStringLiteral("RCTarget.exe"));
         // The chevron is part of the chip: same tip, same hover group.
         hoverAt(bar, bar.itemRect(QStringLiteral("src.chev")).center());
         QCOMPARE(bar.toolTip(), tip);
@@ -1439,7 +1575,7 @@ private slots:
         QVERIFY2(countColour(img, devRect(img, bar.itemRect(QStringLiteral("base"))), t.textMuted) < 16,
                  "resolved suffix drawn beside a literal");
 
-        const QString formula = QStringLiteral("<REECLASS.exe>+0x1234+[0x10]*2");
+        const QString formula = QStringLiteral("<RCTarget.exe>+0x1234+[0x10]*2");
         QCOMPARE(formula.size(), 30);
         s.baseFormula  = formula;
         s.resolvedBase = 0x7FF6DEAD1234ULL;
@@ -1448,7 +1584,7 @@ private slots:
         const QString shown = bar.baseDisplayText();           // the display: elided
         QVERIFY2(shown.size() < formula.size(), qPrintable(shown));
         QVERIFY(shown.contains(QChar(0x2026)));
-        QVERIFY2(shown.startsWith(QStringLiteral("<REE")) && shown.endsWith(QStringLiteral("*2")),
+        QVERIFY2(shown.startsWith(QStringLiteral("<RCT")) && shown.endsWith(QStringLiteral("*2")),
                  qPrintable(shown));                            // middle elision keeps both ends
         QVERIFY(QFontMetrics(bar.font()).horizontalAdvance(shown) <= AddressBar::kBaseMaxW);
         img = grabOf(bar);
@@ -1569,7 +1705,7 @@ private slots:
         // ellipsis the command row used to hand the parser.
         AddressBar bar;
         AddressBarState s = stateWith(twoLevel());
-        const QString formula = QStringLiteral("<REECLASS.exe>+0x1234+[0x10]*2");
+        const QString formula = QStringLiteral("<RCTarget.exe>+0x1234+[0x10]*2");
         QCOMPARE(formula.size(), 30);
         s.baseFormula  = formula;
         s.resolvedBase = 0x7FF6DEAD1234ULL;
@@ -1881,8 +2017,8 @@ private slots:
         // event pump: the hidden desktop closes a popup at the first one.
         GotoAddressDialog::clearRecent();
         GotoAddressDialog::pushRecent(QStringLiteral("0x7FF60000"));
-        GotoAddressDialog::pushRecent(QStringLiteral("<REECLASS.exe>+0x40"));   // most recent first
-        Bookmark b; b.name = QStringLiteral("spawn"); b.addressFormula = QStringLiteral("<REECLASS.exe>+0x100");
+        GotoAddressDialog::pushRecent(QStringLiteral("<RCTarget.exe>+0x40"));   // most recent first
+        Bookmark b; b.name = QStringLiteral("spawn"); b.addressFormula = QStringLiteral("<RCTarget.exe>+0x100");
         m_doc->tree.bookmarks.append(b);
         QApplication::processEvents();
         AddressBar* bar = m_editor->addressBar();
@@ -1896,19 +2032,19 @@ private slots:
         QVERIFY(menu);
         QVERIFY(menu->isVisible());
         const QStringList texts = actionTexts(menu);
-        QVERIFY2(texts.contains(QStringLiteral("<REECLASS.exe>+0x40")), qPrintable(texts.join('|')));
+        QVERIFY2(texts.contains(QStringLiteral("<RCTarget.exe>+0x40")), qPrintable(texts.join('|')));
         QVERIFY2(texts.contains(QStringLiteral("0x7FF60000")), qPrintable(texts.join('|')));
-        QVERIFY2(texts.contains(QStringLiteral("spawn  <REECLASS.exe>+0x100")), qPrintable(texts.join('|')));
+        QVERIFY2(texts.contains(QStringLiteral("spawn  <RCTarget.exe>+0x100")), qPrintable(texts.join('|')));
         // Recent before bookmarks, most recent first.
-        QVERIFY(texts.indexOf(QStringLiteral("<REECLASS.exe>+0x40")) < texts.indexOf(QStringLiteral("0x7FF60000")));
-        QVERIFY(texts.indexOf(QStringLiteral("0x7FF60000")) < texts.indexOf(QStringLiteral("spawn  <REECLASS.exe>+0x100")));
+        QVERIFY(texts.indexOf(QStringLiteral("<RCTarget.exe>+0x40")) < texts.indexOf(QStringLiteral("0x7FF60000")));
+        QVERIFY(texts.indexOf(QStringLiteral("0x7FF60000")) < texts.indexOf(QStringLiteral("spawn  <RCTarget.exe>+0x100")));
         QVERIFY(!texts.contains(QStringLiteral("Clear recent")));       // the edit's menu inserts only
-        QAction* pick = actionWithText(menu, QStringLiteral("<REECLASS.exe>+0x40"));
+        QAction* pick = actionWithText(menu, QStringLiteral("<RCTarget.exe>+0x40"));
         QVERIFY(pick);
         pick->trigger();
         menu->hide();
         QTest::qWait(10);                                        // runs the menu's deleteLater
-        QCOMPARE(bar->editText(), QStringLiteral("<REECLASS.exe>+0x40"));
+        QCOMPARE(bar->editText(), QStringLiteral("<RCTarget.exe>+0x40"));
         QVERIFY(bar->isEditing());                               // inserted, not committed
         QCOMPARE(commit.count(), 0);
         QCOMPARE(m_doc->tree.baseAddress, 0ULL);
@@ -1921,7 +2057,7 @@ private slots:
         QVERIFY(menu);
         QStringList entries;
         for (QAction* a : menu->actions()) if (!a->isSeparator() && a->data().isValid()) entries << a->text();
-        QCOMPARE(entries, QStringList{ QStringLiteral("spawn  <REECLASS.exe>+0x100") });
+        QCOMPARE(entries, QStringList{ QStringLiteral("spawn  <RCTarget.exe>+0x100") });
         menu->hide();
         QTest::qWait(10);
         // Nothing matches → no menu at all.
@@ -2119,7 +2255,7 @@ private slots:
         showBar(bar, 800);
         hoverAt(bar, bar.itemRect(QStringLiteral("src")).center());
         const QString tip = bar.toolTip();
-        QVERIFY2(tip.startsWith(QStringLiteral("REECLASS.exe")), qPrintable(tip));
+        QVERIFY2(tip.startsWith(QStringLiteral("RCTarget.exe")), qPrintable(tip));
         QVERIFY2(!tip.contains(QStringLiteral("Plugin")), qPrintable(tip));
         QVERIFY(tip.contains(QStringLiteral("Live")));
     }
@@ -3866,7 +4002,7 @@ private slots:
             QVector<SourceEntry> entries;
             SourceEntry h; h.entryKind = SourceEntry::SectionHeader; h.displayName = QStringLiteral("Connected"); h.enabled = false;
             entries.append(h);
-            SourceEntry e; e.entryKind = SourceEntry::SavedSource; e.displayName = QStringLiteral("REECLASS.exe");
+            SourceEntry e; e.entryKind = SourceEntry::SavedSource; e.displayName = QStringLiteral("RCTarget.exe");
             e.providerIdentifier = QStringLiteral("processmemory"); e.kindLabel = QStringLiteral("Process");
             e.iconPath = iconForProvider(e.providerIdentifier); e.pid = QStringLiteral("34856");
             e.arch = QStringLiteral("x64"); e.savedIndex = 0; e.isActive = true;
@@ -4193,7 +4329,7 @@ private slots:
         // the text, caret and selection alone; Esc still restores.
         AddressBar bar;
         AddressBarState s = stateWith(twoLevel());
-        s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234");
+        s.baseFormula  = QStringLiteral("<RCTarget.exe>+0x1234");
         s.resolvedBase = 0x7FF6DEAD1234ULL;
         bar.setState(s);
         showBar(bar, 800);
@@ -4270,7 +4406,7 @@ private slots:
 
         AddressBar bar;
         AddressBarState s = stateWith(twoLevel());
-        s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234");
+        s.baseFormula  = QStringLiteral("<RCTarget.exe>+0x1234");
         s.resolvedBase = 0x7FF6DEAD1234ULL;
         bar.setState(s);
         showBar(bar, 900);
@@ -4280,7 +4416,7 @@ private slots:
         // GEOMETRY (baseSepGap, one space wide), reserved so the suffix
         // already stands where the edit overlay's preview will.
         const QString shown = bar.baseDisplayText() + QStringLiteral(" ") + bar.baseSuffixShown();
-        QCOMPARE(shown, QStringLiteral("<REECLASS.exe>+0x1234 = 0x7FF6DEAD1234"));
+        QCOMPARE(shown, QStringLiteral("<RCTarget.exe>+0x1234 = 0x7FF6DEAD1234"));
         const QRect cell = bar.itemRect(QStringLiteral("base"));
         const int sepGap = QFontMetrics(bar.font()).horizontalAdvance(QLatin1Char(' '));
         QCOMPARE(cell.width(), AddressBar::kBasePad
@@ -4367,12 +4503,12 @@ private slots:
         bar.applyTheme(ThemeManager::instance().current());
         AddressBar::Callbacks cb;
         cb.evaluate = [](const QString& s) {
-            return s == QStringLiteral("<REECLASS.exe>+0x1234") ? QStringLiteral("0x7FF6DEAD1234")
+            return s == QStringLiteral("<RCTarget.exe>+0x1234") ? QStringLiteral("0x7FF6DEAD1234")
                                                                 : QString();
         };
         bar.setCallbacks(std::move(cb));
         AddressBarState s = stateWith(twoLevel());
-        s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234");
+        s.baseFormula  = QStringLiteral("<RCTarget.exe>+0x1234");
         s.resolvedBase = 0x7FF6DEAD1234ULL;
         bar.setState(s);
         showBar(bar, 900);
@@ -4460,7 +4596,7 @@ private slots:
                                 .arg(bar.editRect().width())));
         // ...and it grows the moment there is something to grow for.
         const int opened = bar.editRect().width();
-        bar.editWidget()->setText(QStringLiteral("<REECLASS.exe>+0x1234"));
+        bar.editWidget()->setText(QStringLiteral("<RCTarget.exe>+0x1234"));
         QApplication::processEvents();
         QVERIFY(bar.editRect().width() > opened);
     }
@@ -4480,7 +4616,7 @@ private slots:
         QVERIFY(bar.isBaseEditing());
         const int opened = bar.editRect().width();
 
-        bar.editWidget()->setText(QStringLiteral("<REECLASS.exe> + 0x1A0 + 0x58"));
+        bar.editWidget()->setText(QStringLiteral("<RCTarget.exe> + 0x1A0 + 0x58"));
         QApplication::processEvents();
         const int grown = bar.editRect().width();
         QVERIFY2(grown > opened, qPrintable(QStringLiteral("%1 -> %2").arg(opened).arg(grown)));

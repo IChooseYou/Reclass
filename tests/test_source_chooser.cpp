@@ -156,7 +156,7 @@ private:
         entries.append(provider(QStringLiteral("Open File"), QStringLiteral("File"), QStringLiteral("built-in")));
         entries.append(provider(QStringLiteral("Kernel Memory"), QStringLiteral("kernelmemory"), QStringLiteral("libKernelMemoryPlugin.dll")));
         entries.append(provider(QStringLiteral("Process Memory"), QStringLiteral("processmemory"), QStringLiteral("libProcessMemoryPlugin.dll")));
-        entries.append(provider(QStringLiteral("ReClass.NET Compat Layer"), QStringLiteral("REECLASS.netcompatlayer"), QStringLiteral("libRcNetCompatPlugin.dll")));
+        entries.append(provider(QStringLiteral("ReClass.NET Compat Layer"), QStringLiteral("RC.netcompatlayer"), QStringLiteral("libRcNetCompatPlugin.dll")));
         entries.append(provider(QStringLiteral("Remote Process Memory"), QStringLiteral("remoteprocessmemory"), QStringLiteral("libRemoteProcessMemoryPlugin.dll")));
         entries.append(provider(QStringLiteral("WinDbg Memory"), QStringLiteral("windbgmemory"), QStringLiteral("libWinDbgMemoryPlugin.dll")));
         entries.append(clearAll(true));

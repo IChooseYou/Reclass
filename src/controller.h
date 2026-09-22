@@ -3,6 +3,10 @@
 #include "editor.h"
 #include "nav_history.h"
 #include "providers/snapshot_provider.h"
+#include "diffutil.h"
+#include "timeline/tl_types.h"
+#include "timeline/tl_model.h"
+#include "timeline/class_changes.h"
 #include <QObject>
 #include <QUndoStack>
 #include <QUndoCommand>
@@ -13,6 +17,13 @@
 #include <QJsonArray>
 #include <memory>
 #include <optional>
+
+namespace rcx::tl {
+class TimelineHub;
+class CaptureContext;
+class TimelineFrameProvider;
+struct Frame;
+}
 
 namespace rcx {
 
@@ -75,12 +86,18 @@ public:
     // png.rcx use this to ship a sibling sample binary that the
     // controller auto-attaches on first load.
     QJsonArray                 pendingSavedSources;
+    QList<RcxController*>      controllers;
     // Count of sibling-overlaps detected by tree.findOverlaps() during the
     // most recent load(). Surfaced to the user via a controller statusHint
     // post-load so it's actually visible (the per-pair details are also
     // logged via qWarning for console post-mortem). Zero on clean trees /
     // freshly-created docs.
     int                        m_loadOverlapCount = 0;
+    // Class timelines: capture state shared by every tab on this document
+    // (they share its base address). Created by the first controller that
+    // binds a live source. Instance tabs, with their own address, keep their
+    // own hub instead.
+    std::shared_ptr<tl::TimelineHub> timeline;
 
     QString resolveTypeName(NodeKind kind) const {
         auto it = typeAliases.find(kind);
@@ -94,13 +111,17 @@ public:
                           bool treeLines = false, bool braceWrap = false,
                           bool typeHints = false, bool showComments = true,
                           SymbolLookupFn symbolLookup = {}) const;
-    bool save(const QString& path);
+    bool save(const QString& path, const NodeTree* view = nullptr);
     bool load(const QString& path);
-    void loadData(const QString& binaryPath);
+    bool loadData(const QString& binaryPath);
     void loadData(const QByteArray& data);
 
 signals:
     void documentChanged();
+    // The shared timeline hub changed (a class started/stopped recording, was
+    // paused, reset; a source attached). Every tab showing this document
+    // refreshes its strip.
+    void timelineStateChanged();
 };
 
 // ── Undo command ──
@@ -111,7 +132,11 @@ public:
     void undo() override;
     void redo() override;
 private:
-    RcxController* m_ctrl;
+    QPointer<RcxController> m_ctrl;
+    QPointer<RcxDocument> m_doc;
+    std::shared_ptr<Provider> m_writeProvider;
+    bool m_localViewCommand = false;
+    void execute(bool undo);
     Command m_cmd;
 };
 
@@ -293,7 +318,8 @@ public:
     // rejected the change (e.g. provider write failed). Callers — primarily
     // RcxCommand::undo/redo — use this to mark the command obsolete so the
     // undo stack stays consistent with the actual data.
-    bool applyCommand(const Command& cmd, bool isUndo);
+    bool applyCommand(const Command& cmd, bool isUndo,
+                      const std::shared_ptr<Provider>& writeProvider = {});
     void refresh();
     void applyTypePopupResult(TypePopupMode mode, int nodeIdx, const TypeEntry& entry, const QString& fullText);
     uint64_t findOrCreateStructByName(const QString& typeName, int depth = 0);
@@ -304,6 +330,7 @@ public:
     void clearSelection();
     void applySelectionOverlays();
     QSet<uint64_t> selectedIds() const { return m_selIds; }
+    const QHash<uint64_t, SelectionAnchor>& selectionAnchors() const { return m_selAnchors; }
 
     // Mirror an editor's byte selection into the row selection. The set is
     // the encoded selIds of every hex row the byte selection covers (empty
@@ -456,10 +483,29 @@ public:
     QString currentNavLabel() const;
 
     RcxDocument* document() const { return m_doc; }
+    // Instance tabs share the layout/undo stack, not the address or source.
+    bool isInstanceView() const { return m_instance.has_value(); }
+    bool configureInstance(const RcxController& source, uint64_t rootId,
+                           uint64_t address, const QString& expression = {},
+                           std::shared_ptr<Provider> instanceProvider = {});
+    uint64_t& baseAddress();
+    uint64_t baseAddress() const;
+    QString& baseAddressFormula();
+    const QString& baseAddressFormula() const;
+    std::shared_ptr<Provider>& provider();
+    const std::shared_ptr<Provider>& provider() const;
+    const NodeTree& viewTree() const;
+    bool isCollapsed(const Node& node) const;
+    void setCollapsed(uint64_t nodeId, bool collapsed);
+    QString addressExpression(uint64_t address, const QString& preferred = {}) const;
+    bool navigateToAddress(uint64_t address, const QString& preferred = {});
+    bool loadSourceFile(const QString& path);
+    void openPointerBeside(RcxEditor* editor, int line);
     void setEditorFont(const QString& fontName);
     void setRefreshInterval(int ms);
     void setCompactColumns(bool v);
     void setTreeLines(bool v);
+    void setTreeColumns(bool v);   // paint-only: lines between the columns
     void setBraceWrap(bool v);
     void setTypeHints(bool v);
     bool typeHints() const { return m_typeHints; }
@@ -500,10 +546,82 @@ public:
     void setTrackValues(bool on);
     void resetChangeTracking();
 
+    // ── Class timeline ──
+    // Nothing is captured until Record: while the class shown is recording,
+    // every change is kept (until Clear, Stop included). The view is LIVE —
+    // always updating — unless the user looks back at a recording (the PAST:
+    // a recorded moment, composed through the current structure). Recording
+    // carries on underneath.
+    tl::TimelineHub*    timelineHub() const;
+    tl::CaptureContext* timelineContext() const;
+    // The class the strip speaks for: the view root, else the first root class.
+    uint64_t timelineClassId() const;
+    bool     isViewingPast() const { return m_pastRecord != tl::kNoRecord; }
+    tl::RecordId pastRecord() const { return m_pastRecord; }
+    // Where the playhead stands: the moment asked for, not the record's own
+    // time (they differ whenever the user parks between two records).
+    int64_t  pastTimeMs() const;   // capture clock
+    int64_t  pastRecordTimeMs() const { return m_pastRecordMs; }
+    // Look at `timeMs` (capture clock): the playhead stops there, showing the
+    // last record at or before it.
+    void viewTimelineAt(int64_t timeMs);
+    // Land ON a record — stepping, "Show in Timeline", restoring a scrub.
+    void viewTimelineRecord(tl::RecordId record);
+    // Back to live: out of the recording, live values again.
+    void returnToLive();
+    void timelineToggleRecording();
+    bool timelineRecording() const;   // the class shown is recording
+    // Looking back at a recording, values are read-only: why a write was refused.
+    QString viewingPastHint() const;
+    // What the view shows — the recorded moment, else the snapshot, else the
+    // source — for everything that copies, saves or follows what is on screen.
+    const Provider* displayedProvider() const;
+    // A scrub the user cancels (Esc, right-press) puts back exactly what was
+    // on screen before it.
+    void beginTimelineScrub();
+    void cancelTimelineScrub();
+    void timelineReset();          // "Clear History"
+    // Show `record` with the playhead at `viewMs` — the two differ when the
+    // user parks between records.
+    void viewTimelineRecordAt(tl::RecordId record, int64_t viewMs);
+    // Previous (-1) / next (+1) change of the class; stepping past the newest
+    // change returns to live. False when there is nowhere to go.
+    bool stepTimelineChange(int dir);
+    // What changed in the class shown, counted in FIELDS of the current
+    // layout: the graph's height, the readout, the stepping scope. Empty
+    // until the view has composed once (the byte counts stand in meanwhile).
+    const tl::ClassChangeSeries& timelineClassChanges() const { return m_classChanges; }
+    bool    timelineCountsFields() const { return !m_fieldIndex.isEmpty(); }
+    quint64 timelineClassChangesVersion() const { return m_classChangesVersion; }
+    // The selected rows as field spans; stepping and the strip's ticks follow
+    // them. Empty: the whole class.
+    QVector<tl::FieldSpan> timelineSelectionScope() const;
+    // "'health'" / "3 fields", for labels; empty without a selection.
+    QString timelineScopeLabel() const;
+    // The strip's hover readout for a moment (capture clock).
+    QString describeTimelineAt(int64_t timeMs) const;
+    // Frame the selection's captured changes on the strip.
+    void revealSelectionInTimeline();
+    // Keep capturing while minimised / unfocused (default: the setting).
+    // Tests of the old throttle turn it off.
+    void setTimelineBackgroundCapture(bool on);
+    bool timelineCapturing() const { return m_timelineBackgroundCapture && timelineRecording(); }
+    // View ▸ Timeline ▸ Enable. On by default. Off detaches capture and frees
+    // the history; on again starts rolling afresh.
+    void setTimelineEnabled(bool on);
+    bool timelineEnabled() const { return m_timelineEnabled; }
+    // Budgets or the rolling window changed in settings.
+    void reloadTimelineSettings() { bindTimeline(); }
+
     // Cross-tab type visibility: point at the project's full document list
     void setProjectDocuments(QVector<RcxDocument*>* docs) { m_projectDocs = docs; }
 
     // Test accessors
+    AddressBarState addressBarStateForTest() { return addressBarState(); }
+    void setSelectedIdsForTest(const QSet<uint64_t>& ids) {
+        m_selIds = ids;
+        emit selectionChanged(m_selIds.size());
+    }
     const QHash<uint64_t, ValueHistory>& valueHistory() const { return m_valueHistory; }
     const ComposeResult& lastResult() const { return m_lastResult; }
 //TODO-DELETE(dataExtent)     int  dataExtent() const { return computeDataExtent(); }
@@ -532,6 +650,8 @@ signals:
     // in a new tab sharing this document. MainWindow calls createTab(doc)
     // and setViewRootId(structId) on the new tab.
     void requestOpenStructInNewTab(uint64_t structId);
+    void requestOpenInstanceBeside(uint64_t structId, uint64_t address,
+                                   const QString& expression);
     // Active provider's isValid() flipped — used by the dock tab's
     // source-status icon to dim/restore in real time when a process
     // exits, a file vanishes, etc. Fires on transition only, not every
@@ -544,16 +664,36 @@ signals:
     // on the refresh that follows; this is for a menu that wants them
     // without a refresh.
     void historyChanged(bool canBack, bool canForward);
+    // Anything the timeline strip shows changed: a commit landed, capture
+    // state changed, the view moved into or out of the past. Coalesced.
+    void timelineChanged();
+    // "Show in Timeline": frame [beginMs, endMs] (capture clock) on the strip.
+    void timelineRevealRequested(int64_t beginMs, int64_t endMs);
 
 private:
-    RcxDocument*       m_doc;
+    QPointer<RcxDocument> m_doc;
+    struct InstanceState {
+        uint64_t baseAddress = 0;
+        QString formula;
+        std::shared_ptr<Provider> provider;
+        QHash<uint64_t, bool> collapsed;
+    };
+    std::optional<InstanceState> m_instance;
+    mutable NodeTree m_viewTree;
+    mutable quint64 m_viewTreeGeneration = 0;
+    mutable bool m_viewTreeDirty = true;
     QList<RcxEditor*>  m_editors;
     ComposeResult      m_lastResult;
     QSet<uint64_t>     m_selIds;
+    // Where each selected id was selected (row_instances.h): a node shown in
+    // several places is marked only at the one clicked. Ids without an anchor
+    // (selected by menu, MCP, undo, a byte drag) mark their first instance.
+    QHash<uint64_t, SelectionAnchor> m_selAnchors;
     int                m_anchorLine = -1;
     bool               m_suppressRefresh = false;
     bool               m_compactColumns = false;
     bool               m_treeLines = false;
+    bool               m_treeColumns = false;
     bool               m_braceWrap = false;
     bool               m_typeHints = false;
     bool               m_showComments = false;
@@ -668,15 +808,131 @@ private:
 
     // ── Auto-refresh state ──
     using PageMap = QHash<uint64_t, QByteArray>;
+    // What one async refresh read hands back. The worker reads each page with
+    // read() (so a refused page is REPORTED, not zero-filled) and diffs it
+    // against the pages as they stood at dispatch, so the UI thread gets the
+    // verdict instead of redoing the comparison.
+    struct ReadBatch {
+        PageMap pages;                   // first-seen or changed pages only
+        QVector<uint64_t> firstSeen;     // read OK, no baseline to compare with
+        QVector<uint64_t> changed;       // read OK, bytes differ from the baseline
+        QVector<uint64_t> unchanged;     // read OK, byte-identical (not in `pages`)
+        QVector<uint64_t> unreadable;    // read() failed
+        QVector<ChangedRun> runs;        // normalized, absolute addresses
+        bool     page0AllZero = false;   // page 0 read OK and is all zero bytes
+        uint64_t diffGen = 0;            // m_diffGen at dispatch
+        // Every page this tick WATCHED — the main range, touched pages and
+        // the pointer targets resolved on the worker — before any was skipped.
+        QVector<uint64_t> intended;
+    };
+
+    // ── Capture plan ──
+    // The view's pointer graph, flattened on the UI thread so the read worker
+    // can follow it without touching the tree: each struct as its pointers
+    // (offset, size, extra dereferences, relative?) and what they lead to.
+    // The worker reads a struct's pages, takes pointer values from the bytes
+    // it just read, and reads the targets in the SAME tick — so a pointer
+    // and its target always come from one moment. The traversal mirrors
+    // compose: embedded structs (own children or a refId), arrays of structs,
+    // materialised pointer children, isRelative, ptrDepth, and primitive
+    // pointers that display their target's value.
+    struct PlanPtr {
+        int64_t offset = 0;        // from the start of the struct's frame
+        uint8_t size = 8;          // 4 or 8
+        uint8_t derefs = 0;        // extra dereferences before the target
+        bool    relative = false;  // add the document base (RVA)
+        int     targetStruct = -1; // index into CapturePlan::structs
+        int     targetLen = 0;     // primitive target: bytes to capture
+    };
+    struct PlanStruct {
+        int span = 0;
+        QVector<PlanPtr> ptrs;
+    };
+    struct CapturePlan {
+        QVector<PlanStruct> structs;
+        int root = -1;
+    };
+    std::shared_ptr<const CapturePlan> capturePlanFor(uint64_t rootId);
+    std::shared_ptr<const CapturePlan> m_capturePlan;
+    quint64 m_capturePlanKey = 0;
+    quint64 m_capturePlanEpoch = 0;     // bumped when collapse state or the view root changes
+    static constexpr int kMaxPlanPointers = 65536;
+    static constexpr int kMaxPlanArrayElems = 4096;
     QTimer*         m_refreshTimer = nullptr;
-    QFutureWatcher<PageMap>* m_refreshWatcher = nullptr;
+    QFutureWatcher<ReadBatch>* m_refreshWatcher = nullptr;
     std::unique_ptr<SnapshotProvider> m_snapshotProv;
     PageMap         m_prevPages;
     // Latches the "discarding all-zero page-0" debug log so a sustained
     // unreadable-page condition doesn't flood the console at refresh
     // tick rate. Cleared the first time we get a real read through.
     bool            m_loggedAllZeroPage0 = false;
-    QSet<int64_t>   m_changedOffsets;
+    // Bytes that changed on the tick being composed, as sorted absolute runs.
+    QVector<ChangedRun> m_changedRuns;
+    // Bumped whenever the diff baseline (m_prevPages) is thrown away, so a
+    // read already in flight — diffed against the old baseline — can't
+    // report changes against bytes the user asked us to forget.
+    uint64_t        m_diffGen = 0;
+
+    // ── Class timeline state ──
+    std::shared_ptr<tl::TimelineHub>    m_timelineHub;       // the doc's, or m_ownTimelineHub
+    std::shared_ptr<tl::TimelineHub>    m_ownTimelineHub;    // instance tabs only
+    std::shared_ptr<tl::CaptureContext> m_timelineCtx;       // this source's byte history
+    int  m_timelineProducer = 0;
+    int  m_timelineListener = 0;
+    int  m_timelineRequester = 0;
+    bool m_timelineBackgroundCapture = true;
+    bool m_timelineEnabled = true;
+    bool m_timelineChangedPending = false;
+    bool m_timelineSeeded = false;      // this recording has been handed every page once
+    int64_t m_pastRecordMs = 0;         // the shown record's time, kept past its eviction
+    // The moment the USER asked for, which is where the playhead stands. A
+    // scrub stops wherever it is released — between two records included —
+    // and what it shows is the record at or before it. Both are plain
+    // scalars, never re-derived from the model, so a moment that ages out of
+    // the store stays exactly where it was put.
+    int64_t m_pastViewMs = 0;
+    struct ScrubSnapshot {
+        bool         active = false;
+        tl::RecordId record = tl::kNoRecord;
+        int64_t      recordMs = 0;
+        int64_t      viewMs = 0;
+    };
+    ScrubSnapshot m_scrubSnapshot;
+    // Fields changed, per record, for the class shown.
+    tl::FieldIndex        m_fieldIndex;
+    uint64_t              m_fieldIndexBase = 0;
+    quint64               m_fieldIndexGeneration = 0;
+    quint64               m_fieldLayoutKey = 0;     // the layout the series was counted with
+    tl::ClassChangeSeries m_classChanges;
+    quint64               m_classChangesVersion = 0;
+    int                   m_classChangesQuery = 0;  // latest recount; older answers are dropped
+    mutable QVector<tl::FieldSpan> m_scope;
+    mutable quint64       m_scopeKey = 0;
+    mutable bool          m_scopeValid = false;
+    static int rowValueBytes(const NodeTree& tree, const LineMeta& lm);
+    QString fieldDisplayName(uint64_t selId) const;
+    void rebuildFieldIndex();
+    void recountClassChanges();
+    void onTimelineCommit(const tl::CommitBatch& b);
+    void countRecord(tl::ClassChangeSeries& series, tl::RecordId r, int64_t tMs,
+                     const QVector<tl::ChangedSpan>& spans, QVector<int>& hits) const;
+    // The page set last declared to the timeline (sent only when it changes).
+    QVector<uint64_t> m_timelineCoverage;
+    bool    m_inflightPartial = false;
+    int64_t m_readStartMs = 0;
+    // The past being shown, if any.
+    tl::RecordId m_pastRecord = tl::kNoRecord;
+    std::unique_ptr<tl::TimelineFrameProvider> m_frameProv;
+    // A compose was skipped (minimised); do it when the window is back.
+    bool m_viewStale = false;
+    // Pages compose read on its last live passes, beyond the ranges the tick
+    // walks itself (RTTI vtables, deref targets, pointers inside nested
+    // structs). Each is requested on following ticks until it has gone
+    // kTouchedPageMaxAge composes untouched. Capped so a pathological view
+    // cannot turn every tick into thousands of reads.
+    QHash<uint64_t, int> m_touchedAge;
+    static constexpr int kTouchedPageMaxAge = 5;
+    static constexpr int kTouchedPageCap = 1024;
     QHash<uint64_t, ValueHistory> m_valueHistory;
     QHash<uint64_t, uint64_t> m_lastValueAddr;  // nodeId → last offsetAddr used for value recording
     // nodeId → raw bytes of the last sampled value. Change-detection keys on
@@ -801,6 +1057,17 @@ public:
 
 private:
     void resetSnapshot();
+    // Timeline plumbing.
+    std::shared_ptr<tl::TimelineHub> ensureTimelineHub();
+    void bindTimeline();
+    void detachTimeline();
+    void feedTimeline(const ReadBatch& batch);
+    // Not recording: this tab's pages leave the timeline's coverage.
+    void leaveTimelineCoverage();
+    // Out of the past: live again (capture is untouched).
+    void leavePast();
+    void scheduleTimelineChanged();
+    void onPastFrame(std::shared_ptr<const tl::Frame> frame);
     void collectPointerRanges(uint64_t structId, uint64_t memBase,
                               int depth, int maxDepth,
                               QSet<QPair<uint64_t,uint64_t>>& visited,

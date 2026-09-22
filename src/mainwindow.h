@@ -10,7 +10,7 @@
 #include "widgets/dock_header.h"
 #include "widgets/panel_search_field.h"
 #include "names/name_provider.h"
-namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class UnifiedSymbolPanel; }
+namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class UnifiedSymbolPanel; class TimelineStrip; }
 namespace rcx { class RibbonBar; class RibbonActions; }
 class QToolBar;
 class QActionGroup;
@@ -100,6 +100,8 @@ public:
     // the split layout headlessly (mirrors the scanner/workspace args).
     void previewBothSplit();
     void previewCodeView();   // select the single "Code" view (test/preview)
+    void previewInstances(); // --screenshot instances: shared layout at two addresses
+    void previewLargeFile(); // --screenshot largefile, RCX_LARGE_FILE supplies the fixture
 
     // Test hook: with 3 doc tabs open, click the actual close-X on the active
     // tab, wait a tick, then click the next survivor's X — exercises the real
@@ -108,7 +110,11 @@ public:
     void previewCloseViaX();
     void previewSymbolsDock();   // --screenshot symbols: Symbols dock at 270 px
     void previewFontMenu();      // --screenshot fontmenu: View ▸ Font, open
-    void previewNodeMenu();      // --screenshot nodemenu: the node right-click menu
+    void previewNodeMenu();       // --screenshot nodemenu: the node right-click menu
+    void previewTimeline(const QString& ssPath);   // --screenshot timeline: live, then the past
+    // --screenshot simtimeline: the bouncing ball recorded for a few seconds —
+    // <png> while recording, <png>_stopped after Stop, <png>_past looking back.
+    void previewSimulationTimeline(const QString& ssPath);
 
     // Pin the bottom-right resize grip + the edge/corner resize zones to the
     // current window size. Called from resizeEvent AND explicitly after the
@@ -154,6 +160,8 @@ public:
     // Project Lifecycle API
     QDockWidget* project_new(const QString& classKeyword = QString(),
                              bool forceFreshDoc = false);
+    // The live bouncing-ball example a first launch opens on.
+    QDockWidget* project_newSimulation();
     QDockWidget* project_open(const QString& path = {});
     bool project_save(QDockWidget* dock = nullptr, bool saveAs = false);
     void project_close(QDockWidget* dock = nullptr);
@@ -168,6 +176,9 @@ public:
     // types imported from another project), then present a modal list.
     // Double-click an entry jumps to that tab + scrolls to the reference.
     void showFindReferences(const QString& targetTypeName, uint64_t targetStructId);
+    QDockWidget* openInstanceBeside(RcxController* source, uint64_t structId,
+                                    uint64_t address, const QString& expression = {},
+                                    std::shared_ptr<rcx::Provider> provider = {});
 
     // Data form for the same query, exposed for MCP tool reuse.
     struct ReferenceHit {
@@ -252,6 +263,13 @@ private:
     QAction*        m_actBookmarks = nullptr;
     QAction*        m_actRtti      = nullptr;
     QAction*        m_actSplit     = nullptr;
+    QAction*        m_actTimeline  = nullptr;   // View > Timeline > Enable (on by default)
+    QAction*        m_actTlRecord  = nullptr;   // F9
+    QAction*        m_actTlLive    = nullptr;   // Ctrl+End (enabled only in the past)
+    QAction*        m_actTlStrip   = nullptr;   // View ▸ Timeline ▸ Show Timeline
+    QAction*        m_actTlPrev    = nullptr;   // Ctrl+,
+    QAction*        m_actTlNext    = nullptr;   // Ctrl+.
+    QAction*        m_actTlReset   = nullptr;
     QMenu*          m_recentFilesMenu = nullptr;
     QTimer*         m_autosaveTimer   = nullptr;
 
@@ -301,6 +319,9 @@ private:
         QSplitter*         splitter;
         QVector<SplitPane> panes;
         int                activePaneIdx = 0;
+        // The class timeline along the bottom of the tab. Per TAB, not per
+        // pane: capture belongs to the controller, which every pane shares.
+        TimelineStrip*     timeline = nullptr;
     };
     QMap<QDockWidget*, TabState> m_tabs;
     QVector<QDockWidget*> m_docDocks;       // ordered list for tabByIndex
@@ -352,6 +373,14 @@ private:
 
     RcxController* activeController() const;
     TabState* activeTab();
+    // ── Class timeline ──
+    void bindTimelineStrip(TabState& tab);
+    void setTimelineEnabled(bool on);
+    // Enabled state and labels of View > Timeline, pushed live: a stale
+    // disabled action would swallow its shortcut.
+    void syncTimelineActions();
+    void confirmTimelineClear(RcxController* ctrl);
+    void setTimelineStripVisible(bool on);
     TabState* tabByIndex(int index);
     int tabCount() const { return m_tabs.size(); }
     QDockWidget* createSentinelDock();

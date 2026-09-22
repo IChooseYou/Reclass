@@ -88,6 +88,56 @@ static TypeNameFn g_typeNameFn = nullptr;
 
 void setTypeNameProvider(TypeNameFn fn) { g_typeNameFn = fn; }
 
+// ── Float decimals ──
+
+static int g_floatDecimals = kDefaultFloatDecimals;
+
+void setFloatDecimals(int decimals) {
+    g_floatDecimals = qBound(kMinFloatDecimals, decimals, kMaxFloatDecimals);
+}
+int floatDecimals() { return g_floatDecimals; }
+
+QString fmtFloatExact(float v) {
+    if (!std::isfinite(v)) return QString::number(v);
+    for (int p = 1; p < 9; ++p) {
+        const QString s = QString::number(v, 'g', p);
+        if (s.toFloat() == v) return s;
+    }
+    return QString::number(v, 'g', 9);
+}
+
+QString fmtDoubleExact(double v) {
+    return QString::number(v, 'g', QLocale::FloatingPointShortest);
+}
+
+// The integer digits a float may show before its decimals give way: five (so
+// 12345.6 still reads as itself), or one more than the decimals so a value
+// under 10 always shows every one of them.
+static int floatDigitBudget() { return qMax(5, g_floatDecimals + 1); }
+
+// |v| as "digits.decimals<suffix>": at most floatDecimals() decimals, fewer as
+// the integer part grows so the body never passes budget + 2 characters, and
+// "99999+<suffix>" past the budget.
+static QString fixedFloatBody(double av, QChar suffix) {
+    const int budget = floatDigitBudget();
+    const QString cap = QString(budget, QLatin1Char('9')) + QLatin1Char('+') + suffix;
+    if (av >= std::pow(10.0, budget)) return cap;
+    int intDigits = av < 1.0 ? 1 : int(std::floor(std::log10(av))) + 1;
+    for (;;) {
+        const int dec = qMin(g_floatDecimals, qMax(0, budget - intDigits));
+        QString body = QString::number(av, 'f', dec);
+        const int dot = body.indexOf(QLatin1Char('.'));
+        const int gotDigits = dot < 0 ? int(body.size()) : dot;
+        if (gotDigits > budget) return cap;          // rounding carried past the budget
+        if (gotDigits > intDigits) {                 // 9.9996 -> "10.000": a decimal gives way
+            intDigits = gotDigits;
+            continue;
+        }
+        if (dec == 0) body += QLatin1Char('.');
+        return body + suffix;
+    }
+}
+
 // Unpadded type name for width calculation
 QString typeNameRaw(NodeKind kind) {
     if (g_typeNameFn) return g_typeNameFn(kind);
@@ -151,8 +201,9 @@ QString fmtFloat16(uint16_t bits) {
     float f = halfToFloat(bits);
     if (std::isnan(f)) return QStringLiteral("NaN");
     if (std::isinf(f)) return f > 0 ? QStringLiteral("infh") : QStringLiteral("-infh");
-    QString s = QString::number(f, 'g', 4);
-    return s + QStringLiteral("h");
+    QString body = fixedFloatBody(std::fabs(double(f)), QLatin1Char('h'));
+    if (std::signbit(f)) body.prepend(QLatin1Char('-'));
+    return body;
 }
 
 // ── 128-bit integers (native __int128 on GCC/Clang) ──
@@ -189,37 +240,55 @@ QString fmtUInt128(const void* data) {
 }
 
 QString fmtFloat(float v) {
-    // Fixed 7-char body: digits + "." + decimals + "f"
-    // Negative values get a '-' prefix (8 chars total), positive stay 7.
+    // "digits.decimals f" with at most floatDecimals() decimals; a negative
+    // value — negative zero included — gets its '-' in front of the same body.
     if (std::isnan(v)) return QStringLiteral("NaN");
     if (std::isinf(v)) return v > 0 ? QStringLiteral("inff") : QStringLiteral("-inff");
-    if (v == 0.f && std::signbit(v)) return QStringLiteral("-0.000f");
-
-    float av = std::fabs(v);
-    if (av >= 100000.f)
-        return v < 0 ? QStringLiteral("-99999+f") : QStringLiteral("99999+f");
-
-    // body = digits + "." + decimals + "f", target exactly 7 chars.
-    // Start with max decimals, reduce if integer part is wide or rounding overflows.
-    for (int dec = 4; dec >= 0; dec--) {
-        QString body = QString::number(av, 'f', dec);
-        body += (dec == 0) ? QStringLiteral(".f") : QStringLiteral("f");
-        if (body.size() == 7) {
-            if (v < 0.f) body.prepend('-');
-            return body;
-        }
-    }
-
-    // Rounding pushed past 99999 — use overflow cap
-    return v < 0 ? QStringLiteral("-99999+f") : QStringLiteral("99999+f");
+    QString body = fixedFloatBody(std::fabs(double(v)), QLatin1Char('f'));
+    if (std::signbit(v)) body.prepend(QLatin1Char('-'));
+    return body;
 }
+
 QString fmtDouble(double v) {
     if (std::isnan(v)) return QStringLiteral("NaN");
     if (std::isinf(v)) return v > 0 ? QStringLiteral("inf") : QStringLiteral("-inf");
-    QString s = QString::number(v, 'g', 6);
-    if (!s.contains('.') && !s.contains('e') && !s.contains('E'))
+    if (std::fabs(v) >= 1e15)
+        return QString::number(v, 'g', g_floatDecimals + 1);
+    // At most floatDecimals() decimals; trailing zeros go, one stays: 51.5, 42.0.
+    // The sign comes from the bit, so negative zero reads "-0.0" as floats do.
+    QString s = QString::number(std::fabs(v), 'f', g_floatDecimals);
+    const int dot = s.indexOf(QLatin1Char('.'));
+    if (dot >= 0) {
+        int end = s.size();
+        while (end > dot + 2 && s.at(end - 1) == QLatin1Char('0')) --end;
+        s.truncate(end);
+    } else {
         s += QStringLiteral(".0");
+    }
+    if (std::signbit(v)) s.prepend(QLatin1Char('-'));
     return s;
+}
+
+// The components of one vector, or of one whole matrix, share a width: the
+// widest of them plus a sign column. Right-aligned in it, a component changing
+// sign never shoves the ones after it, and decimal points line up down a matrix.
+static int floatComponentWidth(const Provider& prov, uint64_t addr, int count) {
+    int widest = 0;
+    for (int i = 0; i < count; i++) {
+        const QString s = fmtFloat(prov.readF32(addr + i * 4));
+        widest = qMax(widest, int(s.size()) - (s.startsWith(QLatin1Char('-')) ? 1 : 0));
+    }
+    return widest + 1;
+}
+
+// "[ c0, c1, …]" — the one shape vectors and matrix rows are written in.
+static QString fmtFloatBracketList(const Provider& prov, uint64_t addr, int count, int width) {
+    QString s = QStringLiteral("[");
+    for (int i = 0; i < count; i++) {
+        if (i > 0) s += QStringLiteral(", ");
+        s += fmtFloat(prov.readF32(addr + i * 4)).rightJustified(width);
+    }
+    return s + QStringLiteral("]");
 }
 QString fmtBool(uint8_t v)    { return v ? QStringLiteral("true") : QStringLiteral("false"); }
 
@@ -299,8 +368,9 @@ QString fmtPointerHeader(const Node& node, int depth, bool collapsed,
     QString type = compact ? fitOverflow(ptrTypeName, colType) : fit(ptrTypeName, colType);
     if (collapsed) {
         if (overflow) {
-            // Overflow: no column padding
-            return ind + type + SEP + node.name + SEP + readValue(node, prov, addr, 0);
+            // The type overflows its column; the name still keeps its own, so
+            // the value starts where the row's meta says (nameStart + colName).
+            return ind + type + SEP + fit(node.name, colName) + SEP + readValue(node, prov, addr, 0);
         }
         // Collapsed: show pointer value instead of brace (name padded for value alignment)
         QString name = fit(node.name, colName);
@@ -436,8 +506,9 @@ static QString readValueImpl(const Node& node, const Provider& prov,
     case NodeKind::UInt32:    return fmtUInt32(rU32(addr));
     case NodeKind::UInt64:    return fmtUInt64(rU64(addr));
     case NodeKind::Float16:   { auto s = fmtFloat16(rU16(addr));         return display ? s : s.trimmed(); }
-    case NodeKind::Float:     { auto s = fmtFloat(rF32(addr));           return display ? s : s.trimmed(); }
-    case NodeKind::Double:    { auto s = fmtDouble(rF64(addr));          return display ? s : s.trimmed(); }
+    // Editable text keeps every digit: the display decimals are for reading.
+    case NodeKind::Float:     return display ? fmtFloat(rF32(addr)) : fmtFloatExact(rF32(addr));
+    case NodeKind::Double:    return display ? fmtDouble(rF64(addr)) : fmtDoubleExact(rF64(addr));
     case NodeKind::Bool:      return fmtBool(prov.readU8(addr));
     // Pointer / function-pointer value formatting: just the address
     // (and the optional derefed primitive). PDB symbol annotations are
@@ -485,21 +556,19 @@ static QString readValueImpl(const Node& node, const Provider& prov,
     case NodeKind::Vec3:
     case NodeKind::Vec4: {
         int count = sizeForKind(node.kind) / 4;
-        QStringList parts;
+        if (display)   // "[ 1.860f,  1.554f, -1.080f]": the same shape as a matrix row
+            return fmtFloatBracketList(prov, addr, count, floatComponentWidth(prov, addr, count));
+        QStringList parts;   // editable: bare components, every digit
         for (int i = 0; i < count; i++)
-            parts << fmtFloat(prov.readF32(addr + i * 4));
+            parts << fmtFloatExact(prov.readF32(addr + i * 4));
         return parts.join(QStringLiteral(", "));
     }
     case NodeKind::Mat4x4: {
         if (!display) return {};  // not editable as single value
         if (subLine < 0 || subLine >= 4) return QStringLiteral("?");
-        QString line = QStringLiteral("row%1 [").arg(subLine);
-        for (int c = 0; c < 4; c++) {
-            if (c > 0) line += QStringLiteral(", ");
-            line += fmtFloat(prov.readF32(addr + (subLine * 4 + c) * 4));
-        }
-        line += QStringLiteral("]");
-        return line;
+        // All four rows share one component width, so the columns line up.
+        return QStringLiteral("row%1 ").arg(subLine)
+             + fmtFloatBracketList(prov, addr + subLine * 16, 4, floatComponentWidth(prov, addr, 16));
     }
     case NodeKind::UTF8: {
         QByteArray bytes = prov.readBytes(addr, node.strLen);
@@ -537,7 +606,8 @@ QString readValue(const Node& node, const Provider& prov,
 QString fmtNodeLine(const Node& node, const Provider& prov,
                     uint64_t addr, int depth, int subLine,
                     const QString& comment, int colType, int colName,
-                    const QString& typeOverride, bool compact) {
+                    const QString& typeOverride, bool compact,
+                    const QString& valueOverride) {
     QString ind = indent(depth);
 
     // Compute raw type string for overflow detection
@@ -575,8 +645,8 @@ QString fmtNodeLine(const Node& node, const Provider& prov,
         return ind + type + SEP + ascii + SEP + hex + cmtSuffix;
     }
 
-    QString val = overflow ? readValue(node, prov, addr, subLine)
-                           : fit(readValue(node, prov, addr, subLine), COL_VALUE);
+    const QString raw = valueOverride.isEmpty() ? readValue(node, prov, addr, subLine) : valueOverride;
+    QString val = overflow ? raw : fit(raw, COL_VALUE);
     return ind + type + SEP + name + SEP + val + cmtSuffix;
 }
 
@@ -950,6 +1020,26 @@ QString validateBaseAddress(const QString& text) {
 QString fmtEnumMember(const QString& name, int64_t value, int depth, int nameW) {
     QString ind = indent(depth);
     return ind + name.leftJustified(nameW) + QStringLiteral(" = ") + QString::number(value);
+}
+
+int64_t readEnumRaw(const Provider& prov, NodeKind kind, uint64_t addr) {
+    switch (kind) {
+    case NodeKind::UInt8:  return (int64_t)prov.readU8 (addr);
+    case NodeKind::UInt16: return (int64_t)prov.readU16(addr);
+    case NodeKind::UInt32: return (int64_t)prov.readU32(addr);
+    case NodeKind::UInt64: return (int64_t)prov.readU64(addr);
+    case NodeKind::Int8:   return (int8_t) prov.readU8 (addr);
+    case NodeKind::Int16:  return (int16_t)prov.readU16(addr);
+    case NodeKind::Int32:  return (int32_t)prov.readU32(addr);
+    case NodeKind::Int64:  return (int64_t)prov.readU64(addr);
+    default:               return 0;
+    }
+}
+
+QString enumMemberName(const Node& enumDef, int64_t value) {
+    for (const auto& m : enumDef.enumMembers)
+        if (m.second == value) return m.first;
+    return {};
 }
 
 // ── Instruction rows ──

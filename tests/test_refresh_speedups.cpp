@@ -44,8 +44,16 @@ public:
     mutable std::atomic<int>     totalReads{0};
     mutable std::atomic<int>     regionEnumCount{0};  // enumerateRegions() calls
     QByteArray                   data{kTotalSize, '\0'};
+    // Pages whose reads are refused, like an unmapped page in a live process.
+    // Set before the controller exists; read-only afterwards.
+    QSet<uint64_t>               unmapped;
 
     bool read(uint64_t addr, void* buf, int len) const override {
+        if (unmapped.contains(addr & ~uint64_t(4095))) {
+            readsPerPage[addr & ~uint64_t(4095)]++;
+            totalReads.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
         if (addr + (uint64_t)len > (uint64_t)data.size()) return false;
         std::memcpy(buf, data.constData() + addr, len);
         // Tally by page so a single 4 KB readBytes call counts as one.
@@ -98,7 +106,7 @@ public:
 // starts ticking the moment its window is exposed, so any post-
 // construction mutation races the first tick.
 static void buildTree(NodeTree& tree, bool withPointer,
-                      bool pointerCollapsed = true) {
+                      bool pointerCollapsed = true, bool withFarField = false) {
     tree.baseAddress = CountingProvider::kHeapBase;
 
     Node root;
@@ -121,6 +129,8 @@ static void buildTree(NodeTree& tree, bool withPointer,
     };
     field(0,  NodeKind::UInt32, "u32");
     field(4,  NodeKind::UInt32, "next");
+    // On the heap's SECOND page, so a test can refuse that page alone.
+    if (withFarField) field(4096, NodeKind::UInt32, "far");
 
     if (withPointer) {
         Node target;
@@ -168,11 +178,14 @@ private:
     // — no race window between construction and the first refresh.
     void setupWithProvider(bool withPointer,
                            bool pointerCollapsed = true,
-                           uint64_t pointerTargetAddr = 0) {
+                           uint64_t pointerTargetAddr = 0,
+                           bool withFarField = false,
+                           const QSet<uint64_t>& unmapped = {}) {
         m_doc = new RcxDocument();
-        buildTree(m_doc->tree, withPointer, pointerCollapsed);
+        buildTree(m_doc->tree, withPointer, pointerCollapsed, withFarField);
         auto prov = std::make_shared<CountingProvider>();
         m_prov = prov.get();
+        m_prov->unmapped = unmapped;
         // Pre-populate pointer bytes BEFORE the controller is born so
         // the first read in the snapshot already has the right target.
         // Pointer lives at root + offset 8 inside the heap region; the
@@ -408,6 +421,8 @@ private slots:
 
     void focusOutWidensInterval() {
         setupWithProvider(/*withPointer=*/false);
+        // The old throttle, with the timeline's background capture off.
+        m_ctrl->setTimelineBackgroundCapture(false);
         m_ctrl->setRefreshInterval(50);
         m_ctrl->setWindowState(/*focused=*/false, /*visible=*/true);
         // Blur cap is max(base, 1500) = 1500 here.
@@ -417,6 +432,7 @@ private slots:
 
     void minimizePausesTimer() {
         setupWithProvider(/*withPointer=*/false);
+        m_ctrl->setTimelineBackgroundCapture(false);
         m_ctrl->setRefreshInterval(50);
         QVERIFY(m_ctrl->refreshTimerActive());
         m_ctrl->setWindowState(/*focused=*/false, /*visible=*/false);
@@ -457,6 +473,173 @@ private slots:
         QCOMPARE((unsigned char)buf[0], (unsigned char)0xAA);
         QVERIFY(sp.read(0x1000, buf, 4));
         QCOMPARE((unsigned char)buf[0], (unsigned char)0xCC);
+    }
+
+    // ── Changed-byte runs ───────────────────────────────────────────
+    // The run diff must describe exactly the bytes a per-byte compare
+    // finds, as maximal runs: expanding them gives the naive set, and no
+    // two runs of one page touch.
+    void testDiffPageRunsMatchesNaive() {
+        std::mt19937 rng(0xBADC0DEu);
+        const int lens[] = {0, 1, 7, 8, 9, 15, 16, 17, 4095, 4096};
+        for (int len : lens) {
+            for (int round = 0; round < 40; ++round) {
+                QByteArray a(len, '\0'), b(len, '\0');
+                for (int i = 0; i < len; ++i) a[i] = char(rng() & 0xFF);
+                b = a;
+                // Sparse flips, runs of flips, or everything.
+                const int mode = round % 3;
+                for (int i = 0; i < len; ++i) {
+                    bool flip = (mode == 0) ? (rng() % 97 == 0)
+                              : (mode == 1) ? ((i / 13) % 3 == 0 && rng() % 2)
+                                            : true;
+                    if (flip) b[i] = char(a[i] ^ (1 + rng() % 255));
+                }
+                const uint64_t pageAddr = 0x7FF6DEAD0000ULL;
+                QSet<int64_t> want;
+                for (int i = 0; i < len; ++i)
+                    if (a[i] != b[i]) want.insert(int64_t(pageAddr) + i);
+
+                QVector<ChangedRun> runs;
+                bool changed = diffPageRuns(runs, pageAddr, a.constData(), b.constData(), len);
+                QCOMPARE(changed, !want.isEmpty());
+                QSet<int64_t> got;
+                for (int r = 0; r < runs.size(); ++r) {
+                    QVERIFY(runs[r].len > 0);
+                    for (uint32_t k = 0; k < runs[r].len; ++k)
+                        got.insert(int64_t(runs[r].addr + k));
+                    if (r > 0)   // maximal: a gap of at least one equal byte
+                        QVERIFY(runs[r].addr > runs[r - 1].addr + runs[r - 1].len);
+                }
+                QCOMPARE(got, want);
+            }
+        }
+    }
+
+    // Pages are diffed in hash order, so one change straddling a page
+    // boundary arrives as two runs; normalizing sorts and joins them —
+    // including at the very top of the address space, where addr + len
+    // would wrap to zero.
+    void testNormalizeRunsJoinsAcrossPages() {
+        QVector<ChangedRun> runs = { {0x2000, 3}, {0x1FFE, 2}, {0x9000, 4}, {0x9002, 8} };
+        normalizeRuns(runs);
+        QCOMPARE(runs.size(), 2);
+        QCOMPARE(runs[0], (ChangedRun{0x1FFE, 5}));
+        QCOMPARE(runs[1], (ChangedRun{0x9000, 10}));
+
+        QVector<ChangedRun> top = { {0xFFFFFFFFFFFFF800ULL, 0x800}, {0xFFFFFFFFFFFFF000ULL, 0x800} };
+        normalizeRuns(top);
+        QCOMPARE(top.size(), 1);
+        QCOMPARE(top[0], (ChangedRun{0xFFFFFFFFFFFFF000ULL, 0x1000}));
+        QVERIFY(runsOverlap(top, 0xFFFFFFFFFFFFFFFFULL, 1));
+        QVERIFY(!runsOverlap(top, 0xFFFFFFFFFFFFEFFFULL, 1));
+    }
+
+    void testRunsOverlapMatchesNaive() {
+        std::mt19937 rng(0x5EEDu);
+        for (int round = 0; round < 200; ++round) {
+            QVector<ChangedRun> runs;
+            QSet<uint64_t> bytes;
+            for (int i = 0; i < 12; ++i) {
+                const uint64_t addr = 0x1000 + rng() % 512;
+                const uint32_t len = 1 + rng() % 9;
+                runs.append({addr, len});
+                for (uint32_t k = 0; k < len; ++k) bytes.insert(addr + k);
+            }
+            normalizeRuns(runs);
+            for (int q = 0; q < 50; ++q) {
+                const uint64_t addr = 0x1000 - 16 + rng() % 560;
+                const uint64_t len = 1 + rng() % 12;
+                bool want = false;
+                for (uint64_t k = 0; k < len && !want; ++k) want = bytes.contains(addr + k);
+                QCOMPARE(runsOverlap(runs, addr, len), want);
+            }
+        }
+    }
+
+    // ── Changed-byte highlight at a non-zero base ───────────────────
+    // The class here sits at 0x8000. Change-marking used to look lines up
+    // by base-RELATIVE offset in a set of ABSOLUTE addresses, so nothing
+    // at a non-zero base was ever marked changed.
+    void changedFieldIsMarkedAtNonZeroBase() {
+        setupWithProvider(/*withPointer=*/false);
+        QVERIFY(CountingProvider::kHeapBase != 0);
+        QVERIFY(waitForOneTick());
+        QVERIFY(waitForOneTick(2000));
+
+        m_prov->data[int(CountingProvider::kHeapBase + 1)] = char(0x5A);   // inside "u32"
+
+        bool marked = false;
+        QElapsedTimer t; t.start();
+        while (!marked && t.elapsed() < 3000) {
+            waitForOneTick(500);
+            for (const LineMeta& lm : m_ctrl->lastResult().meta) {
+                if (lm.lineKind != LineKind::Field || lm.nodeIdx < 0
+                    || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
+                if (m_doc->tree.nodes[lm.nodeIdx].name == QStringLiteral("u32") && lm.dataChanged)
+                    marked = true;
+            }
+        }
+        QVERIFY2(marked, "a byte written inside u32 never marked its line changed");
+        // …and only that line: "next" shares the page but not the bytes.
+        for (const LineMeta& lm : m_ctrl->lastResult().meta) {
+            if (lm.lineKind != LineKind::Field || lm.nodeIdx < 0
+                || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
+            if (m_doc->tree.nodes[lm.nodeIdx].name == QStringLiteral("next"))
+                QVERIFY2(!lm.dataChanged, "an untouched neighbour was marked changed");
+        }
+    }
+
+    // ── A refused read is unreadable, not zeros ─────────────────────
+    // readBytes() zero-fills a failed read and throws the verdict away,
+    // so an unmapped page used to merge into the snapshot as real zero
+    // bytes and its fields never showed the unreadable strike.
+    void refusedPageReadsAsUnreadable() {
+        const uint64_t farPage = CountingProvider::kHeapBase + 4096;
+        setupWithProvider(/*withPointer=*/false, true, 0,
+                          /*withFarField=*/true, /*unmapped=*/{farPage});
+        QVERIFY(waitForOneTick());
+        QTest::qWait(60);
+        QApplication::processEvents();
+
+        const SnapshotProvider* snap = m_ctrl->snapshotProv();
+        QVERIFY(snap != nullptr);
+        QVERIFY2(snap->isFailed(farPage), "the refused page was not recorded as failed");
+        QVERIFY2(!snap->isReadable(farPage + 4, 4), "a refused page still claims to be readable");
+        char buf[4] = {1, 1, 1, 1};
+        QVERIFY(!snap->read(farPage, buf, 4));
+        // The page that DID read is unaffected.
+        QVERIFY(snap->isReadable(CountingProvider::kHeapBase, 4));
+
+        bool farUnreadable = false, nearReadable = false;
+        for (const LineMeta& lm : m_ctrl->lastResult().meta) {
+            if (lm.lineKind != LineKind::Field || lm.nodeIdx < 0
+                || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
+            const QString& name = m_doc->tree.nodes[lm.nodeIdx].name;
+            if (name == QStringLiteral("far"))  farUnreadable = lm.unreadable;
+            if (name == QStringLiteral("u32"))  nearReadable  = !lm.unreadable;
+        }
+        QVERIFY2(farUnreadable, "the field on the refused page is not struck unreadable");
+        QVERIFY2(nearReadable, "a field on a readable page was struck unreadable");
+    }
+
+    // ── A page that reads back identical keeps its buffer ───────────
+    // Re-inserting an equal page every tick swapped a fresh allocation into
+    // the snapshot for nothing; anything sharing those buffers would end up
+    // holding a second copy of every page.
+    void unchangedPageKeepsItsBuffer() {
+        setupWithProvider(/*withPointer=*/false);
+        const uint64_t heapPage = CountingProvider::kHeapBase;
+        QVERIFY(waitForOneTick());
+        QTest::qWait(60);
+        QApplication::processEvents();
+        QVERIFY(m_ctrl->snapshotProv() != nullptr);
+        const char* before = m_ctrl->snapshotProv()->pages().value(heapPage).constData();
+        QVERIFY(before != nullptr);
+        for (int i = 0; i < 3; ++i) QVERIFY(waitForOneTick(2000));
+        QTest::qWait(60);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->snapshotProv()->pages().value(heapPage).constData(), before);
     }
 };
 

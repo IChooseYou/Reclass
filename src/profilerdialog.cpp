@@ -109,7 +109,7 @@ ProfilerDialog::ProfilerDialog(QWidget* parent) : ThemedDialog(parent) {
 
     const auto& t = ThemeManager::instance().current();
 
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 

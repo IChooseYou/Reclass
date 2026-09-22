@@ -292,7 +292,7 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     setPalette(pal);
 
     // App label. padding-left in the stylesheet (not setContentsMargins, which
-    // a QSS-styled QLabel ignores) so "REECLASS" isn't jammed into the corner.
+    // a QSS-styled QLabel ignores) so "RC" isn't jammed into the corner.
     m_appLabel->setStyleSheet(appLabelSheet(theme.text));
 
     // Menu bar palette — all roles used by MenuBarStyle, so live theme
@@ -356,7 +356,7 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
     if (m_quickRule) static_cast<QuickAccessRule*>(m_quickRule)->setColour(theme.border);
     if (m_themeSwitch) {
         static_cast<ThemeSwitch*>(m_themeSwitch)->applyTheme(theme);
-        setDarkTheme(theme.isDark());
+        setDarkTheme(theme.background.lightnessF() < 0.5);
     }
 
     // Linux menu tool buttons

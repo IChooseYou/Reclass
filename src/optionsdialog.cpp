@@ -1,4 +1,5 @@
 #include "optionsdialog.h"
+#include "core.h"
 #include "themes/thememanager.h"
 #include "widgets/dialog_button.h"
 #include <QVBoxLayout>
@@ -92,6 +93,28 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     refreshLayout->addRow(refreshDesc);
 
     generalLayout->addWidget(refreshGroup);
+
+    // Values group box
+    auto* valuesGroup = new QGroupBox("Values");
+    auto* valuesLayout = new QFormLayout(valuesGroup);
+    valuesLayout->setSpacing(8);
+    valuesLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    m_floatDecimalsSpin = new QSpinBox;
+    m_floatDecimalsSpin->setRange(fmt::kMinFloatDecimals, fmt::kMaxFloatDecimals);
+    m_floatDecimalsSpin->setValue(current.floatDecimals);
+    m_floatDecimalsSpin->setObjectName("floatDecimalsSpin");
+    valuesLayout->addRow("Float decimals:", m_floatDecimalsSpin);
+
+    auto* decimalsDesc = new QLabel(
+        "The most decimals shown for float, double, vector and matrix values "
+        "(3 shows -0.277). Memory keeps every digit, and editing a value starts from all of them. "
+        "Default: 3.");
+    decimalsDesc->setWordWrap(true);
+    decimalsDesc->setContentsMargins(0, 0, 0, 0);
+    valuesLayout->addRow(decimalsDesc);
+
+    generalLayout->addWidget(valuesGroup);
 
     // Visual Experience group box
     auto* visualGroup = new QGroupBox("Visual Experience");
@@ -229,6 +252,7 @@ OptionsResult OptionsDialog::result() const {
     r.refreshMs = m_refreshSpin->value();
     r.generatorAsserts = m_assertCheck->isChecked();
     r.braceWrap = m_braceWrapCheck->isChecked();
+    r.floatDecimals = m_floatDecimalsSpin->value();
     return r;
 }
 

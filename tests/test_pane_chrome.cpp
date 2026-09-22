@@ -59,7 +59,7 @@ private slots:
     // ── Pane tabs ────────────────────────────────────────────────────────
     void testTabZeroIsStructureNotTheAppName() {
         // The brand belongs on the title bar; a VIEW is named after what it
-        // shows. Tab 0 used to read "REECLASS".
+        // shows. Tab 0 used to read "RC".
         QCOMPARE(QString::fromLatin1(kPaneTabs[0].name), QStringLiteral("Structure"));
         QCOMPARE(kPaneTabCount, 4);
     }

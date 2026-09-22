@@ -107,6 +107,8 @@
 #include "tab_source_icon.h"
 #include "themes/thememanager.h"
 #include "address_bar_model.h"
+#include "chrome_fallback_theme.h"
+#include "timeline_glyphs.h"          // Record / Stop / Back to live, painted
 #include "nav_history.h"          // NavEntry — the history menu's rows
 #include "dock_header.h"          // chromeFont
 #include "fuzzy_match.h"          // the places menu filter
@@ -151,18 +153,7 @@ namespace address_bar_detail {
 // run from a directory without themes/). The same VS2022 Dark values
 // RibbonBar falls back to, so the two strips agree even in a bare target.
 inline Theme fallbackTheme() {
-    static const char* kJson = R"({
-        "name": "VS2022 Dark", "background": "#181818", "backgroundAlt": "#2d2d30",
-        "surface": "#333337", "border": "#3f3f46", "borderFocused": "#b180d7",
-        "button": "#3f3f46", "text": "#dcdcdc", "textDim": "#858585",
-        "textMuted": "#636369", "textFaint": "#585862", "hover": "#242427",
-        "selected": "#2c2c31", "selection": "#264f78", "syntaxKeyword": "#569cd6",
-        "syntaxNumber": "#b5cea8", "syntaxString": "#d69d85", "syntaxComment": "#57a64a",
-        "syntaxPreproc": "#9b9b9b", "syntaxType": "#4ec9b0", "indHoverSpan": "#b180d7",
-        "indCmdPill": "#2d2d30", "indDataChanged": "#8fbc7a", "indHintGreen": "#5a8248",
-        "indRttiHint": "#D7BA7D", "markerPtr": "#f44747", "markerCycle": "#e5a00d",
-        "markerError": "#7a2e2e", "focusGlow": "#E5A00D" })";
-    return Theme::fromJson(QJsonDocument::fromJson(kJson).object());
+    return chromeFallbackTheme();
 }
 
 inline QString hex(uint64_t v) {
@@ -228,6 +219,8 @@ public:
         // exactly as a run of single Back / Forward presses would leave them.
         std::function<void(int)>           onHistoryJump;
         std::function<void()>              onRefresh;        // source context menu
+        std::function<void()>              onTimelineBackToLive;  // "Back to live" beside the address
+        std::function<void()>              onTimelineRecord; // Record / Stop beside it
         std::function<void()>              onGotoDialog;     // recent menu "Go to address…" (Ctrl+G)
         // An edit ended from the keyboard (Enter accepted, Esc): the document
         // takes focus back. Not called when focus already went elsewhere.
@@ -377,6 +370,11 @@ public:
     // platform's DelayedPopup feel) and how many times the history menu
     // has opened — a popup on the hidden test desktop is closed at the
     // first event pump, so "did it open" is counted rather than seen.
+    // What a laid-out cell reads ("" when it is not laid out) — the chips' words.
+    QString cellText(const QString& id) const {
+        const LaidItem* li = itemById(id);
+        return li ? li->text : QString();
+    }
     void setHoldDelayMs(int ms) { m_holdDelayMs = qMax(1, ms); }
     int  holdDelayMs() const { return m_holdDelayMs; }
     int  historyMenuOpenCount() const { return m_historyMenuOpens; }
@@ -787,6 +785,9 @@ public:
     static constexpr int kDeepestMinW  = 60;
     static constexpr int kOverflowW    = 18;
     static constexpr int kRecentW      = 16;
+    static constexpr int kTlChipPad    = 6;    // either side of a timeline chip's ink
+    static constexpr int kTlGlyphW     = 10;   // the chip's dot / clock / square
+    static constexpr int kTlGlyphGap   = 5;    // glyph to words
     static constexpr int kRightMargin  = 6;
     static constexpr int kCellTop      = 2;
     static constexpr int kCellH        = 22;
@@ -827,6 +828,10 @@ protected:
         // inside the strip rather than a cut through it.
         if (m_layout.dividerX >= 0)
             fillLeftDeviceColOfRect(p, QRectF(m_layout.dividerX, 4, 1, kAddressBarHeight - 8),
+                                    containerBorderColor(t));
+        // ...and its mirror before the timeline's buttons.
+        if (m_layout.tlDividerX >= 0)
+            fillLeftDeviceColOfRect(p, QRectF(m_layout.tlDividerX, 4, 1, kAddressBarHeight - 8),
                                     containerBorderColor(t));
         for (const LaidItem& li : m_layout.items) paintItem(p, li);
         // Keyboard focus: ONE device-exact 1-px ring around the focused
@@ -977,6 +982,9 @@ protected:
         // the overlay kept its opening rect while the base cell and the
         // recent cell went elsewhere.
         if (m_editVisible) followEditGeometry();
+        // A narrower pane can drop the focused cell (Record, Forward…):
+        // keyboard focus moves to a cell that is still there.
+        else if (m_kbMode) reconcileKeyboardFocus();
     }
 
     void changeEvent(QEvent* e) override {
@@ -1194,7 +1202,7 @@ protected:
 
 private:
     enum class Cell { Back, Fwd, Hist, Up, Src, SrcChev, Base,
-                      Crumb, Chev, Overflow, Space, Recent };
+                      Crumb, Chev, Overflow, Space, Recent, Live, Record };
 
     struct LaidItem {
         QString id;
@@ -1208,12 +1216,16 @@ private:
     struct Layout {
         QVector<LaidItem> items;
         int dividerX = -1;        // the field divider column, logical x
+        int tlDividerX = -1;      // the divider before the timeline's buttons
         int fold     = 0;         // crumbs [0, fold) are behind «
         int width    = 0;         // width the strip needs with an empty `space`
         int forWidth = -1;        // widget width this layout was computed for
     };
     // The knobs the overflow rule turns, in the order it turns them.
     struct Budget {
+        bool compactTimeline = false;  // step 0: the timeline buttons lose their words; tooltips keep them
+        bool dropRecord    = false;  // step 8: F9 and View ▸ Timeline still record
+        bool dropTimeline  = false;  // step 9: Ctrl+End still resumes
         int  baseMaxW      = kBaseMaxW;
         bool showResolved  = true;   // the base's "  → 0x…" suffix; goes with step 1
         int  srcMaxW       = kSrcMaxW;
@@ -1246,6 +1258,36 @@ private:
 
     QString sourceFullText() const {
         return m_state.sourceName.isEmpty() ? QStringLiteral("Select source") : m_state.sourceName;
+    }
+    // What a button showed when it was laid out, kept in LaidItem::index so
+    // the glyph, its colour and the words always come from one snapshot (the
+    // layout stays frozen while an edit is open; the state may not).
+    static constexpr int kChipPast = 1, kChipRecording = 2;
+    int chipFlags() const {
+        int f = 0;
+        if (m_state.past) f |= kChipPast;
+        if (m_state.recording) f |= kChipRecording;
+        return f;
+    }
+    // The buttons say what a click does: "Record", "Stop" while recording, and
+    // "Back to live" — only while looking back at a recording. Compact: the
+    // glyph alone (the tooltip keeps the words).
+    QString liveChipText(bool compact) const {
+        return compact ? QString() : QStringLiteral("Back to live");
+    }
+    QString recChipText(bool compact) const {
+        if (compact) return QString();
+        return m_state.recording ? QStringLiteral("Stop") : QStringLiteral("Record");
+    }
+    static int tlChipWidth(const QFontMetrics& fm, const QString& text) {
+        return text.isEmpty() ? kTlChipPad + kTlGlyphW + kTlChipPad
+                              : kTlChipPad + kTlGlyphW + kTlGlyphGap + fm.horizontalAdvance(text) + kTlChipPad;
+    }
+    static QRectF tlGlyphBox(const QRect& cell) {
+        // Centred on the cell's true middle — the one drawIcon and
+        // AlignVCenter use — not QRect::center(), which rounds down half a pixel.
+        const double cy = cell.top() + cell.height() / 2.0;
+        return QRectF(cell.left() + kTlChipPad, cy - kTlGlyphW / 2.0, kTlGlyphW, kTlGlyphW);
     }
     QString baseFullText() const {
         return m_state.baseFormula.isEmpty() ? address_bar_detail::hex(m_state.baseAddress)
@@ -1367,14 +1409,49 @@ private:
                 add(QStringLiteral("chev:%1").arg(i), Cell::Chev, i, kChevW, true);
         }
 
-        // The stretch, then `recent` pinned to the right edge — or pushed
-        // past it when nothing fits; the strip never drops a crumb to make
-        // room for a menu button.
-        L.width = x + kRecentW + kRightMargin;
-        const int recentX = qMax(x, width() - kRightMargin - kRecentW);
+        // The stretch, then `recent` pinned to the right — or pushed past it
+        // when nothing fits; the strip never drops a crumb to make room for a
+        // menu button. While the timeline is on, a divider and its buttons
+        // close the bar, pinned to the right margin, each named for what a
+        // click does: Record (Stop while recording) and — only while looking
+        // back at a recording — Back to live. Values are live otherwise; there
+        // is nothing to pause. Whether the bar FITS is decided with Back to
+        // live's room counted and on the widest words ("Record"), so it coming
+        // and going, or Record → Stop, never folds a crumb or brings one back.
+        const bool tl = m_state.timeline && !b.dropTimeline;
+        const QString liveText = liveChipText(b.compactTimeline);
+        const QString recText = recChipText(b.compactTimeline);
+        const int liveFitW = tl ? tlChipWidth(fm, liveText) : 0;
+        const int liveW = (tl && m_state.past) ? liveFitW : 0;
+        const int recRoomW = (tl && !b.dropRecord) ? tlChipWidth(fm, recText) : 0;
+        const int recFitW = (recRoomW == 0 || b.compactTimeline)
+            ? recRoomW : qMax(tlChipWidth(fm, QStringLiteral("Record")), tlChipWidth(fm, QStringLiteral("Stop")));
+        // Room for one glyph only (Record dropped): that slot is Back to live
+        // while looking back, and Record's glyph — the same width — otherwise,
+        // since live Record is the only timeline control there is.
+        const int recW = recRoomW > 0 ? recRoomW
+                       : (tl && b.dropRecord && !m_state.past) ? liveFitW : 0;
+        auto clusterW = [](int live, int rec) {
+            if (live + rec == 0) return 0;
+            return kDividerPad + 1 + kDividerPad + live + (live > 0 && rec > 0 ? kNavGap : 0) + rec;
+        };
+        const int tlW = clusterW(liveW, recW);
+        L.width = x + kRecentW + clusterW(liveFitW, recFitW) + kRightMargin;
+        const int recentX = qMax(x, width() - kRightMargin - tlW - kRecentW);
         if (recentX > x) add(QStringLiteral("space"), Cell::Space, -1, recentX - x, true);
         x = recentX;
         add(QStringLiteral("recent"), Cell::Recent, -1, kRecentW, true);
+        if (tlW > 0) {
+            x += kDividerPad;
+            L.tlDividerX = x;
+            x += 1 + kDividerPad;
+            if (liveW > 0) {
+                add(QStringLiteral("tl.live"), Cell::Live, chipFlags(), liveW, true, liveText);
+                if (recW > 0) x += kNavGap;
+            }
+            if (recW > 0)
+                add(QStringLiteral("tl.rec"), Cell::Record, chipFlags(), recW, m_state.canRecord, recText);
+        }
         L.forWidth = width();
         return L;
     }
@@ -1388,8 +1465,34 @@ private:
         m_layoutDirty = false;
         const int avail = width();
         const QFontMetrics fm(font());
-        Budget b;
-        Layout L = computeLayout(b);
+        // 8. The timeline's buttons go only when the field has given all it
+        //    can (steps 0–7d): down to one glyph — Back to live while looking
+        //    back, Record otherwise — then none. When they go, the field is re-decided from
+        //    scratch with the room they freed: a bar with the timeline on never
+        //    keeps Back or the source name dropped that the same bar with it
+        //    off would show. With both gone the bar is exactly the one
+        //    kNarrowFloorW was measured for.
+        //    The buttons' words are worth eliding the base and source names
+        //    for (steps 1–2), not a folded crumb or a lost Back: past that,
+        //    both keep only their glyphs (the tooltips keep the words), and
+        //    the field is decided again from scratch.
+        Layout L;
+        for (int chips = 0; chips < 4; ++chips) {
+            Budget start;
+            start.compactTimeline = chips >= 1;
+            start.dropRecord = chips >= 2;
+            start.dropTimeline = chips >= 3;
+            const bool wordsPass = m_state.timeline && chips == 0;
+            if (fitField(start, avail, fm, L, wordsPass) || !m_state.timeline) break;
+        }
+        m_layout = L;   // when nothing fits: narrower than kNarrowFloorW — best effort
+        Q_ASSERT(avail < kNarrowFloorW || namesThePlace(L));
+    }
+
+    // Steps 1–7d from `b`: true as soon as a layout fits; `L` holds the last
+    // tried. `elideOnly`: stop after the two text steps (1–2).
+    bool fitField(Budget b, int avail, const QFontMetrics& fm, Layout& L, bool elideOnly = false) const {
+        L = computeLayout(b);
         auto fits = [&] { return L.width <= avail; };
         auto over = [&] { return L.width - avail; };
         auto laidTextW = [&](const char* id) {
@@ -1397,7 +1500,7 @@ private:
                 if (li.id == QLatin1String(id)) return fm.horizontalAdvance(li.text);
             return 0;
         };
-        if (fits()) { m_layout = L; return; }
+        if (fits()) return true;
         // 1. The base: elide the formula by the overshoot; when its floor
         //    cannot absorb it, drop the resolved-address suffix instead and
         //    give the formula back whatever that freed beyond the need.
@@ -1416,9 +1519,9 @@ private:
             }
             L = computeLayout(b);
         }
-        if (fits()) { m_layout = L; return; }
+        if (fits()) return true;
         b.baseMaxW = kBaseMinW; b.showResolved = false;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        L = computeLayout(b); if (fits()) return true;
         // 2. The source name, the same way.
         for (int turn = 0; turn < 3 && !fits(); ++turn) {
             const int cur = laidTextW("src");
@@ -1426,39 +1529,39 @@ private:
             b.srcMaxW = qMax(kSrcMinW, cur - over());
             L = computeLayout(b);
         }
-        if (fits()) { m_layout = L; return; }
+        if (fits()) return true;
         b.srcMaxW = kSrcMinW;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        L = computeLayout(b); if (fits()) return true;
+        if (elideOnly) return false;
         for (int f = 1; f < m_state.crumbs.size(); ++f) {   // never the deepest
             b.fold = f;
-            L = computeLayout(b); if (fits()) { m_layout = L; return; }
+            L = computeLayout(b); if (fits()) return true;
         }
         b.deepestMaxW = kDeepestMinW;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        L = computeLayout(b); if (fits()) return true;
         b.dropUpHist = true;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        L = computeLayout(b); if (fits()) return true;
         b.dropTrailChev = true;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        L = computeLayout(b); if (fits()) return true;
         // 7. Narrow panes — below the ~395 px the six steps above reach with
         //    a process source and a formula base. The field keeps only what
         //    names the place, so the deepest crumb and `recent` stay inside
         //    the strip instead of running past its right edge:
         // 7a. the chip goes icon-only (the name is the tooltip's);
         b.srcIconOnly = true;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        L = computeLayout(b); if (fits()) return true;
         // 7b. the base shows its bare literal, elided to 60 px — the state
         //     and the edit keep the full formula;
         b.bareBase = true;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        L = computeLayout(b); if (fits()) return true;
         // 7c. Forward goes (24 px) — Back stays, so the history list keeps
         //     its on-bar route (right-click / hold) one step longer;
         b.dropFwd = true;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
-        // 7d. last resort: Back and the divider go.
+        L = computeLayout(b); if (fits()) return true;
+        // 7d. last resort for the field: Back and the divider go.
         b.dropNav = true;
         L = computeLayout(b);
-        m_layout = L;   // narrower than kNarrowFloorW — best effort
-        Q_ASSERT(avail < kNarrowFloorW || namesThePlace(L));
+        return fits();
     }
 
     // The invariant the narrow-pane steps exist for: the deepest crumb and
@@ -1520,7 +1623,8 @@ private:
     QRect fieldRect() const {
         ensureLayout();
         const int left = m_layout.dividerX >= 0 ? m_layout.dividerX + 1 : 0;
-        return QRect(left, 0, qMax(0, width() - kRightMargin - left), height());
+        const int right = m_layout.tlDividerX >= 0 ? m_layout.tlDividerX : width() - kRightMargin;
+        return QRect(left, 0, qMax(0, right - left), height());
     }
 
     // ── Painting ──
@@ -1547,12 +1651,17 @@ private:
     static QRect dotRectFor(const QRect& icon) {
         return QRect(icon.right() + 3 - kDotPx, icon.bottom() + 3 - kDotPx, kDotPx, kDotPx);
     }
-    // The status-bar chip's mapping, so the two never disagree: green while
-    // reads succeed, focusGlow while they fail, markerError when the source
-    // is gone — and nothing for a static file or no source, where "alive"
-    // has no meaning.
+    // The status-bar chip's mapping: green while reads succeed, focusGlow
+    // while they fail, markerError when the source is gone — and nothing for
+    // a static file or no source, where "alive" has no meaning. One
+    // exception: while looking back at a recording the dot speaks
+    // for the VIEW (amber, "not live"), and the chip's tooltip says so; the
+    // status-bar chip keeps reporting the source.
     QColor livenessDotColor() const {
         if (m_state.sourceName.isEmpty()) return QColor();
+        // Looking back: whatever the source is doing, what is on screen is
+        // not live. The app's "not live" amber, as on the timeline.
+        if (m_state.past) return m_theme.focusGlow;
         switch (m_state.liveness) {
         case liveness::Live:         return m_theme.indHintGreen;
         case liveness::Stale:        return m_theme.focusGlow;
@@ -1679,6 +1788,25 @@ private:
             break;
         case Cell::Space:
             break;
+        // The timeline's buttons: a glyph that carries the colour, then the
+        // verb, on the same straight hover fill as every other cell — no
+        // coloured box, no pulse. Back to live: a green play triangle.
+        // Record: a red dot; Stop: a red square and red words, the one sign
+        // that a recording is running.
+        case Cell::Live: {
+            const QRect words = r.adjusted(kTlChipPad + kTlGlyphW + kTlGlyphGap, 0, -kTlChipPad, 0);
+            timeline::paintPlayGlyph(p, tlGlyphBox(r), t.indHintGreen);
+            p.setPen(t.text);
+            if (!li.text.isEmpty()) p.drawText(words, textFlags, li.text);
+            break;
+        }
+        case Cell::Record: {
+            const QRect words = r.adjusted(kTlChipPad + kTlGlyphW + kTlGlyphGap, 0, -kTlChipPad, 0);
+            timeline::paintRecordGlyph(p, tlGlyphBox(r), (li.index & kChipRecording) != 0, t.markerPtr);
+            p.setPen((li.index & kChipRecording) ? t.markerPtr : t.text);
+            if (!li.text.isEmpty()) p.drawText(words, textFlags, li.text);
+            break;
+        }
         case Cell::Recent:
             drawIcon(p, r, ":/vsicons/chevron-down.svg", kChevIconPx, hovered ? t.textDim : t.textFaint);
             break;
@@ -1784,6 +1912,7 @@ private:
             case Cell::Crumb:    shape = isDeepest(*li) ? Qt::IBeamCursor
                                                         : Qt::PointingHandCursor; break;
             case Cell::Back: case Cell::Fwd: case Cell::Hist: case Cell::Up:
+            case Cell::Live: case Cell::Record:
                 shape = li->enabled ? Qt::PointingHandCursor : Qt::ArrowCursor; break;
             default:             shape = Qt::PointingHandCursor; break;
             }
@@ -1804,6 +1933,9 @@ private:
         case liveness::Static:       live = QStringLiteral("Static file"); break;
         default: break;
         }
+        // The dot is amber while looking back at a recording, whatever the source is
+        // doing: the words must agree with it.
+        if (m_state.past) live = QStringLiteral("Looking back at a recording — values are read-only");
         // The kind word comes from the saved source's identifier; a live
         // attach that registered none (tutorial self-attach, MCP, kernel)
         // gets the bare name — kindLabelFor("") would say "Plugin".
@@ -1859,6 +1991,14 @@ private:
             return QStringLiteral("Fields of %1").arg(classHalf(m_state.crumbs[li->index].label));
         case Cell::Overflow:
             return overflowMenuLabels().join(QStringLiteral(" › "));
+        case Cell::Live:
+            return QStringLiteral("Back to live  Ctrl+End\n"
+                                  "you are looking back at the recording; values are read-only");
+        case Cell::Record:
+            if (!m_state.canRecord) return QStringLiteral("Record\nthe timeline records live sources");
+            return m_state.recording
+                ? QStringLiteral("Stop recording  F9\nwhat was recorded stays on the timeline until you clear it")
+                : QStringLiteral("Record  F9\nkeep every change of this class from now on, to look back at on the timeline");
         case Cell::Space:    return QStringLiteral("Edit the path  Alt+D");
         case Cell::Recent:   return QStringLiteral("Recent addresses and bookmarks");
         }
@@ -1900,6 +2040,8 @@ private:
         // Click-to-type on the empty stretch (Explorer): the trail turns
         // into its dotted path. chev:<i> and hist open on PRESS.
         case Cell::Space:  beginPathEdit(); break;
+        case Cell::Live:   if (m_cb.onTimelineBackToLive) m_cb.onTimelineBackToLive(); break;
+        case Cell::Record: if (m_cb.onTimelineRecord) m_cb.onTimelineRecord(); break;
         default: break;
         }
     }
@@ -2283,9 +2425,14 @@ private:
     // preview's run — which at open is exactly the suffix's run, and grows
     // only with what you type. Path is the exception: it stands in for the
     // whole trail, so it covers the whole trail.
-    void placeEdit(const QRect& r, int coveredLeft) {
+    void placeEdit(const QRect& rIn, int coveredLeft) {
         const QRect recent = itemRect(QStringLiteral("recent"));
-        const int stop = recent.isNull() ? width() - kRightMargin : recent.left();
+        // The timeline's divider and buttons are a hard bound: a narrow-pane
+        // fallback may widen the field over `recent`, never over the timeline's buttons.
+        const int hard = m_layout.tlDividerX >= 0 ? m_layout.tlDividerX : width() - kRightMargin;
+        QRect r = rIn;
+        if (r.right() >= hard) r.setRight(qMax(r.left(), hard - 1));
+        const int stop = qMin(hard, recent.isNull() ? width() - kRightMargin : recent.left());
         m_editRect = r;
         m_edit->setGeometry(r);
         const QRect cell = editCellRect();

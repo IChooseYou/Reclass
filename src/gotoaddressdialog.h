@@ -39,7 +39,7 @@ public:
 
         const auto& t = ThemeManager::instance().current();
 
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         QFont font(s.value("font", "JetBrains Mono").toString(), 10);
         font.setFixedPitch(true);
 
@@ -121,14 +121,14 @@ public:
     uint64_t resolvedAddress() const { return m_resolved; }
 
     static QStringList loadRecent() {
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         return s.value(kSettingsKey).toStringList();
     }
 
     static void pushRecent(const QString& entry) {
         QString trimmed = entry.trimmed();
         if (trimmed.isEmpty()) return;
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         QStringList list = s.value(kSettingsKey).toStringList();
         list.removeAll(trimmed);
         list.prepend(trimmed);
@@ -137,7 +137,7 @@ public:
     }
 
     static void clearRecent() {
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         s.remove(kSettingsKey);
     }
 

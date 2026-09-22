@@ -38,6 +38,31 @@ src/*.png
 /tmp_*
 /test_*.txt
 /ctest_*.txt
+
+# ── Root-level scratch: dumps of a run, not project files ──
+/Comments
+/Type
+/testInlineEditReEntry
+/output.txt
+/eprocess_*.txt
+/rcxeditor_layout.txt
+/scanner_sample_results.json
+# A byte-identical copy of src/examples/windows-x86_64.h that lands here when
+# the generator is run from the root.
+/windows-x86_64.h
+/*.zip
+
+# ── Local machine config and user-only work ──
+/.mcp.json
+/training/
+/training2/
+/tools/book/
+
+# ── Hand-made MCP request bodies and generator dumps ──
+/tools/ksd_*.json
+/tools/ball_*.json
+/tools/test_*.json
+/tools/all_25h2_structs.txt
 /bench_*.txt
 /ctrl_*.txt
 /debug_*.txt

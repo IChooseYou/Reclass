@@ -228,6 +228,51 @@ private slots:
         QVERIFY(!m_editor->byteSelection().has_value());
     }
 
+    // ── A drag keeps the cursor it started with ─────────────────────
+    // Never a closed hand: neither gesture carries anything — a range
+    // grows. Byte drags keep the grid cross, row drags the plain arrow.
+    // (The old closed-hand branch also asked QApplication::mouseButtons(),
+    // which synthetic events cannot set; these assertions are on the
+    // cursor the viewport actually ends up wearing.)
+    void testDraggingKeepsItsOwnCursor() {
+        auto* sci = m_editor->scintilla();
+        auto* vp = sci->viewport();
+        // While a drag runs the editor consumes MouseMove before the hover
+        // bookkeeping, so the cursor is only re-resolved when the selection
+        // is applied — which is what the controller does on every drag move,
+        // and how a cursor got installed mid-drag in the first place.
+        auto refreshLikeTheController = [this] { m_editor->applySelectionOverlay({}); };
+
+        // Byte drag: hover a hex digit, press, move past the 8 px threshold.
+        const QPoint b0 = hexByteCoord(m_editor, m_h0Line, 0);
+        const QPoint b1 = hexByteCoord(m_editor, m_h0Line, 5);
+        sendMove(vp, b0, Qt::NoButton);
+        sendPress(vp, b0);
+        sendMove(vp, b1);
+        QVERIFY2(m_editor->byteSelection().has_value(), "no byte drag to judge the cursor by");
+        refreshLikeTheController();
+        QVERIFY2(vp->cursor().shape() != Qt::ClosedHandCursor, "byte drag shows a closed hand");
+        QCOMPARE(vp->cursor().shape(), Qt::CrossCursor);
+        sendRelease(vp, b1);
+        m_editor->clearByteSelection();
+
+        // Row drag: hover the non-hex row away from its value column, press,
+        // drag a couple of rows.
+        const long pos = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
+                                            (unsigned long)m_iLine);
+        const int y = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos);
+        const int lh = (int)sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+        const QPoint r0(40, y + lh / 2);
+        const QPoint r1(r0.x(), r0.y() - 2 * lh);
+        sendMove(vp, r0, Qt::NoButton);
+        sendPress(vp, r0);
+        sendMove(vp, r1);                       // well past the threshold
+        refreshLikeTheController();
+        QVERIFY2(vp->cursor().shape() != Qt::ClosedHandCursor, "row drag shows a closed hand");
+        QCOMPARE(vp->cursor().shape(), Qt::ArrowCursor);
+        sendRelease(vp, r1);
+    }
+
     // ── Mouse press + drag upgrades to byte selection past 8px ──────
     void testMouseDragUpgradesToByteSelection() {
         auto* vp = m_editor->scintilla()->viewport();

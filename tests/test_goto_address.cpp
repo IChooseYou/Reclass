@@ -38,8 +38,8 @@ private slots:
     void initTestCase() {
         // Use a dedicated organisation/app scope so we don't trash a real
         // user's Reclass settings while running tests.
-        QCoreApplication::setOrganizationName(QStringLiteral("REECLASS"));
-        QCoreApplication::setApplicationName(QStringLiteral("REECLASS"));
+        QCoreApplication::setOrganizationName(QStringLiteral("RC"));
+        QCoreApplication::setApplicationName(QStringLiteral("RC"));
         GotoAddressDialog::clearRecent();
     }
     void cleanupTestCase() {

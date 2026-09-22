@@ -260,6 +260,21 @@ private slots:
         QCOMPARE(r.refreshMs, 100);
     }
 
+    void floatDecimalsSpinBoxShowsAndReturnsTheSetting() {
+        QCOMPARE(OptionsResult().floatDecimals, 3);
+        OptionsResult input;
+        input.floatDecimals = 4;
+        OptionsDialog dlg(input);
+
+        auto* spin = dlg.findChild<QSpinBox*>("floatDecimalsSpin");
+        QVERIFY(spin);
+        QCOMPARE(spin->value(), 4);
+        QCOMPARE(spin->minimum(), 1);
+        QCOMPARE(spin->maximum(), 6);
+        spin->setValue(2);
+        QCOMPARE(dlg.result().floatDecimals, 2);
+    }
+
     void refreshRateClampsMin() {
         OptionsResult input;
         input.refreshMs = 0; // below minimum

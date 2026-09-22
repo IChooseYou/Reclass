@@ -19,6 +19,7 @@ struct OptionsResult {
     int     refreshMs = 660;
     bool    generatorAsserts = false;
     bool    braceWrap = false;
+    int     floatDecimals = 3;   // fmt::kDefaultFloatDecimals
 };
 
 class OptionsDialog : public ThemedDialog {
@@ -42,6 +43,7 @@ private:
     QCheckBox*      m_showIconCheck  = nullptr;
     QCheckBox*      m_autoMcpCheck   = nullptr;
     QSpinBox*       m_refreshSpin    = nullptr;
+    QSpinBox*       m_floatDecimalsSpin = nullptr;
     QCheckBox*      m_assertCheck    = nullptr;
     QCheckBox*      m_braceWrapCheck = nullptr;
 

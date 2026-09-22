@@ -24,6 +24,9 @@
 #include <QPainter>
 #include <QTimer>
 #include <QMenu>
+#include <QFontDatabase>
+#include <QScreen>
+#include <cstdlib>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
 #include <cstdio>
@@ -33,6 +36,7 @@
 #include "core.h"
 #include "providers/buffer_provider.h"
 #include "themes/thememanager.h"
+#include "../tests/tree_fixture.h"
 
 using namespace rcx;
 
@@ -237,6 +241,52 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (mode == QStringLiteral("tree")) {
+        // Drawn tree lines: editor_render <out.png> tree <zoom> <firstLine> <xOffset> [brace]
+        // over the rich fixture (every kind of child row), in the app's font,
+        // grabbed from the screen so the PNG holds the real composed pixels.
+        // Also writes <out>_4x.png: the top-left of the indent, nearest ×4.
+        QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/JetBrainsMono.ttf"));
+        const int zoom = argc > 3 ? std::atoi(argv[3]) : 0;
+        const int first = argc > 4 ? std::atoi(argv[4]) : 0;
+        const int xOffset = argc > 5 ? std::atoi(argv[5]) : 0;
+        const bool brace = argc > 6 && QString::fromLocal8Bit(argv[6]) == QStringLiteral("brace");
+        treefix::Rich fx = treefix::richTree();
+        doc->tree = fx.tree;
+        doc->provider = std::make_shared<BufferProvider>(fx.data, "tree.bin");
+        ctrl->setEditorFont(QStringLiteral("JetBrains Mono"));
+        ctrl->setTreeLines(true);
+        ctrl->setTreeColumns(true);
+        ctrl->setBraceWrap(brace);
+        ctrl->setViewRootId(fx.rootId);
+        splitter->resize(1080, 620);
+        ctrl->refresh();
+        app.processEvents();
+        auto* sci = editor->scintilla();
+        sci->zoomTo(zoom);
+        sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, (unsigned long)first);
+        sci->SendScintilla(QsciScintillaBase::SCI_SETXOFFSET, (unsigned long)xOffset);
+        app.processEvents();
+        sci->viewport()->repaint();
+        app.processEvents();
+        const QImage shot = splitter->screen()->grabWindow(splitter->winId()).toImage();
+        shot.save(out);
+        const QPoint vp = sci->viewport()->mapTo(splitter, QPoint(0, 0));
+        const qreal dpr = splitter->devicePixelRatioF();
+        const QRect crop = QRect(int(vp.x() * dpr), int(vp.y() * dpr), int(340 * dpr), int(280 * dpr))
+                               .intersected(shot.rect());
+        QFileInfo fi(out);
+        shot.copy(crop)
+            .scaled(crop.width() * 4, crop.height() * 4, Qt::IgnoreAspectRatio, Qt::FastTransformation)
+            .save(fi.path() + QStringLiteral("/") + fi.completeBaseName() + QStringLiteral("_4x.png"));
+        std::printf("tree: dpr %.2f zoom %d first %d xOffset %d brace %d rects %d column dashes %d -> %s\n",
+                    dpr, zoom, first, xOffset, brace ? 1 : 0,
+                    int(editor->lastTreeGuideDeviceRects().size()),
+                    int(editor->lastTreeColumnDeviceRects().size()), qPrintable(out));
+        std::fflush(stdout);
+        return 0;
+    }
+
     if (mode == QStringLiteral("menu")) {
         // The node context menu, grabbed as its own top-level popup.
         // showContextMenu() exec()s, so a zero-delay timer photographs
@@ -404,9 +454,9 @@ int main(int argc, char** argv) {
         // eyeball it without a live process.
         {
             AddressBarState s = editor->addressBar()->state();
-            s.sourceName   = QStringLiteral("REECLASS.exe");
+            s.sourceName   = QStringLiteral("RC.exe");
             s.sourceKindId = QStringLiteral("processmemory");
-            s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234+[0x10]*2");
+            s.baseFormula  = QStringLiteral("<RC.exe>+0x1234+[0x10]*2");
             s.resolvedBase = 0x7FF6DEAD1234ULL;
             const int levels[] = { liveness::Live, liveness::Stale, liveness::Disconnected,
                                    liveness::Static, liveness::None };

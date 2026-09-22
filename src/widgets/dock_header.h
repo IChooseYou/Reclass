@@ -68,7 +68,7 @@ inline constexpr int kDockAccentRows   = 2;
 // this exact font, so a tabified Project/Bookmarks pair no longer changes text
 // weight (and, with the fixed header height, geometry) on a tab switch.
 inline QFont chromeFont() {
-    QSettings s(QStringLiteral("REECLASS"), QStringLiteral("REECLASS"));
+    QSettings s(QStringLiteral("RC"), QStringLiteral("RC"));
     QFont f(s.value(QStringLiteral("font"), QStringLiteral("JetBrains Mono")).toString(), 10);
     f.setFixedPitch(true);
     return f;

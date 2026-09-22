@@ -26,6 +26,21 @@ class SnapshotProvider : public Provider {
     // because each one chases a vtable pointer into module memory.
     QSet<uint64_t> m_permanentPages;
 
+    // Pages whose last read FAILED. They read as zeros and report
+    // not-readable, and they never fall through to the real provider: the
+    // refresh loop already asked and was refused, and merging a zero-filled
+    // stand-in (what readBytes used to hand back) made unreadable memory
+    // look like real zero bytes — the unreadable strike never showed.
+    QSet<uint64_t> m_failedPages;
+
+    // While set, every page a read or readability check touches is noted
+    // here. The controller records what compose ACTUALLY reads — RTTI
+    // vtables, dereferenced targets, anything its own range walk misses —
+    // and asks for those pages on the next tick, so the capture set is what
+    // the view reads rather than a guess at it.
+    mutable QSet<uint64_t>* m_touchSink = nullptr;
+    mutable uint64_t        m_lastTouched = ~uint64_t(0);
+
     static constexpr uint64_t kPageSize = 4096;
     static constexpr uint64_t kPageMask = ~(kPageSize - 1);
 
@@ -42,13 +57,18 @@ public:
         char* out = static_cast<char*>(buf);
         uint64_t cur = addr;
         int remaining = len;
+        bool ok = true;
         while (remaining > 0) {
             uint64_t pageAddr = cur & kPageMask;
             int pageOff = static_cast<int>(cur - pageAddr);
             int chunk = qMin(remaining, static_cast<int>(kPageSize - pageOff));
+            noteTouched(pageAddr);
             auto it = m_pages.constFind(pageAddr);
             if (it != m_pages.constEnd()) {
                 std::memcpy(out, it->constData() + pageOff, chunk);
+            } else if (m_failedPages.contains(pageAddr)) {
+                std::memset(out, 0, chunk);
+                ok = false;
             } else if (m_real) {
                 // Fall through to the real provider for pages the async
                 // refresh didn't pre-fetch. Required by the auto-RTTI
@@ -59,8 +79,10 @@ public:
                 // a Class* field) leave those pages out of the snapshot.
                 // A handful of qword reads on the UI thread is fine; the
                 // alternative is the RTTI feature silently doing nothing.
-                if (!m_real->read(cur, out, chunk))
+                if (!m_real->read(cur, out, chunk)) {
                     std::memset(out, 0, chunk);
+                    ok = false;
+                }
             } else {
                 std::memset(out, 0, chunk);
             }
@@ -68,7 +90,7 @@ public:
             cur += chunk;
             remaining -= chunk;
         }
-        return true;
+        return ok;
     }
 
     bool isReadable(uint64_t addr, int len) const override {
@@ -76,6 +98,8 @@ public:
         uint64_t end = addr + static_cast<uint64_t>(len);
         if (end < addr) return false;   // overflow
         for (uint64_t p = addr & kPageMask; p < end; p += kPageSize) {
+            noteTouched(p);
+            if (m_failedPages.contains(p)) return false;
             if (!m_pages.contains(p)) {
                 // Page not in snapshot — defer to the real provider's
                 // bounds check (e.g. ProcessMemoryProvider returns true
@@ -137,10 +161,40 @@ public:
     // started skipping pages (permanent / stable / out-of-viewport):
     // an unread page should retain its previous bytes, not vanish.
     void mergePages(const PageMap& fresh, int mainExtent) {
-        for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it)
+        for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) {
             m_pages.insert(it.key(), it.value());
+            m_failedPages.remove(it.key());
+        }
         m_mainExtent = mainExtent;
     }
+
+    // Pages whose read just failed: drop any bytes held for them so they
+    // read as not-readable instead of as whatever was there last time.
+    void markFailed(const QVector<uint64_t>& pageAddrs) {
+        for (uint64_t p : pageAddrs) {
+            const uint64_t page = p & kPageMask;
+            m_failedPages.insert(page);
+            m_pages.remove(page);
+        }
+    }
+    bool isFailed(uint64_t pageAddr) const {
+        return m_failedPages.contains(pageAddr & kPageMask);
+    }
+
+    void beginTouchRecording(QSet<uint64_t>* sink) {
+        m_touchSink = sink;
+        m_lastTouched = ~uint64_t(0);
+    }
+    void endTouchRecording() { m_touchSink = nullptr; }
+
+private:
+    void noteTouched(uint64_t pageAddr) const {
+        if (!m_touchSink || pageAddr == m_lastTouched) return;
+        m_touchSink->insert(pageAddr);
+        m_lastTouched = pageAddr;
+    }
+
+public:
 
     // Mark a page as immutable for the lifetime of this snapshot.
     // The controller calls this once it has classified the page as

@@ -1,6 +1,7 @@
 #include "controller.h"
 #include "addressparser.h"
 #include "address_callbacks.h"
+#include "providers/file_provider.h"
 #include "widgets/address_bar_model.h"
 #include "widgets/address_bar.h"
 #include "symbolstore.h"
@@ -11,6 +12,10 @@
 #include "commontypes.h"
 #include "clipboard.h"
 #include "diffutil.h"
+#include "timeline/frame_provider.h"
+#include "timeline/timeline_hub.h"
+#include "timeline/timeline_service.h"
+#include "timeline/tl_clock.h"
 #include <cmath>
 #include <cstring>
 #include "providerregistry.h"
@@ -85,7 +90,7 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
                                  const QString& existing, bool* ok) {
     *ok = false;
     const auto& theme = ThemeManager::instance().current();
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QFont editorFont(settings.value("font", "JetBrains Mono").toString(), 12);
     editorFont.setFixedPitch(true);
 
@@ -152,8 +157,8 @@ ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
                         showComments, std::move(symbolLookup));
 }
 
-bool RcxDocument::save(const QString& path) {
-    QJsonObject json = tree.toJson();
+bool RcxDocument::save(const QString& path, const NodeTree* view) {
+    QJsonObject json = (view ? *view : tree).toJson();
 
     // Save type aliases
     if (!typeAliases.isEmpty()) {
@@ -179,6 +184,12 @@ bool RcxDocument::load(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
         return false;
+    QByteArray head = file.peek(4096);
+    if (head.startsWith("\xEF\xBB\xBF")) head.remove(0, 3);
+    if (file.size() > 0 && !head.trimmed().startsWith('{')) {
+        qWarning() << "Not a JSON definition:" << path;
+        return false;
+    }
     QByteArray bytes;
     {
         PROFILE_SCOPE("RcxDocument::load.read");
@@ -199,7 +210,7 @@ bool RcxDocument::load(const QString& path) {
             : QJsonDocument::fromJson(bytes, &jerr);
     }
     if (jdoc.isNull() || !jdoc.isObject()) {
-        qWarning().noquote() << "[load]" << path << "isn't a REECLASS project ("
+        qWarning().noquote() << "[load]" << path << "isn't a RC project ("
                              << (jdoc.isNull() ? jerr.errorString()
                                                : QStringLiteral("not a JSON object"))
                              << ") — refuse rather than show Untitled placeholder";
@@ -281,22 +292,22 @@ bool RcxDocument::load(const QString& path) {
     return true;
 }
 
-void RcxDocument::loadData(const QString& binaryPath) {
+bool RcxDocument::loadData(const QString& binaryPath) {
     PROFILE_SCOPE("RcxDocument::loadData(path)");
-    QFile file(binaryPath);
-    if (!file.open(QIODevice::ReadOnly))
-        return;
-    undoStack.clear();
-    provider = std::make_shared<BufferProvider>(
-        file.readAll(), QFileInfo(binaryPath).fileName());
+    auto fileProvider = FileProvider::open(binaryPath);
+    if (!fileProvider) return false;
+    if (controllers.size() <= 1) undoStack.clear();
+    provider = std::move(fileProvider);
     dataPath = binaryPath;
     tree.baseAddress = 0;
+    tree.baseAddressFormula.clear();
     emit documentChanged();
+    return true;
 }
 
 void RcxDocument::loadData(const QByteArray& data) {
     PROFILE_SCOPE("RcxDocument::loadData(bytes)");
-    undoStack.clear();
+    if (controllers.size() <= 1) undoStack.clear();
     provider = std::make_shared<BufferProvider>(data);
     tree.baseAddress = 0;
     emit documentChanged();
@@ -305,7 +316,11 @@ void RcxDocument::loadData(const QByteArray& data) {
 // ── RcxCommand ──
 
 RcxCommand::RcxCommand(RcxController* ctrl, Command cmd)
-    : m_ctrl(ctrl), m_cmd(cmd) {}
+    : m_ctrl(ctrl), m_doc(ctrl->document()), m_cmd(cmd) {
+    if (std::holds_alternative<cmd::WriteBytes>(cmd)) m_writeProvider = ctrl->provider();
+    m_localViewCommand = std::holds_alternative<cmd::Collapse>(cmd)
+        || std::holds_alternative<cmd::ChangeBase>(cmd);
+}
 
 // If applyCommand reports the underlying op was rejected (e.g. the provider
 // refused a WriteBytes), mark this command obsolete so QUndoStack drops it
@@ -320,11 +335,21 @@ static bool isTransientCommand(const Command& cmd) {
 }
 
 void RcxCommand::undo() {
-    if (!m_ctrl->applyCommand(m_cmd, true) && !isTransientCommand(m_cmd))
-        setObsolete(true);
+    execute(true);
 }
 void RcxCommand::redo() {
-    if (!m_ctrl->applyCommand(m_cmd, false) && !isTransientCommand(m_cmd))
+    execute(false);
+}
+
+void RcxCommand::execute(bool undo) {
+    RcxController* ctrl = m_ctrl;
+    if (!ctrl && !m_localViewCommand && m_doc && !m_doc->controllers.isEmpty())
+        ctrl = m_doc->controllers.first();
+    if (!ctrl) {
+        setObsolete(true);
+        return;
+    }
+    if (!ctrl->applyCommand(m_cmd, undo, m_writeProvider) && !isTransientCommand(m_cmd))
         setObsolete(true);
 }
 
@@ -343,8 +368,32 @@ RcxController::RcxController(RcxDocument* doc, QWidget* parent)
     : QObject(parent), m_doc(doc)
 {
     PROFILE_SCOPE("RcxController::ctor");
+    m_doc->controllers.append(this);
     fmt::setTypeNameProvider(docTypeNameProvider);
-    connect(m_doc, &RcxDocument::documentChanged, this, &RcxController::refresh);
+    connect(m_doc, &RcxDocument::documentChanged, this, [this] {
+        m_viewTreeDirty = true;
+        ++m_capturePlanEpoch;
+        refresh();
+    });
+    connect(m_doc, &RcxDocument::timelineStateChanged, this, [this] {
+        // Another tab on this document cleared the class: a moment this tab
+        // holds from before the clear is gone too.
+        if (isViewingPast() && m_timelineHub
+            && m_timelineHub->isHiddenFor(timelineClassId(), m_pastRecordMs))
+            leavePast();
+        scheduleTimelineChanged();
+    });
+    static int s_nextTimelineRequester = 0;
+    m_timelineRequester = ++s_nextTimelineRequester;
+    m_timelineBackgroundCapture = tl::TimelineService::instance().budgets().captureWhenMinimized;
+    m_timelineEnabled = QSettings(QStringLiteral("RC"), QStringLiteral("RC"))
+                            .value(QStringLiteral("timeline/enabled"), true).toBool();
+    connect(&m_doc->undoStack, &QUndoStack::indexChanged, this, [this] {
+        if (m_doc->controllers.size() > 1) {
+            resetChangeTracking();
+            refresh();
+        }
+    });
     setupAutoRefresh();
 
     // Hex toolbar: no longer auto-shows (replaced by type-cycling tooltip).
@@ -361,6 +410,8 @@ RcxController::RcxController(RcxDocument* doc, QWidget* parent)
     m_loading = true;
     ingestPendingSavedSources();
     m_loading = false;
+    // A tab opened on a document whose source is already attached.
+    bindTimeline();
 }
 
 void RcxController::ingestPendingSavedSources() {
@@ -394,16 +445,162 @@ void RcxController::ingestPendingSavedSources() {
 }
 
 RcxController::~RcxController() {
+    if (m_doc) m_doc->controllers.removeAll(this);
     if (m_refreshWatcher) {
         m_refreshWatcher->cancel();
         m_refreshWatcher->waitForFinished();
     }
 
+    detachTimeline();
+    m_frameProv.reset();
     m_snapshotProv.reset();
 }
 
+uint64_t& RcxController::baseAddress() {
+    return m_instance ? m_instance->baseAddress : m_doc->tree.baseAddress;
+}
+uint64_t RcxController::baseAddress() const {
+    return m_instance ? m_instance->baseAddress : m_doc->tree.baseAddress;
+}
+QString& RcxController::baseAddressFormula() {
+    return m_instance ? m_instance->formula : m_doc->tree.baseAddressFormula;
+}
+const QString& RcxController::baseAddressFormula() const {
+    return m_instance ? m_instance->formula : m_doc->tree.baseAddressFormula;
+}
+std::shared_ptr<Provider>& RcxController::provider() {
+    return m_instance ? m_instance->provider : m_doc->provider;
+}
+const std::shared_ptr<Provider>& RcxController::provider() const {
+    return m_instance ? m_instance->provider : m_doc->provider;
+}
+
+bool RcxController::isCollapsed(const Node& node) const {
+    return m_instance ? m_instance->collapsed.value(node.id, node.collapsed) : node.collapsed;
+}
+
+void RcxController::setCollapsed(uint64_t id, bool collapsed) {
+    ++m_capturePlanEpoch;   // an expanded pointer's target joins (or leaves) the capture
+    if (m_instance) {
+        m_instance->collapsed.insert(id, collapsed);
+        m_viewTreeDirty = true;
+    } else {
+        const int idx = m_doc->tree.indexOfId(id);
+        if (idx >= 0) m_doc->tree.nodes[idx].collapsed = collapsed;
+    }
+}
+
+const NodeTree& RcxController::viewTree() const {
+    if (!m_instance) return m_doc->tree;
+    if (m_viewTreeDirty || m_viewTreeGeneration != m_doc->tree.generation()) {
+        m_viewTree = m_doc->tree;
+        for (auto& node : m_viewTree.nodes)
+            node.collapsed = isCollapsed(node);
+        m_viewTreeGeneration = m_doc->tree.generation();
+        m_viewTreeDirty = false;
+    }
+    m_viewTree.baseAddress = baseAddress();
+    m_viewTree.baseAddressFormula = baseAddressFormula();
+    const int root = m_viewTree.indexOfId(m_viewRootId);
+    if (root >= 0) m_viewTree.initialClass = m_viewTree.nodes[root].structTypeName;
+    return m_viewTree;
+}
+
+bool RcxController::configureInstance(const RcxController& source, uint64_t rootId,
+                                      uint64_t address, const QString& expression,
+                                      std::shared_ptr<Provider> instanceProvider) {
+    const int idx = m_doc->tree.indexOfId(rootId);
+    if (source.document() != m_doc || !source.provider() || idx < 0
+        || m_doc->tree.nodes[idx].kind != NodeKind::Struct
+        || m_doc->tree.nodes[idx].parentId != 0) return false;
+    InstanceState instance;
+    instance.baseAddress = address;
+    instance.provider = instanceProvider ? std::move(instanceProvider) : source.provider();
+    if (instance.provider->isLive()
+        && instance.provider->pointerSize() != m_doc->tree.pointerSize) return false;
+    const QString resolved = durableAddressExpression(address, instance.provider.get(),
+                                                       m_doc->tree.pointerSize, expression);
+    if (!isBareAddressLiteral(resolved)) instance.formula = resolved;
+    for (const auto& node : source.viewTree().nodes)
+        instance.collapsed.insert(node.id, node.collapsed);
+    instance.collapsed.insert(rootId, false);
+    m_instance = std::move(instance);
+    m_viewTreeDirty = true;
+    m_viewRootId = rootId;
+    m_focusPath.clear();
+    m_selIds.clear();
+    m_nav = NavHistory();
+    if (provider() == source.provider()) {
+        m_savedSources = source.m_savedSources;
+        m_activeSourceIdx = source.m_activeSourceIdx;
+    } else {
+        m_savedSources.clear();
+        m_activeSourceIdx = -1;
+    }
+    m_readOnlyOverride = source.m_readOnlyOverride;
+    resetSnapshot();
+    refresh();
+    return true;
+}
+
+QString RcxController::addressExpression(uint64_t address, const QString& preferred) const {
+    return durableAddressExpression(address, provider().get(), m_doc->tree.pointerSize, preferred);
+}
+
+bool RcxController::navigateToAddress(uint64_t address, const QString& preferred) {
+    return rebaseTo(addressExpression(address, preferred));
+}
+
+bool RcxController::loadSourceFile(const QString& path) {
+    QString error;
+    auto file = FileProvider::open(path, &error);
+    if (!file) {
+        emit statusHint(QStringLiteral("Couldn't open %1: %2").arg(QFileInfo(path).fileName(), error));
+        return false;
+    }
+    if (!m_instance && m_doc->controllers.size() == 1) m_doc->undoStack.clear();
+    provider() = std::move(file);
+    if (!m_instance) m_doc->dataPath = path;
+    baseAddress() = 0;
+    baseAddressFormula().clear();
+    resetSnapshot();
+    emit m_doc->documentChanged();
+    return true;
+}
+
+void RcxController::openPointerBeside(RcxEditor* editor, int line) {
+    const LineMeta* lm = editor ? editor->metaForLine(line) : nullptr;
+    if (!lm || lm->nodeIdx < 0 || lm->nodeIdx >= m_doc->tree.nodes.size() || !provider()) return;
+    const Node& node = m_doc->tree.nodes[lm->nodeIdx];
+    if (!isPointerKind(node.kind) || !node.refId) return;
+    const Provider* data = displayedProvider();   // the pointer as shown: recorded values too
+    uint64_t target = 0;
+    if (!data->read(lm->offsetAddr, &target, sizeForKind(node.kind)) || !target) {
+        emit statusHint(QStringLiteral("Pointer is null or unreadable"));
+        return;
+    }
+    if (node.isRelative) {
+        if (target > UINT64_MAX - baseAddress()) return;
+        target += baseAddress();
+    }
+    if (!provider()->isReadable(target, 1)) {
+        emit statusHint(QStringLiteral("Pointer target is unreadable"));
+        return;
+    }
+    emit requestOpenInstanceBeside(node.refId, target, addressExpression(target));
+}
+
 void RcxController::resetProvider() {
+    if (m_refreshTimer) m_refreshTimer->stop();
+    if (m_refreshWatcher) {
+        disconnect(m_refreshWatcher, nullptr, this, nullptr);
+        m_refreshWatcher->cancel();
+        m_refreshWatcher->waitForFinished();
+    }
+    returnToLive();
+    detachTimeline();
     m_snapshotProv.reset();
+    provider().reset();
 }
 
 RcxEditor* RcxController::primaryEditor() const {
@@ -415,6 +612,7 @@ RcxEditor* RcxController::addSplitEditor(QWidget* parent) {
     auto* editor = new RcxEditor(parent);
     m_editors.append(editor);
     connectEditor(editor);
+    editor->setTreeColumns(m_treeColumns);
 
     if (!m_lastResult.text.isEmpty()) {
         editor->applyDocument(m_lastResult);
@@ -455,13 +653,11 @@ void RcxController::removeSplitEditor(RcxEditor* editor) {
 
 QByteArray RcxController::readSelectionBytes(RcxEditor* editor) {
     auto range = editor->byteSelection();
-    if (!range || !m_doc->provider) return {};
+    if (!range || !this->provider()) return {};
     uint64_t lo = range->first;
     int n = static_cast<int>(range->second - range->first);
     if (n <= 0 || n > 65536) return {};
-    const Provider* prov = m_snapshotProv
-        ? static_cast<const Provider*>(m_snapshotProv.get())
-        : m_doc->provider.get();
+    const Provider* prov = displayedProvider();   // what is on screen: recorded values too
     if (!prov->isReadable(lo, n)) {
         emit statusHint(QStringLiteral("Couldn't read %1 bytes at 0x%2")
             .arg(n).arg(lo, 0, 16));
@@ -472,13 +668,11 @@ QByteArray RcxController::readSelectionBytes(RcxEditor* editor) {
 
 void RcxController::byteCopyHex(RcxEditor* editor) {
     auto range = editor->byteSelection();
-    if (!range || !m_doc->provider) return;
+    if (!range || !this->provider()) return;
     uint64_t lo = range->first;
     int n = static_cast<int>(range->second - range->first);
     if (n <= 0 || n > 65536) return;
-    const Provider* prov = m_snapshotProv
-        ? static_cast<const Provider*>(m_snapshotProv.get())
-        : m_doc->provider.get();
+    const Provider* prov = displayedProvider();   // what is on screen: recorded values too
     QByteArray data = prov->isReadable(lo, n) ? prov->readBytes(lo, n)
                                               : QByteArray();
     if (data.size() < n) {
@@ -568,9 +762,9 @@ void RcxController::byteSaveAsFile(RcxEditor* editor) {
 
 void RcxController::bytePasteHex(RcxEditor* editor) {
     auto range = editor->byteSelection();
-    if (!range || !m_doc->provider) return;
-    if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
-        emit statusHint(QStringLiteral("Target is read-only"));
+    if (!range || !this->provider()) return;
+    if (!this->provider()->isWritable() || m_readOnlyOverride || isViewingPast()) {
+        emit statusHint(isViewingPast() ? viewingPastHint() : QStringLiteral("Target is read-only"));
         return;
     }
     uint64_t lo = range->first;
@@ -593,8 +787,8 @@ void RcxController::bytePasteHex(RcxEditor* editor) {
     int copyN = qMin(bytes.size(), n);
     memcpy(write.data(), bytes.constData(), copyN);
 
-    QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
-        ? m_doc->provider->readBytes(lo, n)
+    QByteArray oldBytes = this->provider()->isReadable(lo, n)
+        ? this->provider()->readBytes(lo, n)
         : QByteArray(n, '\0');
     m_doc->undoStack.push(new RcxCommand(this,
         cmd::WriteBytes{lo, oldBytes, write}));
@@ -604,16 +798,16 @@ void RcxController::bytePasteHex(RcxEditor* editor) {
 
 void RcxController::byteZeroFill(RcxEditor* editor) {
     auto range = editor->byteSelection();
-    if (!range || !m_doc->provider) return;
-    if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
-        emit statusHint(QStringLiteral("Target is read-only"));
+    if (!range || !this->provider()) return;
+    if (!this->provider()->isWritable() || m_readOnlyOverride || isViewingPast()) {
+        emit statusHint(isViewingPast() ? viewingPastHint() : QStringLiteral("Target is read-only"));
         return;
     }
     uint64_t lo = range->first;
     int n = static_cast<int>(range->second - range->first);
     if (n <= 0 || n > 65536) return;
-    QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
-        ? m_doc->provider->readBytes(lo, n)
+    QByteArray oldBytes = this->provider()->isReadable(lo, n)
+        ? this->provider()->readBytes(lo, n)
         : QByteArray(n, '\0');
     QByteArray zeros(n, '\0');
     m_doc->undoStack.push(new RcxCommand(this,
@@ -625,7 +819,9 @@ void RcxController::byteZeroFill(RcxEditor* editor) {
 void RcxController::onByteSelectionRows(const QSet<uint64_t>& selIds) {
     // The byte selection owns the row selection while active: replace
     // m_selIds wholesale with the covered rows (may be empty → clears).
+    // The editor marks them where the bytes are, so no anchors.
     m_selIds = selIds;
+    m_selAnchors.clear();
     m_anchorLine = -1;
     updateCommandRow();
     applySelectionOverlays();
@@ -704,27 +900,15 @@ void RcxController::connectEditor(RcxEditor* editor) {
             this, [this]() { duplicateSelection(); });
 
     // Real clipboard (Ctrl+C / Ctrl+X / Ctrl+V).
-    // Serialize via ClipboardCodec to "application/x-REECLASS-nodes-v1" plus a
+    // Serialize via ClipboardCodec to "application/x-RC-nodes-v1" plus a
     // plain-text dump for external pastes. Cut = copy + delete. Paste wires
     // pasted nodes into the current view-root via a single undo macro.
     auto selectedRootIds = [this]() -> QVector<uint64_t> {
-        // m_selIds is a QSet (hash-bucket order) — collect with each node's
-        // absolute offset and sort, so copied/cut nodes serialize in struct
-        // order rather than a scrambled order on paste / external text dump.
-        QVector<QPair<int64_t, uint64_t>> rows;  // (offset, nodeId)
-        for (uint64_t id : m_selIds) {
-            uint64_t nodeId = baseNodeIdFromSelId(id);
-            int idx = m_doc->tree.indexOfId(nodeId);
-            if (nodeId != 0 && idx >= 0)
-                rows.append({m_doc->tree.computeOffset(idx), nodeId});
-        }
-        std::sort(rows.begin(), rows.end(),
-                  [](const QPair<int64_t, uint64_t>& a,
-                     const QPair<int64_t, uint64_t>& b) { return a.first < b.first; });
-        QVector<uint64_t> out;
-        out.reserve(rows.size());
-        for (const auto& r : rows) out.append(r.second);
-        return out;
+        // The same row → node mapping Delete uses: member rows (an enum field's
+        // members, bitfield / code rows) stand for nothing, an array-element row
+        // for its Array, a footer for its container — de-duplicated and sorted
+        // by offset, so copied/cut nodes serialize in struct order.
+        return orderedSelectedIds(SF_ArrayElemAsArray | SF_FooterAsContainer);
     };
 
     connect(editor, &RcxEditor::copyNodesRequested, this, [this, selectedRootIds]() {
@@ -756,7 +940,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (!mime) return;
         auto paste = ClipboardCodec::deserialize(m_doc->tree, mime);
         if (paste.nodes.isEmpty()) {
-            emit statusHint(QStringLiteral("Nothing to paste — clipboard has no REECLASS data"));
+            emit statusHint(QStringLiteral("Nothing to paste — clipboard has no RC data"));
             return;
         }
 
@@ -904,15 +1088,15 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // which expects a full-row hex value.
     connect(editor, &RcxEditor::byteRangeCommitRequested, this,
             [this](uint64_t addr, QByteArray bytes) {
-        if (!m_doc->provider) return;
-        if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
-            emit statusHint(QStringLiteral("Target is read-only"));
+        if (!this->provider()) return;
+        if (!this->provider()->isWritable() || m_readOnlyOverride || isViewingPast()) {
+            emit statusHint(isViewingPast() ? viewingPastHint() : QStringLiteral("Target is read-only"));
             return;
         }
         int n = bytes.size();
         if (n <= 0) return;
-        QByteArray oldBytes = m_doc->provider->isReadable(addr, n)
-            ? m_doc->provider->readBytes(addr, n)
+        QByteArray oldBytes = this->provider()->isReadable(addr, n)
+            ? this->provider()->readBytes(addr, n)
             : QByteArray(n, '\0');
         // User edit — exclude from value history (see m_userEditRanges).
         m_userEditRanges.append({addr, addr + (uint64_t)n});
@@ -1078,7 +1262,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         m_doc->undoStack.beginMacro(QStringLiteral("Collapse all"));
         for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
             auto& n = m_doc->tree.nodes[i];
-            if (isContainerKind(n.kind) && !n.collapsed)
+            if ((isContainerKind(n.kind) || enumTypeOf(m_doc->tree, n)) && !isCollapsed(n))
                 m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{n.id, false, true}));
         }
         m_doc->undoStack.endMacro();
@@ -1153,6 +1337,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::navBackRequested,    this, [this, editor] { goBack(editor); });
     connect(editor, &RcxEditor::navForwardRequested, this, [this, editor] { goForward(editor); });
     connect(editor, &RcxEditor::navUpRequested,      this, [this, editor] { goUp(editor); });
+    connect(editor, &RcxEditor::timelineBackToLiveRequested, this, [this] { returnToLive(); });
+    connect(editor, &RcxEditor::timelineRecordRequested, this, [this] { timelineToggleRecording(); });
     connect(editor, &RcxEditor::historyJumpRequested, this,
             [this, editor](int delta) { jumpToHistory(delta, editor); });
     // The history menu's rows, pulled when it opens — and the label of the
@@ -1167,8 +1353,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
         [this] { return m_doc->tree.bookmarks; },
         [this] {
             QStringList names;
-            if (m_doc->provider)
-                for (const auto& m : m_doc->provider->modulesCached()) names << m.name;
+            if (this->provider())
+                for (const auto& m : this->provider()->modulesCached()) names << m.name;
             return names;
         });
 
@@ -1233,7 +1419,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         m_doc->undoStack.beginMacro(QStringLiteral("Expand all"));
         for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
             auto& n = m_doc->tree.nodes[i];
-            if (isContainerKind(n.kind) && n.collapsed)
+            if ((isContainerKind(n.kind) || enumTypeOf(m_doc->tree, n)) && isCollapsed(n))
                 m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{n.id, true, false}));
         }
         m_doc->undoStack.endMacro();
@@ -1441,6 +1627,13 @@ void RcxController::connectEditor(RcxEditor* editor) {
         popup->show(enumName, members, currentValue, t.indDataChanged, globalPos);
     });
 
+    // A member row under an open enum field was chosen: the field takes it.
+    connect(editor, &RcxEditor::enumMemberChosen, this, [this](int nodeIdx, int64_t value) {
+        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+        setNodeValue(nodeIdx, /*subLine=*/0, QString::number(value),
+                     /*isAscii=*/false, /*resolvedAddr=*/0);
+    });
+
     // TypeHint chip clicked — commit the inferred type. One click = one
     // commit: single-kind suggestion converts the field; multi-kind
     // suggestion (e.g. float×2) splits the original hex node into N
@@ -1523,7 +1716,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
         s.remove('\'');
         if (s.isEmpty()) return {};
         const AddressParserCallbacks cbs =
-            makeAddressCallbacks(m_doc->provider.get(), m_doc->tree.pointerSize);
+            makeAddressCallbacks(this->provider().get(), m_doc->tree.pointerSize);
         auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
         if (!result.ok) return {};
         return QStringLiteral("0x") + QString::number(result.value, 16).toUpper();
@@ -1640,7 +1833,22 @@ void RcxController::connectEditor(RcxEditor* editor) {
                     break;
                 }
             }
-            setNodeValue(nodeIdx, subLine, text, /*isAscii=*/false, resolvedAddr);
+            // An enum-typed field takes a member name (or Type::Name) as well as a number.
+            QString valueText = text;
+            if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
+                if (const Node* def = enumTypeOf(m_doc->tree, m_doc->tree.nodes[nodeIdx])) {
+                    QString name = text.trimmed();
+                    const int scope = name.lastIndexOf(QStringLiteral("::"));
+                    if (scope >= 0) name = name.mid(scope + 2);
+                    for (const auto& m : def->enumMembers) {
+                        if (m.first.compare(name, Qt::CaseInsensitive) == 0) {
+                            valueText = QString::number(m.second);
+                            break;
+                        }
+                    }
+                }
+            }
+            setNodeValue(nodeIdx, subLine, valueText, /*isAscii=*/false, resolvedAddr);
             break;
         }
         case EditTarget::ArrayElementType: {
@@ -1775,6 +1983,7 @@ void RcxController::pickViewRoot(uint64_t id, RcxEditor* from) {
 void RcxController::setViewRootId(uint64_t id) {
     if (m_viewRootId == id) return;
     m_viewRootId = id;
+    ++m_capturePlanEpoch;
     m_focusPath.clear();   // new root view → fresh trail (no drill yet)
     refresh();
 }
@@ -1794,7 +2003,7 @@ void RcxController::reconcileFocusPath() {
         int pi = m_doc->tree.indexOfId(m_focusPath[i]);
         if (pi < 0) break;
         const Node& p = m_doc->tree.nodes[pi];
-        if (drillTargetId(p) == 0 || p.collapsed) break;
+        if (drillTargetId(p) == 0 || isCollapsed(p)) break;
         if (expectedContainer != 0 && containerOf(m_doc->tree, p.id) != expectedContainer) break;
         expectedContainer = drillTargetId(p);  // refId class, or the embedded struct itself
         valid = i + 1;
@@ -1816,7 +2025,7 @@ QVector<uint64_t> RcxController::focusChainTo(uint64_t pid) const {
             int ci = m_doc->tree.indexOfId(container);  // (an embedded frame is not)
             if (ci >= 0 && m_doc->tree.nodes[ci].parentId == 0) return chain;
         }
-        cur = expandedHopInto(m_doc->tree, container);
+        cur = expandedHopInto(viewTree(), container);
     }
     return {};  // no expanded chain reaches the view root
 }
@@ -1826,7 +2035,7 @@ QVector<uint64_t> RcxController::focusChainToNode(uint64_t nodeId) const {
     if (idx < 0) return {};
     const Node& n = m_doc->tree.nodes[idx];
     // The selected node is itself an expanded typed pointer → its own chain.
-    if (drillTargetId(n) != 0 && !n.collapsed)
+    if (drillTargetId(n) != 0 && !isCollapsed(n))
         return focusChainTo(n.id);
     // Otherwise it sits inside some frame. If that frame is the view root it's
     // a top-level row (no focus → bare root crumb); else the frame is the
@@ -1836,7 +2045,7 @@ QVector<uint64_t> RcxController::focusChainToNode(uint64_t nodeId) const {
     // stats.
     uint64_t container = containerOf(m_doc->tree, nodeId);
     if (container == 0 || container == m_viewRootId) return {};
-    const uint64_t hop = expandedHopInto(m_doc->tree, container);
+    const uint64_t hop = expandedHopInto(viewTree(), container);
     return hop ? focusChainTo(hop) : QVector<uint64_t>{};
 }
 
@@ -1865,7 +2074,7 @@ void RcxController::collapseToFocusIn(int crumbIndex, RcxEditor* ed) {
     bool pushed = false;
     if (collapsePid) {
         int idx = m_doc->tree.indexOfId(collapsePid);
-        if (idx >= 0 && !m_doc->tree.nodes[idx].collapsed) {
+        if (idx >= 0 && !isCollapsed(m_doc->tree.nodes[idx])) {
             m_doc->undoStack.push(new RcxCommand(this,
                 cmd::Collapse{collapsePid, false, true}));  // auto-refresh
             pushed = true;
@@ -1931,7 +2140,7 @@ QVector<SiblingEntry> RcxController::siblingsForCrumb(int level) const {
         const QVector<int> hops = focusHopLines();
         cursor = (level - 1 < hops.size() && hops[level - 1] >= 0) ? hops[level - 1] + 1 : -1;
     }
-    const Provider* prov = m_doc->provider.get();
+    const Provider* prov = this->provider().get();
     const bool canRead = prov && prov->isValid();
     for (SiblingEntry& e : sibs) {
         const int ni = tree.indexOfId(e.id);
@@ -1977,7 +2186,7 @@ QVector<SiblingEntry> RcxController::siblingsForCrumb(int level) const {
             if (!prov->read(own, &v, sizeof v)) continue;
             if (v == UINT64_MAX) v = 0;
         }
-        if (n.isRelative && v != 0) v += tree.baseAddress;
+        if (n.isRelative && v != 0) v += baseAddress();
         // A dangling pointer must say what its crumb would say: compose
         // stamps ptrBase 0 for an unreadable target, so the row does too.
         if (v != 0 && !prov->isReadable(v, 1)) v = 0;
@@ -2035,8 +2244,8 @@ bool RcxController::switchSibling(int level, uint64_t newPointerId) {
     RcxEditor* ed = gestureEditor(nullptr);
     recordNav(ed);
     const int oi = oldPointer ? tree.indexOfId(oldPointer) : -1;
-    const bool collapseOld = oi >= 0 && !tree.nodes[oi].collapsed;
-    const bool expandNew   = tree.nodes[ni].collapsed;
+    const bool collapseOld = oi >= 0 && !isCollapsed(tree.nodes[oi]);
+    const bool expandNew   = isCollapsed(tree.nodes[ni]);
     const Node& hop = tree.nodes[ni];
     const QString field = hop.name.isEmpty() ? fmt::typeNameRaw(hop.kind) : hop.name;
     // One gesture, one undo entry: the collapse and the expand travel
@@ -2081,7 +2290,7 @@ bool RcxController::navigateToDrillPath(const QString& text, QString* err) {
     QVector<uint64_t> toExpand;
     for (uint64_t hop : path) {
         const int pi = tree.indexOfId(hop);
-        if (pi >= 0 && tree.nodes[pi].collapsed) toExpand.push_back(hop);
+        if (pi >= 0 && isCollapsed(tree.nodes[pi])) toExpand.push_back(hop);
     }
     // The place being left — only when the commit moves somewhere (the
     // trail re-committed as it stands is a no-op, and records nothing).
@@ -2183,7 +2392,7 @@ QVector<uint64_t> RcxController::frameAddresses() const {
     {
         const int ri = detail::classIdx(tree, m_viewRootId);
         const int off = ri >= 0 ? tree.nodes[ri].offset : 0;
-        out[0] = tree.baseAddress + (off > 0 ? uint64_t(off) : 0);
+        out[0] = baseAddress() + (off > 0 ? uint64_t(off) : 0);
     }
     for (int i = 0; i < m_focusPath.size(); ++i) {
         const int line = hopLine[i];
@@ -2265,7 +2474,7 @@ AddressBarState RcxController::addressBarState() {
     }
 
     AddressBarState s;
-    s.sourceName   = m_doc->provider ? m_doc->provider->name() : QString();
+    s.sourceName   = this->provider() ? this->provider()->name() : QString();
     // The saved-source kind is the provider IDENTIFIER (iconForProvider's
     // vocabulary); Provider::kind() is a display word. A live attach that
     // registered no saved source (tutorial self-attach, MCP attach) has no
@@ -2273,15 +2482,21 @@ AddressBarState RcxController::addressBarState() {
     s.sourceKindId = (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
         ? m_savedSources[m_activeSourceIdx].kind : QString();
     s.liveness     = int(m_lastStatus);
-    s.baseAddress  = tree.baseAddress;
-    s.baseFormula  = tree.baseAddressFormula;
-    s.resolvedBase = tree.baseAddress;
+    s.baseAddress  = baseAddress();
+    s.baseFormula  = baseAddressFormula();
+    s.resolvedBase = baseAddress();
     s.crumbs       = crumbs;
     s.trailPath    = trailPathText(tree, m_viewRootId, m_focusPath);
     s.viewRootId   = m_viewRootId;
     s.canBack      = canGoBack();
     s.canForward   = canGoForward();
     s.canUp        = canGoUp();
+    // The timeline's buttons beside the address — only for a live source the
+    // timeline can record: a static file's bar keeps every pixel for the trail.
+    s.timeline  = m_timelineEnabled && m_timelineCtx != nullptr;
+    s.canRecord = m_timelineCtx != nullptr;
+    s.recording = timelineRecording();
+    s.past      = isViewingPast();
     return s;
 }
 
@@ -2309,7 +2524,8 @@ void RcxController::setTrackValues(bool on) {
 }
 
 void RcxController::resetChangeTracking() {
-    m_changedOffsets.clear();
+    m_changedRuns.clear();
+    ++m_diffGen;
     m_valueHistory.clear();
     m_lastValueAddr.clear();
     m_lastValueBytes.clear();
@@ -2321,6 +2537,7 @@ void RcxController::resetChangeTracking() {
 
 void RcxController::refresh() {
     PROFILE_SCOPE("refresh");
+    m_viewStale = false;
     // Bracket compose with thread-local doc pointer for type name resolution.
     // RAII guard restores the previous value on scope exit — safe against any
     // exception compose might throw.
@@ -2340,22 +2557,110 @@ void RcxController::refresh() {
     // Test builds (which don't set the hook) fall back to SymbolStore so
     // they still get symbol annotations, just without demangling.
     SymbolLookupFn symLookup;
-    if (m_doc->provider) {
-        auto* prov = m_doc->provider.get();
+    if (this->provider()) {
+        auto* prov = this->provider().get();
         symLookup = [prov](uint64_t addr) -> QString {
             if (g_nameLookupHook) return g_nameLookupHook(addr, prov);
             return SymbolStore::instance().getSymbolForAddress(addr, prov);
         };
     }
 
-    // Compose against snapshot provider if active, otherwise real provider
-    if (m_snapshotProv)
-        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup, m_showRtti, m_showEnumChips);
+    // Compose against the past being shown, else the snapshot, else the real
+    // provider. The past is composed through TODAY's structure — that is the
+    // point — but at the base address the class had THEN.
+    const bool past = isViewingPast() && m_frameProv && m_frameProv->frame();
+    const Provider* data = past ? static_cast<const Provider*>(m_frameProv.get())
+                         : m_snapshotProv ? static_cast<const Provider*>(m_snapshotProv.get())
+                                          : provider().get();
+    NodeTree pastTree;
+    const NodeTree* composeTree = &viewTree();
+    if (past && m_timelineHub) {
+        const uint64_t thenBase = m_timelineHub->baseAt(m_frameProv->frame()->timeMs,
+                                                        composeTree->baseAddress);
+        if (thenBase != composeTree->baseAddress) {
+            pastTree = *composeTree;
+            pastTree.baseAddress = thenBase;
+            composeTree = &pastTree;
+        }
+    }
+    // While capturing, note every page compose reads through the snapshot, so
+    // the next ticks read exactly those — the capture set becomes what the
+    // view reads, not what the range walk guessed.
+    QSet<uint64_t> touched;
+    const bool recordTouches = !past && m_timelineCtx && m_snapshotProv
+                            && data == static_cast<const Provider*>(m_snapshotProv.get());
+    if (recordTouches) m_snapshotProv->beginTouchRecording(&touched);
+    if (data)
+        m_lastResult = rcx::compose(*composeTree, *data, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup, m_showRtti, m_showEnumChips);
     else
-        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
+        m_lastResult = {};
+    if (recordTouches) {
+        m_snapshotProv->endTouchRecording();
+        for (auto it = m_touchedAge.begin(); it != m_touchedAge.end();) {
+            if (touched.contains(it.key())) { it.value() = 0; ++it; }
+            else if (++it.value() > kTouchedPageMaxAge) it = m_touchedAge.erase(it);
+            else ++it;
+        }
+        for (uint64_t page : std::as_const(touched)) {
+            if (m_touchedAge.contains(page)) continue;
+            if (m_touchedAge.size() >= kTouchedPageCap) break;
+            m_touchedAge.insert(page, 0);
+        }
+    }
+    // The fields as laid out now: what the timeline counts a change in.
+    if (!past && data && m_timelineCtx) rebuildFieldIndex();
 
-    // Mark lines whose node data changed since last refresh
-    if (!m_changedOffsets.isEmpty()) {
+    // Mark lines whose node data changed since last refresh. Runs and
+    // lm.offsetAddr are both ABSOLUTE; subtracting the base here (as this
+    // used to) meant nothing ever matched for a class not at address 0.
+    // In the past, a value the frame could not supply is either a read that
+    // failed THEN (a real unreadable) or bytes nobody was watching then.
+    // Only the first is an error.
+    if (past) {
+        QString& text = m_lastResult.text;
+        const QVector<int>& starts = m_lastResult.lineStarts;
+        for (int i = 0; i < m_lastResult.meta.size(); ++i) {
+            LineMeta& lm = m_lastResult.meta[i];
+            if (lm.unreadable) continue;              // failed THEN: struck, as it was live
+            const int len = rowValueBytes(*composeTree, lm);
+            if (len <= 0) continue;
+            bool missing = m_frameProv->notCaptured(lm.offsetAddr, len);
+            const Node& n = composeTree->nodes[lm.nodeIdx];
+            if (!missing && !lm.isArrayElement && n.kind == NodeKind::Pointer64 && n.ptrDepth > 0
+                && isValidPrimitivePtrTarget(n.elementKind)) {
+                // "-> 87" shows its target's bytes too.
+                uint64_t target = m_frameProv->readU64(lm.offsetAddr);
+                for (int d = 1; d < n.ptrDepth && target != 0 && !missing; ++d) {
+                    missing = m_frameProv->notCaptured(target, 8);
+                    target = m_frameProv->readU64(target);
+                }
+                if (target != 0 && !missing) {
+                    Node shown;
+                    shown.kind = n.elementKind;
+                    shown.strLen = n.strLen;
+                    missing = m_frameProv->notCaptured(target, qMax(1, shown.byteSize()));
+                }
+            }
+            if (!missing) continue;
+            lm.notCaptured = true;
+            // Never a plausible-looking zero: the value reads "??" at the same
+            // width, so no column moves and nobody mistakes it for data.
+            if (i >= starts.size()) continue;
+            const int start = starts[i];
+            const int end = (i + 1 < starts.size()) ? starts[i + 1] - 1 : text.size();
+            const ColumnSpan vs = valueSpanFor(lm, end - start, lm.effectiveTypeW, lm.effectiveNameW);
+            if (!vs.valid) continue;
+            for (int col = vs.start; col < vs.end && start + col < end; ++col)
+                if (!text.at(start + col).isSpace()) text[start + col] = QLatin1Char('?');
+        }
+    }
+
+    // In the past, "changed" means changed AT the record being shown.
+    QVector<ChangedRun> pastRuns;
+    if (past)
+        for (const auto& s : m_frameProv->frame()->changedAt) pastRuns.append({s.addr, s.len});
+    const QVector<ChangedRun>& changedRuns = past ? pastRuns : m_changedRuns;
+    if (!changedRuns.isEmpty()) {
         // Build childMap once for structSpan lookups (avoids O(N) cache rebuilds per call)
         QHash<uint64_t, QVector<int>> childMap;
         for (int i = 0; i < m_doc->tree.nodes.size(); i++)
@@ -2363,16 +2668,12 @@ void RcxController::refresh() {
 
         for (auto& lm : m_lastResult.meta) {
             if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
-            // Use compose's precomputed absolute address (avoids per-line parent-chain walk)
-            int64_t offset = (int64_t)(lm.offsetAddr - m_doc->tree.baseAddress);
             const Node& node = m_doc->tree.nodes[lm.nodeIdx];
 
             if (isHexPreview(node.kind)) {
                 // Per-byte tracking for hex preview nodes
-                int lineOff = 0;
-                int byteCount = lm.lineByteCount;
-                for (int b = 0; b < byteCount; b++) {
-                    if (m_changedOffsets.contains(offset + lineOff + b)) {
+                for (int b = 0; b < lm.lineByteCount; b++) {
+                    if (runsOverlap(changedRuns,lm.offsetAddr + (uint64_t)b, 1)) {
                         lm.changedByteIndices.append(b);
                         lm.dataChanged = true;
                     }
@@ -2381,15 +2682,17 @@ void RcxController::refresh() {
                 // Use structSpan for containers (byteSize returns 0 for Array-of-Struct)
                 int sz = (node.kind == NodeKind::Struct || node.kind == NodeKind::Array)
                     ? m_doc->tree.structSpan(node.id, &childMap) : node.byteSize();
-                for (int64_t b = offset; b < offset + sz; b++) {
-                    if (m_changedOffsets.contains(b)) {
-                        lm.dataChanged = true;
-                        break;
-                    }
-                }
+                if (sz > 0 && runsOverlap(changedRuns,lm.offsetAddr, (uint64_t)sz))
+                    lm.dataChanged = true;
             }
         }
     }
+
+    // The past lights exactly what changed at the record shown, at full heat,
+    // so stepping change to change always shows what just moved.
+    if (past)
+        for (auto& lm : m_lastResult.meta)
+            if (lm.dataChanged) lm.heatLevel = 3;
 
     // Update value history and compute heat levels
     // Only run when a live provider is attached (not for static file/buffer sources)
@@ -2397,15 +2700,23 @@ void RcxController::refresh() {
         const Provider* prov = nullptr;
         if (m_snapshotProv && m_snapshotProv->isLive())
             prov = m_snapshotProv.get();
-        else if (m_doc->provider && m_doc->provider->isValid() && m_doc->provider->isLive())
-            prov = m_doc->provider.get();
+        else if (this->provider() && this->provider()->isValid() && this->provider()->isLive())
+            prov = this->provider().get();
 
-        if (m_valueTrackCooldown > 0) --m_valueTrackCooldown;
-        if (m_trackValues && prov && m_valueTrackCooldown <= 0) {
+        // Never while showing the past: scrubbing would record history's
+        // values as fresh changes.
+        if (!past && m_valueTrackCooldown > 0) --m_valueTrackCooldown;
+        if (!past && m_trackValues && prov && m_valueTrackCooldown <= 0) {
             for (auto& lm : m_lastResult.meta) {
                 if (lm.nodeIdx < 0 || lm.nodeIdx >= m_doc->tree.nodes.size()) continue;
-                if (isSyntheticLine(lm) || lm.isContinuation) continue;
-                if (lm.lineKind != LineKind::Field) continue;
+                if (isSyntheticLine(lm)) continue;
+                // A field's line, or one of the extra rows of a multi-line
+                // value (a matrix's rows 1–3): each row has its own history,
+                // or only row 0 ever lit.
+                const bool extraRow = lm.lineKind == LineKind::Continuation && lm.subLine > 0;
+                if (lm.lineKind != LineKind::Field && !extraRow) continue;
+                // Member rows (enum, bitfield, code) have no value of their own.
+                if (lm.isMemberLine) continue;
 
                 const Node& node = m_doc->tree.nodes[lm.nodeIdx];
                 // Skip containers — they don't have scalar values
@@ -2414,21 +2725,28 @@ void RcxController::refresh() {
                 // causes false heatmap and popup fighting with the disasm popup.
                 if (isFuncPtr(node.kind)) continue;
 
+                const uint64_t key = valueHistoryKey(lm);
+
                 // Use the absolute address from compose (correct for pointer-expanded nodes)
                 uint64_t addr = lm.offsetAddr;
                 int sz = node.byteSize();
                 if (sz <= 0 || !prov->isReadable(addr, sz)) continue;
 
                 QString val = fmt::readValue(node, *prov, addr, lm.subLine);
+                // An enum-typed field's history reads in member names.
+                if (const Node* def = enumTypeOf(m_doc->tree, node)) {
+                    const QString member = fmt::enumMemberName(*def, fmt::readEnumRaw(*prov, node.kind, addr));
+                    if (!member.isEmpty()) val = member;
+                }
                 if (!val.isEmpty()) {
                     // Clear stale history if this node's effective address changed
                     // (e.g. viewRoot switch, pointer expand/collapse, MCP restructure)
-                    auto addrIt = m_lastValueAddr.find(lm.nodeId);
+                    auto addrIt = m_lastValueAddr.find(key);
                     if (addrIt != m_lastValueAddr.end() && addrIt.value() != addr) {
-                        m_valueHistory.remove(lm.nodeId);
-                        m_lastValueBytes.remove(lm.nodeId);
+                        m_valueHistory.remove(key);
+                        m_lastValueBytes.remove(key);
                     }
-                    m_lastValueAddr[lm.nodeId] = addr;
+                    m_lastValueAddr[key] = addr;
 
                     // Change-detection keys on the underlying RAW BYTES, not the
                     // formatted display string. Reformatting identical bytes —
@@ -2464,12 +2782,20 @@ void RcxController::refresh() {
                         // record()'s internal string dedup decides.
                         shouldRecord = true;
                     } else {
-                        QByteArray rawBytes = prov->readBytes(addr, sz);
-                        auto bytesIt = m_lastValueBytes.find(lm.nodeId);
+                        // A matrix row's value is its own four components (every
+                        // row line carries the matrix's base address): another
+                        // row changing must not count, even though it can change
+                        // the width this row is padded to.
+                        const bool matrixRow = node.kind == NodeKind::Mat4x4
+                                            && lm.subLine >= 0 && lm.subLine < 4;
+                        QByteArray rawBytes = matrixRow
+                            ? prov->readBytes(addr + uint64_t(lm.subLine) * 16, 16)
+                            : prov->readBytes(addr, sz);
+                        auto bytesIt = m_lastValueBytes.find(key);
                         shouldRecord = (bytesIt == m_lastValueBytes.end()
                                         || bytesIt.value() != rawBytes);
                         if (shouldRecord)
-                            m_lastValueBytes[lm.nodeId] = rawBytes;
+                            m_lastValueBytes[key] = rawBytes;
                     }
                     // Don't record the user's OWN edit. If this node overlaps a
                     // range the user just wrote, the baseline was still refreshed
@@ -2483,8 +2809,8 @@ void RcxController::refresh() {
                         }
                     }
                     if (shouldRecord && !userWrote)
-                        m_valueHistory[lm.nodeId].record(val);
-                    lm.heatLevel = m_valueHistory[lm.nodeId].heatLevel();
+                        m_valueHistory[key].record(val);
+                    lm.heatLevel = m_valueHistory[key].heatLevel();
                 }
             }
         }
@@ -2517,17 +2843,21 @@ void RcxController::refresh() {
     // Resolve providers for disasm popup:
     // - snapProv: snapshot or real — for reading pointer values within the tree
     // - realProv: always the real process provider — for reading code at arbitrary addresses
-    const Provider* snapProv = m_snapshotProv
+    // In the past BOTH are the frame: a hover preview must not read today's
+    // memory and present it as the past.
+    const Provider* snapProv = past ? static_cast<const Provider*>(m_frameProv.get())
+        : m_snapshotProv
         ? static_cast<const Provider*>(m_snapshotProv.get())
-        : (m_doc->provider ? m_doc->provider.get() : nullptr);
-    const Provider* realProv = m_doc->provider ? m_doc->provider.get() : nullptr;
+        : (this->provider() ? this->provider().get() : nullptr);
+    const Provider* realProv = past ? static_cast<const Provider*>(m_frameProv.get())
+        : this->provider() ? this->provider().get() : nullptr;
 
     {
         PROFILE_SCOPE("refresh.applyToEditors");
         for (auto* editor : m_editors) {
             editor->setCustomTypeNames(customTypes);
-            editor->setValueHistoryRef(&m_valueHistory);
-            editor->setProviderRef(snapProv, realProv, &m_doc->tree);
+            editor->setValueHistoryRef(past ? nullptr : &m_valueHistory);
+            editor->setProviderRef(snapProv, realProv, &viewTree());
             ViewState vs = editor->saveViewState();
             editor->applyDocument(m_lastResult);
             editor->restoreViewState(vs);
@@ -2707,7 +3037,7 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
         const NodeKind oldKind = node.kind;
         const int oldArrayLen = node.arrayLen;
         const NodeKind oldElemKind = node.elementKind;
-        const bool wasCollapsed = node.collapsed;
+        const bool wasCollapsed = isCollapsed(node);
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeKind{node.id, oldKind, newKind, adjs}));
         if (toAsm) {
@@ -2755,7 +3085,7 @@ void RcxController::extractByteSelectionToNewClass(uint64_t selLo, uint64_t selH
     }
 
     auto& tree = m_doc->tree;
-    const uint64_t base = tree.baseAddress;
+    const uint64_t base = baseAddress();
     if (selLo < base) {
         emit statusHint(QStringLiteral("Selection starts before base address"));
         return;
@@ -3072,7 +3402,7 @@ RcxController::regionFromCurrentSelection(RcxEditor* editor) const {
         else           { minOff = qMin(minOff, lo); maxOff = qMax(maxOff, hi); }
     }
     if (!any || maxOff <= minOff) return std::nullopt;
-    const uint64_t base = tree.baseAddress;
+    const uint64_t base = baseAddress();
     return QPair<uint64_t, uint64_t>(base + (uint64_t)minOff, base + (uint64_t)maxOff);
 }
 
@@ -3351,7 +3681,7 @@ void RcxController::toggleCollapse(int nodeIdx) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
     auto& node = m_doc->tree.nodes[nodeIdx];
     m_doc->undoStack.push(new RcxCommand(this,
-        cmd::Collapse{node.id, node.collapsed, !node.collapsed}));
+        cmd::Collapse{node.id, isCollapsed(node), !isCollapsed(node)}));
 }
 
 void RcxController::materializeRefChildren(int nodeIdx) {
@@ -3413,9 +3743,7 @@ bool RcxController::writeSelectedBytesToFile(uint64_t addr, int n,
         if (err) *err = QStringLiteral("No bytes to save");
         return false;
     }
-    const Provider* prov = m_snapshotProv
-        ? static_cast<const Provider*>(m_snapshotProv.get())
-        : (m_doc->provider ? m_doc->provider.get() : nullptr);
+    const Provider* prov = displayedProvider();   // what is on screen: recorded values too
     if (!prov) {
         if (err) *err = QStringLiteral("No active provider");
         return false;
@@ -3444,7 +3772,8 @@ bool RcxController::writeSelectedBytesToFile(uint64_t addr, int n,
     return true;
 }
 
-bool RcxController::applyCommand(const Command& command, bool isUndo) {
+bool RcxController::applyCommand(const Command& command, bool isUndo,
+                                  const std::shared_ptr<Provider>& writeProvider) {
     auto& tree = m_doc->tree;
     bool success = true;
     // Every command that reaches here mutates tree state in some way (the
@@ -3460,9 +3789,13 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
     // Also invalidates any in-flight async read so that stale snapshot data
     // from before the offset change doesn't re-introduce false heat.
     auto clearNodeHistory = [&](uint64_t id) {
-        m_valueHistory.remove(id);
-        m_lastValueAddr.remove(id);
-        m_lastValueBytes.remove(id);
+        // The node's own history and each extra row's (valueHistoryKey).
+        for (int row = 0; row < 8; ++row) {
+            const uint64_t key = row == 0 ? id : makeMemberSelId(id, row);
+            m_valueHistory.remove(key);
+            m_lastValueAddr.remove(key);
+            m_lastValueBytes.remove(key);
+        }
     };
 
     auto clearHistoryForAdjs = [&](const QVector<cmd::OffsetAdj>& adjs) {
@@ -3543,7 +3876,7 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
         } else if constexpr (std::is_same_v<T, cmd::Collapse>) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
-                tree.nodes[idx].collapsed = isUndo ? c.oldState : c.newState;
+                setCollapsed(c.nodeId, isUndo ? c.oldState : c.newState);
         } else if constexpr (std::is_same_v<T, cmd::Insert>) {
             if (isUndo) {
                 // Revert offset adjustments
@@ -3593,8 +3926,13 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             // Siblings shifted — their old values are from wrong addresses
             clearHistoryForAdjs(c.offAdjs);
         } else if constexpr (std::is_same_v<T, cmd::ChangeBase>) {
-            tree.baseAddress = isUndo ? c.oldBase : c.newBase;
-            tree.baseAddressFormula = isUndo ? c.oldFormula : c.newFormula;
+            baseAddress() = isUndo ? c.oldBase : c.newBase;
+            baseAddressFormula() = isUndo ? c.oldFormula : c.newFormula;
+            if (!baseAddressFormula().isEmpty()) {
+                const auto callbacks = makeAddressCallbacks(provider().get(), tree.pointerSize);
+                const auto result = AddressParser::evaluate(baseAddressFormula(), tree.pointerSize, &callbacks);
+                if (result.ok) baseAddress() = result.value;
+            }
             resetSnapshot();
         } else if constexpr (std::is_same_v<T, cmd::WriteBytes>) {
             const QByteArray& bytes = isUndo ? c.oldBytes : c.newBytes;
@@ -3608,9 +3946,12 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             // Write through snapshot (patches pages only on success) or provider directly.
             // If write fails, the snapshot is NOT patched, so the next compose shows the
             // real unchanged value — no optimistic visual leak.
-            bool ok = m_snapshotProv
+            const auto target = writeProvider ? writeProvider : this->provider();
+            bool ok = target && target != this->provider()
+                ? target->writeBytes(c.addr, bytes)
+                : m_snapshotProv
                 ? m_snapshotProv->write(c.addr, bytes.constData(), bytes.size())
-                : m_doc->provider->writeBytes(c.addr, bytes);
+                : target && target->writeBytes(c.addr, bytes);
             if (!ok) {
                 qWarning() << "WriteBytes failed at address" << QString::number(c.addr, 16);
                 // Signal failure so RcxCommand::redo/undo can call setObsolete(true)
@@ -3633,7 +3974,7 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             if (idx >= 0) {
                 tree.nodes[idx].refId = isUndo ? c.oldRefId : c.newRefId;
                 if (tree.nodes[idx].refId != 0)
-                    tree.nodes[idx].collapsed = true;
+                    setCollapsed(tree.nodes[idx].id, true);
             }
         } else if constexpr (std::is_same_v<T, cmd::ChangeStructTypeName>) {
             int idx = tree.indexOfId(c.nodeId);
@@ -3683,11 +4024,15 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
 void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
                                   bool isAscii, uint64_t resolvedAddr) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
-    if (!m_doc->provider->isWritable()) return;
+    if (!this->provider()->isWritable()) return;
     // Tutorial / self-attach safety: writing into the editor's own
     // memory through a fully-writable provider is fatal (e.g. stomping
     // the __vptr value crashes the next virtual dispatch on this
     // RcxEditor instance). The override is set by MainWindow::selfTest.
+    if (isViewingPast()) {
+        emit statusHint(viewingPastHint());
+        return;
+    }
     if (m_readOnlyOverride) {
         // Silent no-op — UI didn't have a status channel handy and a
         // dialog would interrupt the tutorial flow. Edit commits but
@@ -3698,14 +4043,14 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
     const Node& node = m_doc->tree.nodes[nodeIdx];
 
     // Use the compose-resolved address when available (correct for pointer children).
-    // Fall back to tree.baseAddress + computeOffset for callers that don't supply it.
+    // Fall back to baseAddress() + computeOffset for callers that don't supply it.
     uint64_t addr;
     if (resolvedAddr != 0) {
         addr = resolvedAddr;
     } else {
         int64_t signedAddr = m_doc->tree.computeOffset(nodeIdx);
         if (signedAddr < 0) return;  // malformed tree: negative offset
-        addr = m_doc->tree.baseAddress + static_cast<uint64_t>(signedAddr);
+        addr = baseAddress() + static_cast<uint64_t>(signedAddr);
     }
 
     // For vector components, redirect to float parsing at sub-offset
@@ -3749,16 +4094,16 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
     int writeSize = newBytes.size();
 
     // Validate write range before pushing command
-    if (!m_doc->provider->isReadable(addr, writeSize)) return;
+    if (!this->provider()->isReadable(addr, writeSize)) return;
 
     // Read old bytes before writing (for undo)
-    QByteArray oldBytes = m_doc->provider->readBytes(addr, writeSize);
+    QByteArray oldBytes = this->provider()->readBytes(addr, writeSize);
 
     // Test the write first — don't push a command that will silently fail.
     // This prevents optimistic visual updates for read-only providers.
     bool writeOk = m_snapshotProv
         ? m_snapshotProv->write(addr, newBytes.constData(), newBytes.size())
-        : m_doc->provider->writeBytes(addr, newBytes);
+        : this->provider()->writeBytes(addr, newBytes);
     if (!writeOk) {
         qWarning() << "Write failed at address" << QString::number(addr, 16);
         refresh();  // refresh to show the real unchanged value
@@ -4043,8 +4388,8 @@ void RcxController::splitHexNode(uint64_t nodeId) {
 //    int curSz = sizeForKind(node.kind);
 //    bool addrOk = true;
 //    uint64_t addr = m_doc->tree.absoluteAddress(nodeIdx, &addrOk);
-//    ctx.data = (addrOk && m_doc->provider)
-//        ? m_doc->provider->readBytes(addr, curSz)
+//    ctx.data = (addrOk && this->provider())
+//        ? this->provider()->readBytes(addr, curSz)
 //        : QByteArray(curSz, '\0');
 //
 //    // Collect adjacent same-parent hex nodes
@@ -4061,29 +4406,29 @@ void RcxController::splitHexNode(uint64_t nodeId) {
 //        int sibSz = sizeForKind(sib.kind);
 //        bool sibOk = true;
 //        uint64_t sibAddr = m_doc->tree.absoluteAddress(i, &sibOk);
-//        adj.data = (sibOk && m_doc->provider)
-//            ? m_doc->provider->readBytes(sibAddr, sibSz)
+//        adj.data = (sibOk && this->provider())
+//            ? this->provider()->readBytes(sibAddr, sibSz)
 //            : QByteArray(sibSz, '\0');
 //        ctx.nexts.append(adj);
 //        nextOff += sibSz;
 //    }
 //
 //    // Smart suggestions (only when pinned — avoids overhead on every selection)
-//    if (m_hexToolbar->isPinned() && m_doc->provider) {
+//    if (m_hexToolbar->isPinned() && this->provider()) {
 //        // Pointer check: interpret bytes as uint64, check if readable address
 //        if (curSz >= 8) {
 //            uint64_t ptrVal = 0;
 //            memcpy(&ptrVal, ctx.data.constData(), qMin(curSz, 8));
-//            if (ptrVal > 0x10000 && m_doc->provider->isReadable(ptrVal, 1)) {
+//            if (ptrVal > 0x10000 && this->provider()->isReadable(ptrVal, 1)) {
 //                ctx.hasPtr = true;
-//                ctx.ptrSymbol = m_doc->provider->getSymbol(ptrVal);
+//                ctx.ptrSymbol = this->provider()->getSymbol(ptrVal);
 //            }
 //        } else if (curSz == 4) {
 //            uint32_t ptrVal = 0;
 //            memcpy(&ptrVal, ctx.data.constData(), 4);
-//            if (ptrVal > 0x10000 && m_doc->provider->isReadable(ptrVal, 1)) {
+//            if (ptrVal > 0x10000 && this->provider()->isReadable(ptrVal, 1)) {
 //                ctx.hasPtr = true;
-//                ctx.ptrSymbol = m_doc->provider->getSymbol(ptrVal);
+//                ctx.ptrSymbol = this->provider()->getSymbol(ptrVal);
 //            }
 //        }
 //        // Float check
@@ -4257,17 +4602,21 @@ void RcxController::toggleBitfieldBit(uint64_t nodeId, int memberIdx) {
     const Node& node = m_doc->tree.nodes[ni];
     if (!node.isBitfield()) return;
     if (memberIdx < 0 || memberIdx >= node.bitfieldMembers.size()) return;
-    if (!m_doc->provider || !m_doc->provider->isWritable()) return;
+    if (!this->provider() || !this->provider()->isWritable()) return;
+    if (isViewingPast() || m_readOnlyOverride) {
+        emit statusHint(isViewingPast() ? viewingPastHint() : QStringLiteral("Target is read-only"));
+        return;
+    }
 
     const auto& bm = node.bitfieldMembers[memberIdx];
     int64_t signedOff = m_doc->tree.computeOffset(ni);
     if (signedOff < 0) return;
-    uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(signedOff);
+    uint64_t addr = baseAddress() + static_cast<uint64_t>(signedOff);
     int containerSize = sizeForKind(node.elementKind);
     if (containerSize <= 0) containerSize = 4;
 
     QByteArray oldBytes(containerSize, 0);
-    m_doc->provider->read(addr, oldBytes.data(), containerSize);
+    this->provider()->read(addr, oldBytes.data(), containerSize);
 
     QByteArray newBytes = oldBytes;
     // Toggle the bit
@@ -4287,17 +4636,21 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
     const Node& node = m_doc->tree.nodes[ni];
     if (!node.isBitfield()) return;
     if (memberIdx < 0 || memberIdx >= node.bitfieldMembers.size()) return;
-    if (!m_doc->provider || !m_doc->provider->isWritable()) return;
+    if (!this->provider() || !this->provider()->isWritable()) return;
+    if (isViewingPast() || m_readOnlyOverride) {
+        emit statusHint(isViewingPast() ? viewingPastHint() : QStringLiteral("Target is read-only"));
+        return;
+    }
 
     const auto& bm = node.bitfieldMembers[memberIdx];
     int64_t signedOff = m_doc->tree.computeOffset(ni);
     if (signedOff < 0) return;
-    uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(signedOff);
+    uint64_t addr = baseAddress() + static_cast<uint64_t>(signedOff);
     int containerSize = sizeForKind(node.elementKind);
     if (containerSize <= 0) containerSize = 4;
 
     // Read current value
-    uint64_t curVal = fmt::extractBits(*m_doc->provider, addr, node.elementKind,
+    uint64_t curVal = fmt::extractBits(*this->provider(), addr, node.elementKind,
                                        bm.bitOffset, bm.bitWidth);
     uint64_t maxVal = (bm.bitWidth >= 64) ? UINT64_MAX : ((1ULL << bm.bitWidth) - 1);
 
@@ -4320,7 +4673,7 @@ void RcxController::editBitfieldValue(uint64_t nodeId, int memberIdx) {
     newVal &= maxVal;
 
     QByteArray oldBytes(containerSize, 0);
-    m_doc->provider->read(addr, oldBytes.data(), containerSize);
+    this->provider()->read(addr, oldBytes.data(), containerSize);
 
     // Read-modify-write: clear target bits and set new value
     QByteArray newBytes = oldBytes;
@@ -4360,7 +4713,7 @@ static QWidgetAction* makeCycleRow(QMenu* menu,
                                     const QString& centerLabel,
                                     std::function<void(NodeKind)> onSelect) {
     const auto& theme = ThemeManager::instance().current();
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QFont font(s.value("font", "JetBrains Mono").toString(), 10);
     font.setFixedPitch(true);
     QString css = QStringLiteral(
@@ -4780,7 +5133,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 if (ni < 0) continue;
                 int64_t off = m_doc->tree.computeOffset(ni);
                 if (off < 0) continue;
-                uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
+                uint64_t addr = baseAddress() + static_cast<uint64_t>(off);
                 rows.append({off, QStringLiteral("0x") + QString::number(addr, 16).toUpper()});
             }
             std::sort(rows.begin(), rows.end(),
@@ -4793,17 +5146,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         copyMenu->addSeparator();
         if (editor) {
             copyMenu->addAction("Copy Line", [editor, line]() {
-                auto* sci = editor->scintilla();
-                int len = (int)sci->SendScintilla(
-                    QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
-                if (len > 0) {
-                    QByteArray buf(len + 1, '\0');
-                    sci->SendScintilla(QsciScintillaBase::SCI_GETLINE,
-                                       (unsigned long)line, (void*)buf.data());
-                    QString text = QString::fromUtf8(buf.data(), len).trimmed();
-                    if (!text.isEmpty())
-                        QApplication::clipboard()->setText(text);
-                }
+                const QString text = editor->lineTextForCopy(line).trimmed();
+                if (!text.isEmpty())
+                    QApplication::clipboard()->setText(text);
             });
         }
         copyMenu->addAction("Copy All as Text", [editor]() {
@@ -4815,28 +5160,33 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             copyMenu->addAction(tr("Copy Selected as Text (%1 row%2)")
                                     .arg(ids.size()).arg(ids.size() == 1 ? "" : "s"),
                                 [editor, capIds, lastResult]() {
-                QStringList lines;
+                // Each row loses its fold column and trailing blanks, then the
+                // indent every copied row shares is cut once. Trimming rows one
+                // by one shifted each by a different amount, so the tree's
+                // columns no longer lined up in the paste.
+                struct Row { QString margin, body; };
+                QVector<Row> rows;
+                int common = -1;
                 for (int i = 0; i < lastResult.meta.size(); ++i) {
                     const auto& lm = lastResult.meta[i];
                     if (lm.nodeIdx < 0) continue;
                     if (!capIds.contains(selIdForLine(lm))) continue;
-                    QString margin = lm.offsetText;
-                    QString text;
-                    if (editor) {
-                        auto* sci = editor->scintilla();
-                        int len = (int)sci->SendScintilla(
-                            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)i);
-                        if (len > 0) {
-                            QByteArray buf(len + 1, '\0');
-                            sci->SendScintilla(QsciScintillaBase::SCI_GETLINE,
-                                               (unsigned long)i, (void*)buf.data());
-                            text = QString::fromUtf8(buf.data(), len).trimmed();
-                        }
+                    QString body = editor ? editor->lineTextForCopy(i) : QString();
+                    body = body.mid(LineGeometry::forLine(lm).prefixWidth);
+                    int end = body.size();
+                    while (end > 0 && body.at(end - 1).isSpace()) --end;
+                    body.truncate(end);
+                    if (!body.isEmpty()) {
+                        int lead = 0;
+                        while (lead < body.size() && body.at(lead) == QLatin1Char(' ')) ++lead;
+                        common = common < 0 ? lead : qMin(common, lead);
                     }
-                    lines.append(margin + text);
+                    rows.append({lm.offsetText, body});
                 }
-                if (!lines.isEmpty())
-                    QApplication::clipboard()->setText(lines.join('\n'));
+                if (rows.isEmpty()) return;
+                QStringList lines;
+                for (const Row& r : rows) lines.append(r.margin + r.body.mid(qMax(0, common)));
+                QApplication::clipboard()->setText(lines.join('\n'));
             });
         }
 
@@ -4861,7 +5211,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 if (sz <= 0) continue;
                 int64_t off = m_doc->tree.computeOffset(ni);
                 if (off < 0) continue;
-                spans.append({m_doc->tree.baseAddress + uint64_t(off), sz});
+                spans.append({baseAddress() + uint64_t(off), sz});
             }
             if (spans.isEmpty()) {
                 emit statusHint(QStringLiteral("No readable bytes in selection"));
@@ -4884,9 +5234,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 QStringLiteral("Binary (*.bin);;All Files (*)"));
             if (path.isEmpty()) return;
 
-            const Provider* prov = m_snapshotProv
-                ? static_cast<const Provider*>(m_snapshotProv.get())
-                : (m_doc->provider ? m_doc->provider.get() : nullptr);
+            const Provider* prov = displayedProvider();   // what is on screen: recorded values too
             if (!prov) {
                 emit statusHint(QStringLiteral("No active provider"));
                 return;
@@ -4930,6 +5278,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     // ── Node-specific actions (only when clicking on a node) ──
     if (hasNode) {
         const Node& node = m_doc->tree.nodes[nodeIdx];
+        if (isPointerKind(node.kind) && node.refId != 0) {
+            auto* beside = menu.addAction(icon("split-vertical.svg"), tr("Open Beside"),
+                [this, editor, line] { openPointerBeside(editor, line); });
+            beside->setObjectName(QStringLiteral("openInstanceBeside"));
+            menu.addSeparator();
+        }
         uint64_t nodeId = node.id;
         uint64_t parentId = node.parentId;
 
@@ -5084,7 +5438,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                     int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
                              ? m_doc->tree.structSpan(n.id) : n.byteSize();
                     if (sz <= 0) return;
-                    const uint64_t lo = m_doc->tree.baseAddress + (uint64_t)n.offset;
+                    const uint64_t lo = baseAddress() + (uint64_t)n.offset;
                     region = QPair<uint64_t, uint64_t>(lo, lo + (uint64_t)sz);
                 }
                 extractByteSelectionToNewClass(region->first, region->second);
@@ -5208,7 +5562,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             menu.addSeparator();
 
         // ── Hex byte / ASCII inline editing ──
-        if (isHexNode(node.kind) && m_doc->provider->isWritable()) {
+        if (isHexNode(node.kind) && this->provider()->isWritable()) {
             menu.addAction(icon("edit.svg"), "Edit He&x Bytes", [editor, line]() {
                 editor->setHexEditPending(true);
                 editor->beginInlineEdit(EditTarget::Value, line);
@@ -5223,7 +5577,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // ── Edit Value / Rename / Change Type ──
         bool isEditable = node.kind != NodeKind::Struct && node.kind != NodeKind::Array
                           && !isHexNode(node.kind)
-                          && m_doc->provider->isWritable();
+                          && this->provider()->isWritable();
         if (isEditable) {
             menu.addAction(icon("edit.svg"), "Edit &Value\tEnter", [editor, line]() {
                 editor->beginInlineEdit(EditTarget::Value, line);
@@ -5426,7 +5780,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 structMenu->addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
                     insertNode(nodeId, 0, NodeKind::Hex64, "newField");
                 });
-                if (node.collapsed) {
+                if (isCollapsed(node)) {
                     structMenu->addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
                         int ni = m_doc->tree.indexOfId(nodeId);
                         if (ni >= 0) toggleCollapse(ni);
@@ -5437,6 +5791,17 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                         if (ni >= 0) toggleCollapse(ni);
                     });
                 }
+                hasStructAction = true;
+            }
+
+            // An enum-typed field folds open to its members like a struct.
+            if (enumTypeOf(m_doc->tree, node)) {
+                const bool collapsed = isCollapsed(node);
+                structMenu->addAction(icon(collapsed ? "expand-all.svg" : "collapse-all.svg"),
+                                      collapsed ? "&Expand" : "&Collapse", [this, nodeId]() {
+                    int ni = m_doc->tree.indexOfId(nodeId);
+                    if (ni >= 0) toggleCollapse(ni);
+                });
                 hasStructAction = true;
             }
 
@@ -5510,29 +5875,47 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
     }
 
+    // ── Timeline: when did this change? ──
+    // Scoped to the selection, like the View ▸ Timeline actions. The
+    // shortcut is shown as a hint only — it is registered once, on the menu.
+    if (hasNode && m_timelineCtx && !m_timelineCtx->model().isEmpty()) {
+        QString of = timelineScopeLabel();
+        of.replace(QLatin1Char('&'), QStringLiteral("&&"));
+        if (!of.isEmpty()) of.prepend(QStringLiteral(" of "));
+        menu.addAction(QStringLiteral("Previous Change%1\tCtrl+,").arg(of),
+                       [this]() { stepTimelineChange(-1); });
+        QAction* next = menu.addAction(QStringLiteral("Next Change%1\tCtrl+.").arg(of),
+                                       [this]() { stepTimelineChange(+1); });
+        next->setEnabled(isViewingPast());
+        menu.addAction(QStringLiteral("Show in Timeline"), [this]() { revealSelectionInTimeline(); });
+        menu.addSeparator();
+    }
+
     // ── Bookmark this address (user-defined symbol via bookmark) ──
     if (hasNode) {
         uint64_t labelNodeId = m_doc->tree.nodes[nodeIdx].id;
+        const LineMeta* bookmarkLine = editor->metaForLine(line);
+        const uint64_t bookmarkAddress = bookmarkLine ? bookmarkLine->offsetAddr : baseAddress();
         menu.addAction(icon("symbol-key.svg"), "Bookmark this address...",
-                       [this, labelNodeId]() {
+                       [this, labelNodeId, bookmarkAddress]() {
             int ni = m_doc->tree.indexOfId(labelNodeId);
             if (ni < 0) return;
             int64_t off = m_doc->tree.computeOffset(ni);
             if (off < 0) return;
-            uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
+            uint64_t addr = bookmarkAddress;
             auto entered = ThemedInputDialog::getText(nullptr,
                 QStringLiteral("Bookmark this address"),
                 QStringLiteral("Symbol name for 0x%1").arg(addr, 0, 16),
                 {}, QStringLiteral("symbol name"));
             if (!entered || entered->trimmed().isEmpty()) return;
             QString formula;
-            if (!m_doc->tree.baseAddressFormula.isEmpty() && off >= 0)
-                formula = QStringLiteral("%1+0x%2")
-                    .arg(m_doc->tree.baseAddressFormula)
+            if (!baseAddressFormula().isEmpty() && off >= 0)
+                formula = QStringLiteral("(%1)+0x%2")
+                    .arg(baseAddressFormula())
                     .arg((qulonglong)off, 0, 16);
             else
                 formula = QStringLiteral("0x%1").arg(addr, 0, 16);
-            addBookmark(entered->trimmed(), formula);
+            addBookmark(entered->trimmed(), addressExpression(addr, formula));
             if (g_namesChangedHook) g_namesChangedHook();
         });
         menu.addSeparator();
@@ -5547,7 +5930,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             if (ni < 0) return;
             int64_t off = m_doc->tree.computeOffset(ni);
             if (off < 0) return;
-            uint64_t addr = m_doc->tree.baseAddress + static_cast<uint64_t>(off);
+            uint64_t addr = baseAddress() + static_cast<uint64_t>(off);
             QApplication::clipboard()->setText(
                 QStringLiteral("0x") + QString::number(addr, 16).toUpper());
         });
@@ -5561,15 +5944,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         copyMenu->addSeparator();
     }
     copyMenu->addAction("Copy Line", [editor, line]() {
-        auto* sci = editor->scintilla();
-        int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
-        if (len > 0) {
-            QByteArray buf(len + 1, '\0');
-            sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)line, (void*)buf.data());
-            QString text = QString::fromUtf8(buf.data(), len).trimmed();
-            if (!text.isEmpty())
-                QApplication::clipboard()->setText(text);
-        }
+        const QString text = editor->lineTextForCopy(line).trimmed();
+        if (!text.isEmpty())
+            QApplication::clipboard()->setText(text);
     });
     copyMenu->addAction("Copy All as Text", [editor]() {
         QApplication::clipboard()->setText(editor->textWithMargins());
@@ -5591,7 +5968,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     }
 
     // ── Kernel paging menu items ──
-    if (m_doc->provider && m_doc->provider->hasKernelPaging()) {
+    if (this->provider() && this->provider()->hasKernelPaging()) {
         menu.addSeparator();
         auto* kernelMenu = menu.addMenu(icon("symbol-key.svg"), "Kernel");
 
@@ -5599,9 +5976,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         if (hasNode) {
             int64_t nodeOff = m_doc->tree.computeOffset(nodeIdx);
             uint64_t nodeAddr = (nodeOff >= 0)
-                ? m_doc->tree.baseAddress + static_cast<uint64_t>(nodeOff) : 0;
+                ? baseAddress() + static_cast<uint64_t>(nodeOff) : 0;
             kernelMenu->addAction("Show Physical Address", [this, nodeAddr, &menu]() {
-                auto result = m_doc->provider->translateAddress(nodeAddr);
+                auto result = this->provider()->translateAddress(nodeAddr);
                 if (result.valid) {
                     const char* pageSz = result.pageSize == 2 ? "1 GB"
                                        : result.pageSize == 1 ? "2 MB" : "4 KB";
@@ -5635,7 +6012,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         // Browse Page Tables — open PML4 in a new physical tab
         kernelMenu->addAction("Browse Page Tables", [this]() {
-            uint64_t cr3 = m_doc->provider->getCr3();
+            uint64_t cr3 = this->provider()->getCr3();
             if (cr3 == 0) {
                 ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
                     QStringLiteral("Page Table Unavailable"),
@@ -5658,12 +6035,12 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                         int bitWid = bf.bitWidth;
                         int64_t nodeOff = m_doc->tree.computeOffset(nodeIdx);
                         if (nodeOff < 0) break;
-                        uint64_t nodeAddr = m_doc->tree.baseAddress
+                        uint64_t nodeAddr = baseAddress()
                             + static_cast<uint64_t>(nodeOff);
                         kernelMenu->addAction("Follow Physical Frame",
                             [this, nodeAddr, bitOff, bitWid]() {
                             uint64_t pteValue = 0;
-                            if (!m_doc->provider->read(nodeAddr, &pteValue, 8)) {
+                            if (!this->provider()->read(nodeAddr, &pteValue, 8)) {
                                 ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
                                     QStringLiteral("PTE Read Failed"),
                                     QStringLiteral("Couldn't read the page-table entry at 0x%1.")
@@ -5972,7 +6349,7 @@ bool RcxController::retypeByteRange(uint64_t selLo, uint64_t selHi, NodeKind kin
     const int elemSz = asWindow ? 1 : sizeForKind(kind);
     if (elemSz <= 0) return false;
 
-    const uint64_t base = tree.baseAddress;
+    const uint64_t base = baseAddress();
     if (selLo < base) {
         emit statusHint(QStringLiteral("Selection starts before the base address"));
         return false;
@@ -6308,9 +6685,9 @@ void RcxController::duplicateSelection() {
 }
 
 bool RcxController::fillSelectionBytes(ByteFill fill) {
-    if (!m_doc->provider) return false;
-    if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
-        emit statusHint(QStringLiteral("Target is read-only"));
+    if (!this->provider()) return false;
+    if (!this->provider()->isWritable() || m_readOnlyOverride || isViewingPast()) {
+        emit statusHint(isViewingPast() ? viewingPastHint() : QStringLiteral("Target is read-only"));
         return false;
     }
     auto region = regionFromCurrentSelection(primaryEditor());
@@ -6325,8 +6702,8 @@ bool RcxController::fillSelectionBytes(ByteFill fill) {
             emit statusHint(QStringLiteral("Fill: selection too large (max 64 KiB)"));
         return false;
     }
-    QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
-        ? m_doc->provider->readBytes(lo, n)
+    QByteArray oldBytes = this->provider()->isReadable(lo, n)
+        ? this->provider()->readBytes(lo, n)
         : QByteArray(n, '\0');
     QByteArray newBytes(n, fill == ByteFill::FF ? char(0xFF) : '\0');
     if (fill == ByteFill::Random) {
@@ -6532,8 +6909,11 @@ void RcxController::commentSelection(RcxEditor* editor) {
 
 // Project a range's endpoints to siblings in the displayed tree. Using the
 // display ancestry also handles virtual pointer children and array elements.
+// `anchors`, when given, receives where each selected id was taken from — the
+// rows inside the range, so a node shown elsewhere too is marked here.
 static QSet<uint64_t> nodeRangeSelection(const QVector<LineMeta>& meta,
-                                       RcxEditor* source, int anchor, int target) {
+                                       RcxEditor* source, int anchor, int target,
+                                       QHash<uint64_t, SelectionAnchor>* anchors = nullptr) {
     auto selectable = [&](int line) {
         const auto& lm = meta[line];
         return lm.nodeId != 0 && lm.nodeId != kCommandRowId && !lm.isContinuation
@@ -6572,14 +6952,18 @@ static QSet<uint64_t> nodeRangeSelection(const QVector<LineMeta>& meta,
         ++common;
     if (common == a.size() || common == b.size()) {
         const int parent = common == a.size() ? a.back() : b.back();
+        if (anchors) anchors->insert(selIdForLine(meta[parent]), anchorForLine(meta, parent));
         return {selIdForLine(meta[parent])};
     }
     const int from = qMin(a[common], b[common]);
     const int to = qMax(a[common], b[common]);
     QSet<uint64_t> selected;
     for (int i = from; i <= to; ++i) {
-        if (selectable(i) && meta[i].depth == meta[from].depth)
-            selected.insert(selIdForLine(meta[i]));
+        if (selectable(i) && meta[i].depth == meta[from].depth) {
+            const uint64_t sel = selIdForLine(meta[i]);
+            if (anchors && !selected.contains(sel)) anchors->insert(sel, anchorForLine(meta, i));
+            selected.insert(sel);
+        }
     }
     return selected;
 }
@@ -6615,31 +6999,46 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     if (m_doc->tree.indexOfId(nodeId) < 0) return;
 
     uint64_t selId = effectiveId(line, nodeId);
+    // Where the click landed: a node shown in several places is marked only here.
+    const SelectionAnchor here = anchorForLine(m_lastResult.meta, line);
 
     if (!ctrl && !shift) {
         m_selIds.clear();
         m_selIds.insert(selId);
+        m_selAnchors.clear();
+        m_selAnchors.insert(selId, here);
         m_anchorLine = line;
     } else if (ctrl && !shift) {
-        if (m_selIds.contains(selId))
+        // Ctrl+click on the marked row unselects it; on another place the
+        // same node is shown, the mark moves there.
+        if (m_selIds.contains(selId) && m_selAnchors.value(selId, here) == here) {
             m_selIds.remove(selId);
-        else
+            m_selAnchors.remove(selId);
+        } else {
             m_selIds.insert(selId);
+            m_selAnchors.insert(selId, here);
+        }
         m_anchorLine = line;
     } else if (shift && !ctrl) {
         if (m_anchorLine < 0) {
             m_selIds.clear();
             m_selIds.insert(selId);
+            m_selAnchors.clear();
+            m_selAnchors.insert(selId, here);
             m_anchorLine = line;
         } else {
-            m_selIds = nodeRangeSelection(m_lastResult.meta, source, m_anchorLine, line);
+            m_selAnchors.clear();
+            m_selIds = nodeRangeSelection(m_lastResult.meta, source, m_anchorLine, line, &m_selAnchors);
         }
     } else { // Ctrl+Shift
         if (m_anchorLine < 0) {
             m_selIds.insert(selId);
+            m_selAnchors.insert(selId, here);
             m_anchorLine = line;
         } else {
-            m_selIds.unite(nodeRangeSelection(m_lastResult.meta, source, m_anchorLine, line));
+            QHash<uint64_t, SelectionAnchor> ranged;
+            m_selIds.unite(nodeRangeSelection(m_lastResult.meta, source, m_anchorLine, line, &ranged));
+            m_selAnchors.insert(ranged);
         }
     }
 
@@ -6667,6 +7066,7 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
 
 void RcxController::clearSelection() {
     m_selIds.clear();
+    m_selAnchors.clear();
     m_anchorLine = -1;
     bool hadFocus = !m_focusPath.isEmpty();
     m_focusPath.clear();   // the trail back to the bare root crumb
@@ -6676,8 +7076,12 @@ void RcxController::clearSelection() {
 }
 
 void RcxController::applySelectionOverlays() {
+    // Anchors of ids no longer selected (a delete, an undo, a replaced set)
+    // would only mislead the next time that id is selected some other way.
+    for (auto it = m_selAnchors.begin(); it != m_selAnchors.end();)
+        it = m_selIds.contains(it.key()) ? std::next(it) : m_selAnchors.erase(it);
     for (auto* editor : m_editors)
-        editor->applySelectionOverlay(m_selIds);
+        editor->applySelectionOverlay(m_selIds, m_selAnchors);
 }
 
 
@@ -6794,7 +7198,7 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
                     QString::number(ss.baseAddress, 16).toUpper();
 
             // Architecture (from active provider if this is the active source)
-            if (e.isActive && m_doc->provider)
+            if (e.isActive && this->provider())
                 e.arch = (m_doc->tree.pointerSize >= 8)
                     ? QStringLiteral("x64") : QStringLiteral("x86");
 
@@ -6854,7 +7258,7 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
     };
 
     // Configure and show popup
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
@@ -6904,7 +7308,7 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
             const auto& ss = m_savedSources[i];
             if (i == m_activeSourceIdx) {
                 // Active source: check the current provider
-                alive.append(m_doc->provider && m_doc->provider->isValid());
+                alive.append(this->provider() && this->provider()->isValid());
             } else if (ss.kind == QStringLiteral("File")) {
                 alive.append(QFile::exists(ss.filePath));
             } else {
@@ -6947,7 +7351,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
     }
 
     // ── Font with zoom ──
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont font(fontName, 12);
     font.setFixedPitch(true);
@@ -7138,7 +7542,9 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                     }
                 }
             } else if (node) {
-                if (!(node->kind == NodeKind::Struct && node->refId != 0)) {
+                // An enum-typed int reads as its enum: that composite is current.
+                if (!(node->kind == NodeKind::Struct && node->refId != 0)
+                    && !enumTypeOf(m_doc->tree, *node)) {
                     // For pointer kinds, the catalog now ships two
                     // entries per width (absolute + RVA). Match the
                     // variant that mirrors node->isRelative so opening
@@ -7158,6 +7564,7 @@ void RcxController::showTypePopup(RcxEditor* editor, TypePopupMode mode,
                 if (isTypedPtr && n.refId == e.structId) return true;
                 if (isArray && n.elementKind == NodeKind::Struct && n.refId == e.structId) return true;
                 if (!isPtr && !isArray && n.kind == NodeKind::Struct && n.refId == e.structId) return true;
+                if (!isPtr && !isArray && enumTypeOf(m_doc->tree, n) && n.refId == e.structId) return true;
                 return false;
             });
             break;
@@ -7385,8 +7792,25 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                     if (!m_suppressRefresh) refresh();
                 }
             } else {
+                // Picking a plain type on an enum field makes it that plain type:
+                // the enum link goes too, in the same undo step.
+                const bool wasEnum = enumTypeOf(m_doc->tree, m_doc->tree.nodes[nodeIdx]) != nullptr;
+                const bool refreshWasSuppressed = m_suppressRefresh;
+                if (wasEnum) {
+                    m_suppressRefresh = true;
+                    m_doc->undoStack.beginMacro(QStringLiteral("Change type"));
+                }
                 if (resolved.primitiveKind != nodeKind)
                     changeNodeKind(nodeIdx, resolved.primitiveKind);
+                if (wasEnum) {
+                    int idx = m_doc->tree.indexOfId(nodeId);   // changeNodeKind may insert pads
+                    if (idx >= 0 && m_doc->tree.nodes[idx].refId != 0)
+                        m_doc->undoStack.push(new RcxCommand(this,
+                            cmd::ChangePointerRef{nodeId, m_doc->tree.nodes[idx].refId, 0}));
+                    m_doc->undoStack.endMacro();
+                    m_suppressRefresh = refreshWasSuppressed;
+                    if (!m_suppressRefresh) refresh();
+                }
                 // Apply RVA flag from the catalog entry. The catalog
                 // ships two pointer entries per width — "Pointer32" and
                 // "Pointer32 (RVA)" — that differ only in isRelative.
@@ -7464,6 +7888,20 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                             m_doc->tree.nodes[idx].refId,
                             resolved.structId}));
                 }
+            } else if (const int enumIdx = m_doc->tree.indexOfId(resolved.structId);
+                       enumIdx >= 0 && m_doc->tree.nodes[enumIdx].isEnum()) {
+                // An enum is not a struct: the field stays an int (UInt32 unless it
+                // already is one) and points at the enum, so it reads as that enum.
+                const bool isInt = nodeKind == NodeKind::UInt8 || nodeKind == NodeKind::UInt16
+                    || nodeKind == NodeKind::UInt32 || nodeKind == NodeKind::UInt64
+                    || nodeKind == NodeKind::Int8 || nodeKind == NodeKind::Int16
+                    || nodeKind == NodeKind::Int32 || nodeKind == NodeKind::Int64;
+                if (!isInt)
+                    changeNodeKind(nodeIdx, NodeKind::UInt32);
+                int idx = m_doc->tree.indexOfId(nodeId);
+                if (idx >= 0 && m_doc->tree.nodes[idx].refId != resolved.structId)
+                    m_doc->undoStack.push(new RcxCommand(this,
+                        cmd::ChangePointerRef{nodeId, m_doc->tree.nodes[idx].refId, resolved.structId}));
             } else {
                 // Plain struct: e.g. "Material" → Struct + structTypeName + refId + collapsed
                 if (nodeKind != NodeKind::Struct)
@@ -7658,23 +8096,28 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
         return;
     }
 
-    m_doc->undoStack.clear();
-    m_doc->provider = std::move(provider);
-    m_doc->dataPath.clear();
+    if ((m_instance || m_doc->controllers.size() > 1)
+        && provider->isLive() && provider->pointerSize() != m_doc->tree.pointerSize) {
+        emit statusHint(QStringLiteral("Source pointer size differs from the shared class definition"));
+        return;
+    }
+    if (!m_instance && m_doc->controllers.size() == 1) m_doc->undoStack.clear();
+    this->provider() = std::move(provider);
+    if (!m_instance) m_doc->dataPath.clear();
     // Don't overwrite baseAddress — caller (e.g. selfTest) already set it.
     // User-initiated source switches go through selectSource() which does update it.
 
     // Adopt the provider's pointer size for this document
-    m_doc->tree.pointerSize = m_doc->provider->pointerSize();
+    if (!m_instance) m_doc->tree.pointerSize = this->provider()->pointerSize();
 
     // Re-evaluate stored formula against the new provider
-    if (!m_doc->tree.baseAddressFormula.isEmpty()) {
+    if (!baseAddressFormula().isEmpty()) {
         int ptrSz = m_doc->tree.pointerSize;
         const AddressParserCallbacks cbs =
-            makeAddressCallbacks(m_doc->provider.get(), ptrSz);
-        auto result = AddressParser::evaluate(m_doc->tree.baseAddressFormula, ptrSz, &cbs);
+            makeAddressCallbacks(this->provider().get(), ptrSz);
+        auto result = AddressParser::evaluate(baseAddressFormula(), ptrSz, &cbs);
         if (result.ok)
-            m_doc->tree.baseAddress = result.value;
+            baseAddress() = result.value;
     }
 
     resetSnapshot();
@@ -7695,14 +8138,14 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
         }
         if (existingIdx >= 0) {
             m_activeSourceIdx = existingIdx;
-            m_savedSources[existingIdx].baseAddress = m_doc->tree.baseAddress;
+            m_savedSources[existingIdx].baseAddress = baseAddress();
         } else {
             SavedSourceEntry entry;
             entry.kind             = providerIdentifier;
-            entry.displayName      = m_doc->provider ? m_doc->provider->name()
+            entry.displayName      = this->provider() ? this->provider()->name()
                                                     : providerIdentifier;
             entry.providerTarget   = target;
-            entry.baseAddress      = m_doc->tree.baseAddress;
+            entry.baseAddress      = baseAddress();
             m_savedSources.append(entry);
             m_activeSourceIdx = m_savedSources.size() - 1;
         }
@@ -7722,17 +8165,17 @@ void RcxController::switchToSavedSource(int idx) {
 
     // Save current source's base address before switching
     if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size()) {
-        m_savedSources[m_activeSourceIdx].baseAddress = m_doc->tree.baseAddress;
-        m_savedSources[m_activeSourceIdx].baseAddressFormula = m_doc->tree.baseAddressFormula;
+        m_savedSources[m_activeSourceIdx].baseAddress = baseAddress();
+        m_savedSources[m_activeSourceIdx].baseAddressFormula = baseAddressFormula();
     }
 
-    m_activeSourceIdx = idx;
     const auto& entry = m_savedSources[idx];
 
     if (entry.kind == QStringLiteral("File")) {
-        m_doc->loadData(entry.filePath);
-        m_doc->tree.baseAddress = entry.baseAddress;
-        m_doc->tree.baseAddressFormula = entry.baseAddressFormula;
+        if (!loadSourceFile(entry.filePath)) return;
+        m_activeSourceIdx = idx;
+        baseAddress() = entry.baseAddress;
+        baseAddressFormula() = entry.baseAddressFormula;
         // Drop the prior source's snapshot/pages/value-history. loadData() only
         // swaps the document's provider; without this, refresh() still composes
         // against the stale m_snapshotProv (controller.cpp:1959) and renders the
@@ -7741,13 +8184,14 @@ void RcxController::switchToSavedSource(int idx) {
         resetSnapshot();
         refresh();
     } else if (!entry.providerTarget.isEmpty()) {
+        m_activeSourceIdx = idx;
         // Plugin-based provider (e.g. "processmemory" with target "pid:name")
         // Restore formula before attach so it can be re-evaluated against the new provider
-        m_doc->tree.baseAddressFormula = entry.baseAddressFormula;
+        baseAddressFormula() = entry.baseAddressFormula;
         attachViaPlugin(entry.kind, entry.providerTarget);
         // Restore saved base address — always override with saved value on source switch
         if (entry.baseAddressFormula.isEmpty())
-            m_doc->tree.baseAddress = entry.baseAddress;
+            baseAddress() = entry.baseAddress;
     }
     // Notify listeners that the active source changed — used by the
     // doc tab's source-icon to swap to the new provider's icon.
@@ -7765,9 +8209,9 @@ void RcxController::selectSource(const QString& text) {
         QString path = QFileDialog::getOpenFileName(w, "Load Binary Data", {}, "All Files (*)");
         if (!path.isEmpty()) {
             if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
-                m_savedSources[m_activeSourceIdx].baseAddress = m_doc->tree.baseAddress;
+                m_savedSources[m_activeSourceIdx].baseAddress = baseAddress();
 
-            m_doc->loadData(path);
+            if (!loadSourceFile(path)) return;
 
             int existingIdx = -1;
             for (int i = 0; i < m_savedSources.size(); i++) {
@@ -7779,13 +8223,13 @@ void RcxController::selectSource(const QString& text) {
             }
             if (existingIdx >= 0) {
                 m_activeSourceIdx = existingIdx;
-                m_doc->tree.baseAddress = m_savedSources[existingIdx].baseAddress;
+                baseAddress() = m_savedSources[existingIdx].baseAddress;
             } else {
                 SavedSourceEntry entry;
                 entry.kind = QStringLiteral("File");
                 entry.displayName = QFileInfo(path).fileName();
                 entry.filePath = path;
-                entry.baseAddress = m_doc->tree.baseAddress;
+                entry.baseAddress = baseAddress();
                 m_savedSources.append(entry);
                 m_activeSourceIdx = m_savedSources.size() - 1;
             }
@@ -7818,25 +8262,30 @@ void RcxController::selectSource(const QString& text) {
                     provider = providerInfo->plugin->createProvider(target, &errorMsg);
 
                 if (provider) {
+                    if ((m_instance || m_doc->controllers.size() > 1)
+                        && provider->isLive() && provider->pointerSize() != m_doc->tree.pointerSize) {
+                        emit statusHint(QStringLiteral("Source pointer size differs from the shared class definition"));
+                        return;
+                    }
                     if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
-                        m_savedSources[m_activeSourceIdx].baseAddress = m_doc->tree.baseAddress;
+                        m_savedSources[m_activeSourceIdx].baseAddress = baseAddress();
 
                     uint64_t newBase = provider->base();
                     QString displayName = provider->name();
-                    m_doc->undoStack.clear();
-                    m_doc->provider = std::move(provider);
-                    m_doc->dataPath.clear();
-                    m_doc->tree.pointerSize = m_doc->provider->pointerSize();
+                    if (!m_instance && m_doc->controllers.size() == 1) m_doc->undoStack.clear();
+                    this->provider() = std::move(provider);
+                    if (!m_instance) m_doc->dataPath.clear();
+                    if (!m_instance) m_doc->tree.pointerSize = this->provider()->pointerSize();
 
                     // Re-evaluate formula if present (mirrors attachViaPlugin)
-                    if (!m_doc->tree.baseAddressFormula.isEmpty()) {
+                    if (!baseAddressFormula().isEmpty()) {
                         int ptrSz = m_doc->tree.pointerSize;
                         const AddressParserCallbacks cbs =
-                            makeAddressCallbacks(m_doc->provider.get(), ptrSz);
+                            makeAddressCallbacks(this->provider().get(), ptrSz);
                         auto result = AddressParser::evaluate(
-                            m_doc->tree.baseAddressFormula, ptrSz, &cbs);
+                            baseAddressFormula(), ptrSz, &cbs);
                         if (result.ok)
-                            m_doc->tree.baseAddress = result.value;
+                            baseAddress() = result.value;
                     } else {
                         // Adopt the new provider's base when this target
                         // hasn't been seen before. The old test ("base ==
@@ -7861,7 +8310,7 @@ void RcxController::selectSource(const QString& text) {
                             }
                         }
                         if (!isExisting && newBase != 0)
-                            m_doc->tree.baseAddress = newBase;
+                            baseAddress() = newBase;
                     }
                     resetSnapshot();
                     emit m_doc->documentChanged();
@@ -7877,13 +8326,13 @@ void RcxController::selectSource(const QString& text) {
                     }
                     if (existingIdx >= 0) {
                         m_activeSourceIdx = existingIdx;
-                        m_savedSources[existingIdx].baseAddress = m_doc->tree.baseAddress;
+                        m_savedSources[existingIdx].baseAddress = baseAddress();
                     } else {
                         SavedSourceEntry entry;
                         entry.kind = identifier;
                         entry.displayName = displayName;
                         entry.providerTarget = target;
-                        entry.baseAddress = m_doc->tree.baseAddress;
+                        entry.baseAddress = baseAddress();
                         m_savedSources.append(entry);
                         m_activeSourceIdx = m_savedSources.size() - 1;
                     }
@@ -7905,8 +8354,8 @@ void RcxController::clearSources() {
     m_savedSources.clear();
     m_nav.forgetAllSources();   // every recorded source index just went stale
     m_activeSourceIdx = -1;
-    m_doc->provider = std::make_shared<NullProvider>();
-    m_doc->dataPath.clear();
+    this->provider() = std::make_shared<NullProvider>();
+    if (!m_instance) m_doc->dataPath.clear();
     resetSnapshot();
     refresh();
 }
@@ -7929,8 +8378,8 @@ void RcxController::removeSavedSource(int idx) {
         // but leaving the remaining saved sources intact (no auto-activate, so
         // it behaves like "clicking out of" the source rather than surprising
         // the user by jumping to a different process/file).
-        m_doc->provider = std::make_shared<NullProvider>();
-        m_doc->dataPath.clear();
+        this->provider() = std::make_shared<NullProvider>();
+        if (!m_instance) m_doc->dataPath.clear();
         resetSnapshot();
     }
     refresh();
@@ -7969,18 +8418,26 @@ void RcxController::applyAdaptiveInterval() {
         // Stop the timer entirely while minimized — nothing on screen
         // to update, no reason to syscall. Resume on setWindowState
         // restoring visibility.
-        if (m_refreshTimer->isActive()) m_refreshTimer->stop();
-        return;
-    }
-    if (!m_windowFocused) {
-        target = m_refreshIntervalBlurMs;
+        if (!timelineCapturing()) {
+            if (m_refreshTimer->isActive()) m_refreshTimer->stop();
+            return;
+        }
+        // …unless the timeline is capturing: playing the target with Reclass
+        // minimised and rewinding afterwards is the point. Reads continue a
+        // little slower; nothing is composed until the window is back.
+        target = qMax(m_refreshIntervalBaseMs, 250);
+    } else if (!m_windowFocused) {
+        target = timelineCapturing() ? m_refreshIntervalBaseMs : m_refreshIntervalBlurMs;
     } else if (m_idleTicks >= kIdleBackoffTicks) {
         // Geometric backoff once the struct has been quiet for a while:
         // base × 2^(idleTicks / threshold), capped. e.g. base=200, after
         // 8 idle ticks → 400, after 16 → 800, after 24 → 1500 (capped).
         int factor = 1 << qMin(4, (m_idleTicks - kIdleBackoffTicks) / kIdleBackoffTicks + 1);
-        target = qMin(m_refreshIntervalMaxMs,
-                      m_refreshIntervalBaseMs * factor);
+        // Capturing caps the backoff lower: a change after a quiet spell is
+        // stamped within half a second, not a second and a half.
+        const int cap = timelineCapturing() ? qMax(m_refreshIntervalBaseMs, 500)
+                                            : m_refreshIntervalMaxMs;
+        target = qMin(cap, m_refreshIntervalBaseMs * factor);
     } else {
         target = m_refreshIntervalBaseMs;
     }
@@ -7999,6 +8456,7 @@ void RcxController::setWindowState(bool focused, bool visible) {
     // last backed-off tick.
     if (focusGained) m_idleTicks = 0;
     applyAdaptiveInterval();
+    if (m_windowVisible && m_viewStale) refresh();
 }
 
 void RcxController::setCompactColumns(bool v) {
@@ -8009,6 +8467,13 @@ void RcxController::setCompactColumns(bool v) {
 void RcxController::setTreeLines(bool v) {
     m_treeLines = v;
     refresh();
+}
+
+void RcxController::setTreeColumns(bool v) {
+    // Paint-only: the text doesn't change, so no recompose.
+    m_treeColumns = v;
+    for (RcxEditor* editor : m_editors)
+        editor->setTreeColumns(v);
 }
 
 void RcxController::setBraceWrap(bool v) {
@@ -8037,7 +8502,7 @@ void RcxController::setShowEnumChips(bool v) {
 }
 
 void RcxController::setupAutoRefresh() {
-    int ms = QSettings("REECLASS", "REECLASS").value("refreshMs", kDefaultRefreshMs).toInt();
+    int ms = QSettings("RC", "RC").value("refreshMs", kDefaultRefreshMs).toInt();
     m_refreshIntervalBaseMs = qMax(1, ms);
     m_refreshIntervalMaxMs  = qMax(m_refreshIntervalBaseMs, 1500);
     m_refreshIntervalBlurMs = qMax(m_refreshIntervalBaseMs, 1500);
@@ -8046,9 +8511,122 @@ void RcxController::setupAutoRefresh() {
     connect(m_refreshTimer, &QTimer::timeout, this, &RcxController::onRefreshTick);
     m_refreshTimer->start();
 
-    m_refreshWatcher = new QFutureWatcher<PageMap>(this);
-    connect(m_refreshWatcher, &QFutureWatcher<PageMap>::finished,
+    m_refreshWatcher = new QFutureWatcher<ReadBatch>(this);
+    connect(m_refreshWatcher, &QFutureWatcher<ReadBatch>::finished,
             this, &RcxController::onReadComplete);
+}
+
+std::shared_ptr<const RcxController::CapturePlan> RcxController::capturePlanFor(uint64_t rootId) {
+    const NodeTree& tree = viewTree();
+    const quint64 key = (tree.generation() * 0x9E3779B97F4A7C15ull)
+                      ^ (m_capturePlanEpoch * 0xC2B2AE3D27D4EB4Full) ^ rootId;
+    if (m_capturePlan && m_capturePlanKey == key) return m_capturePlan;
+
+    auto plan = std::make_shared<CapturePlan>();
+    QHash<uint64_t, QVector<int>> childMap;
+    for (int i = 0; i < tree.nodes.size(); ++i) childMap[tree.nodes[i].parentId].append(i);
+
+    // Which containers have a pointer anywhere beneath them: an array of
+    // structs with none is skipped instead of walked element by element.
+    QHash<uint64_t, bool> hasPtrMemo;
+    std::function<bool(uint64_t, int)> hasPointers = [&](uint64_t id, int depth) -> bool {
+        auto it = hasPtrMemo.constFind(id);
+        if (it != hasPtrMemo.constEnd()) return it.value();
+        if (depth > 32) return false;
+        hasPtrMemo.insert(id, false);   // cycle guard
+        bool found = false;
+        for (int ci : childMap.value(id)) {
+            const Node& n = tree.nodes[ci];
+            if (n.kind == NodeKind::Pointer32 || n.kind == NodeKind::Pointer64) { found = true; break; }
+            if ((n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                && (hasPointers(n.id, depth + 1) || (n.refId && hasPointers(n.refId, depth + 1)))) {
+                found = true;
+                break;
+            }
+        }
+        hasPtrMemo.insert(id, found);
+        return found;
+    };
+    auto spanOf = [&](uint64_t id) -> int {
+        const int idx = tree.indexOfId(id);
+        if (idx >= 0 && isPointerKind(tree.nodes[idx].kind)) {
+            // Materialised pointer children: the target frame is their extent.
+            int64_t end = 0;
+            for (int ci : childMap.value(id)) {
+                const Node& c = tree.nodes[ci];
+                const int sz = (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
+                             ? tree.structSpan(c.id, &childMap) : c.byteSize();
+                end = qMax<int64_t>(end, int64_t(c.offset) + sz);
+            }
+            return int(qMin<int64_t>(end, INT_MAX));
+        }
+        return tree.structSpan(id, &childMap);
+    };
+
+    QHash<uint64_t, int> planIndex;
+    int totalPtrs = 0;
+    std::function<int(uint64_t)> compile;
+    std::function<void(PlanStruct&, uint64_t, int64_t, int)> walk =
+        [&](PlanStruct& ps, uint64_t parent, int64_t baseOff, int depth) {
+        if (depth > 32 || totalPtrs >= kMaxPlanPointers) return;
+        for (int ci : childMap.value(parent)) {
+            const Node& n = tree.nodes[ci];
+            const int64_t off = baseOff + n.offset;
+            if (n.kind == NodeKind::Pointer32 || n.kind == NodeKind::Pointer64) {
+                const bool materialised = childMap.contains(n.id);
+                PlanPtr pp;
+                pp.offset = off;
+                pp.size = (n.kind == NodeKind::Pointer32) ? 4 : 8;
+                if (n.kind == NodeKind::Pointer64 && n.ptrDepth > 0 && n.refId == 0 && !materialised
+                    && isValidPrimitivePtrTarget(n.elementKind)) {
+                    // A primitive pointer shows "-> value", collapsed or not
+                    // (format.cpp): its target is part of what the view reads.
+                    pp.derefs = uint8_t(qBound(0, n.ptrDepth - 1, 8));
+                    Node target;
+                    target.kind = n.elementKind;
+                    target.strLen = n.strLen;
+                    pp.targetLen = qMax(1, target.byteSize());
+                } else if (!isCollapsed(n) && (materialised || n.refId != 0)) {
+                    pp.derefs = uint8_t(qBound(0, n.ptrDepth, 8));
+                    pp.relative = n.isRelative;
+                    pp.targetStruct = compile(materialised ? n.id : n.refId);
+                } else {
+                    continue;
+                }
+                ps.ptrs.append(pp);
+                if (++totalPtrs >= kMaxPlanPointers) return;
+            } else if (n.kind == NodeKind::Struct || n.kind == NodeKind::Array) {
+                const bool ownChildren = childMap.contains(n.id);
+                const uint64_t frame = ownChildren ? n.id : n.refId;
+                if (!frame || !hasPointers(frame, 0)) continue;
+                if (n.kind == NodeKind::Array && !ownChildren) {
+                    if (n.elementKind != NodeKind::Struct) continue;
+                    const int stride = qMax(1, tree.structSpan(n.refId, &childMap));
+                    const int count = qMin(n.arrayLen, kMaxPlanArrayElems);
+                    for (int i = 0; i < count && totalPtrs < kMaxPlanPointers; ++i)
+                        walk(ps, n.refId, off + int64_t(i) * stride, depth + 1);
+                } else {
+                    walk(ps, frame, off, depth + 1);
+                }
+            }
+        }
+    };
+    compile = [&](uint64_t containerId) -> int {
+        auto it = planIndex.constFind(containerId);
+        if (it != planIndex.constEnd()) return it.value();
+        const int idx = plan->structs.size();
+        plan->structs.append(PlanStruct{});
+        planIndex.insert(containerId, idx);
+        PlanStruct ps;
+        ps.span = spanOf(containerId);
+        walk(ps, containerId, 0, 0);
+        plan->structs[idx] = std::move(ps);
+        return idx;
+    };
+    plan->root = compile(rootId);
+    m_capturePlan = plan;
+    m_capturePlanKey = key;
+    return m_capturePlan;
 }
 
 // Recursively collect memory ranges for a struct and its pointer targets.
@@ -8081,7 +8659,7 @@ void RcxController::collectPointerRanges(
         const Node& child = m_doc->tree.nodes[ci];
         if (child.kind != NodeKind::Pointer32 && child.kind != NodeKind::Pointer64)
             continue;
-        if (child.collapsed || child.refId == 0) continue;
+        if (isCollapsed(child) || child.refId == 0) continue;
 
         uint64_t ptrAddr = memBase + child.offset;
         int ptrSize = child.byteSize();
@@ -8111,7 +8689,7 @@ void RcxController::onRefreshTick() {
     // Liveness-flip detection runs BEFORE the early-returns below: when
     // a process exits its provider transitions to !isValid(), and we
     // also want to report that case to the UI so the tab icon dims.
-    bool nowLive = (m_doc->provider && m_doc->provider->isValid());
+    bool nowLive = (this->provider() && this->provider()->isValid());
     if (nowLive != m_lastLive) {
         m_lastLive = nowLive;
         emit sourceLivenessChanged(nowLive);
@@ -8130,7 +8708,7 @@ void RcxController::onRefreshTick() {
         // processes as None → the chip masked them to a neutral "Static" dot.)
         status = (m_activeSourceIdx < 0) ? SourceStatus::None
                                          : SourceStatus::Disconnected;
-    else if (!m_doc->provider->isLive())          status = SourceStatus::Static;
+    else if (!this->provider()->isLive())          status = SourceStatus::Static;
     else if (!m_lastReadOk)                       status = SourceStatus::Stale;
     else                                          status = SourceStatus::Live;
     if (status != m_lastStatus) {
@@ -8139,7 +8717,7 @@ void RcxController::onRefreshTick() {
     }
 
     if (m_readInFlight) return;
-    if (!m_doc->provider || !m_doc->provider->isLive()) return;
+    if (!this->provider() || !this->provider()->isLive()) return;
     if (m_suppressRefresh) return;
     for (auto* editor : m_editors)
         if (editor->isEditing()) return;
@@ -8151,20 +8729,27 @@ void RcxController::onRefreshTick() {
 
     // Collect all needed ranges: main struct + pointer targets (absolute addresses)
     QVector<QPair<uint64_t,int>> ranges;
-    ranges.emplaceBack(m_doc->tree.baseAddress, extent);
+    ranges.emplaceBack(baseAddress(), extent);
 
-    if (m_snapshotProv) {
-        QSet<QPair<uint64_t,uint64_t>> visited;
-        uint64_t rootId = m_viewRootId;
-        if (rootId == 0 && !m_doc->tree.nodes.isEmpty())
-            rootId = m_doc->tree.nodes[0].id;
-        // Cap total bytes to prevent balloon snapshots on cyclic pointer graphs
-        // or pathological tree shapes. 64MB is plenty for any reasonable struct
-        // hierarchy; beyond that we silently clip the deepest branches.
-        int64_t budget = kPointerSnapshotByteBudget - extent;
-        collectPointerRanges(rootId, m_doc->tree.baseAddress, 0, 99,
-                             visited, ranges, budget);
-    }
+    // Pointer targets are followed on the worker, from the bytes it has just
+    // read, so a pointer and its target always come from the same tick (the
+    // old walk read pointer values from the previous snapshot, a tick late,
+    // and missed pointers inside nested structs and arrays). The plan is the
+    // view's pointer graph, flattened here while the tree is safe to touch.
+    // The 64 MB budget still clips a cyclic or pathological graph.
+    uint64_t planRootId = m_viewRootId;
+    if (planRootId == 0 && !m_doc->tree.nodes.isEmpty())
+        planRootId = m_doc->tree.nodes[0].id;
+    const std::shared_ptr<const CapturePlan> plan = capturePlanFor(planRootId);
+    const int64_t pointerBudget = kPointerSnapshotByteBudget - extent;
+    const bool planHasPointers = plan && plan->root >= 0 && !plan->structs[plan->root].ptrs.isEmpty();
+
+    // Pages compose actually read on its last passes — RTTI vtables, deref
+    // targets, pointers inside nested structs the walk above does not follow.
+    // Reading them here keeps them out of the UI thread's fall-through reads
+    // and puts them in the timeline, where a past frame needs them.
+    for (auto it = m_touchedAge.constBegin(); it != m_touchedAge.constEnd(); ++it)
+        ranges.emplaceBack(it.key(), 4096);
 
     // ── Speedup 1: viewport-bounded re-read ──
     // The first refresh on a fresh attach reads the whole extent so the
@@ -8181,13 +8766,17 @@ void RcxController::onRefreshTick() {
     constexpr uint64_t kPageMask = ~(kPageSize - 1);
     constexpr uint64_t kOverscanPages = 2;
 
-    // Build the set of pages we actually need this tick.
+    // Build the set of pages we actually need this tick — and, for the
+    // timeline, the set this view is WATCHING, before any page is skipped.
     QSet<uint64_t> requestPages;
+    QVector<uint64_t> intendedPages;
+    bool skippedStable = false;
     for (const auto& r : ranges) {
         uint64_t pageStart = r.first & kPageMask;
         uint64_t end = r.first + r.second;
         uint64_t pageEnd = (end + kPageSize - 1) & kPageMask;
         for (uint64_t p = pageStart; p < pageEnd; p += kPageSize) {
+            intendedPages.append(p);
             // Speedup 4: never re-read pages we've classified as
             // permanent (read-only module memory).
             if (m_snapshotProv && m_snapshotProv->isPermanent(p)) continue;
@@ -8203,19 +8792,19 @@ void RcxController::onRefreshTick() {
                 uint64_t hi = ((viewport->second + kOverscanPages * kPageSize)
                               + kPageSize - 1) & kPageMask;
                 bool inViewport = (p >= lo && p < hi);
-                bool isMainRange = (r.first == m_doc->tree.baseAddress);
+                bool isMainRange = (r.first == baseAddress());
                 if (isMainRange && !inViewport) {
                     // Speedup 2: stable backstage page → re-read at half rate.
                     int stab = m_pageStability.value(p, 0);
                     bool isStable = (stab >= kStabilityThreshold);
-                    if (isStable && (m_tickCount & 1ULL)) continue;
+                    if (isStable && (m_tickCount & 1ULL)) { skippedStable = true; continue; }
                 }
             }
             requestPages.insert(p);
         }
     }
 
-    if (requestPages.isEmpty()) {
+    if (requestPages.isEmpty() && !planHasPointers) {
         // Nothing to read this tick (everything is stable + off-screen,
         // or every page is permanent). Treat as zero-change for the
         // adaptive backoff so the timer can widen — but don't recompose,
@@ -8228,15 +8817,148 @@ void RcxController::onRefreshTick() {
     m_readInFlight = true;
     m_readGen = m_refreshGen;
 
-    auto prov = m_doc->provider;
+    m_inflightPartial = skippedStable;
+    m_readStartMs = tl::CaptureClock::nowMs();
+
+    auto prov = this->provider();
     QVector<uint64_t> pageList(requestPages.constBegin(), requestPages.constEnd());
-    m_refreshWatcher->setFuture(QtConcurrent::run([prov, pageList]() -> PageMap {
-        PageMap pages;
-        pages.reserve(pageList.size());
-        for (uint64_t p : pageList) {
-            pages[p] = prov->readBytes(p, static_cast<int>(kPageSize));
+    // The worker diffs against the pages as they stood at dispatch. Copying
+    // the map is O(1) (implicitly shared): anything the UI thread replaces
+    // while the read is in flight detaches rather than changing under it.
+    const PageMap baseline = m_prevPages;
+    const uint64_t diffGen = m_diffGen;
+    const QSet<uint64_t> permanent = m_snapshotProv ? m_snapshotProv->permanentPages() : QSet<uint64_t>{};
+    const uint64_t mainBase = baseAddress();
+    const uint64_t relBase = viewTree().baseAddress;
+    m_refreshWatcher->setFuture(QtConcurrent::run(
+        [prov, pageList, baseline, diffGen, permanent, intendedPages, plan, mainBase, relBase, pointerBudget]() -> ReadBatch {
+        ReadBatch batch;
+        batch.diffGen = diffGen;
+        const int pageSize = static_cast<int>(kPageSize);
+        QHash<uint64_t, QByteArray> fresh;    // every page read OK this tick
+        QSet<uint64_t> refused;
+
+        auto readPage = [&](uint64_t p) {
+            QByteArray page(pageSize, Qt::Uninitialized);
+            // read(), not readBytes(): readBytes zero-fills a refused read
+            // and discards the verdict, so unmapped memory used to merge
+            // into the snapshot as real zero bytes and never showed as
+            // unreadable. Deliberately one page per call: the process
+            // plugins report a PARTIAL multi-page read as success with the
+            // tail zero-filled, which would bring that bug straight back.
+            if (!prov->read(p, page.data(), pageSize)) {
+                batch.unreadable.append(p);
+                refused.insert(p);
+                return;
+            }
+            if (p == 0)
+                batch.page0AllZero = std::all_of(page.cbegin(), page.cend(),
+                                                 [](char c) { return c == 0; });
+            auto old = baseline.constFind(p);
+            if (old == baseline.constEnd() || old->size() != pageSize) {
+                batch.firstSeen.append(p);
+                batch.pages.insert(p, page);
+            } else if (diffPageRuns(batch.runs, p, old->constData(),
+                                    page.constData(), pageSize)) {
+                batch.changed.append(p);
+                batch.pages.insert(p, page);
+            } else {
+                batch.unchanged.append(p);
+            }
+            fresh.insert(p, page);
+        };
+        for (uint64_t p : pageList) readPage(p);
+
+        // ── Pointer targets, from the bytes this tick just read ──
+        const QSet<uint64_t> watched(intendedPages.cbegin(), intendedPages.cend());
+        QSet<uint64_t> targets;
+        auto bytesOf = [&](uint64_t page) -> const QByteArray* {
+            auto it = fresh.constFind(page);
+            if (it != fresh.constEnd()) return &it.value();
+            if (refused.contains(page)) return nullptr;
+            // Skipped this tick (stable backstage, or permanent module
+            // memory): its last bytes still stand.
+            if (watched.contains(page) || permanent.contains(page)) {
+                auto b = baseline.constFind(page);
+                if (b != baseline.constEnd() && b->size() == pageSize) return &b.value();
+            }
+            readPage(page);
+            it = fresh.constFind(page);
+            return it == fresh.constEnd() ? nullptr : &it.value();
+        };
+        auto readAt = [&](uint64_t addr, char* out, int len) -> bool {
+            uint64_t cur = addr;
+            int remaining = len;
+            while (remaining > 0) {
+                const uint64_t page = cur & kPageMask;
+                const int off = int(cur - page);
+                const int chunk = qMin(remaining, pageSize - off);
+                targets.insert(page);
+                const QByteArray* b = bytesOf(page);
+                if (!b) return false;
+                std::memcpy(out, b->constData() + off, size_t(chunk));
+                out += chunk;
+                cur += uint64_t(chunk);
+                remaining -= chunk;
+                if (cur == 0 && remaining > 0) return false;
+            }
+            return true;
+        };
+        auto touch = [&](uint64_t addr, int64_t len) {
+            if (len <= 0) return;
+            const uint64_t last = (addr > UINT64_MAX - uint64_t(len - 1)) ? UINT64_MAX : addr + uint64_t(len - 1);
+            for (uint64_t page = addr & kPageMask;; page += kPageSize) {
+                targets.insert(page);
+                bytesOf(page);
+                if (page + (kPageSize - 1) >= last) break;
+            }
+        };
+        if (plan && plan->root >= 0) {
+            int64_t budget = pointerBudget;
+            QSet<QPair<int, uint64_t>> visited;
+            std::function<void(int, uint64_t, int)> resolve = [&](int si, uint64_t base, int depth) {
+                if (depth > 99 || budget <= 0) return;
+                const QPair<int, uint64_t> key(si, base);
+                if (visited.contains(key)) return;
+                visited.insert(key);
+                for (const PlanPtr& pp : plan->structs[si].ptrs) {
+                    if (budget <= 0) return;
+                    auto isNull = [&pp](uint64_t x) {
+                        return x == 0 || x == UINT64_MAX || (pp.size == 4 && x == 0xFFFFFFFFull);
+                    };
+                    uint64_t v = 0;
+                    if (!readAt(base + uint64_t(pp.offset), reinterpret_cast<char*>(&v), pp.size)) continue;
+                    if (isNull(v)) continue;
+                    if (pp.relative) v += relBase;
+                    for (int d = 0; d < pp.derefs && v; ++d) {
+                        uint64_t next = 0;
+                        if (!readAt(v, reinterpret_cast<char*>(&next), pp.size) || isNull(next)) { v = 0; break; }
+                        v = next;
+                    }
+                    if (!v) continue;
+                    if (pp.targetStruct >= 0) {
+                        const int span = plan->structs[pp.targetStruct].span;
+                        if (span <= 0) continue;
+                        budget -= span;
+                        touch(v, span);
+                        resolve(pp.targetStruct, v, depth + 1);
+                    } else if (pp.targetLen > 0) {
+                        budget -= pp.targetLen;
+                        touch(v, pp.targetLen);
+                    }
+                }
+            };
+            resolve(plan->root, mainBase, 0);
         }
-        return pages;
+
+        // What this tick watched: the main range, touched pages and every
+        // pointer target — the timeline's coverage.
+        batch.intended = intendedPages;
+        for (uint64_t p : std::as_const(targets)) batch.intended.append(p);
+        std::sort(batch.intended.begin(), batch.intended.end());
+        batch.intended.erase(std::unique(batch.intended.begin(), batch.intended.end()), batch.intended.end());
+        normalizeRuns(batch.runs);
+        return batch;
     }));
 }
 
@@ -8245,9 +8967,9 @@ void RcxController::onReadComplete() {
 
     if (m_readGen != m_refreshGen) return;
 
-    PageMap newPages;
+    ReadBatch batch;
     try {
-        newPages = m_refreshWatcher->result();
+        batch = m_refreshWatcher->result();
     } catch (const std::exception& e) {
         qWarning() << "[Refresh] async read threw:" << e.what();
         m_lastReadOk = false;
@@ -8259,57 +8981,42 @@ void RcxController::onReadComplete() {
     }
 
     // All-zero guard: if page 0 is all zeros and we already have data, discard
-    if (!m_prevPages.isEmpty() && newPages.contains(0)) {
-        const QByteArray& p0 = newPages.value(0);
-        bool allZero = true;
-        for (int i = 0; i < p0.size(); ++i) {
-            if (p0[i] != 0) { allZero = false; break; }
+    if (!m_prevPages.isEmpty() && batch.page0AllZero) {
+        if (!m_loggedAllZeroPage0) {
+            qDebug() << "[Refresh] discarding all-zero page-0, keeping stale snapshot (further occurrences silenced)";
+            m_loggedAllZeroPage0 = true;
         }
-        if (allZero) {
-            if (!m_loggedAllZeroPage0) {
-                qDebug() << "[Refresh] discarding all-zero page-0, keeping stale snapshot (further occurrences silenced)";
-                m_loggedAllZeroPage0 = true;
-            }
-            m_lastReadOk = false;
-            return;
-        }
+        m_lastReadOk = false;
+        return;
     }
     // First successful non-all-zero refresh — re-arm the log latch so a
     // future all-zero burst gets a single line again.
     m_loggedAllZeroPage0 = false;
-    m_lastReadOk = true;
+    // Live but every page refused: that is a failing read, not a live one.
+    const bool anyReadOk = !batch.firstSeen.isEmpty() || !batch.changed.isEmpty()
+                        || !batch.unchanged.isEmpty();
+    m_lastReadOk = anyReadOk || batch.unreadable.isEmpty();
 
-    // Compute which byte offsets changed (for change highlighting) and
-    // update per-page stability counters.
-    m_changedOffsets.clear();
-    bool anyChanged = false;
+    // A resetChangeTracking() while the read was in flight threw away the
+    // baseline the worker diffed against, so its "changed" is relative to
+    // bytes the user just asked us to forget. Keep the bytes, drop the verdict.
+    const bool staleBaseline = (batch.diffGen != m_diffGen);
     bool firstSnapshot = m_prevPages.isEmpty();
-    for (auto it = newPages.constBegin(); it != newPages.constEnd(); ++it) {
-        uint64_t pageAddr = it.key();
-        const QByteArray& newPage = it.value();
-        auto oldIt = m_prevPages.constFind(pageAddr);
-        if (oldIt == m_prevPages.constEnd()) {
-            // First time we see this page — start its stability counter
-            // at zero. Don't fold it into "anyChanged"; first-sight isn't
-            // a value mutation.
-            m_pageStability[pageAddr] = 0;
-            continue;
-        }
-        const QByteArray& oldPage = oldIt.value();
-        int cmpLen = qMin(oldPage.size(), newPage.size());
-        // Word-strided diff (byte-identical to a per-byte compare; the only
-        // cost on an unchanged page is one memcmp-equivalent per 8 bytes).
-        bool pageChanged = diffPageInto(m_changedOffsets, pageAddr,
-                                        oldPage.constData(), newPage.constData(),
-                                        cmpLen);
-        if (pageChanged) {
-            m_pageStability[pageAddr] = 0;
-            anyChanged = true;
-        } else {
-            m_pageStability[pageAddr] = qMin(kStabilityThreshold + 16,
-                                             m_pageStability.value(pageAddr, 0) + 1);
-        }
+    bool anyChanged = false;
+    m_changedRuns.clear();
+    if (!staleBaseline) {
+        m_changedRuns = batch.runs;
+        anyChanged = !batch.changed.isEmpty();
     }
+
+    // Per-page stability. First sight isn't a value mutation, so it neither
+    // counts as a change nor as quiet; a refused page stays hot so it is
+    // retried at full rate.
+    for (uint64_t p : batch.firstSeen)  m_pageStability[p] = 0;
+    for (uint64_t p : batch.changed)    m_pageStability[p] = 0;
+    for (uint64_t p : batch.unreadable) m_pageStability[p] = 0;
+    for (uint64_t p : batch.unchanged)
+        m_pageStability[p] = qMin(kStabilityThreshold + 16, m_pageStability.value(p, 0) + 1);
 
     // Adaptive: count consecutive ticks with zero observed change.
     if (anyChanged) {
@@ -8321,30 +9028,54 @@ void RcxController::onReadComplete() {
 
     int mainExtent = computeDataExtent();
 
-    // Merge instead of wholesale replace — pages we deliberately skipped
-    // this tick (backstage / permanent) keep their previous bytes.
-    for (auto it = newPages.constBegin(); it != newPages.constEnd(); ++it)
+    // A page turning unreadable, or readable again, changes what is on
+    // screen (the unreadable strike) even when no byte value moved.
+    bool readabilityChanged = false;
+    for (uint64_t p : batch.unreadable)
+        if (!m_snapshotProv || !m_snapshotProv->isFailed(p)) { readabilityChanged = true; break; }
+    if (!readabilityChanged && m_snapshotProv)
+        for (uint64_t p : batch.firstSeen)
+            if (m_snapshotProv->isFailed(p)) { readabilityChanged = true; break; }
+
+    // Merge only what is new or changed. Pages we skipped this tick
+    // (backstage / permanent) keep their previous bytes, and so do pages
+    // that read back identical — re-inserting an equal page every tick
+    // swapped a fresh buffer into both maps for nothing.
+    for (auto it = batch.pages.constBegin(); it != batch.pages.constEnd(); ++it)
         m_prevPages.insert(it.key(), it.value());
+    for (uint64_t p : batch.unreadable)
+        m_prevPages.remove(p);
 
     if (m_snapshotProv) {
-        m_snapshotProv->mergePages(newPages, mainExtent);
+        m_snapshotProv->mergePages(batch.pages, mainExtent);
     } else {
         m_snapshotProv = std::make_unique<SnapshotProvider>(
-            m_doc->provider, newPages, mainExtent);
+            this->provider(), batch.pages, mainExtent);
     }
+    m_snapshotProv->markFailed(batch.unreadable);
 
     // Speedup 4: classify newly-fetched pages as permanent if they fall
     // in a read-only module section — module memory doesn't change at
     // runtime, so we can skip them on every subsequent tick. Must run
     // after m_snapshotProv exists, otherwise the helper early-returns.
-    classifyPermanentPages(newPages);
+    classifyPermanentPages(batch.pages);
+
+    // Hand the tick to the timeline before composing: refresh() consumes the
+    // user-edit ranges the timeline needs to tell your writes from the target's.
+    feedTimeline(batch);
 
     // Compose only when something actually changed (or this is the
-    // first snapshot — there's nothing on screen yet).
-    if (anyChanged || firstSnapshot) {
-        refresh();
+    // first snapshot — there's nothing on screen yet). Not while the view
+    // shows the past — reads (and a recording) continue underneath, the past
+    // does not change — and not while minimised: one compose on restore
+    // instead.
+    if (anyChanged || firstSnapshot || readabilityChanged) {
+        if (!m_windowVisible)
+            m_viewStale = true;
+        else if (!isViewingPast())
+            refresh();
     }
-    m_changedOffsets.clear();
+    m_changedRuns.clear();
 }
 
 // ── Speedup 1: viewport address range ──
@@ -8383,12 +9114,12 @@ RcxController::viewportAddressRange() const {
 
 // ── Speedup 4: classify pages whose region is read-only module memory ──
 void RcxController::classifyPermanentPages(const PageMap& fresh) {
-    if (!m_snapshotProv || !m_doc->provider) return;
+    if (!m_snapshotProv || !this->provider()) return;
     // enumerateRegions() is a FULL VirtualQueryEx sweep of the target's address
     // space — 10s of ms on a process with thousands of mappings (a big game like
     // DayZ). The old code here re-ran it on EVERY refresh tick on the main thread
     // (the "already-cached" comment was wrong: ProcessMemoryProvider re-sweeps on
-    // every call, and we ask m_doc->provider, not a cached wrapper), which is what
+    // every call, and we ask this->provider(), not a cached wrapper), which is what
     // made module-heavy targets barely usable. Cache the list and refresh it at
     // most every kRegionRefreshTicks ticks: the executable module regions we mark
     // permanent are stable, so a slightly stale list only means a just-loaded
@@ -8396,7 +9127,7 @@ void RcxController::classifyPermanentPages(const PageMap& fresh) {
     // correctness issue.
     if (!m_classifyRegionsValid
         || (m_tickCount - m_classifyRegionsTick) >= (uint64_t)kRegionRefreshTicks) {
-        m_classifyRegions = m_doc->provider->enumerateRegions();
+        m_classifyRegions = this->provider()->enumerateRegions();
         m_classifyRegionsValid = true;
         m_classifyRegionsTick = m_tickCount;
     }
@@ -8432,7 +9163,7 @@ int RcxController::computeDataExtent() const {
     }
     if (treeExtent > 0) return static_cast<int>(qMin(treeExtent, kMaxMainExtent));
 
-    int provSize = m_doc->provider->size();
+    int provSize = this->provider()->size();
     if (provSize > 0) return provSize;
     return 0;
 }
@@ -8442,7 +9173,10 @@ void RcxController::resetSnapshot() {
     m_readInFlight = false;
     m_snapshotProv.reset();
     m_prevPages.clear();
-    m_changedOffsets.clear();
+    m_changedRuns.clear();
+    ++m_diffGen;
+    // Touched pages are addresses in the old address space / at the old base.
+    m_touchedAge.clear();
     m_valueHistory.clear();
     m_lastValueAddr.clear();
     m_lastValueBytes.clear();
@@ -8455,7 +9189,627 @@ void RcxController::resetSnapshot() {
     m_classifyRegionsTick = 0;
     m_idleTicks = 0;
     m_tickCount = 0;
+    // Every rebase, attach and source switch lands here. The timeline's
+    // history is NOT reset with the snapshot: it re-binds (same process →
+    // same history, with a base-address epoch; another process → a new one).
+    bindTimeline();
     applyAdaptiveInterval();  // restart timer if it was paused
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Class timeline
+// ─────────────────────────────────────────────────────────────────────────
+
+std::shared_ptr<tl::TimelineHub> RcxController::ensureTimelineHub() {
+    if (m_instance) {
+        if (!m_ownTimelineHub) {
+            m_ownTimelineHub = std::make_shared<tl::TimelineHub>();
+            QPointer<RcxController> self(this);
+            m_ownTimelineHub->onChanged = [self]() { if (self) self->scheduleTimelineChanged(); };
+        }
+        return m_ownTimelineHub;
+    }
+    if (!m_doc) return {};
+    if (!m_doc->timeline) {
+        m_doc->timeline = std::make_shared<tl::TimelineHub>();
+        QPointer<RcxDocument> doc(m_doc.data());
+        m_doc->timeline->onChanged = [doc]() { if (doc) emit doc->timelineStateChanged(); };
+    }
+    return m_doc->timeline;
+}
+
+void RcxController::bindTimeline() {
+    m_timelineHub = ensureTimelineHub();
+    const std::shared_ptr<Provider>& prov = provider();
+    const int64_t now = tl::CaptureClock::nowMs();
+
+    std::shared_ptr<tl::CaptureContext> ctx;
+    if (m_timelineEnabled && prov && prov->isLive())
+        ctx = tl::TimelineService::instance().contextFor(prov);
+
+    if (ctx != m_timelineCtx) {
+        // Another source: the past being shown belongs to the old history.
+        if (isViewingPast()) leavePast();
+        detachTimeline();
+        m_timelineCtx = ctx;
+        m_timelineCoverage.clear();
+        m_timelineSeeded = false;
+        // Another history: count its fields afresh on the next compose.
+        m_classChanges.clear();
+        ++m_classChangesVersion;
+        ++m_classChangesQuery;
+        m_fieldLayoutKey = 0;
+        if (m_timelineCtx) {
+            m_timelineProducer = m_timelineCtx->addProducer();
+            m_timelineCtx->setWantSpans(true);
+            QPointer<RcxController> self(this);
+            m_timelineListener = m_timelineCtx->addListener([self](const tl::CommitBatch& b) {
+                if (!self) return;
+                self->onTimelineCommit(b);
+                self->scheduleTimelineChanged();
+            });
+        }
+    }
+
+    if (m_timelineHub) {
+        if (m_timelineCtx) {
+            const auto& svc = tl::TimelineService::instance();
+            tl::TimelineHub::Budgets b;
+            b.rollingBytes = svc.rollingBudgetPerContext();
+            b.rollingWindowMs = svc.budgets().rollingWindowMs;
+            b.recordingBytes = svc.budgets().recordRamBytes;
+            b.recordingDiskBytes = svc.budgets().recordDiskBytes;
+            m_timelineHub->setBudgets(b);
+            m_timelineHub->bindSource(m_timelineCtx, prov->name(), now);
+            const uint64_t base = baseAddress();
+            if (m_timelineHub->baseAt(INT64_MAX, base) != base)
+                m_timelineHub->noteEvent(tl::TimelineEventKind::Rebase,
+                    QStringLiteral("0x%1").arg(base, 0, 16), now);
+            m_timelineHub->noteBase(base, now);
+        } else if (!m_timelineEnabled) {
+            // Switched off: nothing is kept, not even what was captured.
+            m_timelineHub->clearHistory();
+        } else if (m_timelineHub->context() && (!prov || !prov->isLive())) {
+            m_timelineHub->unbindSource(prov ? prov->name() : QString(), now);
+        }
+    }
+    applyAdaptiveInterval();
+    scheduleTimelineChanged();
+}
+
+void RcxController::detachTimeline() {
+    if (!m_timelineCtx) return;
+    m_timelineCtx->removeListener(m_timelineListener);
+    m_timelineCtx->cancelFrames(m_timelineRequester);
+    // Its watched pages leave coverage: a coverage-only record, so the
+    // history says "not watched from here", never "unchanged".
+    m_timelineCtx->removeProducer(m_timelineProducer, tl::CaptureClock::nowMs());
+    m_timelineCtx.reset();
+    m_timelineListener = 0;
+    m_timelineProducer = 0;
+}
+
+void RcxController::feedTimeline(const ReadBatch& batch) {
+    if (!m_timelineCtx) return;
+    // Nothing is kept until Record is pressed, and nothing after Stop.
+    if (!timelineRecording()) {
+        leaveTimelineCoverage();
+        return;
+    }
+    tl::TickInput in;
+    in.producer = m_timelineProducer;
+    in.readStartMs = m_readStartMs;
+    in.timeMs = tl::CaptureClock::nowMs();
+    in.pages = batch.pages;                 // shared buffers, not copies
+    in.unreadable = batch.unreadable;
+    in.partialSampling = m_inflightPartial;
+    const bool seed = !m_timelineSeeded;
+    const bool coverageChanged = seed || batch.intended != m_timelineCoverage;
+    if (coverageChanged) {
+        // A page entering coverage starts with no bytes in the store — every
+        // page on a recording's first tick; later a pointer target or touched
+        // page coming back — and an unchanged page is not in this tick's
+        // read, so hand over the snapshot's copy (this tick already merged).
+        // Both page lists are sorted and unique.
+        auto covIt = m_timelineCoverage.cbegin();
+        const auto covEnd = m_timelineCoverage.cend();
+        for (uint64_t page : batch.intended) {
+            if (!seed) {
+                while (covIt != covEnd && *covIt < page) ++covIt;
+                if (covIt != covEnd && *covIt == page) continue;   // already covered
+            }
+            if (in.pages.contains(page)) continue;
+            auto it = m_prevPages.constFind(page);
+            if (it != m_prevPages.constEnd()) in.pages.insert(page, it.value());
+        }
+    }
+    if (coverageChanged) in.coverage = batch.intended;
+    for (const auto& r : m_userEditRanges)
+        if (r.second > r.first) in.userEdits.append({r.first, r.second - r.first});
+    if (in.pages.isEmpty() && in.unreadable.isEmpty() && !in.coverage) return;   // idle
+    const bool accepted = m_timelineCtx->append(std::move(in)) == tl::AppendStatus::Accepted;
+    if (accepted) {
+        if (coverageChanged) m_timelineCoverage = batch.intended;
+        m_timelineSeeded = true;
+    }
+}
+
+void RcxController::leaveTimelineCoverage() {
+    if (!m_timelineCtx || !m_timelineSeeded) return;
+    // A coverage-only record: from here this tab's pages read "not recorded"
+    // in the history, never "unchanged". Another tab recording the same
+    // pages keeps its own coverage.
+    tl::TickInput in;
+    in.producer = m_timelineProducer;
+    in.timeMs = tl::CaptureClock::nowMs();
+    in.readStartMs = in.timeMs;
+    in.coverage = QVector<uint64_t>{};
+    m_timelineCtx->append(std::move(in));
+    m_timelineCoverage.clear();
+    m_timelineSeeded = false;
+}
+
+void RcxController::scheduleTimelineChanged() {
+    if (m_timelineChangedPending) return;
+    m_timelineChangedPending = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_timelineChangedPending = false;
+        // The address bar's buttons read the same state as the strip.
+        if (m_doc) pushAddressBarState();
+        emit timelineChanged();
+    });
+}
+
+tl::TimelineHub* RcxController::timelineHub() const { return m_timelineHub.get(); }
+tl::CaptureContext* RcxController::timelineContext() const { return m_timelineCtx.get(); }
+
+uint64_t RcxController::timelineClassId() const {
+    if (m_viewRootId) return m_viewRootId;
+    for (const Node& n : m_doc->tree.nodes)
+        if (n.parentId == 0 && n.kind == NodeKind::Struct) return n.id;
+    return 0;
+}
+
+int64_t RcxController::pastTimeMs() const {
+    // The moment asked for, remembered when it was chosen: the record behind
+    // it may since have aged out of the model, and the moment itself may sit
+    // between two records.
+    return isViewingPast() ? m_pastViewMs : 0;
+}
+
+bool RcxController::timelineRecording() const {
+    return m_timelineCtx && m_timelineHub
+        && m_timelineHub->mode(timelineClassId()) == tl::CaptureMode::Recording;
+}
+
+QString RcxController::viewingPastHint() const {
+    return QStringLiteral("Looking back at a recording: values are read-only. Back to live (Ctrl+End) to edit.");
+}
+
+void RcxController::viewTimelineAt(int64_t timeMs) {
+    if (!m_timelineCtx || m_timelineCtx->model().isEmpty()) return;
+    const tl::TimelineModel& m = m_timelineCtx->model();
+    tl::RecordId r = m.recordAtOrBefore(timeMs);
+    if (!m_timelineHub) {
+        if (r == tl::kNoRecord) r = m.firstRecord();
+        viewTimelineRecord(r);
+        return;
+    }
+    // Only this class's own recording: nothing from before its first Record
+    // or a Clear, and nothing another class or tab recorded meanwhile.
+    const uint64_t cls = timelineClassId();
+    const tl::RecordId first = m_timelineHub->firstVisibleRecord(cls);
+    if (first == tl::kNoRecord) return;
+    // A moment inside a not-recorded stretch (after Stop) shows the last
+    // recorded moment before it.
+    for (int guard = 0; guard < 64 && r != tl::kNoRecord && r >= first
+                        && m_timelineHub->isHiddenFor(cls, m.timeOf(r)); ++guard) {
+        const int64_t at = m.timeOf(r);
+        const tl::Gap* gap = nullptr;
+        for (const tl::Gap& g : m_timelineHub->track(cls).pauses)
+            if (g.contains(at)) { gap = &g; break; }
+        if (!gap) { r = first; break; }   // before the floor or the first Record
+        r = m.recordAtOrBefore(gap->startMs - 1);
+    }
+    if (r == tl::kNoRecord || r < first) r = first;
+    // The playhead stays where it was asked for — inside a not-recorded
+    // stretch included, where the frame shown is the last one before it.
+    viewTimelineRecordAt(r, timeMs);
+}
+
+void RcxController::viewTimelineRecord(tl::RecordId record) {
+    if (!m_timelineCtx || !m_timelineCtx->model().contains(record)) return;
+    viewTimelineRecordAt(record, m_timelineCtx->model().timeOf(record));
+}
+
+void RcxController::viewTimelineRecordAt(tl::RecordId record, int64_t viewMs) {
+    if (!m_timelineCtx || !m_timelineCtx->model().contains(record)) return;
+    m_pastRecordMs = m_timelineCtx->model().timeOf(record);
+    m_pastViewMs = viewMs;
+    // Scrubbing between two records keeps the same frame but moves the
+    // playhead, so this must still tell the UI — hence before the early exit.
+    if (m_pastRecord == record && m_frameProv) {
+        scheduleTimelineChanged();
+        return;
+    }
+    m_pastRecord = record;
+    if (!m_frameProv)
+        m_frameProv = std::make_unique<tl::TimelineFrameProvider>(provider(), nullptr, computeDataExtent());
+    QPointer<RcxController> self(this);
+    m_timelineCtx->requestFrame(m_timelineRequester, record, {}, this,
+        [self](tl::FramePtr frame) { if (self) self->onPastFrame(std::move(frame)); });
+    scheduleTimelineChanged();
+}
+
+void RcxController::onPastFrame(std::shared_ptr<const tl::Frame> frame) {
+    if (!isViewingPast() || !m_frameProv || !frame) return;
+    // A frame computed for a moment since replaced keeps the current one.
+    if (frame->record != m_pastRecord) return;
+    m_frameProv->setFrame(std::move(frame));
+    m_frameProv->setExtent(computeDataExtent());
+    refresh();
+}
+
+void RcxController::leavePast() {
+    if (!isViewingPast()) return;
+    m_pastRecord = tl::kNoRecord;
+    if (m_timelineCtx) m_timelineCtx->cancelFrames(m_timelineRequester);
+    m_frameProv.reset();
+    refresh();
+    scheduleTimelineChanged();
+}
+
+void RcxController::returnToLive() {
+    leavePast();
+}
+
+void RcxController::timelineToggleRecording() {
+    if (!m_timelineHub) return;
+    m_timelineHub->toggleRecording(timelineClassId(), tl::CaptureClock::nowMs());
+    // Stopped: this tab's pages leave the recording now, not on the next read.
+    if (!timelineRecording()) leaveTimelineCoverage();
+    // Recording reads on while unfocused or minimised; stopped, it need not.
+    applyAdaptiveInterval();
+    scheduleTimelineChanged();
+}
+
+void RcxController::timelineReset() {
+    if (!m_timelineHub) return;
+    if (isViewingPast()) leavePast();
+    m_timelineHub->reset(timelineClassId(), tl::CaptureClock::nowMs());
+    scheduleTimelineChanged();
+}
+
+void RcxController::beginTimelineScrub() {
+    m_scrubSnapshot = ScrubSnapshot{true, m_pastRecord, m_pastRecordMs, m_pastViewMs};
+}
+
+void RcxController::cancelTimelineScrub() {
+    const ScrubSnapshot s = m_scrubSnapshot;
+    m_scrubSnapshot = ScrubSnapshot{};
+    if (!s.active) return;
+    if (s.record == tl::kNoRecord) {
+        // Out of the past: live again.
+        leavePast();
+        return;
+    }
+    // The same record, at the time it was chosen (it may have aged out since).
+    if (!m_timelineCtx || !m_timelineCtx->model().contains(s.record)) return;
+    viewTimelineRecordAt(s.record, s.viewMs);
+    m_pastRecordMs = s.recordMs;
+    scheduleTimelineChanged();
+}
+
+bool RcxController::stepTimelineChange(int dir) {
+    if (!m_timelineCtx || m_timelineCtx->model().isEmpty() || dir == 0) return false;
+    const tl::TimelineModel& m = m_timelineCtx->model();
+    const uint64_t cls = timelineClassId();
+    tl::RecordId first = m_timelineHub ? m_timelineHub->firstVisibleRecord(cls) : m.firstRecord();
+    if (first == tl::kNoRecord) return false;
+    auto hidden = [&](tl::RecordId r) {
+        return m_timelineHub && m_timelineHub->isHiddenFor(cls, m.timeOf(r));
+    };
+    if (timelineCountsFields()) {
+        // Change = a field of this class changed; with rows selected, one of
+        // THEM changed — "when did health last move?".
+        const QVector<tl::FieldSpan> scope = timelineSelectionScope();
+        const QVector<tl::FieldSpan>* sc = scope.isEmpty() ? nullptr : &scope;
+        if (dir < 0) {
+            tl::RecordId r = isViewingPast() ? m_pastRecord : m.lastRecord() + 1;
+            while ((r = m_classChanges.previous(r, sc, first)) != tl::kNoRecord)
+                if (m.contains(r) && !hidden(r)) { viewTimelineRecord(r); return true; }
+            emit statusHint(sc ? QStringLiteral("No earlier change of %1 was captured.").arg(timelineScopeLabel())
+                               : QStringLiteral("No earlier change was captured."));
+            return false;
+        }
+        if (!isViewingPast()) return false;
+        tl::RecordId r = m_pastRecord;
+        while ((r = m_classChanges.next(r, sc)) != tl::kNoRecord)
+            if (m.contains(r) && !hidden(r)) { viewTimelineRecord(r); return true; }
+        returnToLive();   // past the newest change is now
+        return true;
+    }
+    auto eligible = [&](tl::RecordId r) { return m.changedBytesOf(r) > 0 && !hidden(r); };
+    if (dir < 0) {
+        tl::RecordId r = isViewingPast() ? m_pastRecord : m.lastRecord() + 1;
+        while (r > first) {
+            --r;
+            if (eligible(r)) { viewTimelineRecord(r); return true; }
+        }
+        return false;
+    }
+    if (!isViewingPast()) return false;
+    for (tl::RecordId r = m_pastRecord + 1; r <= m.lastRecord(); ++r)
+        if (eligible(r)) { viewTimelineRecord(r); return true; }
+    returnToLive();   // past the newest change is now
+    return true;
+}
+
+void RcxController::setTimelineBackgroundCapture(bool on) {
+    m_timelineBackgroundCapture = on;
+    applyAdaptiveInterval();
+}
+
+void RcxController::setTimelineEnabled(bool on) {
+    if (m_timelineEnabled == on) return;
+    m_timelineEnabled = on;
+    // Its buttons go with it: a recorded moment left on screen would have no
+    // way back to live.
+    if (!on && isViewingPast()) returnToLive();
+    bindTimeline();
+}
+
+const Provider* RcxController::displayedProvider() const {
+    if (isViewingPast() && m_frameProv && m_frameProv->frame()) return m_frameProv.get();
+    if (m_snapshotProv) return m_snapshotProv.get();
+    return provider() ? provider().get() : nullptr;
+}
+
+// The bytes a composed row's value shows; 0 for a row with no value of its
+// own (an open struct's header, a footer).
+int RcxController::rowValueBytes(const NodeTree& tree, const LineMeta& lm) {
+    if (lm.lineKind != LineKind::Field || lm.nodeIdx < 0 || lm.nodeIdx >= tree.nodes.size()) return 0;
+    const Node& n = tree.nodes[lm.nodeIdx];
+    if (lm.isArrayElement) return qMax(0, sizeForKind(lm.elementKind));
+    if (n.kind == NodeKind::Struct && n.classKeyword != QStringLiteral("bitfield")) return 0;
+    return qMax(0, n.byteSize());
+}
+
+QString RcxController::fieldDisplayName(uint64_t selId) const {
+    const NodeTree& tree = viewTree();
+    const int idx = tree.indexOfId(baseNodeIdFromSelId(selId));
+    if (idx < 0) return QStringLiteral("?");
+    const Node& n = tree.nodes[idx];
+    QString name = n.name.isEmpty() ? n.structTypeName : n.name;
+    if (selId & kArrayElemBit) name += QStringLiteral("[%1]").arg(arrayElemIdxFromSelId(selId));
+    return name;
+}
+
+void RcxController::rebuildFieldIndex() {
+    const NodeTree& tree = viewTree();
+    const uint64_t cls = timelineClassId();
+    // A recount is for the LAYOUT changing (retype, resize, fold, another
+    // class); the base moving or a pointer re-pointing only moves the spans.
+    const quint64 layoutKey = (tree.generation() * 0x9E3779B97F4A7C15ull)
+                            ^ (m_capturePlanEpoch * 0xC2B2AE3D27D4EB4Full) ^ (cls + 1);
+    const uint64_t base = baseAddress();
+    const bool layoutChanged = layoutKey != m_fieldLayoutKey;
+    const bool pointersMove = m_capturePlan && m_capturePlan->root >= 0
+                           && !m_capturePlan->structs[m_capturePlan->root].ptrs.isEmpty();
+    if (!layoutChanged && base == m_fieldIndexBase && !pointersMove) return;
+
+    QHash<uint64_t, QVector<int>> childMap;
+    bool childMapBuilt = false;
+    QVector<tl::FieldSpan> fields;
+    fields.reserve(m_lastResult.meta.size());
+    for (const LineMeta& lm : m_lastResult.meta) {
+        if (lm.nodeIdx < 0 || lm.nodeIdx >= tree.nodes.size()) continue;
+        if (lm.lineKind == LineKind::Field) {
+            const int len = rowValueBytes(tree, lm);
+            if (len > 0) fields.append({lm.offsetAddr, uint32_t(len), selIdForLine(lm)});
+            continue;
+        }
+        if (lm.lineKind != LineKind::Header) continue;
+        const Node& n = tree.nodes[lm.nodeIdx];
+        int len = 0;
+        if (isPointerKind(n.kind)) {
+            len = n.byteSize();                    // an open pointer's own bytes
+        } else if (lm.foldCollapsed) {
+            // A folded struct or array is one field: anything inside it.
+            if (!childMapBuilt) {
+                for (int i = 0; i < tree.nodes.size(); ++i) childMap[tree.nodes[i].parentId].append(i);
+                childMapBuilt = true;
+            }
+            len = tree.structSpan(n.id, &childMap);
+            if (len <= 0 && n.kind == NodeKind::Array && n.refId)
+                len = int(qMin<int64_t>(INT_MAX, int64_t(tree.structSpan(n.refId, &childMap)) * n.arrayLen));
+        }
+        if (len > 0) fields.append({lm.offsetAddr, uint32_t(len), lm.nodeId});
+    }
+    m_fieldIndex.build(std::move(fields));
+    m_fieldIndexBase = base;
+    ++m_fieldIndexGeneration;
+    if (layoutChanged) {
+        m_fieldLayoutKey = layoutKey;
+        recountClassChanges();
+    }
+}
+
+void RcxController::countRecord(tl::ClassChangeSeries& series, tl::RecordId r, int64_t tMs,
+                                const QVector<tl::ChangedSpan>& spans, QVector<int>& hits) const {
+    if (spans.isEmpty()) return;
+    // A record from before a rebase is counted where the class was then.
+    const uint64_t base = baseAddress();
+    const uint64_t thenBase = m_timelineHub ? m_timelineHub->baseAt(tMs, base) : base;
+    if (thenBase != base) {
+        QVector<tl::ChangedSpan> moved = spans;
+        for (tl::ChangedSpan& s : moved) s.addr += base - thenBase;
+        m_fieldIndex.hits(moved, hits);
+    } else {
+        m_fieldIndex.hits(spans, hits);
+    }
+    if (hits.isEmpty()) return;
+    QVector<uint64_t> ids;
+    ids.reserve(qMin(hits.size(), tl::ClassChangeSeries::kMaxIdsPerRecord));
+    uint64_t lo = UINT64_MAX, hi = 0;
+    for (int h : std::as_const(hits)) {
+        const tl::FieldSpan& f = m_fieldIndex.at(h);
+        if (ids.size() < tl::ClassChangeSeries::kMaxIdsPerRecord) ids.append(f.id);
+        lo = qMin(lo, f.addr);
+        hi = qMax(hi, tl::FieldIndex::endOf(f.addr, f.len));
+    }
+    series.append(r, tMs, hits.size(), ids, lo, hi);
+}
+
+void RcxController::onTimelineCommit(const tl::CommitBatch& b) {
+    bool changed = false;
+    if (b.firstRetained != tl::kNoRecord && !m_classChanges.isEmpty()) {
+        const int before = m_classChanges.size();
+        m_classChanges.dropBefore(b.firstRetained);
+        changed = m_classChanges.size() != before;
+    }
+    if (!m_fieldIndex.isEmpty() && !b.spans.isEmpty()) {
+        QVector<int> hits;
+        int j = 0;
+        for (const auto& rs : b.spans) {
+            while (j < b.appended.size() && b.appended[j].rec < rs.first) ++j;
+            const int64_t t = (j < b.appended.size() && b.appended[j].rec == rs.first)
+                            ? b.appended[j].timeMs
+                            : (m_timelineCtx ? m_timelineCtx->model().timeOf(rs.first) : 0);
+            const int size = m_classChanges.size();
+            countRecord(m_classChanges, rs.first, t, rs.second, hits);
+            changed |= m_classChanges.size() != size;
+        }
+    }
+    if (changed) ++m_classChangesVersion;
+    // A moment on screen that ages out of the store stays on screen: the
+    // frame holds its pages, and pastTimeMs() reads the time cached when it
+    // was chosen. Re-pinning to the oldest record would creep the view
+    // forward on every trim.
+}
+
+void RcxController::recountClassChanges() {
+    const int query = ++m_classChangesQuery;
+    // The series is NOT cleared here. The refill below is queued on the
+    // maintenance lane, behind every capture tick, so clearing up front blanked
+    // the graph on any relayout — a fold, a tree edit, a view-root change — and
+    // read as the timeline reloading. The callback swaps the rebuilt series in
+    // atomically; until it lands the old counts keep drawing.
+    if (!m_timelineCtx || m_timelineCtx->model().isEmpty() || m_fieldIndex.isEmpty()) {
+        // Nothing to count against: here the old counts WOULD be a lie.
+        m_classChanges.clear();
+        ++m_classChangesVersion;
+        scheduleTimelineChanged();
+        return;
+    }
+    const tl::TimelineModel& m = m_timelineCtx->model();
+    const tl::RecordId hi = m.lastRecord();
+    tl::RecordId lo = m.firstRecord();
+    constexpr tl::RecordId kMaxRecount = 200000;   // an 11-hour recording at 5 Hz
+    if (hi - lo + 1 > kMaxRecount) lo = hi - kMaxRecount + 1;
+    // Commits landing meanwhile are counted live into m_classChanges; the
+    // recount goes in front of them when it arrives.
+    QPointer<RcxController> self(this);
+    m_timelineCtx->querySpans(lo, hi, this, [self, query](tl::CaptureContext::SpanList list) {
+        if (!self || query != self->m_classChangesQuery || !self->m_timelineCtx) return;
+        const tl::TimelineModel& model = self->m_timelineCtx->model();
+        tl::ClassChangeSeries recount;
+        QVector<int> hits;
+        for (const auto& rs : list)
+            if (model.contains(rs.first))
+                self->countRecord(recount, rs.first, model.timeOf(rs.first), rs.second, hits);
+        recount.appendNewer(self->m_classChanges);
+        self->m_classChanges = std::move(recount);
+        ++self->m_classChangesVersion;
+        self->scheduleTimelineChanged();
+    });
+}
+
+QVector<tl::FieldSpan> RcxController::timelineSelectionScope() const {
+    if (m_selIds.isEmpty() || m_fieldIndex.isEmpty()) return {};
+    const quint64 key = qHash(m_selIds) ^ (m_fieldIndexGeneration * 0x9E3779B97F4A7C15ull);
+    if (key == m_scopeKey && m_scopeValid) return m_scope;
+    QVector<tl::FieldSpan> scope = m_fieldIndex.spansOf(m_selIds);
+    // An open struct or array row: every field laid out inside it.
+    const NodeTree& tree = viewTree();
+    for (uint64_t sel : m_selIds) {
+        if (sel & (kFooterIdBit | kArrayElemBit | kMemberBit)) continue;
+        const int idx = tree.indexOfId(sel);
+        if (idx < 0 || !isContainerKind(tree.nodes[idx].kind)) continue;
+        const int64_t off = tree.computeOffset(idx);
+        const int span = tree.structSpan(sel);
+        if (off < 0 || span <= 0) continue;
+        const uint64_t lo = baseAddress() + uint64_t(off);
+        const uint64_t hi = tl::FieldIndex::endOf(lo, uint64_t(span));
+        for (const tl::FieldSpan& f : m_fieldIndex.fields())
+            if (f.addr >= lo && tl::FieldIndex::endOf(f.addr, f.len) <= hi) scope.append(f);
+    }
+    m_scope = scope;
+    m_scopeKey = key;
+    m_scopeValid = true;
+    return scope;
+}
+
+QString RcxController::timelineScopeLabel() const {
+    if (timelineSelectionScope().isEmpty()) return {};
+    if (m_selIds.size() == 1)
+        return QStringLiteral("'%1'").arg(fieldDisplayName(*m_selIds.constBegin()));
+    return QStringLiteral("%1 fields").arg(m_selIds.size());
+}
+
+QString RcxController::describeTimelineAt(int64_t timeMs) const {
+    if (!m_timelineCtx) return {};
+    const tl::TimelineModel& m = m_timelineCtx->model();
+    const tl::RecordId r = m.recordAtOrBefore(timeMs);
+    if (r == tl::kNoRecord) return QStringLiteral("Before capture began");
+    // Parked between records: what is shown is the last capture before this
+    // moment, and "nothing changed" would hide how far back that was.
+    const int64_t age = timeMs - m.timeOf(r);
+    if (age > 1000) {
+        const double secs = age / 1000.0;
+        return QStringLiteral("Unchanged — last change %1s earlier")
+            .arg(secs < 10 ? QString::number(secs, 'f', 1)
+                           : QString::number(qint64(secs + 0.5)));
+    }
+    if (!timelineCountsFields()) {
+        const uint32_t bytes = m.changedBytesOf(r);
+        return bytes ? QStringLiteral("%1 bytes changed").arg(bytes) : QStringLiteral("Nothing changed");
+    }
+    const int count = m_classChanges.countOf(r);
+    if (count == 0)
+        return m.changedBytesOf(r) ? QStringLiteral("Nothing in this class changed")
+                                   : QStringLiteral("Nothing changed");
+    QString text = count == 1 ? QStringLiteral("1 field changed")
+                              : QStringLiteral("%1 fields changed").arg(count);
+    const QVector<uint64_t> ids = m_classChanges.idsOf(r);
+    QStringList names;
+    for (uint64_t id : ids) {
+        if (names.size() == 4) break;
+        names << fieldDisplayName(id);
+    }
+    if (!names.isEmpty())
+        text += QStringLiteral(": ") + names.join(QStringLiteral(", "))
+              + (count > names.size() ? QStringLiteral(", …") : QString());
+    return text;
+}
+
+void RcxController::revealSelectionInTimeline() {
+    if (!m_timelineCtx || m_timelineCtx->model().isEmpty()) {
+        emit statusHint(QStringLiteral("Nothing captured yet — the timeline records live sources."));
+        return;
+    }
+    const QVector<tl::FieldSpan> scope = timelineSelectionScope();
+    const tl::TimelineModel& m = m_timelineCtx->model();
+    const QVector<int64_t> times = m_classChanges.times(INT64_MIN, INT64_MAX,
+                                                        scope.isEmpty() ? nullptr : &scope, INT_MAX);
+    if (times.isEmpty()) {
+        emit statusHint(scope.isEmpty() ? QStringLiteral("No change of this class was captured.")
+                                        : QStringLiteral("No change of %1 was captured.").arg(timelineScopeLabel()));
+        emit timelineRevealRequested(m.timeOf(m.firstRecord()), tl::CaptureClock::nowMs());
+        return;
+    }
+    const int64_t pad = qMax<int64_t>(500, (times.last() - times.first()) / 20);
+    emit timelineRevealRequested(times.first() - pad, times.last() + pad);
 }
 
 void RcxController::handleMarginClick(RcxEditor* editor, int margin,
@@ -8498,7 +9852,7 @@ bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHisto
     if (s.isEmpty()) return refuse(QStringLiteral("empty formula"));
 
     const AddressParserCallbacks cbs =
-        makeAddressCallbacks(m_doc->provider.get(), m_doc->tree.pointerSize);
+        makeAddressCallbacks(this->provider().get(), m_doc->tree.pointerSize);
     const auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
     if (!result.ok) return refuse(result.error);
 
@@ -8506,8 +9860,8 @@ bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHisto
     // hex/decimal literal that round-trips identically through the canonical
     // "0xHEX" display — a literal formula would only shadow the number.
     const QString newFormula = isBareAddressLiteral(s) ? QString() : s;
-    const uint64_t oldBase = m_doc->tree.baseAddress;
-    const QString oldFormula = m_doc->tree.baseAddressFormula;
+    const uint64_t oldBase = baseAddress();
+    const QString oldFormula = baseAddressFormula();
     if (result.value != oldBase || newFormula != oldFormula) {
         // The place being left, recorded only on the path that moves: the
         // same-base branch below changes nothing and leaves no entry.
@@ -8580,8 +9934,8 @@ NavEntry RcxController::currentNavEntry(RcxEditor* from) const {
     NavEntry e;
     e.viewRootId      = m_viewRootId;
     e.focusPath       = m_focusPath;
-    e.baseAddress     = tree.baseAddress;
-    e.baseFormula     = tree.baseAddressFormula;
+    e.baseAddress     = baseAddress();
+    e.baseFormula     = baseAddressFormula();
     e.activeSourceIdx = m_activeSourceIdx;
     // The anchor: the node on the pane's first visible row, so a restore
     // scrolls back to what was on screen and not merely to the class
@@ -8600,7 +9954,7 @@ NavEntry RcxController::currentNavEntry(RcxEditor* from) const {
 QString RcxController::currentNavLabel() const {
     const NodeTree& tree = m_doc->tree;
     return trailPathText(tree, m_viewRootId, m_focusPath)
-         + QStringLiteral("  @ 0x") + QString::number(tree.baseAddress, 16).toUpper();
+         + QStringLiteral("  @ 0x") + QString::number(baseAddress(), 16).toUpper();
 }
 
 void RcxController::recordNav(RcxEditor* from) {
@@ -8670,9 +10024,9 @@ void RcxController::restoreNav(const NavEntry& e, RcxEditor* from) {
         }
         if (ok) {
             const int prevIdx = m_activeSourceIdx;
-            const Provider* prevProv = m_doc->provider.get();
+            const Provider* prevProv = this->provider().get();
             switchToSavedSource(e.activeSourceIdx);
-            if (m_doc->provider.get() == prevProv) {   // refused: nothing was swapped
+            if (this->provider().get() == prevProv) {   // refused: nothing was swapped
                 m_activeSourceIdx = prevIdx;
                 ok = false;
             }
@@ -8701,9 +10055,15 @@ void RcxController::restoreNav(const NavEntry& e, RcxEditor* from) {
     //    restored base are not "changes", and the snapshot is of the old
     //    base's pages.
     NodeTree& tree = m_doc->tree;
-    if (e.baseAddress != tree.baseAddress || e.baseFormula != tree.baseAddressFormula) {
-        tree.baseAddress = e.baseAddress;
-        tree.baseAddressFormula = e.baseFormula;
+    uint64_t restoredBase = e.baseAddress;
+    if (!e.baseFormula.isEmpty()) {
+        const auto callbacks = makeAddressCallbacks(provider().get(), tree.pointerSize);
+        const auto result = AddressParser::evaluate(e.baseFormula, tree.pointerSize, &callbacks);
+        if (result.ok) restoredBase = result.value;
+    }
+    if (restoredBase != baseAddress() || e.baseFormula != baseAddressFormula()) {
+        baseAddress() = restoredBase;
+        baseAddressFormula() = e.baseFormula;
         resetChangeTracking();
         resetSnapshot();
     }
@@ -8715,7 +10075,7 @@ void RcxController::restoreNav(const NavEntry& e, RcxEditor* from) {
     QVector<uint64_t> toExpand;
     for (uint64_t hop : e.focusPath) {
         const int pi = tree.indexOfId(hop);
-        if (pi >= 0 && tree.nodes[pi].collapsed) toExpand.push_back(hop);
+        if (pi >= 0 && isCollapsed(tree.nodes[pi])) toExpand.push_back(hop);
     }
     if (!toExpand.isEmpty()) {
         const bool wasSuppressed = m_suppressRefresh;
@@ -8756,6 +10116,11 @@ void RcxController::addBookmark(const QString& name, const QString& formula) {
     b.name = name.trimmed();
     b.addressFormula = formula.trimmed();
     if (b.name.isEmpty() || b.addressFormula.isEmpty()) return;
+    if (isBareAddressLiteral(b.addressFormula)) {
+        const auto callbacks = makeAddressCallbacks(provider().get(), m_doc->tree.pointerSize);
+        const auto result = AddressParser::evaluate(b.addressFormula, m_doc->tree.pointerSize, &callbacks);
+        if (result.ok) b.addressFormula = addressExpression(result.value);
+    }
     m_doc->tree.bookmarks.append(b);
     m_doc->modified = true;
     emit m_doc->documentChanged();

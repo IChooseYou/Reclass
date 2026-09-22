@@ -10,6 +10,11 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTemporaryFile>
+#include <QMenu>
+#include <QSignalSpy>
+#include <QTimer>
+#include "providers/file_provider.h"
+#include "sparse_file.h"
 #include <memory>
 #include "scannerpanel.h"
 #include "themes/thememanager.h"
@@ -33,6 +38,83 @@ class TestScannerPanel : public QObject {
     }
 
 private slots:
+
+    void testFileScanBeyond4GiB() {
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        constexpr uint64_t offset = (uint64_t(1) << 32) + 4096;
+        if (!resizeSparseTestFile(file, qint64(offset + 65536)))
+            QSKIP("Filesystem does not support sparse test files");
+        QVERIFY(file.seek(qint64(offset)));
+        QCOMPARE(file.write(QByteArray::fromHex("2a000000")), qint64(4));
+        file.flush();
+        auto provider = FileProvider::open(file.fileName());
+        QVERIFY(provider);
+        ScannerPanel panel;
+        panel.setProviderGetter([provider] { return provider; });
+        const auto results = panel.runValueScanAndWait(ValueType::Int32, QStringLiteral("42"),
+            false, false, {{offset - 64, offset + 64}});
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results.first().address, offset);
+        QVERIFY(provider->cachedBytes() <= 65536);
+    }
+
+    void testResultsRetainTheirSourceAndOpenBeside() {
+        ScannerPanel panel;
+        QByteArray bytes(64, '\0');
+        bytes[8] = 42;
+        auto original = std::make_shared<BufferProvider>(bytes);
+        std::shared_ptr<Provider> active = original;
+        panel.setProviderGetter([&active] { return active; });
+        const auto results = panel.runValueScanAndWait(ValueType::Int32, QStringLiteral("42"));
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(panel.resultProvider().get(), original.get());
+        active = std::make_shared<BufferProvider>(QByteArray(64, '\0'));
+        panel.resultsTable()->item(0, 1)->setText(QStringLiteral("99"));
+        QCOMPARE(original->readU32(8), uint32_t(99));
+        QCOMPARE(active->readU32(8), uint32_t(0));
+        panel.resize(620, 700);
+        panel.show();
+        QApplication::processEvents();
+        QSignalSpy opened(&panel, &ScannerPanel::openBesideRequested);
+        QTimer::singleShot(0, &panel, [] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (!menu) return;
+            for (auto* action : menu->actions()) {
+                if (action->objectName() == QStringLiteral("openInstanceBeside")) {
+                    menu->setActiveAction(action);
+                    QTest::keyClick(menu, Qt::Key_Return);
+                    return;
+                }
+            }
+            menu->close();
+        });
+        QTimer::singleShot(250, &panel, [] {
+            if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) menu->close();
+        });
+        auto* table = panel.resultsTable();
+        const QPoint pos = table->visualItemRect(table->item(0, 0)).center();
+        emit table->customContextMenuRequested(pos);
+        QCOMPARE(opened.size(), 1);
+        QCOMPARE(opened.first().first().toULongLong(), uint64_t(8));
+        QCOMPARE(panel.resultProvider().get(), original.get());
+        panel.newScanButton()->click();
+        QVERIFY(!panel.resultProvider());
+        QTemporaryFile imported;
+        QVERIFY(loadOneRow(panel, imported));
+        QCOMPARE(panel.resultProvider().get(), active.get());
+        bool oldRowsCleared = false;
+        connect(&panel, &ScannerPanel::resultSourceChanged, &panel, [&] {
+            oldRowsCleared = panel.results().isEmpty() && panel.resultsTable()->rowCount() == 0;
+        });
+        bytes.fill('\0');
+        bytes[16] = 42;
+        active = std::make_shared<BufferProvider>(bytes);
+        const auto newResults = panel.runValueScanAndWait(ValueType::Int32, QStringLiteral("42"));
+        QVERIFY(oldRowsCleared);
+        QCOMPARE(newResults.size(), 1);
+        QCOMPARE(newResults.first().address, uint64_t(16));
+    }
 
     // Regression: the in-place value-cell editor must inherit the cell's display
     // alignment (right, for numerics). Qt's default editor is left-aligned, so

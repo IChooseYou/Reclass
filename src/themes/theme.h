@@ -59,7 +59,6 @@ struct Theme {
     // ── Presentation ──
     QColor focusGlow;       // MCP focus pulse (warm amber)
 
-    bool isDark() const { return background.lightnessF() < 0.5; }
     QJsonObject toJson() const;
     static Theme fromJson(const QJsonObject& obj);
 };

@@ -10,7 +10,6 @@
 
 #include <QtTest/QTest>
 #include <QApplication>
-#include <QElapsedTimer>
 #include <QFontDatabase>
 
 #include "widgets/font_choices.h"

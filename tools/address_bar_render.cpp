@@ -112,11 +112,11 @@ static Crumb crumb(const QString& label, uint64_t index, uint64_t address) {
 // follows the depth — the cells the app lights at that place.
 static AddressBarState stateWithDepth(int depth) {
     AddressBarState s;
-    s.sourceName   = QStringLiteral("REECLASS.exe");
+    s.sourceName   = QStringLiteral("RC.exe");
     s.sourceKindId = QStringLiteral("processmemory");
     s.liveness     = liveness::Live;
     s.baseAddress  = 0x7FF6DEAD0000ULL;
-    s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234");
+    s.baseFormula  = QStringLiteral("<RC.exe>+0x1234");
     s.resolvedBase = 0x7FF6DEAD1234ULL;
     s.viewRootId   = 100;
     s.canBack      = true;

@@ -2,10 +2,15 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QTemporaryFile>
+#include <QElapsedTimer>
+#include <future>
 #include <cstring>
 #include "providers/provider.h"
 #include "providers/buffer_provider.h"
 #include "providers/null_provider.h"
+#include "providers/file_provider.h"
+#include "sparse_file.h"
 
 using namespace rcx;
 
@@ -13,6 +18,74 @@ class TestProvider : public QObject {
     Q_OBJECT
 
 private slots:
+
+    void fileProvider_readsAndEditsAcrossPagesWithoutChangingOriginal() {
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        QByteArray original(200000, '\0');
+        for (int i = 0; i < original.size(); ++i) original[i] = char(i % 251);
+        QCOMPARE(file.write(original), qint64(original.size()));
+        file.flush();
+        const auto provider = FileProvider::open(file.fileName());
+        QVERIFY(provider);
+        QCOMPARE(provider->byteSize(), uint64_t(original.size()));
+        QCOMPARE(provider->readBytes(65530, 25), original.mid(65530, 25));
+        QCOMPARE(provider->readBytes(199999, 1), original.right(1));
+        QVERIFY(!provider->isReadable(UINT64_MAX, 1));
+        QVERIFY(!provider->isReadable(0, -1));
+        QVERIFY(!provider->isReadable(200000, 1));
+        QVERIFY(provider->writeBytes(4090, QByteArray(20, 'X')));
+        QByteArray edited = original.mid(4080, 40);
+        edited.replace(10, 20, QByteArray(20, 'X'));
+        QCOMPARE(provider->readBytes(4080, 40), edited);
+        QVERIFY(file.seek(0));
+        QCOMPARE(file.readAll(), original);
+        QVERIFY(provider->cachedBytes() <= 65536);
+
+        auto reader = [provider, original](int seed) {
+            for (int i = 0; i < 100; ++i) {
+                const int offset = 70000 + ((i * 997 + seed) % 100000);
+                if (provider->readBytes(offset, 1024) != original.mid(offset, 1024)) return false;
+            }
+            return true;
+        };
+        auto a = std::async(std::launch::async, reader, 13);
+        auto b = std::async(std::launch::async, reader, 47);
+        QVERIFY(a.get());
+        QVERIFY(b.get());
+    }
+
+    void fileProvider_64GiBSparseFile() {
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        constexpr qint64 length = (qint64(1) << 36) + 123;
+        if (!resizeSparseTestFile(file, length)) QSKIP("Filesystem does not support sparse test files");
+        const QByteArray marker("large-file-sentinel");
+        const QVector<qint64> offsets = {0, (qint64(1) << 31) - 5,
+            (qint64(1) << 32) + 19, length - marker.size()};
+        for (qint64 offset : offsets) {
+            QVERIFY(file.seek(offset));
+            QCOMPARE(file.write(marker), qint64(marker.size()));
+        }
+        file.flush();
+        QElapsedTimer timer;
+        timer.start();
+        const auto provider = FileProvider::open(file.fileName());
+        QVERIFY(provider);
+        QCOMPARE(provider->byteSize(), uint64_t(length));
+        QCOMPARE(provider->size(), INT_MAX);
+        QCOMPARE(provider->cachedBytes(), 0);
+        QCOMPARE(provider->enumerateRegions().first().size, uint64_t(length));
+        for (qint64 offset : offsets)
+            QCOMPARE(provider->readBytes(uint64_t(offset), marker.size()), marker);
+        QVERIFY(provider->writeBytes(uint64_t(length - 2), QByteArray("XY")));
+        QCOMPARE(provider->readBytes(uint64_t(length - 2), 2), QByteArray("XY"));
+        QVERIFY(file.seek(length - marker.size()));
+        QCOMPARE(file.read(marker.size()), marker);
+        QVERIFY(!provider->isReadable(uint64_t(length), 1));
+        QVERIFY(provider->cachedBytes() <= 65536);
+        qInfo() << "64 GiB sparse file open/read/edit:" << timer.elapsed() << "ms, cache:" << provider->cachedBytes();
+    }
 
     // ---------------------------------------------------------------
     // NullProvider

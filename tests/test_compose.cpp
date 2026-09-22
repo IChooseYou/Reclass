@@ -2,6 +2,7 @@
 #include <QJsonDocument>
 #include <QFile>
 #include "core.h"
+#include "treeguides.h"
 
 using namespace rcx;
 
@@ -2631,44 +2632,30 @@ private slots:
         memcpy(data.data() + 8, &ptrVal, 8);
         BufferProvider prov(data);
 
-        // Compose WITH tree lines
+        // Tree lines are drawn by the editor now: the text is the same with
+        // them on or off, and the structure comes from the rows.
         ComposeResult result = compose(tree, prov, 0, false, true);
+        ComposeResult plain = compose(tree, prov, 0, false, false);
+        QCOMPARE(result.text, plain.text);
+        QVERIFY(result.layout.treeLines);
+        QVERIFY(!plain.layout.treeLines);
+        for (QChar ch : {QChar(0x2502), QChar(0x251C), QChar(0x2514)})
+            QVERIFY(!result.text.contains(ch));
 
-        QStringList lines = result.text.split('\n');
-
-        // Print output with char codes for debugging
-        qDebug() << "=== Tree lines compose output (hex64 scenario) ===";
-        for (int i = 0; i < lines.size(); i++) {
-            // Also show hex of first 15 chars to see tree chars
-            QString hexChars;
-            for (int c = 0; c < qMin(15, lines[i].size()); c++)
-                hexChars += QString("U+%1 ").arg(static_cast<uint>(lines[i][c].unicode()), 4, 16, QChar('0'));
-            qDebug().noquote() << QString("[%1] d=%2 k=%3: %4")
-                .arg(i, 2).arg(result.meta[i].depth).arg((int)result.meta[i].lineKind).arg(lines[i]);
-            qDebug().noquote() << QString("     hex: %1").arg(hexChars);
-        }
-        qDebug() << "=== end ===";
-
-        // Verify depth-2 lines contain tree chars
-        QChar vertLine(0x2502);  // │
-        QChar tee(0x251C);       // ├
-        QChar corner(0x2514);    // └
-
-        bool foundDepth2TreeChar = false;
+        // Every non-footer depth-2 row (the pointer's three children) hangs
+        // off a line, and the last one closes it.
+        const TreeGuides guides = buildTreeGuides(result.meta);
+        int depth2 = 0;
         for (int i = 0; i < result.meta.size(); i++) {
-            if (result.meta[i].depth == 2
-                && result.meta[i].lineKind != LineKind::Footer) {
-                bool has = lines[i].contains(vertLine)
-                        || lines[i].contains(tee)
-                        || lines[i].contains(corner);
-                if (has) foundDepth2TreeChar = true;
-                QVERIFY2(has,
-                    qPrintable(QString("Depth-2 line %1 missing tree chars: %2")
-                        .arg(i).arg(lines[i])));
-            }
+            if (result.meta[i].depth != 2 || result.meta[i].lineKind == LineKind::Footer)
+                continue;
+            ++depth2;
+            const QString prefix = treePrefixAscii(guides, result.meta, i);
+            QVERIFY2(prefix.startsWith(QChar(0x2502))
+                         && (prefix.endsWith(QStringLiteral("├ ")) || prefix.endsWith(QStringLiteral("└ "))),
+                     qPrintable(QString("Depth-2 line %1 has tree prefix [%2]").arg(i).arg(prefix)));
         }
-        QVERIFY2(foundDepth2TreeChar,
-                 qPrintable("No depth-2 lines with tree chars found:\n" + result.text));
+        QCOMPARE(depth2, 3);
     }
     void testPrimitiveArrayElementCountFour() {
         rcx::NodeTree tree;

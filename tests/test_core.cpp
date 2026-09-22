@@ -459,21 +459,21 @@ private slots:
         lm.isContinuation = false;
         lm.nodeIdx = 0;
 
-        // kFoldCol (3) + depth*3(0) = 3
+        // kFoldCol (1) + depth*kTreeIndent (0) = 1
         auto ts = rcx::typeSpanFor(lm);
         QVERIFY(ts.valid);
-        QCOMPARE(ts.start, 3);
-        QCOMPARE(ts.end, 17);   // 3 + 14 (kColType)
+        QCOMPARE(ts.start, 1);
+        QCOMPARE(ts.end, 15);   // 1 + 14 (kColType)
 
         auto ns = rcx::nameSpanFor(lm);
         QVERIFY(ns.valid);
-        QCOMPARE(ns.start, 18); // 3 + 14 + 1 (kSepWidth)
-        QCOMPARE(ns.end, 40);   // 18 + 22 (kColName)
+        QCOMPARE(ns.start, 16); // 1 + 14 + 1 (kSepWidth)
+        QCOMPARE(ns.end, 38);   // 16 + 22 (kColName)
 
         auto vs = rcx::valueSpanFor(lm, 100);
         QVERIFY(vs.valid);
-        QCOMPARE(vs.start, 41); // 18 + 22 + 1 (kSepWidth)
-        QCOMPARE(vs.end, 41 + rcx::kColValue);   // start + kColValue
+        QCOMPARE(vs.start, 39); // 16 + 22 + 1 (kSepWidth)
+        QCOMPARE(vs.end, 39 + rcx::kColValue);   // start + kColValue
     }
 
     // selIdForLine is the single source of truth for the line→encoded-selId

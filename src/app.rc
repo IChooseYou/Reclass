@@ -10,12 +10,12 @@ FILETYPE 0x1L
     {
         BLOCK "040904b0"
         {
-            VALUE "CompanyName",      "REECLASS Open Source Project"
-            VALUE "FileDescription",  "REECLASS"
+            VALUE "CompanyName",      "RC Open Source Project"
+            VALUE "FileDescription",  "RC"
             VALUE "FileVersion",      "0.1.0.0"
-            VALUE "ProductName",      "REECLASS"
+            VALUE "ProductName",      "RC"
             VALUE "ProductVersion",   "0.1.0.0"
-            VALUE "OriginalFilename", "REECLASS.exe"
+            VALUE "OriginalFilename", "RC.exe"
             VALUE "LegalCopyright",   "Free and open-source software"
         }
     }

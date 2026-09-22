@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
     });
 
     QObject::connect(socket, &QLocalSocket::disconnected, [&]() {
-        fprintf(stderr, "[REECLASSMcpBridge] Disconnected from server\n");
+        fprintf(stderr, "[RCMcpBridge] Disconnected from server\n");
         app.quit();
     });
 
@@ -55,19 +55,19 @@ int main(int argc, char* argv[]) {
 #else
     QObject::connect(socket, QOverload<QLocalSocket::LocalSocketError>::of(&QLocalSocket::error), [&](QLocalSocket::LocalSocketError err) {
 #endif
-        fprintf(stderr, "[REECLASSMcpBridge] Socket error %d: %s\n",
+        fprintf(stderr, "[RCMcpBridge] Socket error %d: %s\n",
                 (int)err, socket->errorString().toUtf8().constData());
         app.quit();
     });
 
     // Connect to the named pipe
-    socket->connectToServer("REECLASSMcpBridge");
+    socket->connectToServer("RCMcpBridge");
     if (!socket->waitForConnected(5000)) {
-        fprintf(stderr, "[REECLASSMcpBridge] Failed to connect to REECLASSMcpBridge pipe: %s\n",
+        fprintf(stderr, "[RCMcpBridge] Failed to connect to RCMcpBridge pipe: %s\n",
                 socket->errorString().toUtf8().constData());
         return 1;
     }
-    fprintf(stderr, "[REECLASSMcpBridge] Connected to REECLASSMcpBridge\n");
+    fprintf(stderr, "[RCMcpBridge] Connected to RCMcpBridge\n");
 
     // Stdin → socket: poll stdin with a timer (stdin isn't a socket on Windows)
     QByteArray stdinBuf;

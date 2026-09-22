@@ -1,5 +1,7 @@
 #pragma once
 #include "core.h"
+#include "treeguides.h"
+#include "row_instances.h"
 #include "providerregistry.h"
 #include "themes/theme.h"
 #include "widgets/address_bar_model.h"   // AddressBarState, AddressBarTreeQueries (Core-only)
@@ -15,6 +17,7 @@
 
 class QLabel;
 class QLineEdit;
+class QPainter;
 class QsciScintilla;
 class QsciLexerCPP;
 
@@ -141,7 +144,11 @@ public:
     void cancelInlineEdit();
     void setHexEditPending(bool v) { m_hexEditPending = v; }
 
-    void applySelectionOverlay(const QSet<uint64_t>& selIds);
+    // Marks the selected rows: ONE instance per id (row_instances.h) — the one
+    // its anchor names (the place it was clicked), the rows a byte selection
+    // covers, or else the first place the node is shown.
+    void applySelectionOverlay(const QSet<uint64_t>& selIds,
+                               const QHash<uint64_t, SelectionAnchor>& anchors = {});
     void setCommandRowText(const QString& line);
     void setEditorFont(const QString& fontName);
     static void setGlobalFontName(const QString& fontName);
@@ -150,6 +157,32 @@ public:
 
     // Custom type names (struct types from the tree) shown in type picker + lexer GlobalClass coloring
     QString textWithMargins() const;
+    // A row's text as copied: with Tree Lines on, the drawn lines come back
+    // as │ ├ └ in the indent, so a paste keeps the tree.
+    QString lineTextForCopy(int line) const;
+    // The row's indent as box-drawing text ("│ ├ "), empty without tree
+    // lines or without an indent.
+    QString treePrefixForLine(int line) const;
+    // The tree lines as last built and painted (tests, render harness).
+    const TreeGuides& treeGuides() const { return m_treeGuides; }
+    const QVector<QRect>& lastTreeGuideDeviceRects() const { return m_lastGuideRects; }
+    void setTreeGuideColorOverrideForTest(const QColor& c) { m_treeGuideColorOverride = c; }
+    // The drawn fold boxes ([+] / [−] on the elbow of every row with
+    // children), as last built and painted. The hovered box's strokes are
+    // painted in the hover colour and listed apart.
+    const FoldBoxes& foldBoxes() const { return m_foldBoxes; }
+    const QVector<QRect>& lastFoldBoxDeviceRects() const { return m_lastFoldBoxRects; }
+    const QVector<QRect>& lastFoldBoxHoverDeviceRects() const { return m_lastFoldBoxHoverRects; }
+    QColor foldBoxHoverColor() const { return m_foldBoxHoverColor; }
+    int hoveredFoldBoxLine() const { return m_hoverFoldLine; }
+    // Tree columns (View ▸ Tree Columns): quiet vertical lines between the
+    // type, name and value columns. Independent of the tree lines; drawn the
+    // same way.
+    void setTreeColumns(bool on);
+    bool treeColumns() const { return m_treeColumnsOn; }
+    const TreeColumns& treeColumnGuides() const { return m_treeColumns; }
+    const QVector<QRect>& lastTreeColumnDeviceRects() const { return m_lastColumnRects; }
+    void setTreeColumnColorOverrideForTest(const QColor& c) { m_treeColumnColorOverride = c; }
     void setCustomTypeNames(const QStringList& names);
     void setValueHistoryRef(const QHash<uint64_t, ValueHistory>* ref) { m_valueHistory = ref; }
     void setExprEvaluator(std::function<QString(const QString&)> fn) { m_exprEvaluator = std::move(fn); }
@@ -270,6 +303,8 @@ signals:
     void classRenameRequested(uint64_t classId, const QString& newName);
     void navBackRequested();
     void navForwardRequested();
+    void timelineBackToLiveRequested();   // the address bar's "Back to live"
+    void timelineRecordRequested();   // the address bar's Record / Stop
     void navUpRequested();
     void historyJumpRequested(int entry);
     void refreshRequested();                                  // source context menu
@@ -318,6 +353,9 @@ signals:
     // (e.g. "Wrote N bytes", read-only target). Routed to the status bar by
     // MainWindow.
     void statusHintRequested(QString text);
+    // A member row under an open enum field was chosen (double-click / Enter
+    // on it): the field should take that member's value.
+    void enumMemberChosen(int nodeIdx, int64_t value);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
@@ -327,6 +365,40 @@ private:
     QsciLexerCPP*     m_lexer  = nullptr;
     QVector<LineMeta> m_meta;
     LayoutInfo        m_layout;  // cached from ComposeResult
+
+    // ── Drawn tree lines (treeguides.h) ──
+    // Built from m_meta on every applyDocument and painted by RcxSciView
+    // right after Scintilla draws. The frame is read from Scintilla after its
+    // paint (the paint can move the first line) and before the overlay painter
+    // opens, so nothing queries Scintilla while that painter is open.
+    friend class RcxSciView;
+    void snapshotTreeGuideFrame();
+    void paintTreeGuides(QPainter& p);
+    struct TreeGuideFrame {
+        bool  valid = false;
+        int   lineCount = 0, first = 0, lh = 1, ea = 0, ed = 0, xOrigin = 0, textStart = 0;
+        qreal adv = 8;
+    };
+    TreeGuides        m_treeGuides;
+    TreeGuideFrame    m_guideFrame;
+    QColor            m_treeGuideColor;
+    QColor            m_treeGuideColorOverride;
+    QVector<QRect>    m_lastGuideRects;
+    FoldBoxes         m_foldBoxes;
+    QVector<QRect>    m_lastFoldBoxRects;
+    QVector<QRect>    m_lastFoldBoxHoverRects;
+    QColor            m_foldBoxHoverColor;
+    int               m_hoverFoldLine = -1;   // the row whose box is under the pointer
+    void setHoverFoldLine(int line);
+    bool              m_treeColumnsOn = false;
+    TreeColumns       m_treeColumns;
+    QColor            m_treeColumnColor;
+    QColor            m_treeColumnColorOverride;
+    QVector<QRect>    m_lastColumnRects;
+    int               m_fontGeneration = 0;
+    // SCI_TEXTWIDTH is measured again only when one of these changes.
+    struct { int zoom = -1000; int lh = -1; qreal dpr = -1; int fontGen = -1; qreal adv = 8; } m_advCache;
+
     // Previous-frame text used by applyDocument's diff-and-patch path so
     // we can avoid the full Scintilla setText() (~659 µs) on the common
     // append/edit case.
@@ -384,6 +456,8 @@ private:
     uint64_t m_prevHoveredNodeId = 0;  // for incremental marker update
     int      m_prevHoveredLine = -1;   // for incremental marker update
     QSet<uint64_t> m_currentSelIds;
+    QHash<uint64_t, SelectionAnchor> m_currentSelAnchors;
+    QVector<int> m_hoverMarkedLines;  // the rows carrying M_HOVER: one instance
     QVector<int> m_hoverSpanLines;  // Lines with hover span indicators
     // ── nodeId → display-line index (built in applyDocument) ──
     QHash<uint64_t, QVector<int>> m_nodeLineIndex;
@@ -413,8 +487,6 @@ private:
     // selection target.
     std::optional<uint64_t> m_byteSelAnchor;
     bool     m_byteSelDragging = false;
-    int      m_byteDragLine = -1;
-    bool     m_byteDragAscii = false;
     // Last set of covered-row selIds emitted via byteSelectionRowsChanged.
     // De-dups the emit so a multi-pixel drag only re-syncs when it crosses
     // a row boundary, and a passive refresh repaint doesn't re-emit.
@@ -424,6 +496,7 @@ private:
     // m_lastByteRows, which only updates when the emit fires). The controller
     // reads this each refresh to reconcile m_selIds — see byteCoveredRows().
     QSet<uint64_t> m_byteCoveredRows;
+    QVector<int> m_byteCoveredLines;   // ascending: the rows those ids came from
 
     // ── Deferred click (protects multi-select on double-click) ──
     uint64_t m_pendingClickNodeId = 0;
@@ -549,7 +622,9 @@ private:
     bool m_hoverEffects = true;
     // Value/hover preview popups (value history, hex, disasm, struct). When
     // off, neither the hover host's value page nor the inline-edit history show.
-    bool m_valuePopupsEnabled = true;
+    // Off unless the user asks for them, every session: the previous-values
+    // hover is a thing you go and get, not something that follows the pointer.
+    bool m_valuePopupsEnabled = false;
 
     // ── Hover dwell for preview popups ──
     // Value-history / disasm / struct-preview popups wait this long
@@ -650,7 +725,7 @@ private:
     void clampEditSelection();
 
     // ── Refactored helpers ──
-    struct HitInfo { int line = -1; int col = -1; uint64_t nodeId = 0; bool inFoldCol = false; };
+    struct HitInfo { int line = -1; int col = -1; uint64_t nodeId = 0; bool inFoldBox = false; };
     HitInfo hitTest(const QPoint& viewportPos) const;
 
 
@@ -670,7 +745,7 @@ private:
     // is the only thing that acts on the result.
     enum class HoverRegion {
         None,        // padding, blanks, separators — nothing here
-        FoldToggle,  // the ▸/▾ column on a fold head
+        FoldToggle,  // the drawn [+]/[−] box's slot on a fold head
         FooterPill,  // +1 / +10h / +100h / +1000h / +10 / Trim / Top
         TypePicker,  // Type / PointerTarget / ArrayElementType / chevron
         TextEdit,    // Name / Value / RootClassName / ArrayElementCount
@@ -735,7 +810,7 @@ private:
 
     // ── Byte selection helpers ──
     // byteAddrAt: returns the absolute byte address if (line, col) lands
-    //   inside a hex preview row's hex or ASCII column, else nullopt. Each byte
+    //   inside a hex preview row's value column, else nullopt. Each byte
     //   occupies 3 chars ("XX ") in the value column. Optional (rather
     //   than a 0 sentinel) so a struct based at virtual address 0 —
     //   common in kernel-paging tabs that view physical memory — can
@@ -763,7 +838,6 @@ private:
     //   half-open range covering the union; the paint pass naturally
     //   skips non-hex rows in between.
     std::optional<uint64_t> byteAddrAt(int line, int col) const;
-    std::optional<uint64_t> byteDragAddrAt(const QPoint& pos) const;
     void applyByteSelectionOverlay();
     void updateByteSelStatus();
     void extendByteSelection(int dByte);

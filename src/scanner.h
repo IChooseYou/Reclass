@@ -123,6 +123,7 @@ class ScanEngine : public QObject {
     Q_OBJECT
 public:
     explicit ScanEngine(QObject* parent = nullptr);
+    ~ScanEngine() override;
 
     void start(std::shared_ptr<Provider> provider, const ScanRequest& req);
     void startRescan(std::shared_ptr<Provider> provider,

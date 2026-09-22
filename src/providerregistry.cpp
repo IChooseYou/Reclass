@@ -69,7 +69,7 @@ void ProviderRegistry::populateSourceMenu(QMenu* menu,
         {QStringLiteral("processmemory"),          QStringLiteral(":/vsicons/server-process.svg")},
         {QStringLiteral("remoteprocessmemory"),    QStringLiteral(":/vsicons/remote.svg")},
         {QStringLiteral("windbgmemory"),           QStringLiteral(":/vsicons/debug.svg")},
-        {QStringLiteral("REECLASS.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
+        {QStringLiteral("RC.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
     };
 
     // The :/vsicons Codicons bake a light-grey #C5C5C5 ink, chosen for dark

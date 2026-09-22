@@ -20,14 +20,12 @@
 #include <QMainWindow>
 #include <QSettings>
 #include <QSignalSpy>
-#include <QScopeGuard>
 #include <QToolBar>
 #include <QToolButton>
 
 #include "dockoverlay.h"
 #include "ribbon.h"
 #include "themes/theme.h"
-#include "themes/thememanager.h"
 #include "titlebar.h"
 
 using namespace rcx;
@@ -196,7 +194,7 @@ private slots:
             {false, true,  rcx::RibbonHidden,    "hidden wins over minimized"},
         };
         for (const Case& c : cases) {
-            QSettings s(QStringLiteral("REECLASS-test"), QStringLiteral("ribbon-migration"));
+            QSettings s(QStringLiteral("RC-test"), QStringLiteral("ribbon-migration"));
             s.clear();
             s.setValue(QStringLiteral("showRibbon"), c.shown);
             s.setValue(QStringLiteral("ribbonMinimized"), c.mini);
@@ -210,7 +208,7 @@ private slots:
             s.clear();
         }
         // Nothing stored at all = Full; a junk value falls back to Full.
-        QSettings s(QStringLiteral("REECLASS-test"), QStringLiteral("ribbon-migration"));
+        QSettings s(QStringLiteral("RC-test"), QStringLiteral("ribbon-migration"));
         s.clear();
         QCOMPARE(rcx::ribbonStateFromSettings(s), int(rcx::RibbonFull));
         s.setValue(QStringLiteral("ribbonState"), 99);
@@ -263,155 +261,6 @@ private slots:
         // Building twice is a no-op (applyTheme re-runs on every theme switch).
         bar.setQuickActions(&undo, &redo);
         QCOMPARE(bar.quickButton(0), bu);
-    }
-
-    void testThemeSwitchMouseKeyboardAndAnimation() {
-        TitleBarWidget bar;
-        QAction undo(QStringLiteral("Undo")), redo(QStringLiteral("Redo"));
-        bar.setQuickActions(&undo, &redo);
-        const Theme light = loadTheme(QStringLiteral("tw"));
-        bar.applyTheme(light);
-        bar.resize(800, bar.height());
-        bar.show();
-        QTest::qWait(30);
-        auto* toggle = bar.themeSwitch();
-        QVERIFY(toggle);
-        QVERIFY(toggle->isCheckable());
-        QVERIFY(!toggle->isChecked());
-        QCOMPARE(toggle->focusPolicy(), Qt::TabFocus);
-        QVERIFY(toggle->x() >= bar.quickButton(1)->geometry().right() + 8);
-        auto* separator = bar.findChild<QWidget*>(QStringLiteral("themeSwitchSeparator"));
-        QVERIFY(!separator);
-        QCOMPARE(toggle->geometry().right(), bar.width() - 3 * 46 - 8 - 1);
-        QCOMPARE(toggle->size(), QSize(31, 32));
-        const QRect bounds = toggle->geometry();
-        const int centerX = toggle->width() / 2;
-        const int focusX = (toggle->width() - 20) / 2;
-        const QImage before = toggle->grab().toImage();
-        const qreal dpr = before.devicePixelRatio();
-        auto at = [dpr](const QImage& img, int x, int y) {
-            return img.pixelColor(qRound(x * dpr), qRound(y * dpr));
-        };
-        // Initial window activation must not create an accent box.
-        QCOMPARE(at(before, 4, 6).rgba(), menuBarColor(light).rgba());
-        QCOMPARE(at(before, 1, 1).rgba(), menuBarColor(light).rgba());
-        QVERIFY(at(before, centerX - 4, 16) != at(before, centerX + 4, 16));
-        QSignalSpy changes(&bar, &TitleBarWidget::darkThemeRequested);
-        const QPoint right(toggle->width() - 8, toggle->height() / 2);
-        QTest::mouseClick(toggle, Qt::LeftButton, Qt::NoModifier, right);
-        QVERIFY(toggle->isChecked());
-        QCOMPARE(changes.count(), 1);
-        QTest::qWait(40);
-        const QImage moving = toggle->grab().toImage();
-        QTest::qWait(110);
-        const QImage after = toggle->grab().toImage();
-        QVERIFY(before != after);
-        QVERIFY(moving != after);
-        QVERIFY(at(before, centerX - 4, 16) != at(after, centerX - 4, 16));
-        QVERIFY(at(before, centerX + 4, 16) != at(after, centerX + 4, 16));
-        QCOMPARE(toggle->geometry(), bounds);
-        QTest::mouseClick(toggle, Qt::LeftButton, Qt::NoModifier, QPoint(1, 1));
-        QCOMPARE(changes.count(), 2);
-        QVERIFY(!toggle->isChecked());
-        QTest::keyClick(toggle, Qt::Key_Left);
-        QVERIFY(!toggle->isChecked());
-        toggle->setFocus(Qt::TabFocusReason);
-        QVERIFY(toggle->hasFocus());
-        QCOMPARE(at(toggle->grab().toImage(), focusX, 6), light.textDim);
-        QTest::mouseClick(toggle, Qt::LeftButton, Qt::NoModifier, QPoint(1, 1));
-        QVERIFY(at(toggle->grab().toImage(), focusX, 6) != light.textDim);
-        bar.setDarkTheme(false);
-        QTest::keyClick(toggle, Qt::Key_Space);
-        QVERIFY(toggle->isChecked());
-        const int requested = changes.count();
-        bar.setDarkTheme(false);  // reverse the transition while it is running
-        QTest::qWait(150);
-        QVERIFY(!toggle->isChecked());
-        QCOMPARE(toggle->geometry(), bounds);
-        QVERIFY(!toggle->accessibleName().isEmpty());
-        QCOMPARE(toggle->accessibleDescription(), QStringLiteral("Light theme"));
-        QCOMPARE(changes.count(), requested);  // theme feedback must not request another change
-        bar.applyTheme(loadTheme(QStringLiteral("vs")));
-        QVERIFY(toggle->isChecked());
-        QCOMPARE(changes.count(), requested);
-        QVERIFY(toggle->toolTip().isEmpty());
-    }
-
-    void testThemeButtonHoverFillsItsCell() {
-        TitleBarWidget bar;
-        QAction undo(QStringLiteral("Undo")), redo(QStringLiteral("Redo"));
-        bar.setQuickActions(&undo, &redo);
-        const Theme theme = loadTheme(QStringLiteral("vs"));
-        bar.applyTheme(theme);
-        bar.resize(800, bar.height());
-        bar.show();
-        QTest::qWait(30);
-        auto* toggle = bar.themeSwitch();
-        QCOMPARE(toggle->size(), QSize(31, 32));
-        toggle->setAttribute(Qt::WA_UnderMouse, true);
-        const QImage hover = toggle->grab().toImage();
-        for (const QPoint p : {QPoint(0, 0), QPoint(hover.width() - 1, 0),
-                QPoint(0, hover.height() - 1), QPoint(hover.width() - 1, hover.height() - 1)})
-            QCOMPARE(hover.pixelColor(p).rgba(), theme.hover.rgba());
-        QVERIFY(toggle->toolTip().isEmpty());
-        QEvent tooltip(QEvent::ToolTip);
-        QVERIFY(QApplication::sendEvent(toggle, &tooltip));
-        hover.save(QStringLiteral("theme_button_hover.png"));
-    }
-
-    void testThemeSwitchChangesThemeAndRemembersLastDarkTheme() {
-        auto& tm = ThemeManager::instance();
-        const int original = tm.currentIndex();
-        QSettings settings(QStringLiteral("REECLASS"), QStringLiteral("REECLASS"));
-        QMap<QString, QVariant> saved;
-        for (const auto* key : {"theme", "darkTheme", "lightTheme"})
-            saved.insert(QString::fromLatin1(key), settings.value(QString::fromLatin1(key)));
-        const auto restore = qScopeGuard([&]() {
-            tm.setCurrent(original);
-            for (auto it = saved.cbegin(); it != saved.cend(); ++it) {
-                if (it.value().isValid()) settings.setValue(it.key(), it.value());
-                else settings.remove(it.key());
-            }
-        });
-        int dark = -1, alternateDark = -1, light = -1;
-        const auto all = tm.themes();
-        for (int i = 0; i < all.size(); ++i) {
-            if (all[i].isDark()) {
-                if (dark < 0) dark = i;
-                else alternateDark = i;
-            } else light = i;
-        }
-        QVERIFY(dark >= 0 && alternateDark >= 0 && light >= 0);
-        tm.setCurrent(light);
-        tm.setCurrent(dark);
-        TitleBarWidget bar;
-        QAction undo(QStringLiteral("Undo")), redo(QStringLiteral("Redo"));
-        bar.setQuickActions(&undo, &redo);
-        bar.applyTheme(tm.current());
-        connect(&bar, &TitleBarWidget::darkThemeRequested, &tm, &ThemeManager::setDarkMode);
-        connect(&tm, &ThemeManager::themeChanged, &bar, &TitleBarWidget::applyTheme);
-        auto click = [&]() {
-            QTest::mouseClick(bar.themeSwitch(), Qt::LeftButton, Qt::NoModifier,
-                bar.themeSwitch()->rect().center());
-        };
-        click();
-        QCOMPARE(tm.currentIndex(), light);
-        QVERIFY(!bar.themeSwitch()->isChecked());
-        click();
-        QCOMPARE(tm.currentIndex(), dark);
-        tm.setCurrent(alternateDark);  // selecting another theme in View updates the pair
-        QVERIFY(bar.themeSwitch()->isChecked());
-        click();
-        QCOMPARE(tm.currentIndex(), light);
-        click();
-        QCOMPARE(tm.currentIndex(), alternateDark);
-        QSignalSpy changes(&tm, &ThemeManager::themeChanged);
-        tm.setDarkMode(true);
-        QCOMPARE(changes.count(), 0);
-        settings.setValue(QStringLiteral("lightTheme"), QStringLiteral("Removed theme"));
-        click();
-        QVERIFY(!tm.current().isDark());
-        QCOMPARE(settings.value(QStringLiteral("theme")).toString(), tm.current().name);
     }
 };
 

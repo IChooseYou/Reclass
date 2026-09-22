@@ -107,9 +107,10 @@ class TestChips : public QObject {
     Q_OBJECT
 private slots:
 
-    // ── Enum chip emits on int field whose refId resolves to an enum,
-    //    and is suppressed by showEnumChips=false ──
-    void enumChipFiresAndCanBeSuppressed() {
+    // ── An int field typed as an enum reads as that enum: the enum's name in
+    //    the type column and the member it holds as the value — no number, no
+    //    chip — and it folds open to list the members, that one marked ──
+    void enumFieldReadsAsItsEnum() {
         NodeTree tree;
         tree.baseAddress = kStructBase;
 
@@ -139,33 +140,88 @@ private slots:
         field.parentId = rootId;
         field.offset = 0;
         field.refId = enumId;
-        tree.addNode(field);
+        const int fieldIdx = tree.addNode(field);
+        const uint64_t fieldId = tree.nodes[fieldIdx].id;
 
         QByteArray data(kStructBase + 16, '\0');
         uint32_t v = 1;  // RUNNING
         std::memcpy(data.data() + kStructBase, &v, 4);
+        BufferProvider prov(data, QStringLiteral("synthetic"));
 
-        BufferProvider prov(std::move(data), QStringLiteral("synthetic"));
+        auto fieldRow = [&](const ComposeResult& res) {
+            for (int i = 0; i < res.meta.size(); ++i)
+                if (res.meta[i].nodeId == fieldId && res.meta[i].lineKind == LineKind::Field
+                    && !res.meta[i].isMemberLine)
+                    return i;
+            return -1;
+        };
 
-        // Default: enum chip fires.
+        // Collapsed (the default): one row — the enum's name, the member.
         ComposeResult r = compose(tree, prov, rootId);
-        const LineChip* c = firstChipOfKind(r, ChipKind::Enum);
-        QVERIFY2(c, "enum chip should fire on int field with refId→enum");
-        QVERIFY2(c->text.contains(QStringLiteral("RUNNING")),
-            qPrintable(QStringLiteral("expected RUNNING in chip text, got: ")
-                + c->text));
-        QCOMPARE(c->enumCurrentValue, (int64_t)1);
-        QCOMPARE(c->enumRefNodeId, enumId);
-        QVERIFY(c->startCol >= 0);
-        QVERIFY(c->endCol > c->startCol);
+        QStringList lines = r.text.split(QLatin1Char('\n'));
+        int row = fieldRow(r);
+        QVERIFY(row > 0);
+        {
+            const LineMeta& lm = r.meta[row];
+            const int typeStart = kFoldCol + lm.depth * kTreeIndent;
+            QCOMPARE(lines[row].mid(typeStart, lm.effectiveTypeW).trimmed(), QStringLiteral("Status"));
+            QVERIFY2(lines[row].contains(QStringLiteral("RUNNING")), qPrintable(lines[row]));
+            QVERIFY2(!lines[row].contains(QStringLiteral("0x")), qPrintable(lines[row]));
+            QVERIFY(lm.foldHead);
+            QVERIFY(lm.foldCollapsed);
+            QCOMPARE(lm.enumRefId, enumId);
+            QCOMPARE(lm.enumValue, int64_t(1));
+        }
+        QCOMPARE(countChips(r, ChipKind::Enum), 0);
+        for (const LineMeta& m : r.meta)
+            QVERIFY(!(m.isMemberLine && m.nodeId == fieldId));
 
-        // Toggle off: chip suppressed.
-        ComposeResult r2 = compose(tree, prov, rootId,
-            /*compactColumns=*/false, /*treeLines=*/false,
-            /*braceWrap=*/false, /*typeHints=*/false,
-            /*showComments=*/true, /*symbolLookup=*/{},
-            /*showRtti=*/true, /*showEnumChips=*/false);
-        QCOMPARE(countChips(r2, ChipKind::Enum), 0);
+        // Open: "{", the members in value order with the held one marked, "}".
+        tree.nodes[fieldIdx].collapsed = false;
+        r = compose(tree, prov, rootId);
+        lines = r.text.split(QLatin1Char('\n'));
+        row = fieldRow(r);
+        QVERIFY(row > 0 && row + 4 < r.meta.size());
+        QVERIFY2(lines[row].trimmed().endsWith(QLatin1Char('{')), qPrintable(lines[row]));
+        QVERIFY(!r.meta[row].foldCollapsed);
+        const char* names[] = {"READY", "RUNNING", "DONE"};
+        for (int k = 0; k < 3; ++k) {
+            const LineMeta& m = r.meta[row + 1 + k];
+            const QString& t = lines[row + 1 + k];
+            QVERIFY(m.isMemberLine);
+            QCOMPARE(m.nodeId, fieldId);
+            QCOMPARE(m.enumRefId, enumId);
+            QCOMPARE(m.enumValue, int64_t(k));
+            QCOMPARE(m.depth, r.meta[row].depth + 1);
+            QVERIFY2(t.contains(QLatin1String(names[k])), qPrintable(t));
+            QCOMPARE(t.contains(QChar(0x25C0)), k == 1);
+        }
+        QCOMPARE(r.meta[row + 4].lineKind, LineKind::Footer);
+        QCOMPARE(r.meta[row + 4].nodeId, fieldId);
+        QCOMPARE(lines[row + 4].trimmed(), QStringLiteral("}"));
+
+        // A value no member holds: its number, and nothing marked.
+        QByteArray other = data;
+        uint32_t seven = 7;
+        std::memcpy(other.data() + kStructBase, &seven, 4);
+        BufferProvider prov7(other, QStringLiteral("synthetic"));
+        r = compose(tree, prov7, rootId);
+        lines = r.text.split(QLatin1Char('\n'));
+        row = fieldRow(r);
+        QVERIFY(row > 0);
+        const int valueStart = LineGeometry::forLine(r.meta[row]).valueStart();
+        QCOMPARE(lines[row].mid(valueStart).section(QLatin1Char(' '), 0, 0), QStringLiteral("7"));
+        QVERIFY(!r.text.contains(QChar(0x25C0)));
+
+        // Brace-wrap: the "{" gets a row of its own.
+        r = compose(tree, prov, rootId, /*compactColumns=*/false, /*treeLines=*/false,
+                    /*braceWrap=*/true);
+        lines = r.text.split(QLatin1Char('\n'));
+        row = fieldRow(r);
+        QVERIFY(row > 0 && row + 2 < r.meta.size());
+        QVERIFY(!lines[row].trimmed().endsWith(QLatin1Char('{')));
+        QCOMPARE(lines[row + 1].trimmed(), QStringLiteral("{"));
+        QVERIFY(r.meta[row + 2].isMemberLine);
     }
 
     // ── TypeHint chip fires on hex node with strong inference and is
@@ -361,7 +417,7 @@ private slots:
         QByteArray buf(kStructBase + 64, '\0');
         BufferProvider prov(std::move(buf), QStringLiteral("synthetic"));
         // No-PDB fallback form returned for every address.
-        auto symLookup = [](uint64_t) -> QString { return QStringLiteral("REECLASS.exe+0x10"); };
+        auto symLookup = [](uint64_t) -> QString { return QStringLiteral("RC.exe+0x10"); };
 
         ComposeResult r = compose(tree, prov, rootId,
             /*compactColumns=*/false, /*treeLines=*/false, /*braceWrap=*/false,

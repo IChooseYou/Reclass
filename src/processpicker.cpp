@@ -403,7 +403,7 @@ void ProcessPicker::applyFilter()
 void ProcessPicker::selectPreferredProcess()
 {
     // Try to select the last-attached process if it's in the list
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QString lastProc = s.value("lastAttachedProcess").toString();
     if (lastProc.isEmpty()) return;
 

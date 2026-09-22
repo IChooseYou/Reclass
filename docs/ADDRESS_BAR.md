@@ -9,7 +9,7 @@ controller pushes one `AddressBarState` per refresh and every pane shows the
 same trail (only the pane a gesture came from scrolls).
 
 ```
- ← → ˅ ↑ │ ▣● REECLASS.exe ˅ <REECLASS.exe>+0x1234 = 0x7FF6DEAD1234  « QWidget.d_ptr › QObjectPrivate.parent › QObjectData ›            ˅
+ ← → ˅ ↑ │ ▣● RC.exe ˅ <RC.exe>+0x1234 = 0x7FF6DEAD1234  « QWidget.d_ptr › QObjectPrivate.parent › QObjectData ›            ˅
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   back fwd hist up   src        src.chev base                          overflow crumb:2  chev:2 crumb:3  chev:3  crumb:4  chev:4  space recent
 ```

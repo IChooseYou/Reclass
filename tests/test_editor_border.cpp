@@ -112,7 +112,7 @@ private slots:
         fakeEditor->setAutoFillBackground(true);
         ecLay->addWidget(fakeEditor, 1);
 
-        tabWidget->addTab(editorContainer, QStringLiteral("REECLASS"));
+        tabWidget->addTab(editorContainer, QStringLiteral("RC"));
         tabWidget->addTab(new QWidget, QStringLiteral("Code"));
         tabWidget->addTab(new QWidget, QStringLiteral("Debug"));
 

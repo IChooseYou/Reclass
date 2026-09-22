@@ -1168,6 +1168,9 @@ struct LineMeta {
                                       // not readable (bad page / freed region) — render the value
                                       // distinctly instead of as a silent "00". NOT set for the
                                       // intentional NullProvider zero-fill of null pointer targets.
+    bool     notCaptured    = false;  // viewing the timeline's past, and these bytes were not being
+                                      // watched at that moment: shown faint, never struck (nothing
+                                      // failed) and never as a plausible-looking zero.
     int      heatLevel      = 0;     // 0=static, 1=cold, 2=warm, 3=hot (from ValueHistory)
     QVector<int> changedByteIndices;  // Hex preview: which byte indices (0-based) changed on this line
     int      lineByteCount  = 0;     // Hex preview: actual data byte count on this line
@@ -1178,6 +1181,8 @@ struct LineMeta {
     bool     isMemberLine   = false;  // true for enum member / bitfield member lines
     int      braceCol       = -1;      // Column of trailing '{' on header lines (-1 = none); avoids per-char IPC scan
     uint64_t parentAddr     = 0;       // Absolute address of enclosing container (for relative offset display)
+    uint64_t enumRefId      = 0;       // An enum-typed int field's row and its member rows: the enum's id
+    int64_t  enumValue      = 0;       // Field row: the value it holds. Member row: that member's value
 
     // ── Chips (unified annotations after the value column) ──
     // Replaces the parallel typeHint*/rttiHint*/commentStart fields.
@@ -1219,6 +1224,14 @@ inline uint64_t selIdForLine(const LineMeta& lm) {
     return lm.nodeId;
 }
 
+// The value history a composed line records into and reads its heat from: the
+// node's own, except the extra rows of a multi-line value (a matrix's rows
+// 1–3), which each keep their own — so a row lights when IT changes, not only
+// row 0.
+inline uint64_t valueHistoryKey(const LineMeta& lm) {
+    return (lm.isContinuation && lm.subLine > 0) ? makeMemberSelId(lm.nodeId, lm.subLine) : lm.nodeId;
+}
+
 // Decode an encoded selId back to its base node id — the inverse of the high-bit
 // encoding that selIdForLine / makeArrayElemSelId / makeMemberSelId apply. Strips
 // the footer, array-element, and member bits. Routing every decode site through
@@ -1236,7 +1249,7 @@ struct LayoutInfo {
     int nameW = 22;  // Effective name column width (default = kColName)
     int offsetHexDigits = 8;  // Hex digits for offset margin (4/8/12/16)
     uint64_t baseAddress = 0; // Base address for relative offset computation
-    bool treeLines = false;   // Whether tree line connectors are embedded in the text
+    bool treeLines = false;   // Whether the editor draws tree lines over the indent (treeguides.h)
 };
 
 // ── ComposeResult ──
@@ -1305,7 +1318,7 @@ enum class EditTarget { Name, Type, Value, ArrayIndex, ArrayCount,
                         RootClassType, RootClassName, TypeSelector, Comment };
 
 // Column layout constants (shared with format.cpp span computation)
-inline constexpr int kFoldCol     = 3;   // 3-char fold indicator prefix per line
+inline constexpr int kFoldCol     = 1;   // 1-char gutter before the indent (fold boxes are drawn, treeguides.h)
 inline constexpr int kTreeIndent  = 2;   // chars per nesting-level indent (tree connectors)
 inline constexpr int kColType     = 14;  // Max type column width (fits "uint64_t[999]")
 inline constexpr int kColName     = 22;
@@ -1416,6 +1429,9 @@ inline ColumnSpan memberValueSpanFor(const LineMeta& lm, const QString& lineText
     if (eq < 0) return {};
     int valStart = eq + 3;
     int valEnd = lineText.size();
+    // An enum field's member row may end in "  ◀" (the member it holds).
+    const int marker = lineText.indexOf(QChar(0x25C0), valStart);
+    if (marker >= 0) valEnd = marker;
     while (valEnd > valStart && lineText[valEnd - 1] == ' ') valEnd--;
     return {valStart, valEnd, true};
 }
@@ -1613,11 +1629,39 @@ struct ViewState {
     int      cursorSubLine = 0;
 };
 
+// The enum an int field reads as: an 8/16/32/64-bit int whose refId is an enum
+// definition with members. Null for anything else.
+inline const Node* enumTypeOf(const NodeTree& tree, const Node& n) {
+    switch (n.kind) {
+    case NodeKind::UInt8: case NodeKind::UInt16: case NodeKind::UInt32: case NodeKind::UInt64:
+    case NodeKind::Int8:  case NodeKind::Int16:  case NodeKind::Int32:  case NodeKind::Int64:
+        break;
+    default:
+        return nullptr;
+    }
+    if (n.refId == 0) return nullptr;
+    const int idx = tree.indexOfId(n.refId);
+    if (idx < 0) return nullptr;
+    const Node& def = tree.nodes[idx];
+    return def.isEnum() && !def.enumMembers.isEmpty() ? &def : nullptr;
+}
+
 // ── Format function forward declarations ──
 
 namespace fmt {
     using TypeNameFn = QString (*)(NodeKind);
     void setTypeNameProvider(TypeNameFn fn);
+    // Most decimals a float, double, vector or matrix value is DISPLAYED with
+    // (Options ▸ General ▸ Values). Editing and memory keep full precision.
+    inline constexpr int kDefaultFloatDecimals = 3;
+    inline constexpr int kMinFloatDecimals     = 1;
+    inline constexpr int kMaxFloatDecimals     = 6;
+    void setFloatDecimals(int decimals);   // clamped to [kMin, kMax]
+    int  floatDecimals();
+    // The shortest text that reads back as exactly this value ("1.52", not
+    // "1.51999998"): what an edit of a float starts from.
+    QString fmtFloatExact(float v);
+    QString fmtDoubleExact(double v);
     QString typeName(NodeKind kind, int colType = kColType);
     QString typeNameRaw(NodeKind kind);  // Unpadded type name for width calculation
     QString fmtInt8(int8_t v);
@@ -1636,7 +1680,8 @@ namespace fmt {
     QString fmtNodeLine(const Node& node, const Provider& prov,
                         uint64_t addr, int depth, int subLine = 0,
                         const QString& comment = {}, int colType = kColType, int colName = kColName,
-                        const QString& typeOverride = {}, bool compact = false);
+                        const QString& typeOverride = {}, bool compact = false,
+                        const QString& valueOverride = {});
     QString fmtOffsetMargin(uint64_t absoluteOffset, bool isContinuation, int hexDigits = 8);
     QString fmtStructHeader(const Node& node, int depth, bool collapsed, int colType = kColType, int colName = kColName, bool compact = false);
     QString fmtStructFooter(const Node& node, int depth, int totalSize = -1);
@@ -1666,6 +1711,10 @@ namespace fmt {
     QByteArray parseAsciiValue(const QString& text, int expectedSize, bool* ok);
     QString validateValue(NodeKind kind, const QString& text);
     QString fmtEnumMember(const QString& name, int64_t value, int depth, int nameW);
+    // An enum-typed int field's value, sign-correct for its kind.
+    int64_t readEnumRaw(const Provider& prov, NodeKind kind, uint64_t addr);
+    // The first member of `enumDef` holding `value`; empty if none does.
+    QString enumMemberName(const Node& enumDef, int64_t value);
     // One decoded instruction: raw bytes, then the mnemonic, then the name of
     // the branch target when anything knows it. `bytes` is the instruction's
     // own span, so the hex column width tracks the instruction, not a fixed

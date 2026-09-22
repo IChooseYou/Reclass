@@ -137,7 +137,7 @@ inline QFont pixelLabelFontAt(int sizeDev) {
     // whatever the DPI asks for, the icons beside these labels are already
     // vector SVG, and this makes the whole strip one typeface.
     static const QString family = []() -> QString {
-        const QString want = QSettings(QStringLiteral("REECLASS"), QStringLiteral("REECLASS"))
+        const QString want = QSettings(QStringLiteral("RC"), QStringLiteral("RC"))
                                  .value(QStringLiteral("font"), QStringLiteral("JetBrains Mono"))
                                  .toString();
         if (QFontDatabase::families().contains(want)) return want;

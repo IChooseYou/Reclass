@@ -70,4 +70,29 @@ inline AddressParserCallbacks makeAddressCallbacks(Provider* prov, int ptrSize) 
     return cbs;
 }
 
+// Never persist a display label as an expression without verifying it against
+// the current source. Demangled names and duplicate module names can be ambiguous.
+inline QString durableAddressExpression(uint64_t address, Provider* provider,
+                                        int pointerSize, const QString& preferred = {}) {
+    const QString absolute = QStringLiteral("0x") + QString::number(address, 16).toUpper();
+    if (!provider) return absolute;
+    const auto callbacks = makeAddressCallbacks(provider, pointerSize);
+    auto resolves = [&](const QString& expression) {
+        if (expression.isEmpty() || isBareAddressLiteral(expression)) return false;
+        const auto result = AddressParser::evaluate(expression, pointerSize, &callbacks);
+        return result.ok && result.value == address;
+    };
+    if (resolves(preferred)) return preferred;
+    const auto& modules = provider->modulesCached();
+    for (const auto& module : modules) {
+        if (address < module.base || address - module.base >= module.size) continue;
+        const QString symbol = SymbolStore::instance().getSymbolForAddress(address, provider);
+        if (resolves(symbol)) return symbol;
+        const QString expression = QStringLiteral("<%1>+0x%2")
+            .arg(module.name, QString::number(address - module.base, 16).toUpper());
+        if (resolves(expression)) return expression;
+    }
+    return absolute;
+}
+
 } // namespace rcx

@@ -131,7 +131,7 @@ iconOnly / destructive / data`:
    `test_ribbon_actions`, `test_ribbon_mainwindow`, and `ribbon_render` on the
    hidden desktop (`tools/run_tests_hidden.py`) — then look at the PNGs at 125 %.
 
-## Settings (QSettings "REECLASS")
+## Settings (QSettings "RC")
 
 | Key | Meaning |
 |---|---|
@@ -156,5 +156,5 @@ the secondary collapse gesture).
 - **Tooltip source.** `tooltipFor()` prefers a bound external `QAction`'s tooltip *only when it is a real one*. A menu action that never set one hands back Qt's echo of its menu text (`&Close Project` → `Close Project`), which is a different name from the one painted on the strip; that case falls through to `ribbonSpecForId()`, so ribbon = menu = tooltip stays true on the Home tab too.
 - Family colours come from theme tokens, contrast-guarded per theme; Codicons are tinted with a SourceIn fill so baked-colour icons follow the theme too. Plain icons (Codicon, FillSquares, Add/Insert) take the item's state tone through `RibbonIconOptions::plainInk`.
 - `DockOverlay::contentRect()` skips the ribbon host so drag-drop zones never cover it. Ctrl+Click on the ribbon reports region `ribbon` with the button id.
-- `RCX_RIBBON_DEBUG=1 REECLASS.exe --screenshot out.png [home|modify|collapsed]` prints the live ribbon geometry (window/host/ribbon rects, natural width, overflowed panels, font, dpr) to stderr and forces the captured tab / collapsed state (the user's `ribbonTab` / `ribbonState` are restored before exit). Note `--screenshot` PNGs are device pixels: a 1350-px capture at 125 % is a 1080-logical-px window.
+- `RCX_RIBBON_DEBUG=1 RC.exe --screenshot out.png [home|modify|collapsed]` prints the live ribbon geometry (window/host/ribbon rects, natural width, overflowed panels, font, dpr) to stderr and forces the captured tab / collapsed state (the user's `ribbonTab` / `ribbonState` are restored before exit). Note `--screenshot` PNGs are device pixels: a 1350-px capture at 125 % is a 1080-logical-px window.
 - Left out for now: Bits/bitfield, Show/Hide (no hidden nodes), VTable/PCHAR/PWCHAR kinds, 128-bit / half-float types (use Custom…).

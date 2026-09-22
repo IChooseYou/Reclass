@@ -5,6 +5,7 @@
 #include "profilerdialog.h"
 #include "typeselectorpopup.h"
 #include "providerregistry.h"
+#include "providers/file_provider.h"
 #include <QInputDialog>
 #include "generator.h"
 #include "imports/import_reclass_xml.h"
@@ -79,12 +80,20 @@
 #include "themes/themeeditor.h"
 #include "optionsdialog.h"
 #include "widgets/themed_messagebox.h"
+#include "widgets/resize_edges.h"
 #include "widgets/themed_inputdialog.h"
 #include "widgets/themed_dialog.h"
 #include "widgets/dialog_button.h"
 #include "widgets/unified_symbol_panel.h"
 #include "widgets/empty_overlay.h"
 #include "widgets/pane_tabs.h"
+#include "widgets/timeline_strip.h"
+#include "timeline/capture_context.h"
+#include "timeline/timeline_hub.h"
+#include "timeline/tl_clock.h"
+#include "timeline/tl_model.h"
+#include "timeline/timeline_service.h"
+#include "demo_simulation.h"
 #include "widgets/font_choices.h"
 #include "widgets/selection_status.h"
 #include "widgets/dock_header.h"
@@ -210,7 +219,7 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
         GetLocalTime(&st);
         wchar_t dumpPath[MAX_PATH];
         _snwprintf_s(dumpPath, MAX_PATH,
-                   L"%sREECLASS_crash_%04d%02d%02d_%02d%02d%02d.dmp",
+                   L"%sRC_crash_%04d%02d%02d_%02d%02d%02d.dmp",
                    exePath, st.wYear, st.wMonth, st.wDay,
                    st.wHour, st.wMinute, st.wSecond);
 
@@ -363,7 +372,7 @@ static void posixCrashHandler(int sig, siginfo_t* info, void* /*uctx*/) {
     const char* home = getenv("HOME");
     if (home && *home) {
         char dirPath[1024];
-        snprintf(dirPath, sizeof(dirPath), "%s/.REECLASS", home);
+        snprintf(dirPath, sizeof(dirPath), "%s/.RC", home);
         mkdir(dirPath, 0700);  // ignore EEXIST
         time_t now = time(nullptr);
         struct tm tm{};
@@ -381,7 +390,7 @@ static void posixCrashHandler(int sig, siginfo_t* info, void* /*uctx*/) {
     FILE* logF = logPath[0] ? fopen(logPath, "w") : nullptr;
     if (logF) {
         fprintf(stderr, "Log    : %s\n", logPath);
-        fprintf(logF, "=== REECLASS crash ===\n");
+        fprintf(logF, "=== RC crash ===\n");
         fprintf(logF, "Signal : %s (%d)\n", posixSigName(sig), sig);
         fprintf(logF, "Addr   : %p\n", info ? info->si_addr : nullptr);
         fflush(logF);
@@ -907,7 +916,7 @@ public:
                     // sizing to match the dropdown's fm.height()+4 sizing
                     // and to center vertically the same way Qt::AlignVCenter
                     // centers the text below.
-                    QSettings s("REECLASS", "REECLASS");
+                    QSettings s("RC", "RC");
                     QFont f(s.value("font", "JetBrains Mono").toString(), 10);
                     f.setFixedPitch(true);
                     p->setFont(f);
@@ -1043,7 +1052,7 @@ static void applyGlobalTheme(const rcx::Theme& theme) {
         "           font-family: '%6'; font-size: 10pt; }")
         .arg(theme.textFaint.name(), theme.textDim.name(),
              theme.backgroundAlt.name(), theme.text.name(), theme.border.name(),
-             QSettings("REECLASS", "REECLASS").value("font", "JetBrains Mono").toString()));
+             QSettings("RC", "RC").value("font", "JetBrains Mono").toString()));
 }
 
 class BorderOverlay : public QWidget {
@@ -1162,7 +1171,7 @@ static QString sciGetLineText(QsciScintilla* sci, int line) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     PROFILE_SCOPE("MainWindow::ctor");
-    setWindowTitle("REECLASS");
+    setWindowTitle("RC");
     // Initial size +30% over the legacy 1080×720 to give docks + editor
     // more breathing room on first launch.
     resize(1080, 720);
@@ -1186,7 +1195,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_menuBar->setNativeMenuBar(false);
 #endif
 #else
-    setWindowTitle(QStringLiteral("REECLASS"));
+    setWindowTitle(QStringLiteral("RC"));
     setUnifiedTitleAndToolBarOnMac(true);
     m_menuBar = menuBar();
     m_menuBar->setNativeMenuBar(true);
@@ -1287,7 +1296,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // Restore menu bar title case setting (after menus are created)
     {
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         m_menuBarTitleCase = s.value("menuBarTitleCase", false).toBool();
         applyMenuBarTitleCase(m_menuBarTitleCase);
         if (m_titleBar && s.value("showIcon", false).toBool())
@@ -1637,9 +1646,9 @@ void MainWindow::createMenus() {
                     QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_B), QIcon(), this, [this]() {
         auto* c = activeController();
         if (!c) return;
-        QString formula = c->document()->tree.baseAddressFormula;
+        QString formula = c->baseAddressFormula();
         if (formula.isEmpty())
-            formula = QStringLiteral("0x") + QString::number(c->document()->tree.baseAddress, 16).toUpper();
+            formula = QStringLiteral("0x") + QString::number(c->baseAddress(), 16).toUpper();
         // Find a free slot name: bookmark_NN
         int n = 1;
         QSet<QString> taken;
@@ -1663,10 +1672,10 @@ void MainWindow::createMenus() {
         m_actConsole = actConsole;
         actConsole->setCheckable(true);
         actConsole->setChecked(
-            QSettings("REECLASS", "REECLASS").value("showConsole", false).toBool());
+            QSettings("RC", "RC").value("showConsole", false).toBool());
         connect(actConsole, &QAction::triggered, this, [](bool checked) {
             rcxSetConsoleVisible(checked);
-            QSettings("REECLASS", "REECLASS").setValue("showConsole", checked);
+            QSettings("RC", "RC").setValue("showConsole", checked);
         });
         view->addSeparator();
     }
@@ -1766,7 +1775,7 @@ void MainWindow::createMenus() {
     //
     // Rebuilt on every open rather than in the constructor: enumerating
     // families is cheap but startup is where this app counts milliseconds,
-    // and a font installed while REECLASS is running then shows up without a
+    // and a font installed while RC is running then shows up without a
     // restart. See src/widgets/font_choices.h for the filtering (monospace
     // only — the editor lays every column out on one advance).
     auto* fontMenu = view->addMenu(makeIcon(":/vsicons/text-size.svg"), "&Font");
@@ -1793,7 +1802,7 @@ void MainWindow::createMenus() {
 
         const QStringList bundled = rcx::bundledMonoFamilies();
         const QStringList system  = rcx::systemMonoFamilies();
-        // The two that ship with REECLASS, then a rule, then what this
+        // The two that ship with RC, then a rule, then what this
         // machine has. Plain separators, not addSection: MenuBarStyle draws
         // a section as a bare line and swallows its label, so a heading here
         // would be an invisible promise.
@@ -1816,7 +1825,7 @@ void MainWindow::createMenus() {
     // The rest of the View menu reads its checkboxes from here. This used to
     // be declared by the font block above, which no longer needs it — the
     // font in force comes from RcxEditor::globalFontName(), not from disk.
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
 
     // Theme submenu
     auto* themeMenu = view->addMenu("&Theme");
@@ -1844,25 +1853,36 @@ void MainWindow::createMenus() {
     actCompact->setCheckable(true);
     actCompact->setChecked(settings.value("compactColumns", true).toBool());
     connect(actCompact, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("compactColumns", checked);
+        QSettings("RC", "RC").setValue("compactColumns", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setCompactColumns(checked);
     });
 
     auto* actTreeLines = view->addAction("&Tree Lines");
     actTreeLines->setCheckable(true);
-    actTreeLines->setChecked(settings.value("treeLines", false).toBool());
+    actTreeLines->setChecked(settings.value("treeLines", true).toBool());
     connect(actTreeLines, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("treeLines", checked);
+        QSettings("RC", "RC").setValue("treeLines", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setTreeLines(checked);
+    });
+
+    // Quiet lines between the type, name and value columns — its own option,
+    // on or off regardless of the tree lines.
+    auto* actTreeColumns = view->addAction("Tree C&olumns");
+    actTreeColumns->setCheckable(true);
+    actTreeColumns->setChecked(settings.value("treeColumns", true).toBool());
+    connect(actTreeColumns, &QAction::triggered, this, [this](bool checked) {
+        QSettings("RC", "RC").setValue("treeColumns", checked);
+        for (auto& tab : m_tabs)
+            tab.ctrl->setTreeColumns(checked);
     });
 
     m_actRelOfs = view->addAction("R&elative Offsets");
     m_actRelOfs->setCheckable(true);
     m_actRelOfs->setChecked(settings.value("relativeOffsets", true).toBool());
     connect(m_actRelOfs, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("relativeOffsets", checked);
+        QSettings("RC", "RC").setValue("relativeOffsets", checked);
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
                 pane.editor->setRelativeOffsets(checked);
@@ -1882,7 +1902,7 @@ void MainWindow::createMenus() {
     actComments->setCheckable(true);
     actComments->setChecked(settings.value("showComments", false).toBool());
     connect(actComments, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("showComments", checked);
+        QSettings("RC", "RC").setValue("showComments", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setShowComments(checked);
     });
@@ -1905,27 +1925,18 @@ void MainWindow::createMenus() {
     actRttiChips->setCheckable(true);
     actRttiChips->setChecked(settings.value("showRttiChips", false).toBool());
     connect(actRttiChips, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("showRttiChips", checked);
+        QSettings("RC", "RC").setValue("showRttiChips", checked);
         for (auto& tab : m_tabs)
             tab.ctrl->setShowRtti(checked);
     });
 
-    auto* actEnumChips = hints->addAction(QStringLiteral("Enum value chips"));
-    actEnumChips->setToolTip(QStringLiteral("Show (MEMBER) on int fields that match an enum"));
-    actEnumChips->setCheckable(true);
-    actEnumChips->setChecked(settings.value("showEnumChips", true).toBool());
-    connect(actEnumChips, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("showEnumChips", checked);
-        for (auto& tab : m_tabs)
-            tab.ctrl->setShowEnumChips(checked);
-    });
     view->addSeparator();
 
     auto* actHoverEffects = view->addAction("Ho&ver Effects");
     actHoverEffects->setCheckable(true);
     actHoverEffects->setChecked(settings.value("hoverEffects", true).toBool());
     connect(actHoverEffects, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("hoverEffects", checked);
+        QSettings("RC", "RC").setValue("hoverEffects", checked);
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
                 if (pane.editor) pane.editor->setHoverEffects(checked);
@@ -1939,9 +1950,10 @@ void MainWindow::createMenus() {
         "Hover/edit previews for changing values (previous-value history, "
         "hex dump, disasm, struct target)"));
     m_actValuePopups->setCheckable(true);
-    m_actValuePopups->setChecked(settings.value("valuePopups", true).toBool());
+    // Off at every launch, and the choice is not remembered: these follow the
+    // pointer, so having them on is something you ask for while you need it.
+    m_actValuePopups->setChecked(false);
     connect(m_actValuePopups, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("valuePopups", checked);
         for (auto& tab : m_tabs)
             for (auto& pane : tab.panes)
                 if (pane.editor) pane.editor->setValuePopupsEnabled(checked);
@@ -1957,7 +1969,7 @@ void MainWindow::createMenus() {
         m_ribbonMenu = view->addMenu("&Ribbon");
         m_ribbonStateGroup = new QActionGroup(this);
         m_ribbonStateGroup->setExclusive(true);
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         const int state = rcx::ribbonStateFromSettings(s);
         struct { const char* text; const char* tip; int state; } states[] = {
             {"&Full",      "Tabs and buttons",              rcx::RibbonFull},
@@ -2011,7 +2023,7 @@ void MainWindow::createMenus() {
         }
         connect(m_ribbonLabelGroup, &QActionGroup::triggered, this, [this](QAction* a) {
             const int mode = a->data().toInt();
-            QSettings("REECLASS", "REECLASS").setValue("ribbonLabels", mode);
+            QSettings("RC", "RC").setValue("ribbonLabels", mode);
             if (m_ribbon) m_ribbon->setLabelMode(RibbonBar::LabelMode(mode));
         });
     }
@@ -2023,7 +2035,7 @@ void MainWindow::createMenus() {
     actMinimap->setCheckable(true);
     actMinimap->setChecked(settings.value("minimap", false).toBool());
     connect(actMinimap, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("minimap", checked);
+        QSettings("RC", "RC").setValue("minimap", checked);
         for (auto& tab : m_tabs) {
             for (auto& pane : tab.panes) {
                 if (!pane.minimap || !pane.editor) continue;
@@ -2037,13 +2049,63 @@ void MainWindow::createMenus() {
         }
     });
 
+    // ── Timeline ──
+    // On by default: every class on a live source keeps its recent past, so
+    // you can rewind something you only noticed after it happened. Switching
+    // it off hides the strip, stops capture and frees what was kept.
+    {
+        auto* tlMenu = view->addMenu(QStringLiteral("&Timeline"));
+        m_actTimeline = tlMenu->addAction(QStringLiteral("&Enable Timeline"));
+        m_actTimeline->setCheckable(true);
+        m_actTimeline->setChecked(settings.value("timeline/enabled", true).toBool());
+        connect(m_actTimeline, &QAction::toggled, this, [this](bool on) { setTimelineEnabled(on); });
+        // Showing the strip is not capturing: hiding it keeps every tab's
+        // history, a recording, and the buttons beside the address.
+        m_actTlStrip = tlMenu->addAction(QStringLiteral("&Show Timeline"));
+        m_actTlStrip->setCheckable(true);
+        m_actTlStrip->setChecked(settings.value("timeline/stripVisible", true).toBool());
+        connect(m_actTlStrip, &QAction::toggled, this, [this](bool on) { setTimelineStripVisible(on); });
+        tlMenu->addSeparator();
+        auto addTimelineAction = [&](const QString& text, const QKeySequence& key,
+                                     std::function<void(RcxController*)> fn) {
+            QAction* a = tlMenu->addAction(text);
+            if (!key.isEmpty()) a->setShortcut(key);
+            connect(a, &QAction::triggered, this, [this, fn]() {
+                if (auto* c = activeController()) { fn(c); syncTimelineActions(); }
+            });
+            return a;
+        };
+        // The same words as the buttons beside the address: Record / Stop
+        // Recording, and Back to Live while looking back at a recording.
+        // Values are live otherwise — there is nothing to pause.
+        m_actTlRecord = addTimelineAction(QStringLiteral("&Record"), QKeySequence(Qt::Key_F9),
+                                          [](RcxController* c) { c->timelineToggleRecording(); });
+        m_actTlLive = addTimelineAction(QStringLiteral("&Back to Live"), QKeySequence(Qt::CTRL | Qt::Key_End),
+                                        [](RcxController* c) { c->returnToLive(); });
+        m_actTlPrev = addTimelineAction(QStringLiteral("Pre&vious Change"), QKeySequence(Qt::CTRL | Qt::Key_Comma),
+                                        [](RcxController* c) { c->stepTimelineChange(-1); });
+        m_actTlNext = addTimelineAction(QStringLiteral("&Next Change"), QKeySequence(Qt::CTRL | Qt::Key_Period),
+                                        [](RcxController* c) { c->stepTimelineChange(+1); });
+        tlMenu->addSeparator();
+        m_actTlReset = tlMenu->addAction(QStringLiteral("&Clear Recording…"));
+        connect(m_actTlReset, &QAction::triggered, this, [this]() {
+            if (auto* c = activeController()) confirmTimelineClear(c);
+        });
+        connect(tlMenu, &QMenu::aboutToShow, this, &MainWindow::syncTimelineActions);
+    }
+
     {
         auto* actRefresh = view->addAction("&Refresh");
         m_actRefresh = actRefresh;
         actRefresh->setShortcut(QKeySequence(Qt::Key_F5));
         connect(actRefresh, &QAction::triggered, this, [this]() {
             auto* ctrl = activeController();
-            if (ctrl) { ctrl->resetChangeTracking(); ctrl->refresh(); }
+            if (ctrl) {
+                // Refresh means "show me now": leave the past first.
+                if (ctrl->isViewingPast()) ctrl->returnToLive();
+                ctrl->resetChangeTracking();
+                ctrl->refresh();
+            }
         });
     }
     {
@@ -2192,7 +2254,7 @@ void MainWindow::createMenus() {
         // the full hierarchy + vtable browser for the selected vtable.
         // No prompt — discoverability comes from the inline hints.
         auto* ctrl = activeController();
-        if (!ctrl || !ctrl->document()->provider) {
+        if (!ctrl || !ctrl->provider()) {
             setAppStatus(QStringLiteral("No active provider"));
             return;
         }
@@ -2213,10 +2275,10 @@ void MainWindow::createMenus() {
         }
         int64_t off = ctrl->document()->tree.computeOffset(idx);
         if (off < 0) return;
-        uint64_t addr = ctrl->document()->tree.baseAddress + (uint64_t)off;
+        uint64_t addr = ctrl->baseAddress() + (uint64_t)off;
         uint64_t val = is64
-            ? ctrl->document()->provider->readU64(addr)
-            : (uint64_t)ctrl->document()->provider->readU32(addr);
+            ? ctrl->provider()->readU64(addr)
+            : (uint64_t)ctrl->provider()->readU32(addr);
         if (!val) {
             setAppStatus(QStringLiteral("Field is null"));
             return;
@@ -2232,7 +2294,7 @@ void MainWindow::createMenus() {
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F),
                     QIcon(), this, &MainWindow::showProfilerDialog);
     tools->addSeparator();
-    const auto mcpName = QSettings("REECLASS", "REECLASS").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
+    const auto mcpName = QSettings("RC", "RC").value("autoStartMcp", true).toBool() ? "Stop &MCP Server" : "Start &MCP Server";
     m_mcpAction = Qt5Qt6AddAction(tools, mcpName, QKeySequence::UnknownKey, QIcon(), this, &MainWindow::toggleMcp);
     tools->addSeparator();
     Qt5Qt6AddAction(tools, "&Options...", QKeySequence::UnknownKey, makeIcon(":/vsicons/settings-gear.svg"), this,
@@ -2248,7 +2310,7 @@ void MainWindow::createMenus() {
                     makeIcon(":/vsicons/question.svg"), this,
                     &MainWindow::showShortcutsDialog);
     help->addSeparator();
-    Qt5Qt6AddAction(help, "&About REECLASS", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
+    Qt5Qt6AddAction(help, "&About RC", QKeySequence::UnknownKey, makeIcon(":/vsicons/question.svg"), this, &MainWindow::about);
 }
 
 // ── Themed resize grip (replaces ugly default QSizeGrip) ──
@@ -2332,28 +2394,24 @@ protected:
         }
         QWidget::mousePressEvent(e);
     }
+    // The top band sits over the title bar, and double-clicking the title bar
+    // maximizes: the band keeps that, instead of starting a second resize.
+    void mouseDoubleClickEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton && m_edges.testFlag(Qt::TopEdge)) {
+            QWidget* w = window();
+            if (w->isMaximized()) w->showNormal();
+            else w->showMaximized();
+            e->accept();
+            return;
+        }
+        QWidget::mouseDoubleClickEvent(e);
+    }
 private:
     Qt::Edges m_edges;
 };
 
-// Geometry of a resize zone for the given edge(s) within a w×h window.
-// We expose only the BOTTOM + SIDES (and bottom corners) — the top edge is the
-// custom title bar (move + its min/max/close buttons), so a top resize zone
-// there would steal those clicks. The side strips start below the title bar
-// for the same reason.
-static QRect resizeEdgeRect(Qt::Edges e, int w, int h) {
-    constexpr int E   = 5;    // edge strip thickness
-    constexpr int C   = 12;   // corner square size
-    constexpr int TOP = 34;   // keep side strips clear of the title bar
-    const bool L = e & Qt::LeftEdge,  R = e & Qt::RightEdge;
-    const bool B = e & Qt::BottomEdge;
-    if ((L || R) && B)                                   // bottom corner
-        return QRect(L ? 0 : w - C, h - C, C, C);
-    if (L) return QRect(0,     TOP, E, h - TOP - C);     // left strip
-    if (R) return QRect(w - E, TOP, E, h - TOP - C);     // right strip
-    if (B) return QRect(C, h - E,  w - 2 * C, E);        // bottom strip
-    return {};
-}
+// Zone geometry (every edge and corner, none while maximized) lives in
+// widgets/resize_edges.h so it can be tested without a window.
 
 // ── Dock title-bar grip (VS2022-style dot pattern) ──
 // Still used by the FLOATING document-dock title bar (createDocDock). The four
@@ -2568,19 +2626,42 @@ protected:
         // rail so it doesn't float against the bottom edge. Size derived
         // through resolvedPointSize — a raw setPixelSize(13) both ignored the
         // user's chrome size and made the label the loudest thing on the strip.
-        p.save();
+        // The label is drawn FLAT and then turned, never drawn turned.
+        // Windows hands back subpixel (LCD) coverage for text, which owes its
+        // sharpness to the RGB stripes running ALONG the glyphs; rotate the
+        // face 90° and those stripes cross the stems instead, leaving the
+        // orange/blue fringing that reads as a pixelated label. A transparent
+        // image carries no subpixel coverage, so rasterising there gives plain
+        // greyscale edges, and a quarter turn of a bitmap is lossless.
+        //
         // The chrome face, not the inherited app font: this label stands in
         // for the Project dock's title and has to match it.
         QFont f = rcx::chromeFont();
         f.setPointSize(qMax(7, rcx::resolvedPointSize(f) - 1));
         f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
-        p.setFont(f);
-        p.setPen(fg);
-        p.translate(cx, height() / 2.0);
-        p.rotate(-90.0);
-        p.drawText(QRectF(-height() / 2.0, -width() / 2.0, height(), width()),
-                   Qt::AlignCenter, QStringLiteral("PROJECT"));
-        p.restore();
+        const QString label = QStringLiteral("PROJECT");
+        const QFontMetrics fm(f);
+        const qreal dpr = devicePixelRatioF();
+        const QSize flat(fm.horizontalAdvance(label) + 2, fm.height() + 2);
+        QImage img(QSize(qMax(1, int(std::lround(flat.width() * dpr))),
+                         qMax(1, int(std::lround(flat.height() * dpr)))),
+                   QImage::Format_ARGB32_Premultiplied);
+        img.setDevicePixelRatio(dpr);
+        img.fill(Qt::transparent);
+        {
+            QPainter tp(&img);
+            tp.setRenderHint(QPainter::TextAntialiasing, true);
+            tp.setFont(f);
+            tp.setPen(fg);
+            tp.drawText(QRectF(QPointF(0, 0), QSizeF(flat)), Qt::AlignCenter, label);
+        }
+        QTransform turn;
+        turn.rotate(-90.0);
+        QImage upright = img.transformed(turn);
+        upright.setDevicePixelRatio(dpr);
+        p.drawImage(QPointF((width() - upright.width() / dpr) / 2.0,
+                            (height() - upright.height() / dpr) / 2.0),
+                    upright);
     }
 private:
     bool m_hover = false;
@@ -3024,13 +3105,17 @@ void MainWindow::createStatusBar() {
     sb->grip = grip;
 
 #ifndef __APPLE__
-    // Bottom + side resize zones (the visible grip already covers bottom-right).
-    // Positioned/raised in resizeEvent. Frameless platforms only; macOS keeps
-    // its native frame, which already resizes from every edge.
+    // Resize zones on every edge and corner (the visible grip already covers
+    // bottom-right). Positioned/raised in repositionResizeWidgets, hidden while
+    // maximized. Frameless platforms only; macOS keeps its native frame, which
+    // already resizes from every edge.
     struct { Qt::Edges e; Qt::CursorShape c; } kEdges[] = {
+        { Qt::TopEdge,                     Qt::SizeVerCursor   },
         { Qt::BottomEdge,                  Qt::SizeVerCursor   },
         { Qt::LeftEdge,                    Qt::SizeHorCursor   },
         { Qt::RightEdge,                   Qt::SizeHorCursor   },
+        { Qt::TopEdge | Qt::LeftEdge,      Qt::SizeFDiagCursor },
+        { Qt::TopEdge | Qt::RightEdge,     Qt::SizeBDiagCursor },
         { Qt::BottomEdge | Qt::LeftEdge,   Qt::SizeBDiagCursor },
     };
     for (auto& z : kEdges)
@@ -3059,7 +3144,7 @@ void MainWindow::createStatusBar() {
 
     // Sync status bar font to global editor font (10pt monospace)
     {
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_statusLabel->setFont(f);
@@ -3070,7 +3155,7 @@ void MainWindow::createStatusBar() {
     // begin/end. Hidden by default; shown only during long operations.
     {
         const auto& t = ThemeManager::instance().current();
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
 
@@ -3095,7 +3180,7 @@ void MainWindow::createStatusBar() {
     {
         // 10 pt, like the label beside it: at 9 pt the chip and the status text
         // were two sizes on one baseline in a strip 20 px tall.
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_sourceChip = new SourceStatusChip(sb);
@@ -3319,7 +3404,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // marked only by the underline every tab family in the app uses.
     {
         const auto& t = ThemeManager::instance().current();
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         pane.tabWidget->setStyleSheet(rcx::paneTabStyle(
             t, s.value("font", "JetBrains Mono").toString()));
     }
@@ -3327,10 +3412,12 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Create editor via controller (parent = tabWidget for ownership)
     pane.editor = tab.ctrl->addSplitEditor(pane.tabWidget);
     {
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         pane.editor->setRelativeOffsets(s.value("relativeOffsets", true).toBool());
         pane.editor->setHoverEffects(s.value("hoverEffects", true).toBool());
-        pane.editor->setValuePopupsEnabled(s.value("valuePopups", true).toBool());
+        // Session state, not a stored one: a pane opened after the user turned
+        // popups on gets them, but a fresh launch starts without them.
+        pane.editor->setValuePopupsEnabled(m_actValuePopups && m_actValuePopups->isChecked());
     }
     pane.editor->setPresentationMode(m_presentationMode);
     // RTTI chip click is intentionally not wired — the chip is visual
@@ -3357,7 +3444,6 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // emitting editor + emits this. Mirror it to the View-menu checkbox, the
     // persisted setting, and every other editor so the choice is global.
     connect(pane.editor, &RcxEditor::valuePopupsDisableRequested, this, [this]() {
-        QSettings("REECLASS", "REECLASS").setValue("valuePopups", false);
         if (m_actValuePopups) m_actValuePopups->setChecked(false);
         for (auto& tab : m_tabs)
             for (auto& p : tab.panes)
@@ -3366,7 +3452,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
     // Sync View menu checkbox when editor toggles offset mode (double-click / context menu)
     connect(pane.editor, &RcxEditor::relativeOffsetsChanged, this, [this](bool rel) {
-        QSettings("REECLASS", "REECLASS").setValue("relativeOffsets", rel);
+        QSettings("RC", "RC").setValue("relativeOffsets", rel);
         if (m_actRelOfs) m_actRelOfs->setChecked(rel);
         // Propagate to all other editors so they stay in sync
         for (auto& tab : m_tabs)
@@ -3431,7 +3517,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // construction path and the theme-change path can never drift.
     styleMinimap(mm, ThemeManager::instance().current());
     mm->setVisible(
-        QSettings("REECLASS", "REECLASS").value("minimap", false).toBool());
+        QSettings("RC", "RC").value("minimap", false).toBool());
     ecLayout->addWidget(mm);
 
     // Translucent rectangle overlay covering the lines currently
@@ -3639,7 +3725,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Corner widget: format combo + gear icon
     {
         const auto& ct = ThemeManager::instance().current();
-        QSettings cs("REECLASS", "REECLASS");
+        QSettings cs("RC", "RC");
         QString ef = cs.value("font", "JetBrains Mono").toString();
 
         auto* cornerWidget = new QWidget;
@@ -3760,7 +3846,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
 
         connect(pane.fmtCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this, refreshAllRendered](int idx) {
-            QSettings("REECLASS", "REECLASS").setValue("codeFormat", idx);
+            QSettings("RC", "RC").setValue("codeFormat", idx);
             refreshAllRendered();
             for (auto& tab : m_tabs)
                 for (auto& p : tab.panes)
@@ -3769,7 +3855,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         });
         connect(pane.scopeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this, refreshAllRendered](int idx) {
-            QSettings("REECLASS", "REECLASS").setValue("codeScope", idx);
+            QSettings("RC", "RC").setValue("codeScope", idx);
             refreshAllRendered();
             for (auto& tab : m_tabs)
                 for (auto& p : tab.panes)
@@ -3961,7 +4047,63 @@ QString MainWindow::tabTitle(const TabState& tab) const {
     // Source identity is carried by the left-side DockTabSourceIcon \u2014
     // no need to append the source's filename/process to the text,
     // which used to balloon to "UnnamedClass0 \u2014 long_filename.png".
-    return rootName(tab.doc->tree, tab.ctrl->viewRootId());
+    const QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
+    return tab.ctrl->isInstanceView()
+        ? name + QStringLiteral(" @ 0x") + QString::number(tab.ctrl->baseAddress(), 16).toUpper()
+        : name;
+}
+
+QDockWidget* MainWindow::openInstanceBeside(RcxController* source, uint64_t structId,
+                                            uint64_t address, const QString& expression,
+                                            std::shared_ptr<rcx::Provider> provider) {
+    if (!source) return nullptr;
+    QDockWidget* sourceDock = nullptr;
+    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it)
+        if (it->ctrl == source) { sourceDock = it.key(); break; }
+    if (!sourceDock) return nullptr;
+    const auto targetProvider = provider ? provider : source->provider();
+    const int ri = source->document()->tree.indexOfId(structId);
+    if (!targetProvider || !targetProvider->isReadable(address, 1) || ri < 0
+        || source->document()->tree.nodes[ri].parentId != 0
+        || source->document()->tree.nodes[ri].kind != NodeKind::Struct
+        || (targetProvider->isLive()
+            && targetProvider->pointerSize() != source->document()->tree.pointerSize)) {
+        setAppStatus(QStringLiteral("Cannot open this address with the current class and source"));
+        return nullptr;
+    }
+    auto* dock = createTab(source->document());
+    auto* ctrl = m_tabs[dock].ctrl;
+    if (!ctrl->configureInstance(*source, structId, address, expression, targetProvider)) {
+        dock->close();
+        return nullptr;
+    }
+    dock->setWindowTitle(tabTitle(m_tabs[dock]));
+    removeDockWidget(dock);
+    if (sourceDock->isFloating()) {
+        addDockWidget(Qt::TopDockWidgetArea, dock);
+        dock->setFloating(true);
+        const QRect available = sourceDock->screen()->availableGeometry();
+        const QSize size = sourceDock->size().boundedTo(available.size());
+        const int x = qBound(available.left(), sourceDock->frameGeometry().right() + 8,
+                             available.right() - size.width() + 1);
+        const int y = qBound(available.top(), sourceDock->y(), available.bottom() - size.height() + 1);
+        dock->setGeometry(QRect(QPoint(x, y), size));
+    } else {
+        // Use the same placement as New Horizontal Document Group. Splitting
+        // a tabbed dock (including our sentinel tabs) only adds another tab.
+        auto area = dockWidgetArea(sourceDock);
+        if (area == Qt::NoDockWidgetArea) area = Qt::TopDockWidgetArea;
+        addDockWidget(area, dock, Qt::Horizontal);
+        sourceDock->show();
+        sourceDock->raise();
+        dock->show();
+        resizeDocks({sourceDock, dock}, {width() / 2, width() / 2}, Qt::Horizontal);
+    }
+    dock->show();
+    dock->raise();
+    reconcileDockTabBars();
+    setActiveDocDock(dock);
+    return dock;
 }
 
 // Create a sentinel dock — invisible tab that keeps Qt's tab bar on-screen
@@ -4022,7 +4164,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             lbl->setPalette(lp);
         }
         {
-            QSettings settings("REECLASS", "REECLASS");
+            QSettings settings("RC", "RC");
             QFont f(settings.value("font", "JetBrains Mono").toString(), 12);
             f.setFixedPitch(true);
             lbl->setFont(f);
@@ -4065,7 +4207,19 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     });
 
     dock->setTitleBarWidget(emptyTitleBar);
-    dock->setWidget(splitter);
+    // The tab body: every pane, then the class timeline along the bottom.
+    // At the bottom, showing the strip only trims the panes from below, so
+    // the first visible line never moves; and it spans the TAB, because a
+    // strip inside one pane would silently rewind its split sibling too.
+    auto* tabBody = new QWidget;
+    tabBody->setObjectName(QStringLiteral("rcxTabBody"));
+    auto* tabBodyLayout = new QVBoxLayout(tabBody);
+    tabBodyLayout->setContentsMargins(0, 0, 0, 0);
+    tabBodyLayout->setSpacing(0);
+    tabBodyLayout->addWidget(splitter, 1);
+    auto* timelineStrip = new rcx::TimelineStrip(tabBody);
+    tabBodyLayout->addWidget(timelineStrip);
+    dock->setWidget(tabBody);
 
     // Border overlay and resize grip for floating state
     auto* dockBorder = new BorderOverlay(dock);
@@ -4127,15 +4281,17 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     // Create the initial split pane
     tab.panes.append(createSplitPane(tab));
+    tab.timeline = timelineStrip;
+    bindTimelineStrip(tab);
 
     // Apply global compact columns setting to new tab
-    ctrl->setCompactColumns(QSettings("REECLASS", "REECLASS").value("compactColumns", true).toBool());
-    ctrl->setTreeLines(QSettings("REECLASS", "REECLASS").value("treeLines", false).toBool());
-    ctrl->setBraceWrap(QSettings("REECLASS", "REECLASS").value("braceWrap", false).toBool());
-    ctrl->setTypeHints(QSettings("REECLASS", "REECLASS").value("typeHints", false).toBool());
-    ctrl->setShowComments(QSettings("REECLASS", "REECLASS").value("showComments", false).toBool());
-    ctrl->setShowRtti(QSettings("REECLASS", "REECLASS").value("showRttiChips", false).toBool());
-    ctrl->setShowEnumChips(QSettings("REECLASS", "REECLASS").value("showEnumChips", true).toBool());
+    ctrl->setCompactColumns(QSettings("RC", "RC").value("compactColumns", true).toBool());
+    ctrl->setTreeLines(QSettings("RC", "RC").value("treeLines", true).toBool());
+    ctrl->setTreeColumns(QSettings("RC", "RC").value("treeColumns", true).toBool());
+    ctrl->setBraceWrap(QSettings("RC", "RC").value("braceWrap", false).toBool());
+    ctrl->setTypeHints(QSettings("RC", "RC").value("typeHints", false).toBool());
+    ctrl->setShowComments(QSettings("RC", "RC").value("showComments", false).toBool());
+    ctrl->setShowRtti(QSettings("RC", "RC").value("showRttiChips", false).toBool());
 
     // Give every controller the shared document list for cross-tab type visibility
     ctrl->setProjectDocuments(&m_allDocs);
@@ -4253,6 +4409,11 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 setAppStatus(QStringLiteral("Copied C struct to clipboard"));
             }
         });
+    });
+
+    connect(ctrl, &RcxController::requestOpenInstanceBeside, this,
+            [this, ctrl](uint64_t id, uint64_t address, const QString& expression) {
+        openInstanceBeside(ctrl, id, address, expression);
     });
 
     // Ctrl+Click navigation: open a struct in a new tab sharing the same
@@ -4748,7 +4909,7 @@ void MainWindow::refreshDocTabSourceIcon(QDockWidget* docDock) {
     if (idx >= 0 && idx < saved.size()) {
         const auto& ss = saved[idx];
         iconPath = iconForProvider(ss.kind);
-        live = (doc->provider && doc->provider->isValid());
+        live = (ctrl->provider() && ctrl->provider()->isValid());
         tip = QStringLiteral("Source: %1 (%2)")
                 .arg(ss.displayName.isEmpty() ? ss.kind : ss.displayName)
                 .arg(live ? QStringLiteral("connected") : QStringLiteral("disconnected"));
@@ -4801,7 +4962,7 @@ void MainWindow::setupDockTabBars() {
         tabBar->setDrawBase(false);
         // Set editor font so tab width sizing matches our label painting
         {
-            QSettings s("REECLASS", "REECLASS");
+            QSettings s("RC", "RC");
             QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
             tabFont.setFixedPitch(true);
             tabBar->setFont(tabFont);
@@ -5294,6 +5455,17 @@ MainWindow::~MainWindow() {
      * 
      */
 
+    // Scan results and undoable writes also retain their originating provider.
+    delete m_scannerPanel;
+    m_scannerPanel = nullptr;
+    QSet<RcxDocument*> clearedDocs;
+    for (const auto& tab : m_tabs) {
+        if (clearedDocs.contains(tab.doc)) continue;
+        const QSignalBlocker blocker(&tab.doc->undoStack);
+        tab.doc->undoStack.clear();
+        clearedDocs.insert(tab.doc);
+    }
+
     // Disconnect all signals before members are torn down,
     // so the lambdas capturing 'this' never fire on a half-destroyed object.
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
@@ -5301,8 +5473,8 @@ MainWindow::~MainWindow() {
         disconnect(&it->doc->undoStack, nullptr, this, nullptr);
         // Release providers now while plugin DLLs are still loaded;
         // if deferred to Qt child cleanup the DLL code may already be unloaded.
-        it->doc->provider.reset();
         it->ctrl->resetProvider();
+        it->doc->provider.reset();
     }
     m_tabs.clear();
 }
@@ -5479,7 +5651,7 @@ void MainWindow::selfTest() {
     // empty bytes instead of live ones.
     if (ProviderRegistry::instance().findProvider(QStringLiteral("processmemory"))) {
         DWORD pid = GetCurrentProcessId();
-        QString target = QString("%1:REECLASS.exe").arg(pid);
+        QString target = QString("%1:RC.exe").arg(pid);
         editorCtrl->attachViaPlugin(QStringLiteral("processmemory"), target);
     }
 
@@ -5650,6 +5822,108 @@ void MainWindow::previewCodeView() {
     showCodeView(CodeScope::FullSdk);
 }
 
+void MainWindow::previewLargeFile() {
+    const QString path = qEnvironmentVariable("RCX_LARGE_FILE");
+    if (path.isEmpty()) { fprintf(stderr, "LARGE_FILE_RESULT FAIL no fixture\n"); return; }
+    QElapsedTimer timer;
+    timer.start();
+    auto* dock = project_open(path);
+    if (!dock) { fprintf(stderr, "LARGE_FILE_RESULT FAIL open\n"); return; }
+    const qint64 openMs = timer.elapsed();
+    auto* ctrl = m_tabs[dock].ctrl;
+    auto file = std::dynamic_pointer_cast<FileProvider>(ctrl->provider());
+    if (!file || file->byteSize() < 256) { fprintf(stderr, "LARGE_FILE_RESULT FAIL provider\n"); return; }
+    QFile reference(path);
+    bool ok = reference.open(QIODevice::ReadOnly) && ctrl->document()->filePath.isEmpty();
+    const uint64_t size = file->byteSize();
+    timer.restart();
+    const QVector<uint64_t> offsets = {0, qMin(size - 256, (uint64_t(1) << 31) - 8),
+        qMin(size - 256, (uint64_t(1) << 32) - 8), size / 2, size - 256};
+    for (uint64_t offset : offsets) {
+        ok = reference.seek(qint64(offset)) && ok;
+        ok = file->readBytes(offset, 256) == reference.read(256) && ok;
+    }
+    const qint64 sampleMs = timer.elapsed();
+    resize(1280, 720);
+    uint64_t root = ctrl->viewRootId();
+    if (!root && !ctrl->document()->tree.nodes.isEmpty()) root = ctrl->document()->tree.nodes.first().id;
+    auto* otherDock = openInstanceBeside(ctrl, root, size - 128);
+    ok = otherDock && m_tabs[otherDock].ctrl->baseAddress() == size - 128 && ok;
+    fprintf(stderr, "LARGE_FILE_RESULT %s bytes=%llu open_ms=%lld sample_ms=%lld cache_bytes=%d\n",
+        ok ? "PASS" : "FAIL", static_cast<unsigned long long>(size),
+        static_cast<long long>(openMs), static_cast<long long>(sampleMs), file->cachedBytes());
+    fflush(stderr);
+}
+
+void MainWindow::previewInstances() {
+    auto* source = activeController();
+    if (!source) return;
+    auto* doc = source->document();
+    doc->undoStack.clear();
+    doc->tree = NodeTree();
+    doc->tree.baseAddress = 0x20;
+    Node root;
+    root.kind = NodeKind::Struct;
+    root.name = root.structTypeName = QStringLiteral("Player");
+    root.classKeyword = QStringLiteral("class");
+    root.collapsed = false;
+    const uint64_t rootId = doc->tree.nodes[doc->tree.addNode(root)].id;
+    auto field = [&](int offset, NodeKind kind, const QString& name) {
+        Node n;
+        n.kind = kind; n.offset = offset; n.parentId = rootId; n.name = name;
+        if (kind == NodeKind::Pointer64) n.refId = rootId;
+        doc->tree.addNode(n);
+    };
+    field(0, NodeKind::Float, QStringLiteral("health"));
+    field(4, NodeKind::UInt32, QStringLiteral("team"));
+    field(8, NodeKind::Vec3, QStringLiteral("position"));
+    field(20, NodeKind::Pointer64, QStringLiteral("next"));
+    QByteArray bytes(512, '\0');
+    const float firstHealth = 100, secondHealth = 62.5f;
+    const uint32_t firstTeam = 1, secondTeam = 2;
+    const float firstPosition[3] = {10, 20, 30}, secondPosition[3] = {14, 25, 30};
+    const uint64_t next = 0x80;
+    memcpy(bytes.data() + 0x20, &firstHealth, 4);
+    memcpy(bytes.data() + 0x24, &firstTeam, 4);
+    memcpy(bytes.data() + 0x28, firstPosition, 12);
+    memcpy(bytes.data() + 0x34, &next, 8);
+    memcpy(bytes.data() + 0x80, &secondHealth, 4);
+    memcpy(bytes.data() + 0x84, &secondTeam, 4);
+    memcpy(bytes.data() + 0x88, secondPosition, 12);
+    doc->provider = std::make_shared<BufferProvider>(bytes, QStringLiteral("instances.bin"));
+    source->copySavedSources({}, -1);
+    source->setReadOnlyOverride(false);
+    source->setViewRootId(rootId);
+    source->refresh();
+    const int width = qEnvironmentVariableIntValue("RCX_INSTANCE_SHOT_WIDTH");
+    resize(width > 0 ? width : 1280, 720);
+    for (int line = 0; line < source->lastResult().meta.size(); ++line) {
+        if (source->lastResult().meta[line].nodeIdx == 4) {
+            source->openPointerBeside(source->primaryEditor(), line);
+            break;
+        }
+    }
+    QPointer<RcxController> left = source;
+    QPointer<RcxController> right = activeController();
+    QTimer::singleShot(500, this, [this, left, right] {
+        if (!left || !right || left == right) { fprintf(stderr, "INSTANCES_RESULT FAIL no second view\n"); return; }
+        QDockWidget* leftDock = nullptr;
+        QDockWidget* rightDock = nullptr;
+        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+            if (it->ctrl == left) leftDock = it.key();
+            if (it->ctrl == right) rightDock = it.key();
+        }
+        const bool ok = leftDock && rightDock && leftDock->isVisible() && rightDock->isVisible()
+            && leftDock->geometry().right() <= rightDock->geometry().left()
+            && left->document() == right->document() && left->baseAddress() == 0x20
+            && right->baseAddress() == 0x80
+            && left->lastResult().text.contains(QStringLiteral("100.00f"))
+            && right->lastResult().text.contains(QStringLiteral("62.500"));
+        fprintf(stderr, "INSTANCES_RESULT %s\n", ok ? "PASS" : "FAIL");
+        fflush(stderr);
+    });
+}
+
 // --screenshot symbols: open the Symbols dock at the narrow width the header
 // chips / sort row have to survive (the user's dock is ~270 px).
 // --screenshot fontmenu: pop View ▸ Font where the capture can see it.
@@ -5675,6 +5949,103 @@ void MainWindow::previewNodeMenu() {
                                    mapToGlobal(QPoint(160, 160)));
         return;
     }
+}
+
+// --screenshot <png> timeline: the class timeline, end to end, in the real
+// app. project_new()'s class is self-attached — the processmemory provider
+// reading a buffer in our own process — so it is a genuinely LIVE source:
+// writing into that buffer on a timer sends real changes through the real
+// refresh loop into the timeline. Saves <png>_live.png, then scrubs to the
+// middle of what was captured and saves <png> showing the past.
+void MainWindow::previewTimeline(const QString& ssPath) {
+    auto* tab = activeTab();
+    if (!tab || !tab->doc || !tab->doc->m_ownedBuffer || !tab->ctrl) {
+        fprintf(stderr, "timeline: no self-attached class\n");
+        QApplication::quit();
+        return;
+    }
+    uint8_t* buf = tab->doc->m_ownedBuffer.get();
+    const size_t size = tab->doc->m_ownedBufferSize;
+    auto* mutate = new QTimer(this);
+    auto ticks = std::make_shared<int>(0);
+    connect(mutate, &QTimer::timeout, this, [buf, size, ticks]() {
+        const int t = ++*ticks;
+        const uint32_t health = 100 - uint32_t(t % 60);
+        std::memcpy(buf, &health, 4);
+        if (t % 3 == 0) {
+            const uint32_t ammo = uint32_t(t / 3);
+            std::memcpy(buf + 4, &ammo, 4);
+        }
+        if (t % 17 == 0)
+            for (size_t i = 16; i < 48 && i < size; ++i) buf[i] = uint8_t(t * 31 + int(i));
+    });
+    mutate->start(60);
+
+    QPointer<RcxController> c(tab->ctrl);
+    // Nothing is captured until Record.
+    tab->ctrl->timelineToggleRecording();
+    QTimer::singleShot(4000, this, [this, mutate, c, ssPath]() {
+        mutate->stop();
+        QString live = ssPath;
+        live.insert(live.lastIndexOf(QLatin1Char('.')), QStringLiteral("_live"));
+        grab().save(live);
+        if (!c || !c->timelineContext() || c->timelineContext()->model().isEmpty()) {
+            fprintf(stderr, "timeline: nothing captured\n");
+            QApplication::quit();
+            return;
+        }
+        const tl::TimelineModel& m = c->timelineContext()->model();
+        const int64_t first = m.timeOf(m.firstRecord());
+        const int64_t last = m.timeOf(m.lastRecord());
+        c->viewTimelineAt((first + last) / 2);
+        fprintf(stderr, "timeline: %d records over %lld ms; viewing record %u (past=%d)\n",
+                m.size(), (long long)(last - first), (unsigned)c->pastRecord(), int(c->isViewingPast()));
+        QTimer::singleShot(1200, this, [this, c, ssPath]() {
+            grab().save(ssPath);
+            fprintf(stderr, "timeline: past=%d -> %s\n", int(c && c->isViewingPast()), qPrintable(ssPath));
+            QApplication::quit();
+        });
+    });
+}
+
+void MainWindow::previewSimulationTimeline(const QString& ssPath) {
+    project_newSimulation();
+    auto* tab = activeTab();
+    if (!tab || !tab->ctrl) {
+        fprintf(stderr, "simtimeline: no simulation tab\n");
+        QApplication::quit();
+        return;
+    }
+    QPointer<RcxController> c(tab->ctrl);
+    auto suffixed = [ssPath](const char* tag) {
+        QString p = ssPath;
+        p.insert(p.lastIndexOf(QLatin1Char('.')), QLatin1String(tag));
+        return p;
+    };
+    // Record after the first compose, for about seven seconds of bouncing.
+    QTimer::singleShot(600, this, [c]() { if (c) c->timelineToggleRecording(); });
+    QTimer::singleShot(7600, this, [this, c, ssPath, suffixed]() {
+        grab().save(ssPath);                                   // recording
+        if (!c) { QApplication::quit(); return; }
+        c->timelineToggleRecording();                          // Stop
+        QTimer::singleShot(900, this, [this, c, suffixed]() {
+            grab().save(suffixed("_stopped"));
+            if (!c || !c->timelineContext() || c->timelineContext()->model().isEmpty()) {
+                fprintf(stderr, "simtimeline: nothing recorded\n");
+                QApplication::quit();
+                return;
+            }
+            const tl::TimelineModel& m = c->timelineContext()->model();
+            const int64_t first = m.timeOf(m.firstRecord());
+            const int64_t last = m.timeOf(m.lastRecord());
+            c->viewTimelineAt(first + (last - first) * 2 / 5);
+            QTimer::singleShot(900, this, [this, c, suffixed]() {
+                grab().save(suffixed("_past"));
+                fprintf(stderr, "simtimeline: past=%d\n", int(c && c->isViewingPast()));
+                QApplication::quit();
+            });
+        });
+    });
 }
 
 void MainWindow::previewFontMenu() {
@@ -5759,8 +6130,8 @@ void MainWindow::showGotoAddressDialog() {
     // when the provider supports it.
     AddressParserCallbacks cbs;
     auto* doc = ctrl->document();
-    if (doc->provider) {
-        auto* prov = doc->provider.get();
+    if (ctrl->provider()) {
+        auto* prov = ctrl->provider().get();
         cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
             uint64_t base = prov->symbolToAddress(name);
             *ok = (base != 0);
@@ -5820,7 +6191,7 @@ void MainWindow::showCommandPalette() {
 
 void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
     auto* ctrl = activeController();
-    if (!ctrl || !ctrl->document()->provider) {
+    if (!ctrl || !ctrl->provider()) {
         setAppStatus(QStringLiteral("No active provider for RTTI"));
         return;
     }
@@ -5836,7 +6207,7 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
         info = walkRtti(*snap, vtableAddr);
     }
     if (!info.ok) {
-        info = walkRtti(*ctrl->document()->provider, vtableAddr);
+        info = walkRtti(*ctrl->provider(), vtableAddr);
     }
     if (!info.ok) {
         ThemedMessageBox::info(this,
@@ -5847,13 +6218,13 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
                 : info.error);
         return;
     }
-    RttiBrowserDialog dlg(info, ctrl->document()->provider.get(), this);
+    RttiBrowserDialog dlg(info, ctrl->provider().get(), this);
     dlg.exec();
 }
 
 void MainWindow::about() {
     ThemedDialog dlg(this);
-    dlg.setWindowTitle(QStringLiteral("About REECLASS"));
+    dlg.setWindowTitle(QStringLiteral("About RC"));
     dlg.setFixedSize(420, 420);
     auto* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(20, 16, 20, 16);
@@ -5883,7 +6254,7 @@ void MainWindow::about() {
     ack->setWordWrap(true);
     ack->setText(QStringLiteral(
         "<div style='color:%1;font-size:11px;line-height:140%%;'>"
-        "<p>REECLASS uses the following open-source software. Many thanks "
+        "<p>RC uses the following open-source software. Many thanks "
         "to their authors and maintainers.</p>"
         "<ul style='margin-left:14px;padding-left:0;'>"
         "<li><a href='https://www.qt.io/' style='color:%2;'>Qt</a> "
@@ -5913,7 +6284,7 @@ void MainWindow::about() {
     auto* ghBtn = new DialogButton(QStringLiteral("Open GitHub"),
         DialogButton::Primary, &dlg);
     connect(ghBtn, &QPushButton::clicked, this, []() {
-        QDesktopServices::openUrl(QUrl("https://github.com/IChooseYou/REECLASS"));
+        QDesktopServices::openUrl(QUrl("https://github.com/IChooseYou/RC"));
     });
     lay->addWidget(ghBtn, 0, Qt::AlignCenter);
     dlg.exec();
@@ -5933,7 +6304,7 @@ void MainWindow::showShortcutsDialog() {
     dlg.setWindowTitle(QStringLiteral("Keyboard Shortcuts"));
     dlg.resize(560, 520);
 
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
@@ -6015,10 +6386,17 @@ void MainWindow::showShortcutsDialog() {
         {QStringLiteral("Delete / Backspace"),   QStringLiteral("Zero-fill selection")},
         {QStringLiteral("Esc"),                  QStringLiteral("Clear byte selection (first Esc), then node selection")},
 
+        {QStringLiteral("Timeline"),           {}, true},
+        {QStringLiteral("F9"),                  QStringLiteral("Record / stop recording this class")},
+        {QStringLiteral("Ctrl+, / Ctrl+."),     QStringLiteral("Previous / next recorded change")},
+        {QStringLiteral("Ctrl+End"),            QStringLiteral("Back to live (leave the recording)")},
+        {QStringLiteral("Drag on the timeline"), QStringLiteral("Look back through the recording (Shift: don't snap to changes)")},
+        {QStringLiteral("Wheel / Shift+Wheel"), QStringLiteral("Zoom / pan the timeline")},
+
         {QStringLiteral("Bookmarks & Window"), {}, true},
         {QStringLiteral("Ctrl+B"),              QStringLiteral("Add bookmark...")},
         {QStringLiteral("Ctrl+Alt+B"),          QStringLiteral("Quick bookmark here")},
-        {QStringLiteral("Ctrl+\\"),             QStringLiteral("Split view below (REECLASS / Code side-by-side)")},
+        {QStringLiteral("Ctrl+\\"),             QStringLiteral("Split view below (RC / Code side-by-side)")},
         {QStringLiteral("Ctrl+Shift+\\"),       QStringLiteral("Unsplit view")},
         {QStringLiteral("Ctrl+Shift+[ / ]"),    QStringLiteral("Collapse all / expand all")},
         {QStringLiteral("F5"),                  QStringLiteral("Refresh")},
@@ -6108,7 +6486,7 @@ void MainWindow::toggleMcp() {
     } else {
         m_mcp->start();
         m_mcpAction->setText("Stop &MCP Server");
-        setAppStatus("MCP server listening on pipe: REECLASSMcpBridge");
+        setAppStatus("MCP server listening on pipe: RCMcpBridge");
     }
 }
 
@@ -6173,7 +6551,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             tabBar->setExpanding(false);
             // Set editor font so tab width sizing matches our label painting
             {
-                QSettings s("REECLASS", "REECLASS");
+                QSettings s("RC", "RC");
                 QFont tabFont(s.value("font", "JetBrains Mono").toString(), 10);
                 tabFont.setFixedPitch(true);
                 tabBar->setFont(tabFont);
@@ -6209,7 +6587,7 @@ void MainWindow::applyTheme(const Theme& theme) {
     // TOP accent — so the strip changed grammar on every theme switch. Both
     // sites call rcx::paneTabStyle now.
     {
-        QString editorFont = QSettings("REECLASS", "REECLASS").value("font", "JetBrains Mono").toString();
+        QString editorFont = QSettings("RC", "RC").value("font", "JetBrains Mono").toString();
         const QString tabSheet = rcx::paneTabStyle(theme, editorFont);
         QString comboStyle = QStringLiteral(
             "QComboBox { background: %1; color: %2; border: 1px solid %3;"
@@ -6367,7 +6745,7 @@ void MainWindow::applyTheme(const Theme& theme) {
             // format the user last viewed governs which lexer is attached;
             // re-apply for it so a theme switch recolors all languages.
             const CodeFormat fmt = static_cast<CodeFormat>(
-                QSettings("REECLASS", "REECLASS").value("codeFormat", 0).toInt());
+                QSettings("RC", "RC").value("codeFormat", 0).toInt());
             applyCodeLexer(sci, fmt, theme, sci->font());
             sci->setPaper(rcx::editorPaperColor(theme));
             sci->setColor(theme.text);
@@ -6422,7 +6800,7 @@ void MainWindow::loadPluginsDeferred() {
     if (int n = m_pluginManager.rejectedPlugins().size())
         setAppStatus(QStringLiteral(
             "%1 plugin(s) skipped (incompatible) — see Plugins ▸ Manage Plugins").arg(n));
-    if (m_mcp && QSettings("REECLASS", "REECLASS").value("autoStartMcp", true).toBool())
+    if (m_mcp && QSettings("RC", "RC").value("autoStartMcp", true).toBool())
         m_mcp->start();
 }
 
@@ -6441,15 +6819,16 @@ void MainWindow::showOptionsDialog(int initialPage) {
     auto& tm = ThemeManager::instance();
     OptionsResult current;
     current.themeIndex = tm.currentIndex();
-    current.fontName = QSettings("REECLASS", "REECLASS").value("font", "JetBrains Mono").toString();
+    current.fontName = QSettings("RC", "RC").value("font", "JetBrains Mono").toString();
     current.menuBarTitleCase = m_menuBarTitleCase;
     current.showIcon = m_titleBar
-        ? QSettings("REECLASS", "REECLASS").value("showIcon", false).toBool()
+        ? QSettings("RC", "RC").value("showIcon", false).toBool()
         : false;
-    current.autoStartMcp = QSettings("REECLASS", "REECLASS").value("autoStartMcp", true).toBool();
-    current.refreshMs = QSettings("REECLASS", "REECLASS").value("refreshMs", rcx::kDefaultRefreshMs).toInt();
-    current.generatorAsserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
-    current.braceWrap = QSettings("REECLASS", "REECLASS").value("braceWrap", false).toBool();
+    current.autoStartMcp = QSettings("RC", "RC").value("autoStartMcp", true).toBool();
+    current.refreshMs = QSettings("RC", "RC").value("refreshMs", rcx::kDefaultRefreshMs).toInt();
+    current.generatorAsserts = QSettings("RC", "RC").value("generatorAsserts", false).toBool();
+    current.braceWrap = QSettings("RC", "RC").value("braceWrap", false).toBool();
+    current.floatDecimals = rcx::fmt::floatDecimals();
 
     OptionsDialog dlg(current, this);
     if (initialPage >= 0)
@@ -6466,36 +6845,43 @@ void MainWindow::showOptionsDialog(int initialPage) {
 
     if (r.menuBarTitleCase != current.menuBarTitleCase) {
         applyMenuBarTitleCase(r.menuBarTitleCase);
-        QSettings("REECLASS", "REECLASS").setValue("menuBarTitleCase", r.menuBarTitleCase);
+        QSettings("RC", "RC").setValue("menuBarTitleCase", r.menuBarTitleCase);
     }
 
     if (r.showIcon != current.showIcon) {
         if (m_titleBar)
             m_titleBar->setShowIcon(r.showIcon);
-        QSettings("REECLASS", "REECLASS").setValue("showIcon", r.showIcon);
+        QSettings("RC", "RC").setValue("showIcon", r.showIcon);
     }
 
     if (r.autoStartMcp != current.autoStartMcp)
-        QSettings("REECLASS", "REECLASS").setValue("autoStartMcp", r.autoStartMcp);
+        QSettings("RC", "RC").setValue("autoStartMcp", r.autoStartMcp);
 
     if (r.refreshMs != current.refreshMs) {
-        QSettings("REECLASS", "REECLASS").setValue("refreshMs", r.refreshMs);
+        QSettings("RC", "RC").setValue("refreshMs", r.refreshMs);
         for (auto& tab : m_tabs)
             tab.ctrl->setRefreshInterval(r.refreshMs);
     }
 
     if (r.generatorAsserts != current.generatorAsserts)
-        QSettings("REECLASS", "REECLASS").setValue("generatorAsserts", r.generatorAsserts);
+        QSettings("RC", "RC").setValue("generatorAsserts", r.generatorAsserts);
 
     if (r.braceWrap != current.braceWrap) {
-        QSettings("REECLASS", "REECLASS").setValue("braceWrap", r.braceWrap);
+        QSettings("RC", "RC").setValue("braceWrap", r.braceWrap);
         for (auto& tab : m_tabs)
             tab.ctrl->setBraceWrap(r.braceWrap);
+    }
+
+    if (r.floatDecimals != current.floatDecimals) {
+        QSettings("RC", "RC").setValue("floatDecimals", r.floatDecimals);
+        rcx::fmt::setFloatDecimals(r.floatDecimals);
+        for (auto& tab : m_tabs)
+            if (tab.ctrl) tab.ctrl->refresh();
     }
 }
 
 void MainWindow::setEditorFont(const QString& fontName) {
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     settings.setValue("font", fontName);
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -6599,8 +6985,9 @@ void MainWindow::updateEmptyWorkspaceVisibility() {
 
 void MainWindow::updateWindowTitle() {
     syncRibbonController();
+    syncTimelineActions();
 #ifdef __APPLE__
-    setWindowTitle(QStringLiteral("REECLASS"));
+    setWindowTitle(QStringLiteral("RC"));
 #else
     QString title;
     QDockWidget* activeDock = m_activeDocDock;
@@ -6608,9 +6995,9 @@ void MainWindow::updateWindowTitle() {
         auto& tab = m_tabs[activeDock];
         QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
         if (tab.doc->modified) name += " *";
-        title = name + " - REECLASS";
+        title = name + " - RC";
     } else {
-        title = "REECLASS";
+        title = "RC";
     }
     setWindowTitle(title);
 #endif
@@ -6629,7 +7016,7 @@ void MainWindow::updateWindowTitle() {
 // controller at trigger time and tracks its signals for enabled-state), the
 // Home tab reuses the menu actions captured in createMenus().
 void MainWindow::createRibbon() {
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
 
     m_ribbon = new RibbonBar(this);
     m_ribbon->setLabelMode(RibbonBar::LabelMode(
@@ -6638,7 +7025,7 @@ void MainWindow::createRibbon() {
     // choice still wins.
     m_ribbon->setCurrentTab(s.value("ribbonTab", QStringLiteral("home")).toString());
     connect(m_ribbon, &RibbonBar::currentTabChanged, this, [](const QString& id) {
-        QSettings("REECLASS", "REECLASS").setValue("ribbonTab", id);
+        QSettings("RC", "RC").setValue("ribbonTab", id);
     });
     // The chevron and the tab double-click go through the SAME helper as the
     // menu, so all three write the one `ribbonState` key.
@@ -6755,11 +7142,290 @@ void MainWindow::createRibbon() {
         connect(m_titleBar, &TitleBarWidget::darkThemeRequested, this, [this](bool dark) {
             auto& tm = ThemeManager::instance();
             tm.setDarkMode(dark);
-            m_titleBar->setDarkTheme(tm.current().isDark());
+            m_titleBar->setDarkTheme(tm.current().background.lightnessF() < 0.5);
         });
     }
 
     syncRibbonController();
+}
+
+// ── Class timeline ──
+
+// How often a tab's strip is handed fresh state. Records land every capture
+// tick (~200 ms), so a once-a-second push delivered five of them at once and
+// the graph lurched; while a recording runs it is fed at capture rate instead.
+// Idle (stopped, static, or looking back) nothing new arrives, so the slow
+// beat is enough to keep durations honest.
+static constexpr int kTimelinePushLiveMs = 125;
+static constexpr int kTimelinePushIdleMs = 1000;
+
+// What a tab's timeline strip shows, read from its controller.
+static rcx::TimelineStripState timelineStripStateFor(rcx::RcxController* ctrl) {
+    using namespace rcx;
+    TimelineStripState s;
+    if (!ctrl) return s;
+    s.nowMs = tl::CaptureClock::nowMs();
+    s.epochAtZeroMs = tl::CaptureClock::toEpochMs(0);
+    s.utcOffsetSeconds = QDateTime::currentDateTime().offsetFromUtc();
+    s.readsFailing = ctrl->sourceStatus() == RcxController::SourceStatus::Stale;
+    tl::CaptureContext* ctx = ctrl->timelineContext();
+    tl::TimelineHub* hub = ctrl->timelineHub();
+    if (!ctx || !hub) {
+        s.capture = timeline::Capture::Static;
+        return s;
+    }
+    const uint64_t cls = ctrl->timelineClassId();
+    const tl::ClassTrack& track = hub->track(cls);
+    switch (track.mode) {
+    case tl::CaptureMode::Rolling:   s.capture = timeline::Capture::Rolling;   break;
+    case tl::CaptureMode::Recording: s.capture = timeline::Capture::Recording; break;
+    case tl::CaptureMode::Paused:    s.capture = timeline::Capture::Paused;    break;
+    }
+    const tl::TimelineModel& m = ctx->model();
+    // This class's own recording — not whatever else the source's history
+    // holds (another class, another tab), and nothing from before a Clear.
+    s.hasData = hub->firstVisibleRecord(cls) != tl::kNoRecord;
+    // Not recording, the timeline does not move: its "now" stays where this
+    // class's recording stopped, however much other tabs go on recording.
+    if (track.mode != tl::CaptureMode::Recording && s.hasData) {
+        const int64_t end = (!track.pauses.isEmpty() && track.pauses.last().isOpen())
+            ? track.pauses.last().startMs : m.timeOf(m.lastRecord());
+        s.nowMs = qMin(s.nowMs, end);
+    }
+    s.dataGeneration = m.generation() * 1000003u + ctrl->timelineClassChangesVersion();
+    for (const tl::FieldSpan& f : ctrl->timelineSelectionScope())
+        s.selectionKey = s.selectionKey * 1000003u + f.id + 1;
+    const tl::RecordId first = hub->firstVisibleRecord(cls);
+    s.retainedBeginMs = (first != tl::kNoRecord) ? m.timeOf(first) : s.nowMs;
+    if (track.floorMs != INT64_MIN) s.retainedBeginMs = qMax(s.retainedBeginMs, track.floorMs);
+    s.recordBeginMs = track.recordingSinceMs;
+    s.past = ctrl->isViewingPast();
+    s.viewedMs = ctrl->pastTimeMs();
+    const tl::RetentionPolicy policy = hub->retention();
+    s.rollingWindowMs = policy.windowMs;
+    s.byteBudget = policy.budgetBytes;
+    s.bytesUsed = m.stats().totalBytes() + m.stats().diskBytes;
+    for (const tl::Gap& g : m.gaps()) s.gaps.append({g.startMs, g.endMs});
+    for (const tl::Gap& g : track.pauses) s.gaps.append({g.startMs, g.endMs});
+    for (const tl::TimelineEvent& e : hub->events()) {
+        if (e.classId != 0 && e.classId != cls) continue;
+        s.markers.append({e.timeMs, TimelineMarkerKind(int(e.kind)), e.label});
+    }
+    return s;
+}
+
+void MainWindow::bindTimelineStrip(TabState& tab) {
+    TimelineStrip* strip = tab.timeline;
+    RcxController* ctrl = tab.ctrl;
+    if (!strip || !ctrl) return;
+    QPointer<RcxController> c(ctrl);
+
+    TimelineStrip::Callbacks cb;
+    cb.onClear        = [this, c]() { if (c) confirmTimelineClear(c); };
+    cb.onReturnToLive = [c]() { if (c) c->returnToLive(); };
+    cb.onHide         = [this]() { setTimelineStripVisible(false); };
+    cb.onScrub        = [c](int64_t t, bool) { if (c) c->viewTimelineAt(t); };
+    cb.onScrubBegin   = [c]() { if (c) c->beginTimelineScrub(); };
+    cb.onScrubCancel  = [c]() { if (c) c->cancelTimelineScrub(); };
+    cb.onStep         = [c](int dir) { if (c) c->stepTimelineChange(dir); };
+    // The graph counts FIELDS of this class that changed (the byte counts of
+    // the whole source stand in until the view has composed once).
+    cb.columns = [c](int64_t t0, int64_t step, int n, QVector<TimelineColumn>& out) {
+        out.resize(n);
+        if (!c || !c->timelineContext()) return;
+        const bool fields = c->timelineCountsFields();
+        const tl::TimelineModel& m = c->timelineContext()->model();
+        const tl::ClassChangeSeries& s = c->timelineClassChanges();
+        for (int i = 0; i < n; ++i) {
+            const int64_t a = t0 + step * i;
+            const auto agg = fields ? s.aggregate(a, a + step) : m.aggregate(a, a + step);
+            out[i].maxChanged = agg.max;
+            out[i].sumChanged = agg.sum;
+            out[i].records = agg.count;
+        }
+    };
+    cb.changeTicks = [c](int64_t t0, int64_t t1) {
+        QVector<int64_t> ticks;
+        if (!c || !c->timelineContext()) return ticks;
+        if (c->timelineCountsFields()) return c->timelineClassChanges().times(t0, t1);
+        const tl::TimelineModel& m = c->timelineContext()->model();
+        const auto range = m.indexRange(t0, t1);
+        for (int i = range.first; i < range.second && ticks.size() < 256; ++i) {
+            const tl::RecordId r = m.recordAtIndex(i);
+            if (m.changedBytesOf(r) > 0) ticks.append(m.timeOf(r));
+        }
+        return ticks;
+    };
+    // The selection lane, per graph column: did the selected rows change?
+    cb.selection = [c](int64_t t0, int64_t step, int n, QVector<char>& out) {
+        out.fill(0, std::max(n, 0));
+        if (!c || !c->timelineContext()) return;
+        const QVector<tl::FieldSpan> scope = c->timelineSelectionScope();
+        if (scope.isEmpty()) return;
+        c->timelineClassChanges().matchColumns(t0, step, n, &scope, out);
+    };
+    // Beads, per graph column: the most fields one record started changing
+    // (a bounce among steady motion).
+    cb.events = [c](int64_t t0, int64_t step, int n, QVector<uint32_t>& out) {
+        out.fill(0, std::max(n, 0));
+        if (!c || !c->timelineContext() || !c->timelineCountsFields()) return;
+        const tl::ClassChangeSeries& series = c->timelineClassChanges();
+        for (int i = 0; i < n; ++i)
+            out[i] = series.onsetMax(t0 + step * i, t0 + step * (i + 1));
+    };
+    // The records themselves, when there are few enough to draw one by one:
+    // the graph places each at its own moment, so it flows with the clock
+    // rather than stepping with the bin grid.
+    cb.points = [c](int64_t t0, int64_t t1, int cap, QVector<TimelinePoint>& out) {
+        out.clear();
+        if (!c || !c->timelineContext()) return true;   // nothing to draw, completely
+        if (c->timelineCountsFields()) {
+            const QVector<tl::FieldSpan> scope = c->timelineSelectionScope();
+            QVector<tl::ClassChangeSeries::Point> pts;
+            const bool complete = c->timelineClassChanges().points(
+                t0, t1, scope.isEmpty() ? nullptr : &scope, cap, pts);
+            if (!complete) return false;
+            out.reserve(pts.size());
+            for (const auto& p : pts)
+                out.append(TimelinePoint{p.tMs, p.count, p.onset, p.matched});
+            return true;
+        }
+        const tl::TimelineModel& m = c->timelineContext()->model();
+        const auto range = m.indexRange(t0, t1);
+        if (range.second - range.first > cap) return false;
+        out.reserve(range.second - range.first);
+        for (int i = range.first; i < range.second; ++i) {
+            const tl::RecordId r = m.recordAtIndex(i);
+            out.append(TimelinePoint{m.timeOf(r), m.changedBytesOf(r), 0, false});
+        }
+        return true;
+    };
+    cb.describe = [c](int64_t t) -> QString { return c ? c->describeTimelineAt(t) : QString(); };
+    strip->setCallbacks(cb);
+
+    const bool enabled = QSettings("RC", "RC").value("timeline/enabled", true).toBool();
+    strip->setVisible(enabled && QSettings("RC", "RC").value("timeline/stripVisible", true).toBool());
+    ctrl->setTimelineEnabled(enabled);
+
+    QPointer<TimelineStrip> sp(strip);
+    auto push = [sp, c]() {
+        if (sp && c && sp->isVisible()) sp->setState(timelineStripStateFor(c));
+    };
+    connect(ctrl, &RcxController::timelineChanged, strip, push);
+    connect(ctrl, &RcxController::sourceStatusChanged, strip, push);
+    connect(ctrl, &RcxController::selectionChanged, strip, push);
+    connect(ctrl, &RcxController::timelineChanged, this, [this]() { syncTimelineActions(); });
+    connect(ctrl, &RcxController::timelineRevealRequested, strip, [this, sp, c](int64_t a, int64_t b) {
+        if (!sp || !c) return;
+        if (m_actTimeline && !m_actTimeline->isChecked()) setTimelineEnabled(true);
+        if (!sp->isVisible()) setTimelineStripVisible(true);
+        sp->setState(timelineStripStateFor(c));
+        sp->showRange(a, b);
+    });
+    // "Now" advances even when nothing changes: the graph moves, durations
+    // tick. The beat follows what the strip is showing — capture rate while
+    // this class is recording, lazy otherwise.
+    auto* clock = new QTimer(strip);
+    clock->setInterval(kTimelinePushIdleMs);
+    connect(clock, &QTimer::timeout, strip, [sp, push, clock]() {
+        push();
+        const bool live = sp && sp->isVisible()
+                       && sp->state().capture == timeline::Capture::Recording;
+        const int want = live ? kTimelinePushLiveMs : kTimelinePushIdleMs;
+        if (clock->interval() != want) clock->setInterval(want);
+    });
+    clock->start();
+    push();
+}
+
+void MainWindow::setTimelineEnabled(bool on) {
+    QSettings("RC", "RC").setValue("timeline/enabled", on);
+    if (m_actTimeline && m_actTimeline->isChecked() != on) {
+        QSignalBlocker block(m_actTimeline);
+        m_actTimeline->setChecked(on);
+    }
+    for (auto& tab : m_tabs) {
+        if (tab.ctrl) tab.ctrl->setTimelineEnabled(on);
+        if (tab.timeline) {
+            const bool show = on && (!m_actTlStrip || m_actTlStrip->isChecked());
+            tab.timeline->setVisible(show);
+            if (show && tab.ctrl) tab.timeline->setState(timelineStripStateFor(tab.ctrl));
+        }
+    }
+    syncTimelineActions();
+}
+
+// View ▸ Timeline ▸ Show Timeline, and the strip menu's Hide Timeline: only
+// the strip. Capture, history and the buttons beside the address stay.
+void MainWindow::setTimelineStripVisible(bool on) {
+    QSettings("RC", "RC").setValue("timeline/stripVisible", on);
+    if (m_actTlStrip && m_actTlStrip->isChecked() != on) {
+        QSignalBlocker block(m_actTlStrip);
+        m_actTlStrip->setChecked(on);
+    }
+    const bool enabled = m_actTimeline && m_actTimeline->isChecked();
+    for (auto& tab : m_tabs) {
+        if (!tab.timeline) continue;
+        tab.timeline->setVisible(on && enabled);
+        if (on && enabled && tab.ctrl) tab.timeline->setState(timelineStripStateFor(tab.ctrl));
+    }
+}
+
+void MainWindow::syncTimelineActions() {
+    RcxController* ctrl = activeController();
+    const bool on = m_actTimeline && m_actTimeline->isChecked();
+    tl::CaptureContext* ctx = (on && ctrl) ? ctrl->timelineContext() : nullptr;
+    const bool capturing = ctx != nullptr;
+    const tl::CaptureMode mode = (capturing && ctrl->timelineHub())
+        ? ctrl->timelineHub()->mode(ctrl->timelineClassId()) : tl::CaptureMode::Rolling;
+    const bool hasData = capturing && ctrl->timelineHub()
+                      && ctrl->timelineHub()->firstVisibleRecord(ctrl->timelineClassId()) != tl::kNoRecord;
+    const bool past = capturing && ctrl->isViewingPast();
+    if (m_actTlRecord) {
+        m_actTlRecord->setEnabled(capturing);
+        m_actTlRecord->setText(mode == tl::CaptureMode::Recording ? QStringLiteral("&Stop Recording")
+                                                                  : QStringLiteral("&Record"));
+    }
+    if (m_actTlLive)  m_actTlLive->setEnabled(past);
+    // The strip can only be shown while the timeline is on.
+    if (m_actTlStrip) m_actTlStrip->setEnabled(on);
+    // "Previous Change of 'health'": stepping follows the selection.
+    QString of = capturing ? ctrl->timelineScopeLabel() : QString();
+    of.replace(QLatin1Char('&'), QStringLiteral("&&"));
+    if (!of.isEmpty()) of.prepend(QStringLiteral(" of "));
+    if (m_actTlPrev) {
+        m_actTlPrev->setEnabled(hasData);
+        m_actTlPrev->setText(QStringLiteral("Pre&vious Change") + of);
+    }
+    if (m_actTlNext) {
+        m_actTlNext->setEnabled(past);
+        m_actTlNext->setText(QStringLiteral("&Next Change") + of);
+    }
+    if (m_actTlReset) m_actTlReset->setEnabled(hasData);
+}
+
+void MainWindow::confirmTimelineClear(RcxController* ctrl) {
+    if (!ctrl || !ctrl->timelineHub()) return;
+    // Nothing recorded for this class: nothing to clear.
+    const bool hasRecording =
+        ctrl->timelineHub()->firstVisibleRecord(ctrl->timelineClassId()) != tl::kNoRecord;
+    if (!hasRecording) return;
+    if (ctrl->document()) {
+        QString className;
+        const int idx = ctrl->document()->tree.indexOfId(ctrl->timelineClassId());
+        if (idx >= 0) {
+            const Node& n = ctrl->document()->tree.nodes[idx];
+            className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+        }
+        const QString msg = QStringLiteral("Discard the recording of “%1”? This can't be undone.")
+                                .arg(className);
+        if (!ThemedMessageBox::confirm(this, QStringLiteral("Clear Recording"), msg,
+                                       QStringLiteral("Clear"), QStringLiteral("Cancel"),
+                                       /*destructive=*/true))
+            return;
+    }
+    ctrl->timelineReset();
+    syncTimelineActions();
 }
 
 // The one place ribbon visibility / collapse is decided: menu radios, the
@@ -6776,7 +7442,7 @@ void MainWindow::applyRibbonState(int state, bool persist) {
     if (m_ribbonStateGroup)
         for (QAction* a : m_ribbonStateGroup->actions())
             a->setChecked(a->data().toInt() == state);
-    if (persist) QSettings("REECLASS", "REECLASS").setValue("ribbonState", state);
+    if (persist) QSettings("RC", "RC").setValue("ribbonState", state);
 }
 
 // Point the ribbon's enabled-state tracking at the active tab's controller.
@@ -6808,12 +7474,11 @@ void MainWindow::updateScannerTitle() {
     if (!m_scanDockTitle) return;
 
     QString sourceName, sourceKind;
-    if (m_activeDocDock && m_tabs.contains(m_activeDocDock)) {
-        auto& tab = m_tabs[m_activeDocDock];
-        if (tab.doc && tab.doc->provider) {
-            sourceName = tab.doc->provider->name();
-            sourceKind = tab.doc->provider->kind();
-        }
+    auto provider = m_scannerPanel ? m_scannerPanel->resultProvider() : nullptr;
+    if (!provider && activeController()) provider = activeController()->provider();
+    if (provider) {
+        sourceName = provider->name();
+        sourceKind = provider->kind();
     }
 
     QString text;
@@ -6834,21 +7499,7 @@ void MainWindow::updateScannerTitle() {
     // text so taskbar / Alt-Tab also identify the source.
     if (m_scannerDock) m_scannerDock->setWindowTitle(text);
 
-    // Tooltip on the title label (and the dock itself) explains the
-    // following-the-active-tab behaviour so the source name in the title
-    // is never read as a static binding to a particular file/process.
-    QString tip = QStringLiteral(
-        "The Scanner runs against the source of whichever editor "
-        "tab is currently active.\n"
-        "Switch tabs (or open a new one) and the scanner re-targets to "
-        "that tab's source automatically.\n\n"
-        "Active source: %1")
-        .arg(sourceName.isEmpty() ? QStringLiteral("(none)") : sourceName);
-    m_scanDockTitle->setToolTip(tip);
-    // NOT on the QDockWidget itself. A container-level tooltip is a catch-all:
-    // every child of the scanner without its own tooltip lets the event walk
-    // up to the dock, so hovering any dead space popped this four-line
-    // paragraph. The title label is the thing the text is about.
+    m_scanDockTitle->setToolTip(sourceName);
     if (m_scannerDock) m_scannerDock->setToolTip(QString());
 }
 
@@ -6859,9 +7510,9 @@ void MainWindow::updateSourceChip() {
     if (m_activeDocDock && m_tabs.contains(m_activeDocDock)) {
         auto& tab = m_tabs[m_activeDocDock];
         if (tab.ctrl) st = tab.ctrl->sourceStatus();
-        if (tab.doc && tab.doc->provider) {
-            const QString name = tab.doc->provider->name();
-            const QString kind = tab.doc->provider->kind();
+        if (tab.doc && tab.ctrl->provider()) {
+            const QString name = tab.ctrl->provider()->name();
+            const QString kind = tab.ctrl->provider()->kind();
             if (!name.isEmpty())
                 label = kind.isEmpty() ? name
                                        : QStringLiteral("%1:%2").arg(kind, name);
@@ -6881,7 +7532,7 @@ void MainWindow::updateSourceChip() {
 // ── Rendered view setup ──
 
 void MainWindow::setupRenderedSci(QsciScintilla* sci) {
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -6914,7 +7565,7 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
     // updateRenderedView; here we attach the one for the saved format so the
     // view is correctly coloured before the first render.
     const CodeFormat initialFmt = static_cast<CodeFormat>(
-        QSettings("REECLASS", "REECLASS").value("codeFormat", 0).toInt());
+        QSettings("RC", "RC").value("codeFormat", 0).toInt());
     applyCodeLexer(sci, initialFmt, theme, f);
     const QColor editorBg = rcx::editorPaperColor(theme);
     sci->setBraceMatching(QsciScintilla::NoBraceMatch);
@@ -6930,7 +7581,7 @@ void MainWindow::setupRenderedSci(QsciScintilla* sci) {
 }
 
 void MainWindow::setupDebugSci(QsciScintilla* sci) {
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -6973,7 +7624,7 @@ void MainWindow::applyDebugStyles(QsciScintilla* sci) {
     const auto& theme = ThemeManager::instance().current();
     const QColor editorBg = rcx::editorPaperColor(theme);
 
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QString fontName = settings.value("font", "JetBrains Mono").toString();
     QFont f(fontName, 12);
     f.setFixedPitch(true);
@@ -7043,7 +7694,7 @@ uint64_t MainWindow::findRootStructForNode(const NodeTree& tree, uint64_t nodeId
 
 void MainWindow::applyPaneZoom(SplitPane& p, int level) {
     level = qBound(-8, level, 24);
-    QSettings("REECLASS", "REECLASS").setValue("viewZoomLevel", level);
+    QSettings("RC", "RC").setValue("viewZoomLevel", level);
     // Drive Scintilla's own zoom (the same SCI_SETZOOM that Ctrl+wheel uses) on
     // all three views so the pane stays consistent across tab switches. Block
     // each view's signals while zooming so the SCN_ZOOM sync can't bounce back.
@@ -7119,11 +7770,11 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     // ~800ms generator passes to <1ms.
     const QHash<NodeKind, QString>* aliases =
         tab.doc->typeAliases.isEmpty() ? nullptr : &tab.doc->typeAliases;
-    bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
+    bool asserts = QSettings("RC", "RC").value("generatorAsserts", false).toBool();
     CodeFormat fmt = static_cast<CodeFormat>(
-        QSettings("REECLASS", "REECLASS").value("codeFormat", 0).toInt());
+        QSettings("RC", "RC").value("codeFormat", 0).toInt());
     CodeScope scope = static_cast<CodeScope>(
-        QSettings("REECLASS", "REECLASS").value("codeScope", 0).toInt());
+        QSettings("RC", "RC").value("codeScope", 0).toInt());
     quint64 treeGen = tab.doc->tree.generation();
     bool cacheHit = (!pane.lastRenderedText.isEmpty()
                      && pane.lastRenderedTreeGen == treeGen
@@ -7234,11 +7885,7 @@ QString MainWindow::generateDebugText(RcxEditor* editor) const {
         annotated.reserve(lineText.size() * 2);
         for (QChar ch : lineText) {
             switch (ch.unicode()) {
-            case 0x25B8: annotated += QStringLiteral("[>]"); break;   // ▸ fold collapsed
-            case 0x25BE: annotated += QStringLiteral("[v]"); break;   // ▾ fold expanded
-            case 0x2502: annotated += QStringLiteral("[|]"); break;   // │ tree vertical
-            case 0x251C: annotated += QStringLiteral("[+]"); break;   // ├ tree branch
-            case 0x2514: annotated += QStringLiteral("[L]"); break;   // └ tree corner
+            case 0x25B8: annotated += QStringLiteral("[>]"); break;   // ▸ command-row chevron
             case 0x2026: annotated += QStringLiteral("[..]"); break;  // … ellipsis
             case 0x2192: annotated += QStringLiteral("[->]"); break;  // → arrow
             case 0x00B7: annotated += QStringLiteral("[.]"); break;   // · middle dot (margin)
@@ -7267,6 +7914,15 @@ QString MainWindow::generateDebugText(RcxEditor* editor) const {
             if (lm->isArrayElement) meta += QStringLiteral(" arrElem");
             if (lm->foldHead) meta += lm->foldCollapsed ? QStringLiteral(" fold+") : QStringLiteral(" fold-");
             if (dbgTypeHint) meta += QStringLiteral(" hint@%1").arg(dbgTypeHint->startCol);
+            // The drawn tree lines of this row, as text (they are not in the buffer).
+            const QString tree = editor->treePrefixForLine(i);
+            if (!tree.trimmed().isEmpty()) meta += QStringLiteral(" tree=[%1]").arg(tree);
+            const TreeColumns& tc = editor->treeColumnGuides();
+            if (i < tc.lineCount && tc.endCol(i) > tc.firstCol(i)) {
+                QStringList cells;
+                for (int k = tc.firstCol(i); k < tc.endCol(i); ++k) cells << QString::number(tc.cols[k]);
+                meta += QStringLiteral(" cols=[%1]").arg(cells.join(QLatin1Char(',')));
+            }
         }
 
         output.append(margin + QStringLiteral("|") + annotated + meta);
@@ -7440,7 +8096,7 @@ void MainWindow::exportToFile(CodeFormat fmt) {
 
     const QHash<NodeKind, QString>* aliases =
         tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
-    bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
+    bool asserts = QSettings("RC", "RC").value("generatorAsserts", false).toBool();
     QString text = renderCodeAll(fmt, tab->doc->tree, aliases, asserts);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -7466,7 +8122,7 @@ void MainWindow::exportReclassXmlAction() {
     if (!tab) return;
 
     QString path = QFileDialog::getSaveFileName(this,
-        "Export ReClass XML", {}, "ReClass XML (*.REECLASS);;All Files (*)");
+        "Export ReClass XML", {}, "ReClass XML (*.RC);;All Files (*)");
     if (path.isEmpty()) return;
 
     QString error;
@@ -7491,9 +8147,9 @@ void MainWindow::exportReclassXmlAction() {
 void MainWindow::importReclassXml() {
     QString filePath = QFileDialog::getOpenFileName(this,
         "Import ReClass / ReClass.NET", {},
-        "ReClass formats (*.REECLASS *.MemeCls *.xml *.rcnet);;"
+        "ReClass formats (*.RC *.MemeCls *.xml *.rcnet);;"
         "ReClass.NET (*.rcnet);;"
-        "ReClass XML (*.REECLASS *.MemeCls *.xml);;"
+        "ReClass XML (*.RC *.MemeCls *.xml);;"
         "All Files (*)");
     if (filePath.isEmpty()) return;
 
@@ -7755,7 +8411,11 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword,
     // a fresh sandbox, not a tab that silently shares the previous
     // project's base address and provider.
     auto* existingCtrl = activeController();
-    if (existingCtrl && !forceFreshDoc) {
+    // The live example's buffer belongs to its simulation: a new struct laid
+    // over it would show (and take writes into) bytes rewritten 30 times a
+    // second. It gets a document of its own instead.
+    if (existingCtrl && !forceFreshDoc
+        && !existingCtrl->document()->property("rcxDemoSimulation").toBool()) {
         auto* doc = existingCtrl->document();
         buildEmptyStruct(doc->tree, classKeyword);
 
@@ -7810,9 +8470,9 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword,
     if (ProviderRegistry::instance().findProvider(QStringLiteral("processmemory"))) {
         auto& tab = m_tabs[dock];
         DWORD pid = GetCurrentProcessId();
-        QString target = QString("%1:REECLASS.exe").arg(pid);
+        QString target = QString("%1:RC.exe").arg(pid);
         // registerAsSavedSource=true so the source-picker dropdown
-        // surfaces "REECLASS.exe" as an entry. Without this the user
+        // surfaces "RC.exe" as an entry. Without this the user
         // would see an active source label but an empty dropdown,
         // breaking discoverability when they want to switch back.
         tab.ctrl->attachViaPlugin(QStringLiteral("processmemory"), target,
@@ -7855,15 +8515,96 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword,
     return dock;
 }
 
+// The class a first launch opens on: a bouncing-ball simulation running in a
+// buffer inside RC, self-attached like New Class, so the view, its
+// change highlights and the timeline have something alive to show from the
+// first second. Values typed into it feed back into the simulation.
+QDockWidget* MainWindow::project_newSimulation() {
+#ifdef Q_OS_WIN
+    if (!ProviderRegistry::instance().findProvider(QStringLiteral("processmemory")))
+        return project_new(QStringLiteral("class"), /*forceFreshDoc=*/true);
+
+    auto* doc = new RcxDocument(this);
+    doc->setProperty("rcxDemoSimulation", true);   // project_new never stacks a struct on it
+    constexpr size_t kBufSize = 64 * 1024;
+    doc->m_ownedBuffer = std::unique_ptr<uint8_t[]>(new uint8_t[kBufSize]());
+    doc->m_ownedBufferSize = kBufSize;
+    const uint64_t base = reinterpret_cast<uint64_t>(doc->m_ownedBuffer.get());
+    doc->tree.baseAddress = base;
+    const demo::BuiltDemo built = demo::buildBouncingBall(doc->tree);
+    doc->tree.initialClass = QStringLiteral("BouncingBall");
+    auto sim = std::make_shared<demo::BouncingBallSim>(doc->m_ownedBuffer.get(), doc->m_ownedBufferSize);
+    sim->reset();   // real values before the first read
+
+    auto* dock = createTab(doc);
+    auto& tab = m_tabs[dock];
+    const DWORD pid = GetCurrentProcessId();
+    tab.ctrl->attachViaPlugin(QStringLiteral("processmemory"),
+                              QString("%1:RC.exe").arg(pid), /*registerAsSavedSource=*/true);
+    // attachViaPlugin may re-evaluate a formula over the base: pin it back.
+    doc->tree.baseAddress = base;
+    doc->tree.baseAddressFormula.clear();
+    tab.ctrl->setViewRootId(built.ballClassId);
+    tab.ctrl->refresh();
+    dock->setWindowTitle(QStringLiteral("BouncingBall"));
+
+    // 30 steps a second on the UI thread. The timer is the document's child
+    // and the buffer the document's member, so both go when the tab closes.
+    auto* timer = new QTimer(doc);
+    timer->setTimerType(Qt::PreciseTimer);
+    connect(timer, &QTimer::timeout, doc, [sim]() { sim->step(); });
+    timer->start(int(std::lround(demo::BouncingBallSim::kStepSeconds * 1000.0)));
+
+    rebuildWorkspaceModelNow();
+    return dock;
+#else
+    return project_new(QStringLiteral("class"), /*forceFreshDoc=*/true);
+#endif
+}
+
 QDockWidget* MainWindow::project_open(const QString& path) {
     PROFILE_SCOPE("MainWindow::project_open");
     QString filePath = path;
     if (filePath.isEmpty()) {
         filePath = QFileDialog::getOpenFileName(this,
-            "Open Definition", {},
-            "REECLASS (*.rcx)"
-            ";;All (*)");
+            "Open File", {},
+            "Supported Files (*.rcx *.json *.rcnet *.reclass *.xml *.bin *.dmp *.dump)"
+            ";;RC (*.rcx);;Binary Files (*.bin *.dmp *.dump);;All (*)");
         if (filePath.isEmpty()) return nullptr;
+    }
+
+    QFile probe(filePath);
+    if (!probe.open(QIODevice::ReadOnly)) {
+        ThemedMessageBox::warn(this, QStringLiteral("Open Failed"), probe.errorString());
+        return nullptr;
+    }
+    const QByteArray head = probe.read(4096).trimmed();
+    const QString suffix = QFileInfo(filePath).suffix().toLower();
+    const bool binary = QStringList{"bin", "dmp", "dump"}.contains(suffix);
+    const bool definition = !binary && (QStringList{"rcx", "json", "rcnet", "reclass", "xml"}.contains(suffix)
+        || head.startsWith('{') || head.startsWith("\xEF\xBB\xBF{")
+        || head.startsWith("<?xml") || head.startsWith("<ReClass"));
+    probe.close();
+    if (!definition) {
+        auto* doc = new RcxDocument(this);
+        if (!doc->loadData(filePath)) {
+            delete doc;
+            ThemedMessageBox::warn(this, QStringLiteral("Open Failed"),
+                                   QStringLiteral("Couldn't open %1.").arg(filePath));
+            return nullptr;
+        }
+        buildEmptyStruct(doc->tree);
+        auto* dock = createTab(doc);
+        SavedSourceEntry entry;
+        entry.kind = QStringLiteral("File");
+        entry.filePath = QFileInfo(filePath).absoluteFilePath();
+        entry.displayName = QFileInfo(filePath).fileName();
+        m_tabs[dock].ctrl->copySavedSources({entry}, 0);
+        rebuildWorkspaceModel();
+        addRecentFile(filePath);
+        setAppStatus(QStringLiteral("Opened %1 (%2 bytes)")
+            .arg(entry.displayName, QLocale().toString(QFileInfo(filePath).size())));
+        return dock;
     }
 
     // Recovery: if a fresher .autosave shadow exists next to the target,
@@ -8022,15 +8763,16 @@ bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
     auto& tab = m_tabs[dock];
 
     QString savedPath;
+    const NodeTree* view = tab.ctrl->isInstanceView() ? &tab.ctrl->viewTree() : nullptr;
     if (saveAs || tab.doc->filePath.isEmpty()) {
         QString path = QFileDialog::getSaveFileName(this,
-            "Save Definition", {}, "REECLASS (*.rcx);;JSON (*.json)");
+            "Save Definition", {}, "RC (*.rcx);;JSON (*.json)");
         if (path.isEmpty()) return false;
-        tab.doc->save(path);
+        if (!tab.doc->save(path, view)) return false;
         addRecentFile(path);
         savedPath = path;
     } else {
-        tab.doc->save(tab.doc->filePath);
+        if (!tab.doc->save(tab.doc->filePath, view)) return false;
         addRecentFile(tab.doc->filePath);
         savedPath = tab.doc->filePath;
     }
@@ -8175,7 +8917,7 @@ void MainWindow::showValidateDialog() {
 
     auto* list = new QListWidget(&dlg);
     list->setAlternatingRowColors(false);
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
     list->setFont(monoFont);
@@ -8306,7 +9048,7 @@ void MainWindow::showFindFieldDialog() {
              t.borderFocused.name()));
     layout->addWidget(search);
 
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QFont monoFont(settings.value("font", "JetBrains Mono").toString(), 10);
     monoFont.setFixedPitch(true);
 
@@ -8656,7 +9398,7 @@ void MainWindow::createWorkspaceDock() {
     m_workspaceTree->setMouseTracking(true);
     m_workspaceTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     {
-        QSettings s("REECLASS", "REECLASS");
+        QSettings s("RC", "RC");
         QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_workspaceTree->setFont(f);
@@ -8924,8 +9666,6 @@ void MainWindow::createWorkspaceDock() {
             RcxDocument* doc = m_tabs[item.dock].doc;
             int ni = doc->tree.indexOfId(item.structId);
             if (ni < 0) return;
-            doc->tree.nodes[ni].collapsed = false;
-
             // Use the active tab if it shares the same document, else use owner
             QDockWidget* targetDock = item.dock;
             if (m_activeDocDock && m_tabs.contains(m_activeDocDock)
@@ -8933,6 +9673,7 @@ void MainWindow::createWorkspaceDock() {
                 targetDock = m_activeDocDock;
 
             auto& tab = m_tabs[targetDock];
+            tab.ctrl->setCollapsed(item.structId, false);
             tab.ctrl->setViewRootId(item.structId);
             tab.ctrl->refresh();
             targetDock->raise();
@@ -8942,7 +9683,7 @@ void MainWindow::createWorkspaceDock() {
                 ? doc->tree.nodes[ni].name
                 : doc->tree.nodes[ni].structTypeName;
             if (!structName.isEmpty())
-                targetDock->setWindowTitle(structName);
+                targetDock->setWindowTitle(tabTitle(tab));
             rebuildWorkspaceModel();
 
         } else if (chosen && chosen == actOpenNew && items.size() == 1) {
@@ -9170,7 +9911,7 @@ void MainWindow::createWorkspaceDock() {
             setActiveDocDock(ownerDock);
             auto& tab = m_tabs[ownerDock];
             int pi = tree.indexOfId(parentId);
-            if (pi >= 0) tree.nodes[pi].collapsed = false;
+            if (pi >= 0) tab.ctrl->setCollapsed(parentId, false);
             tab.ctrl->setViewRootId(parentId);
             tab.ctrl->scrollToNodeId(structId);
             // setActiveDocDock refreshed the status segment BEFORE the drill-down
@@ -9243,7 +9984,7 @@ void MainWindow::createWorkspaceDock() {
             setActiveDocDock(ownerDock);
             auto& tab = m_tabs[ownerDock];
             int pi = tree.indexOfId(parentId);
-            if (pi >= 0) tree.nodes[pi].collapsed = false;
+            if (pi >= 0) tab.ctrl->setCollapsed(parentId, false);
             tab.ctrl->setViewRootId(parentId);
             tab.ctrl->scrollToNodeId(structId);
             // setActiveDocDock refreshed the status segment BEFORE the drill-down
@@ -9370,7 +10111,7 @@ void MainWindow::ensureScannerPanel() {
     m_scannerPanel = new ScannerPanel(m_scannerDock);
     m_scannerPanel->applyTheme(ThemeManager::instance().current());
     {
-        QSettings settings("REECLASS", "REECLASS");
+        QSettings settings("RC", "RC");
         QString fontName = settings.value("font", "JetBrains Mono").toString();
         QFont f(fontName, 12);
         f.setFixedPitch(true);
@@ -9381,15 +10122,17 @@ void MainWindow::ensureScannerPanel() {
     // Wire provider getter: lazily captures the active tab's provider at scan time
     m_scannerPanel->setProviderGetter([this]() -> std::shared_ptr<rcx::Provider> {
         auto* ctrl = activeController();
-        return ctrl ? ctrl->document()->provider : nullptr;
+        return ctrl ? ctrl->provider() : nullptr;
     });
+    connect(m_scannerPanel, &ScannerPanel::resultSourceChanged,
+            this, &MainWindow::updateScannerTitle);
 
     // Wire bounds getter: struct base + size for "Current Struct" filter
     m_scannerPanel->setBoundsGetter([this]() -> rcx::ScannerPanel::StructBounds {
         auto* ctrl = activeController();
         if (!ctrl) return {};
         auto& tree = ctrl->document()->tree;
-        uint64_t base = tree.baseAddress;
+        uint64_t base = ctrl->baseAddress();
         uint64_t viewRoot = ctrl->viewRootId();
         int span = 0;
         if (viewRoot != 0) {
@@ -9413,8 +10156,22 @@ void MainWindow::ensureScannerPanel() {
     connect(m_scannerPanel, &ScannerPanel::goToAddress, this, [this](uint64_t addr) {
         auto* ctrl = activeController();
         if (!ctrl) return;
+        if (m_scannerPanel->resultProvider() && m_scannerPanel->resultProvider() != ctrl->provider()) {
+            setAppStatus(QStringLiteral("Scan source differs from the active view"));
+            return;
+        }
         // Undoable, recent-listed and tracking-cooled like every other rebase.
-        ctrl->rebaseTo(QStringLiteral("0x") + QString::number(addr, 16).toUpper());
+        ctrl->navigateToAddress(addr);
+    });
+    connect(m_scannerPanel, &ScannerPanel::openBesideRequested, this, [this](uint64_t addr) {
+        auto* ctrl = activeController();
+        if (!ctrl) return;
+        uint64_t root = ctrl->viewRootId();
+        if (!root) {
+            for (const auto& node : ctrl->document()->tree.nodes)
+                if (node.parentId == 0 && node.kind == NodeKind::Struct) { root = node.id; break; }
+        }
+        openInstanceBeside(ctrl, root, addr, {}, m_scannerPanel->resultProvider());
     });
 }
 
@@ -9456,7 +10213,7 @@ void MainWindow::createSymbolsDock() {
     m_unifiedSymbols = new rcx::UnifiedSymbolPanel(container);
     m_unifiedSymbols->setActiveProviderFn([this]() -> const rcx::Provider* {
         auto* ctrl = activeController();
-        return (ctrl && ctrl->document()) ? ctrl->document()->provider.get() : nullptr;
+        return (ctrl && ctrl->document()) ? ctrl->provider().get() : nullptr;
     });
     containerLayout->addWidget(m_unifiedSymbols, 1);
 
@@ -9465,10 +10222,7 @@ void MainWindow::createSymbolsDock() {
         if (e.address == 0) return;
         auto* ctrl = activeController();
         if (!ctrl) return;
-        ctrl->document()->tree.baseAddress = e.address;
-        ctrl->document()->tree.baseAddressFormula.clear();
-        ctrl->resetChangeTracking();
-        ctrl->refresh();
+        if (!ctrl->navigateToAddress(e.address, e.name)) return;
         setAppStatus(QStringLiteral("Navigated to %1 (0x%2)")
             .arg(e.name).arg(e.address, 0, 16));
     });
@@ -9715,9 +10469,7 @@ void MainWindow::refreshBookmarksDock() {
 void MainWindow::promptAddBookmark() {
     auto* c = activeController();
     if (!c) return;
-    QString defaultFormula = c->document()->tree.baseAddressFormula;
-    if (defaultFormula.isEmpty())
-        defaultFormula = QStringLiteral("0x") + QString::number(c->document()->tree.baseAddress, 16);
+    QString defaultFormula = c->addressExpression(c->baseAddress(), c->baseAddressFormula());
     ThemedDialog dlg(this);
     dlg.setWindowTitle(QStringLiteral("Add Bookmark"));
     dlg.setMinimumWidth(420);
@@ -9868,11 +10620,11 @@ void MainWindow::bulkImportTypesUI(const QVector<rcx::NamedAddress>& entries) {
 
 void MainWindow::downloadSymbolsForProcess() {
     auto* ctrl = activeController();
-    if (!ctrl || !ctrl->document()->provider) {
+    if (!ctrl || !ctrl->provider()) {
         setAppStatus(QStringLiteral("No process attached"));
         return;
     }
-    auto prov = ctrl->document()->provider;
+    auto prov = ctrl->provider();
     auto modules = prov->enumerateModules();
     if (modules.isEmpty()) {
         setAppStatus(QStringLiteral("No modules found in target process"));
@@ -10190,7 +10942,7 @@ int MainWindow::computeWorkspaceDockWidth() const {
         }
     }
     // Compute pixel width: badge(fontH) + gap(4) + name + gap + count pill(~30) + padding(24)
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QFont f(s.value("font", "JetBrains Mono").toString(), 10);
     f.setFixedPitch(true);
     QFontMetrics fm(f);
@@ -10284,13 +11036,13 @@ void MainWindow::saveDockSize(QDockWidget* dock) {
                               || a == Qt::RightDockWidgetArea);
     int size = horizontal ? dock->width() : dock->height();
     if (size <= 0) return;
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     s.setValue(QStringLiteral("ui/dock.%1.size").arg(dock->objectName()), size);
 }
 
 int MainWindow::loadDockSize(QDockWidget* dock, int fallback) const {
     if (!dock) return fallback;
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     return s.value(QStringLiteral("ui/dock.%1.size").arg(dock->objectName()),
                    fallback).toInt();
 }
@@ -10319,7 +11071,7 @@ void MainWindow::addRecentFile(const QString& path) {
     if (path.isEmpty()) return;
     QString absPath = QFileInfo(path).absoluteFilePath();
 
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QStringList recent = s.value("recentFiles").toStringList();
     recent.removeAll(absPath);
     recent.prepend(absPath);
@@ -10334,7 +11086,7 @@ void MainWindow::updateRecentFilesMenu() {
     if (!m_recentFilesMenu) return;
     m_recentFilesMenu->clear();
 
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QStringList recent = s.value("recentFiles").toStringList();
 
     int added = 0;
@@ -10352,7 +11104,7 @@ void MainWindow::updateRecentFilesMenu() {
     } else {
         m_recentFilesMenu->addSeparator();
         m_recentFilesMenu->addAction(QStringLiteral("&Clear Recent"), this, [this]() {
-            QSettings s("REECLASS", "REECLASS");
+            QSettings s("RC", "RC");
             s.remove("recentFiles");
             updateRecentFilesMenu();
         });
@@ -10531,6 +11283,10 @@ void MainWindow::changeEvent(QEvent* event) {
     }
     if (event->type() == QEvent::WindowStateChange && m_titleBar)
         m_titleBar->updateMaximizeIcon();
+    // Maximizing or restoring hides or shows the resize zones; the resize
+    // and state-change events come in no guaranteed order.
+    if (event->type() == QEvent::WindowStateChange)
+        repositionResizeWidgets();
     // Drive the controller's adaptive refresh rate from window state:
     // focus loss widens the interval, minimize pauses the timer.
     // Folded into the same event handler so the wiring lives next to
@@ -10551,9 +11307,14 @@ void MainWindow::changeEvent(QEvent* event) {
 
 void MainWindow::repositionResizeWidgets() {
     // The resize grip now lives in the status bar (FlatStatusBar pins it).
-    // Here we only keep the frameless edge/corner zones glued to the border.
+    // Here we only keep the frameless edge/corner zones glued to the border —
+    // and out of the way while maximized, when the title bar owns the top edge.
+    const bool enabled = rcx::resizeZonesEnabled(windowState());
     for (auto* re : findChildren<ResizeEdge*>()) {
-        re->setGeometry(resizeEdgeRect(re->edges(), width(), height()));
+        re->setVisible(enabled);
+        if (!enabled) continue;
+        re->setGeometry(rcx::resizeEdgeRect(re->edges(), width(), height(),
+                                            menuWidget() ? menuWidget()->height() : 0));
         re->raise();
     }
 }
@@ -10826,13 +11587,14 @@ MainWindow::InspectionResult MainWindow::inspectAt(QWidget* widget, QPoint local
                 r.region = QStringLiteral("editor.header");
                 r.description = QStringLiteral("Struct/array header line");
                 r.globalRect = lineRect(line);
-            } else if (col >= 0 && col < kFoldCol + 1 && lm->foldHead) {
+            } else if (const ColumnSpan fs = foldSlotFor(*lm);
+                       fs.valid && col >= fs.start && col < fs.end) {
                 r.region = QStringLiteral("editor.foldArrow");
-                r.description = QStringLiteral("Fold arrow — click to expand/collapse");
-                r.globalRect = spanRect(line, {0, kFoldCol, true});
+                r.description = QStringLiteral("Fold box (drawn on the tree) — click to expand/collapse");
+                r.globalRect = spanRect(line, fs);
             } else if (col >= 0 && col < kFoldCol + lm->depth * kTreeIndent && lm->depth > 0) {
                 r.region = QStringLiteral("editor.treeLines");
-                r.description = QStringLiteral("Tree indent connectors (├ └ │)");
+                r.description = QStringLiteral("Tree lines (drawn over the indent)");
                 r.globalRect = spanRect(line, {kFoldCol, kFoldCol + lm->depth * kTreeIndent, true});
             } else if (ts.valid && col >= ts.start && col < ts.end) {
                 r.region = QStringLiteral("editor.typeColumn");
@@ -11013,9 +11775,11 @@ void MainWindow::showStartPage() {
     // Import*, recent files, Tutorial) auto-replace the preloaded tab
     // when their action succeeds (closeAllDocDocks runs inside
     // project_open / the import_* paths).
+    // The preload is the live bouncing-ball example: a first launch should
+    // land on something that moves, not on sixteen zero hex rows.
     const bool preloadedNewClass = m_tabs.isEmpty();
     if (preloadedNewClass)
-        newClass();
+        project_newSimulation();
 
     m_startPage = new StartPageWidget(this);
     m_startPage->applyTheme(ThemeManager::instance().current());
@@ -11029,17 +11793,19 @@ void MainWindow::showStartPage() {
     // class (startup path), just dismiss and the user lands on it. If no
     // preload happened (mid-session Welcome over existing tabs), create
     // one so the click actually produces a class.
-    connect(m_startPage, &StartPageWidget::newClass, this,
-            [this, preloadedNewClass]() {
+    // "New Class" at startup lands on the example that is already open —
+    // no blank class stacked beside it. Mid-session Welcome (nothing was
+    // preloaded) still creates one.
+    connect(m_startPage, &StartPageWidget::newClass, this, [this, preloadedNewClass]() {
         dismissStartPage();
         if (!preloadedNewClass) newClass();
     });
-    // Esc or outside-click — dismiss only. If the session has no tabs
-    // at dismiss time, create one so they don't land on a blank window.
+    // Esc or outside-click — dismiss only. If the session has no tabs at
+    // dismiss time, open the example so they don't land on a blank window.
     connect(m_startPage, &StartPageWidget::dismissed, this, [this]() {
         dismissStartPage();
         if (m_tabs.isEmpty())
-            newClass();
+            project_newSimulation();
     });
     connect(m_startPage, &StartPageWidget::openProject, this, [this]() {
         dismissStartPage();
@@ -11109,13 +11875,13 @@ int main(int argc, char* argv[]) {
     // GUI-subsystem build: no console at launch (no flash). If the user left
     // the console toggled on (View ▸ Show Console persists the choice),
     // summon one now. QSettings with explicit org/app works pre-QApplication.
-    if (QSettings("REECLASS", "REECLASS").value("showConsole", false).toBool())
+    if (QSettings("RC", "RC").value("showConsole", false).toBool())
         rcxSetConsoleVisible(true);
 #endif
 
     DarkApp app(argc, argv);
-    app.setApplicationName("REECLASS");
-    app.setOrganizationName("REECLASS");
+    app.setApplicationName("RC");
+    app.setOrganizationName("RC");
     app.setStyle(new MenuBarStyle("Fusion")); // Fusion + generous menu sizing
 
     // Replace Qt's default tooltips with RcxTooltip everywhere. See class
@@ -11158,9 +11924,11 @@ int main(int argc, char* argv[]) {
         qWarning("Failed to load embedded Departure Mono font");
     // Apply saved font preference before creating any editors
     {
-        QSettings settings("REECLASS", "REECLASS");
+        QSettings settings("RC", "RC");
         QString savedFont = settings.value("font", "JetBrains Mono").toString();
         rcx::RcxEditor::setGlobalFontName(savedFont);
+        rcx::fmt::setFloatDecimals(
+            settings.value("floatDecimals", rcx::fmt::kDefaultFloatDecimals).toInt());
         // One chrome font for the whole app: the menu bar, menu popups, every
         // QLabel/QToolButton and the rail inherit mono 10 pt (the address bar
         // sets chromeFont() itself)
@@ -11276,6 +12044,15 @@ int main(int argc, char* argv[]) {
                                  && args[ssIdx + 2] == "fontmenu");
             bool showNodeMenu = (ssIdx + 2 < args.size()
                                  && args[ssIdx + 2] == "nodemenu");
+            bool showInstances = (ssIdx + 2 < args.size()
+                                   && args[ssIdx + 2] == "instances");
+            bool showLargeFile = (ssIdx + 2 < args.size()
+                                   && args[ssIdx + 2] == "largefile");
+            bool showTimeline = (ssIdx + 2 < args.size()
+                                  && args[ssIdx + 2] == "timeline");
+            // The example a first launch opens on, after it has run a while.
+            bool showSim = (ssIdx + 2 < args.size()
+                             && (args[ssIdx + 2] == "sim" || args[ssIdx + 2] == "simtimeline"));
             // Ribbon captures: force a tab / the collapsed state for the shot.
             // The pre-existing settings are restored before quitting so a
             // screenshot run never rewrites the user's ribbon preferences.
@@ -11284,7 +12061,7 @@ int main(int argc, char* argv[]) {
                                      || ribbonMode == "collapsed");
             QVariant savedTab, savedState, savedScope;
             {
-                QSettings rs("REECLASS", "REECLASS");
+                QSettings rs("RC", "RC");
                 if (ribbonShot) {
                     savedTab = rs.value("ribbonTab");
                     savedState = rs.value("ribbonState");
@@ -11295,13 +12072,33 @@ int main(int argc, char* argv[]) {
                 // below, same as the ribbon keys.
                 if (showCode) savedScope = rs.value("codeScope");
             }
-            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, showFontMenu, showNodeMenu, ribbonMode, ribbonShot, savedTab, savedState, savedScope]() {
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, showFontMenu, showNodeMenu, showInstances, showLargeFile, showTimeline, showSim, ribbonMode, ribbonShot, savedTab, savedState, savedScope]() {
                 if (showSplash) {
                     // Capture the start page itself — skip project_new so it
                     // shows the no-tabs landing.
                     QMetaObject::invokeMethod(&window, "showStartPage", Qt::QueuedConnection);
                 } else {
-                    window.project_new();
+                    if (showSim && ribbonMode == QLatin1String("simtimeline")) {
+                        // Takes its own screenshots on its own schedule.
+                        window.previewSimulationTimeline(ssPath);
+                        return;
+                    }
+                    if (showSim) {
+                        window.project_newSimulation();
+                        QTimer::singleShot(3500, &window, [&window, ssPath]() {
+                            window.grab().save(ssPath);
+                            QApplication::quit();
+                        });
+                        return;
+                    }
+                    if (showLargeFile) window.previewLargeFile();
+                    else window.project_new();
+                    if (showInstances) window.previewInstances();
+                    if (showTimeline) {
+                        // Takes its own screenshots on its own schedule.
+                        window.previewTimeline(ssPath);
+                        return;
+                    }
                     if (showScanner && window.scannerDock())
                         window.scannerDock()->show();
                     if (showWorkspace)
@@ -11379,7 +12176,7 @@ int main(int argc, char* argv[]) {
                     // Put the user's ribbon preferences back: a capture run
                     // must not leave the app on the tab it photographed.
                     if (ribbonShot || showCode) {
-                        QSettings rs("REECLASS", "REECLASS");
+                        QSettings rs("RC", "RC");
                         if (ribbonShot) {
                             if (savedTab.isValid()) rs.setValue("ribbonTab", savedTab);
                             else rs.remove("ribbonTab");
@@ -11405,7 +12202,14 @@ int main(int argc, char* argv[]) {
     // Show VS2022-style start page instead of jumping straight to demo
     QMetaObject::invokeMethod(&window, "showStartPage", Qt::QueuedConnection);
 
-    return app.exec();
+    // Recordings spill to a per-session directory; once startup has settled,
+    // sweep the ones crashed sessions left behind.
+    QTimer::singleShot(5000, &window, [] { rcx::tl::TimelineService::instance().removeStaleSpillLater(); });
+
+    const int exitCode = app.exec();
+    // Queued capture work gets a bounded moment; nothing is kept past exit.
+    rcx::tl::TimelineService::instance().shutdown(1500);
+    return exitCode;
 }
 
 #include "main.moc"

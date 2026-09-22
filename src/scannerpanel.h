@@ -69,6 +69,7 @@ public:
 //TODO-DELETE(condLabel)     QLabel*       condLabel()    const { return m_condLabel; }
     QCheckBox*    structOnlyCheck() const { return m_structOnlyCheck; }
     const QVector<ScanResult>& results() const { return m_results; }
+    std::shared_ptr<Provider> resultProvider() const { return m_resultProvider; }
 
     /** Save / load the result list to a JSON file. */
     bool saveResultsTo(const QString& path) const;
@@ -131,6 +132,8 @@ public:
 
 signals:
     void goToAddress(uint64_t address);
+    void openBesideRequested(uint64_t address);
+    void resultSourceChanged();
 
 protected:
     // Swallows QEvent::ToolTip on the RESULT TABLE'S VIEWPORT only, to stop
@@ -155,6 +158,7 @@ private slots:
     void onResultFilterChanged(const QString& text);
 
 private:
+    void setResultProvider(std::shared_ptr<Provider> provider);
     ScanRequest buildRequest();
     void populateTable(bool showPrevious);
     void updateComboWidth();
@@ -228,6 +232,7 @@ private:
     // Engine
     ScanEngine*   m_engine;
     ProviderGetter m_providerGetter;
+    std::shared_ptr<Provider> m_resultProvider;
     BoundsGetter   m_boundsGetter;
     QVector<ScanResult> m_results;
     int           m_lastScanMode = 0;   // 0=signature, 1=value

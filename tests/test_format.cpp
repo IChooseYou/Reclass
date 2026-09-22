@@ -1,4 +1,5 @@
 #include <QtTest/QTest>
+#include <cstring>
 #include "core.h"
 
 using namespace rcx;
@@ -6,6 +7,9 @@ using namespace rcx;
 class TestFormat : public QObject {
     Q_OBJECT
 private slots:
+    // The float decimals setting is global: every test starts from the default.
+    void init() { fmt::setFloatDecimals(fmt::kDefaultFloatDecimals); }
+
     void testTypeName() {
         QString s = fmt::typeName(NodeKind::Float);
         QVERIFY(s.trimmed() == "float");
@@ -19,24 +23,26 @@ private slots:
     }
 
     void testFmtFloat() {
-        // Positive: 7 chars body. Negative: '-' + 7 chars = 8.
+        // At the default 3 decimals: at most 3, fewer once the integer part
+        // passes the 5-digit budget. A negative value gets '-' in front.
         auto check = [](float v, const char* expected) {
             QString s = fmt::fmtFloat(v);
             QCOMPARE(s, QString(expected));
         };
 
         // Basic positive/negative
-        check( 3.14159f,  "3.1416f");
-        check(-3.14159f,  "-3.1416f");
+        check( 3.14159f,  "3.142f");
+        check(-3.14159f,  "-3.142f");
 
         // Zero
-        check( 0.f,       "0.0000f");
+        check( 0.f,       "0.000f");
 
         // Small values
-        check( 0.02f,     "0.0200f");
-        check(-0.069f,    "-0.0690f");
+        check( 0.02f,     "0.020f");
+        check(-0.069f,    "-0.069f");
+        check(-0.2777f,   "-0.278f");
 
-        // Values >= 10 — 3 decimal places
+        // Values >= 10 — still 3 decimal places
         check( 15.6543f,  "15.654f");
         check(-77.6624f,  "-77.662f");
 
@@ -59,8 +65,54 @@ private slots:
         QCOMPARE(fmt::fmtFloat(std::nanf("")), QString("NaN"));
 
         // 1.0 exactly
-        check( 1.f,       "1.0000f");
-        check(-1.f,       "-1.0000f");
+        check( 1.f,       "1.000f");
+        check(-1.f,       "-1.000f");
+    }
+
+    void testFloatDecimalsSetting() {
+        QCOMPARE(fmt::floatDecimals(), 3);
+
+        // 4 decimals reads exactly as floats always did.
+        fmt::setFloatDecimals(4);
+        QCOMPARE(fmt::fmtFloat(3.14159f), QStringLiteral("3.1416f"));
+        QCOMPARE(fmt::fmtFloat(-0.2777f), QStringLiteral("-0.2777f"));
+        QCOMPARE(fmt::fmtFloat(15.6543f), QStringLiteral("15.654f"));
+        QCOMPARE(fmt::fmtFloat(500.f),    QStringLiteral("500.00f"));
+        QCOMPARE(fmt::fmtFloat(50000.f),  QStringLiteral("50000.f"));
+        // Negative zero is as wide as any other negative (was "-0.000f").
+        QCOMPARE(fmt::fmtFloat(-0.0f), QStringLiteral("-0.0000f"));
+
+        fmt::setFloatDecimals(1);
+        QCOMPARE(fmt::fmtFloat(-0.2777f), QStringLiteral("-0.3f"));
+        QCOMPARE(fmt::fmtFloat(15.6543f), QStringLiteral("15.7f"));
+        QCOMPARE(fmt::fmtFloat(50000.f),  QStringLiteral("50000.f"));
+
+        // 6: a value under 10 shows all six; the integer budget grows to 7.
+        fmt::setFloatDecimals(6);
+        QCOMPARE(fmt::fmtFloat(0.5f),  QStringLiteral("0.500000f"));
+        QCOMPARE(fmt::fmtFloat(15.5f), QStringLiteral("15.50000f"));
+
+        // Clamped to [1, 6].
+        fmt::setFloatDecimals(0);
+        QCOMPARE(fmt::floatDecimals(), fmt::kMinFloatDecimals);
+        fmt::setFloatDecimals(99);
+        QCOMPARE(fmt::floatDecimals(), fmt::kMaxFloatDecimals);
+
+        // Rounding that grows a digit gives up a decimal, never the budget.
+        fmt::setFloatDecimals(3);
+        QCOMPARE(fmt::fmtFloat(9.9996f),   QStringLiteral("10.000f"));
+        QCOMPARE(fmt::fmtFloat(99999.9f),  QStringLiteral("99999+f"));
+        QCOMPARE(fmt::fmtFloat(-0.0f),     QStringLiteral("-0.000f"));
+    }
+
+    void testDoubleDecimals() {
+        QCOMPARE(fmt::fmtDouble(51.5),      QStringLiteral("51.5"));
+        QCOMPARE(fmt::fmtDouble(0.0333333), QStringLiteral("0.033"));
+        QCOMPARE(fmt::fmtDouble(42.0),      QStringLiteral("42.0"));
+        QCOMPARE(fmt::fmtDouble(-0.27777),  QStringLiteral("-0.278"));
+        QCOMPARE(fmt::fmtDouble(-0.0),      QStringLiteral("-0.0"));   // the sign bit, like floats
+        fmt::setFloatDecimals(6);
+        QCOMPARE(fmt::fmtDouble(0.0333333), QStringLiteral("0.033333"));
     }
 
     void testFmtBool() {
@@ -288,6 +340,97 @@ private slots:
         // Vec4 single-line: subLine=0 returns 4 comma-separated values
         n.kind = NodeKind::Vec4;
         QCOMPARE(fmt::readValue(n, prov, 0, 0).count(','), 3);
+    }
+
+    // Vector and matrix components keep a column for the sign: a value
+    // turning negative never pushes the components after it over.
+    void testVectorAndMatrixComponentsKeepASignColumn() {
+        auto put = [](QByteArray& d, const std::initializer_list<float>& vals) {
+            int i = 0;
+            for (float v : vals) { std::memcpy(d.data() + i, &v, 4); i += 4; }
+        };
+        Node n;
+        n.name = "v";
+        QByteArray a(64, '\0'), b(64, '\0');
+        put(a, { 1.5f, -2.25f, 0.5f, 3.0f});
+        put(b, {-1.5f,  2.25f, -0.5f, -3.0f});
+        BufferProvider pa(a), pb(b);
+
+        n.kind = NodeKind::Vec3;
+        const QString va = fmt::readValue(n, pa, 0, 0);
+        const QString vb = fmt::readValue(n, pb, 0, 0);
+        QCOMPARE(va, QStringLiteral("[ 1.500f, -2.250f,  0.500f]"));   // brackets, like a matrix row
+        QCOMPARE(vb, QStringLiteral("[-1.500f,  2.250f, -0.500f]"));
+        for (int i = 0; i < va.size(); ++i)                       // every comma stays put
+            QCOMPARE(va[i] == QLatin1Char(','), vb[i] == QLatin1Char(','));
+        // What an edit starts from carries no padding and no brackets.
+        const QString edit = fmt::editableValue(n, pa, 0, 0);
+        QVERIFY(!edit.startsWith(QLatin1Char(' ')));
+        QVERIFY(!edit.contains(QLatin1Char('[')));
+
+        n.kind = NodeKind::Mat4x4;
+        const QString ra = fmt::readValue(n, pa, 0, 0);
+        const QString rb = fmt::readValue(n, pb, 0, 0);
+        QCOMPARE(ra, QStringLiteral("row0 [ 1.500f, -2.250f,  0.500f,  3.000f]"));
+        QCOMPARE(ra.size(), rb.size());
+        for (int i = 0; i < ra.size(); ++i)
+            QCOMPARE(ra[i] == QLatin1Char(','), rb[i] == QLatin1Char(','));
+
+        // A vector reads exactly as a matrix row does, past the "rowN ".
+        n.kind = NodeKind::Vec4;
+        QCOMPARE(fmt::readValue(n, pa, 0, 0), ra.mid(5));
+
+        // Negative zero takes no less room than any other negative.
+        QByteArray z(12, '\0');
+        put(z, {-0.0f, 0.25f, -1.0f});
+        BufferProvider pz(z);
+        n.kind = NodeKind::Vec3;
+        const QString vz = fmt::readValue(n, pz, 0, 0);
+        QCOMPARE(vz, QStringLiteral("[-0.000f,  0.250f, -1.000f]"));
+        for (int i = 0; i < vz.size(); ++i)
+            QCOMPARE(vz[i] == QLatin1Char(','), va[i] == QLatin1Char(','));
+    }
+
+    // One matrix shares one component width across all four rows: a value
+    // reaching 10 widens every row alike, so the columns stay straight.
+    void testMatrixRowsShareOneComponentWidth() {
+        QByteArray m(64, '\0');
+        const float big = 12.5f, small = 0.5f;
+        std::memcpy(m.data() + 60, &big, 4);     // row 3, column 3
+        std::memcpy(m.data() + 0, &small, 4);    // row 0, column 0
+        BufferProvider pm(m);
+        Node n;
+        n.kind = NodeKind::Mat4x4;
+        QStringList rows;
+        for (int r = 0; r < 4; ++r) rows << fmt::readValue(n, pm, 0, r);
+        for (const QString& row : rows) {
+            QCOMPARE(row.size(), rows[0].size());
+            for (int i = 5; i < row.size(); ++i)
+                QCOMPARE(row[i] == QLatin1Char(','), rows[0][i] == QLatin1Char(','));
+        }
+        QCOMPARE(rows[0], QStringLiteral("row0 [  0.500f,   0.000f,   0.000f,   0.000f]"));
+        QCOMPARE(rows[3], QStringLiteral("row3 [  0.000f,   0.000f,   0.000f,  12.500f]"));
+    }
+
+    void testEditableKeepsEveryDigit() {
+        QByteArray d(16, '\0');
+        const float f = 0.27777f;
+        const double g = 0.123456789;
+        std::memcpy(d.data(), &f, 4);
+        std::memcpy(d.data() + 8, &g, 8);
+        BufferProvider p(d);
+        Node n;
+        n.kind = NodeKind::Float;
+        QVERIFY2(fmt::editableValue(n, p, 0, 0).startsWith(QStringLiteral("0.27777")),
+                 qPrintable(fmt::editableValue(n, p, 0, 0)));
+        n.kind = NodeKind::Double;
+        QVERIFY2(fmt::editableValue(n, p, 8, 0).startsWith(QStringLiteral("0.123456789")),
+                 qPrintable(fmt::editableValue(n, p, 8, 0)));
+        // Every digit, and no more than it takes to read back the same value.
+        QCOMPARE(fmt::fmtFloatExact(1.52f), QStringLiteral("1.52"));
+        QCOMPARE(fmt::fmtFloatExact(0.27777f), QStringLiteral("0.27777"));
+        QCOMPARE(fmt::fmtFloatExact(-0.5f), QStringLiteral("-0.5"));
+        QCOMPARE(fmt::fmtDoubleExact(0.0333333), QStringLiteral("0.0333333"));
     }
 
     void testEditableValueBasic() {

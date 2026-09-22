@@ -9,6 +9,9 @@
 #include <Qsci/qsciscintillabase.h>
 #include "controller.h"
 #include "core.h"
+#include "address_callbacks.h"
+#include "providers/file_provider.h"
+#include "sparse_file.h"
 
 using namespace rcx;
 
@@ -29,6 +32,19 @@ public:
     bool isLive() const override { return true; }
     QString name() const override { return QStringLiteral("test"); }
     QString kind() const override { return QStringLiteral("Process"); }
+};
+
+class RelocatableProvider : public BufferProvider {
+public:
+    RelocatableProvider() : BufferProvider(QByteArray(0x8000, '\0')) {}
+    uint64_t moduleBase = 0x1000;
+    QVector<ModuleEntry> enumerateModules() const override {
+        return {{QStringLiteral("instance_fixture.exe"), {}, moduleBase, 0x400}};
+    }
+    uint64_t symbolToAddress(const QString& name) const override {
+        return name == QStringLiteral("instance_fixture.exe")
+            || name == QStringLiteral("instance_fixture") ? moduleBase : 0;
+    }
 };
 
 // Small tree: one root struct with a few typed fields at known offsets.
@@ -110,6 +126,236 @@ private slots:
         for (int i = 0; i < m_doc->tree.nodes.size(); i++)
             if (m_doc->tree.nodes[i].name == QLatin1String(name)) return i;
         return -1;
+    }
+
+    void testInstanceSharesLayoutButNotAddressOrFolds() {
+        const uint64_t root = m_doc->tree.nodes[0].id;
+        RcxController other(m_doc);
+        QVERIFY(other.configureInstance(*m_ctrl, root, 32));
+        QCOMPARE(other.document(), m_ctrl->document());
+        QCOMPARE(other.baseAddress(), uint64_t(32));
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(0));
+        const uint64_t field = m_doc->tree.nodes[1].id;
+        auto addressOf = [field](const RcxController& c) {
+            for (const auto& line : c.lastResult().meta)
+                if (line.nodeId == field) return line.offsetAddr;
+            return UINT64_MAX;
+        };
+        QCOMPARE(addressOf(other), uint64_t(32));
+        other.renameNode(1, QStringLiteral("shared_name"));
+        QVERIFY(m_ctrl->lastResult().text.contains(QStringLiteral("shared_name")));
+        m_doc->undoStack.undo();
+        QVERIFY(other.lastResult().text.contains(QStringLiteral("field_u32")));
+        QVERIFY(other.rebaseTo(QStringLiteral("0x30")));
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x10")));
+        other.goBack();
+        QCOMPARE(other.baseAddress(), uint64_t(32));
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(16));
+        QCOMPARE(addressOf(other), uint64_t(32));
+        other.toggleCollapse(0);
+        QVERIFY(other.viewTree().nodes[0].collapsed);
+        QVERIFY(!m_doc->tree.nodes[0].collapsed);
+        other.toggleCollapse(0);
+        m_ctrl->toggleCollapse(0);
+        QVERIFY(m_doc->tree.nodes[0].collapsed);
+        QVERIFY(!other.viewTree().nodes[0].collapsed);
+    }
+
+    void testInstanceWritesAndUndoSurviveClosingView() {
+        const auto originalProvider = m_ctrl->provider();
+        auto other = std::make_unique<RcxController>(m_doc);
+        QVERIFY(other->configureInstance(*m_ctrl, m_doc->tree.nodes[0].id, 32));
+        other->setNodeValue(1, -1, QStringLiteral("123"));
+        QCOMPARE(originalProvider->readU32(32), uint32_t(123));
+        QCOMPARE(originalProvider->readU32(0), uint32_t(0xDEADBEEF));
+        other->renameNode(1, QStringLiteral("from_instance"));
+        m_doc->provider = std::make_shared<BufferProvider>(QByteArray(64, '\0'));
+        QCOMPARE(other->provider(), originalProvider);
+        other.reset();
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[1].name, QStringLiteral("field_u32"));
+        m_doc->undoStack.undo();
+        QCOMPARE(originalProvider->readU32(32), uint32_t(0));
+        m_doc->undoStack.redo();
+        QCOMPARE(originalProvider->readU32(32), uint32_t(123));
+        QCOMPARE(m_doc->provider->readU32(32), uint32_t(0));
+    }
+
+    void testInstanceSaveRetainsItsOwnAddress() {
+        m_doc->provider = std::make_shared<RelocatableProvider>();
+        RcxController other(m_doc);
+        QVERIFY(other.configureInstance(*m_ctrl, m_doc->tree.nodes[0].id, 0x1080));
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        const QString path = file.fileName();
+        file.close();
+        QVERIFY(m_doc->save(path, &other.viewTree()));
+        RcxDocument loaded;
+        QVERIFY(loaded.load(path));
+        QCOMPARE(loaded.tree.baseAddress, uint64_t(0x1080));
+        QCOMPARE(loaded.tree.baseAddressFormula, QStringLiteral("<instance_fixture.exe>+0x80"));
+        QCOMPARE(loaded.tree.initialClass, QStringLiteral("TestStruct"));
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(0));
+        QVERIFY(m_ctrl->baseAddressFormula().isEmpty());
+    }
+
+    void testDocumentCanBeDestroyedBeforeItsViews() {
+        auto doc = std::make_unique<RcxDocument>();
+        auto view = std::make_unique<RcxController>(doc.get());
+        doc.reset();
+        QCOMPARE(view->document(), nullptr);
+        view.reset();
+    }
+
+    void testInstanceWith32BitFileLayout() {
+        m_doc->tree.pointerSize = 4;
+        RcxController other(m_doc);
+        QVERIFY(other.configureInstance(*m_ctrl, m_doc->tree.nodes[0].id, 32));
+        QCOMPARE(other.viewTree().pointerSize, 4);
+        QCOMPARE(other.baseAddress(), uint64_t(32));
+    }
+
+    void testLargeFileSourceNavigationAndInstance() {
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        constexpr uint64_t offset = (uint64_t(1) << 33) + 4096;
+        if (!resizeSparseTestFile(file, qint64(offset + 128)))
+            QSKIP("Filesystem does not support sparse test files");
+        QVERIFY(file.seek(qint64(offset)));
+        QCOMPARE(file.write(QByteArray::fromHex("78563412")), qint64(4));
+        file.flush();
+        QVERIFY(m_ctrl->loadSourceFile(file.fileName()));
+        QVERIFY(m_ctrl->navigateToAddress(offset));
+        QCOMPARE(m_ctrl->baseAddress(), offset);
+        QVERIFY(m_ctrl->lastResult().text.contains(QStringLiteral("12345678")));
+        RcxController other(m_doc);
+        QVERIFY(other.configureInstance(*m_ctrl, m_doc->tree.nodes[0].id, offset));
+        other.setNodeValue(1, -1, QStringLiteral("99"));
+        QCOMPARE(m_ctrl->provider()->readU32(offset), uint32_t(99));
+        m_doc->undoStack.undo();
+        QCOMPARE(m_ctrl->provider()->readU32(offset), uint32_t(0x12345678));
+        QVERIFY(file.seek(qint64(offset)));
+        QCOMPARE(file.read(4), QByteArray::fromHex("78563412"));
+        QVERIFY(m_doc->filePath.isEmpty());
+        const auto provider = m_ctrl->provider();
+        QVERIFY(!m_ctrl->loadSourceFile(file.fileName() + QStringLiteral(".missing")));
+        QCOMPARE(m_ctrl->provider(), provider);
+        QCOMPARE(m_ctrl->baseAddress(), offset);
+    }
+
+    void testClosingOriginalViewDoesNotRebaseInstanceOnUndo() {
+        auto source = std::make_unique<RcxController>(m_doc);
+        RcxController other(m_doc);
+        QVERIFY(other.configureInstance(*source, m_doc->tree.nodes[0].id, 32));
+        QVERIFY(source->rebaseTo(QStringLiteral("0x10")));
+        source.reset();
+        m_doc->undoStack.undo();
+        QCOMPARE(other.baseAddress(), uint64_t(32));
+    }
+
+    void testOpenPointerBesideUsesResolvedRowAddress() {
+        const uint64_t root = m_doc->tree.nodes[0].id;
+        m_doc->tree.nodes[1].kind = NodeKind::Pointer64;
+        m_doc->tree.nodes[1].refId = root;
+        m_doc->tree.touch();
+        uint64_t value = 32;
+        QVERIFY(m_doc->provider->write(0, &value, 8));
+        m_ctrl->refresh();
+        int row = -1;
+        for (int i = 0; i < m_ctrl->lastResult().meta.size(); ++i)
+            if (m_ctrl->lastResult().meta[i].nodeIdx == 1) { row = i; break; }
+        QVERIFY(row >= 0);
+        QSignalSpy opened(m_ctrl, &RcxController::requestOpenInstanceBeside);
+        m_ctrl->openPointerBeside(m_editor, row);
+        QCOMPARE(opened.size(), 1);
+        QCOMPARE(opened.first()[0].toULongLong(), root);
+        QCOMPARE(opened.first()[1].toULongLong(), uint64_t(32));
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(0));
+        value = 0;
+        QVERIFY(m_doc->provider->write(0, &value, 8));
+        m_ctrl->openPointerBeside(m_editor, row);
+        QCOMPARE(opened.size(), 1);
+    }
+
+    void testOpenBesideFromNestedPointer() {
+        auto& tree = m_doc->tree;
+        const uint64_t root = tree.nodes[0].id;
+        Node childClass;
+        childClass.kind = NodeKind::Struct;
+        childClass.structTypeName = QStringLiteral("Child");
+        const uint64_t childRoot = tree.nodes[tree.addNode(childClass)].id;
+        Node next;
+        next.kind = NodeKind::Pointer64;
+        next.parentId = childRoot;
+        next.refId = root;
+        next.offset = 8;
+        next.collapsed = true;
+        const uint64_t nextId = tree.nodes[tree.addNode(next)].id;
+        tree.nodes[1].kind = NodeKind::Pointer64;
+        tree.nodes[1].refId = childRoot;
+        tree.nodes[1].collapsed = false;
+        tree.touch();
+        uint64_t address = 32;
+        QVERIFY(m_doc->provider->write(0, &address, 8));
+        address = 48;
+        QVERIFY(m_doc->provider->write(40, &address, 8));
+        m_ctrl->setViewRootId(root);
+        m_ctrl->refresh();
+        int row = -1;
+        for (int i = 0; i < m_ctrl->lastResult().meta.size(); ++i) {
+            const auto& line = m_ctrl->lastResult().meta[i];
+            if (line.nodeId == nextId && line.offsetAddr == 40) { row = i; break; }
+        }
+        QVERIFY(row >= 0);
+        QSignalSpy opened(m_ctrl, &RcxController::requestOpenInstanceBeside);
+        m_ctrl->openPointerBeside(m_editor, row);
+        QCOMPARE(opened.size(), 1);
+        QCOMPARE(opened.first()[0].toULongLong(), root);
+        QCOMPARE(opened.first()[1].toULongLong(), uint64_t(48));
+    }
+
+    void testDurableAddressesRoundTripAndRelocate() {
+        auto prov = std::make_shared<RelocatableProvider>();
+        m_doc->provider = prov;
+        QCOMPARE(m_ctrl->addressExpression(0x1020), QStringLiteral("<instance_fixture.exe>+0x20"));
+        QCOMPARE(m_ctrl->addressExpression(0x1400), QStringLiteral("0x1400"));
+        QCOMPARE(m_ctrl->addressExpression(0x6000), QStringLiteral("0x6000"));
+        QCOMPARE(m_ctrl->addressExpression(0x1020, QStringLiteral("<instance_fixture.exe>+0x21")),
+                 QStringLiteral("<instance_fixture.exe>+0x20"));
+        SymbolStore::instance().addModule(QStringLiteral("instance_fixture"), {},
+            {{QStringLiteral("object"), 0x20}});
+        const QString expression = m_ctrl->addressExpression(0x1020, QStringLiteral("instance_fixture!object"));
+        QCOMPARE(expression, QStringLiteral("instance_fixture!object"));
+        QVERIFY(m_ctrl->navigateToAddress(0x1020, expression));
+        QCOMPARE(m_doc->tree.baseAddressFormula, expression);
+        m_ctrl->addBookmark(QStringLiteral("object_bookmark"), QStringLiteral("0x1020"));
+        QCOMPARE(m_doc->tree.bookmarks.last().addressFormula, expression);
+        QTemporaryFile file;
+        QVERIFY(file.open());
+        const QString path = file.fileName();
+        file.close();
+        QVERIFY(m_doc->save(path));
+        RcxDocument loaded;
+        QVERIFY(loaded.load(path));
+        QCOMPARE(loaded.tree.baseAddressFormula, expression);
+        QCOMPARE(loaded.tree.bookmarks.last().addressFormula, expression);
+        QVERIFY(m_ctrl->navigateToAddress(0x6000));
+        QVERIFY(m_ctrl->baseAddressFormula().isEmpty());
+        prov->moduleBase = 0x3000;
+        prov->invalidateModuleCache();
+        const auto callbacks = makeAddressCallbacks(prov.get(), 8);
+        const auto result = AddressParser::evaluate(expression, 8, &callbacks);
+        QVERIFY(result.ok);
+        QCOMPARE(result.value, uint64_t(0x3020));
+        m_ctrl->goBack();
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(0x3020));
+        m_ctrl->goForward();
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(0x6000));
+        m_doc->undoStack.undo();
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(0x3020));
+        QVERIFY(m_ctrl->navigateToFormula(expression));
+        QCOMPARE(m_ctrl->baseAddress(), uint64_t(0x3020));
+        SymbolStore::instance().addModule(QStringLiteral("instance_fixture"), {}, {});
     }
 
     void testFooterTrimAfterShrinkingAppendedHex_data() {
@@ -459,6 +705,253 @@ private slots:
         for (const Node& n : m_doc->tree.nodes)
             if (n.parentId != 0 && n.offset >= 14 && n.offset < 16) tail += n.byteSize();
         QCOMPARE(tail, 2);
+    }
+
+    // View ▸ Tree Columns is paint-only: it must reach every open pane and
+    // every pane opened later, and turning it off must clear them all.
+    void testTreeColumnsReachEverySplitEditor() {
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        QVERIFY(m_editor->metaForLine(1));
+        QVERIFY(!m_editor->treeColumns());
+        QVERIFY(m_editor->treeColumnGuides().isEmpty());
+        m_ctrl->setTreeColumns(true);
+        QVERIFY(m_editor->treeColumns());
+        QVERIFY(!m_editor->treeColumnGuides().isEmpty());
+        auto* second = m_ctrl->addSplitEditor(m_splitter);
+        QApplication::processEvents();
+        QVERIFY(second->treeColumns());
+        QVERIFY(second->treeColumnGuides() == m_editor->treeColumnGuides());
+        m_ctrl->setTreeColumns(false);
+        QVERIFY(!m_editor->treeColumns() && !second->treeColumns());
+        QVERIFY(m_editor->treeColumnGuides().isEmpty() && second->treeColumnGuides().isEmpty());
+        auto* third = m_ctrl->addSplitEditor(m_splitter);
+        QApplication::processEvents();
+        QVERIFY(!third->treeColumns());
+        QVERIFY(third->treeColumnGuides().isEmpty());
+    }
+
+    // An int field typed as an enum reads as its enum, and takes a member —
+    // chosen from its open member rows, or typed by name — as its value.
+    void testEnumFieldTakesAMemberAsItsValue() {
+        Node en;
+        en.kind = NodeKind::Struct;
+        en.classKeyword = QStringLiteral("enum");
+        en.structTypeName = QStringLiteral("Mode");
+        en.name = QStringLiteral("Mode");
+        en.parentId = 0;
+        en.enumMembers = {{QStringLiteral("Off"), 0}, {QStringLiteral("On"), 1}, {QStringLiteral("Auto"), 2}};
+        const uint64_t enumId = m_doc->tree.nodes[m_doc->tree.addNode(en)].id;
+        int fieldIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); ++i)
+            if (m_doc->tree.nodes[i].name == QStringLiteral("field_u32")) fieldIdx = i;
+        QVERIFY(fieldIdx >= 0);
+        m_doc->tree.nodes[fieldIdx].refId = enumId;
+        m_doc->tree.nodes[fieldIdx].collapsed = false;
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        auto fieldText = [&]() -> QString {
+            for (int i = 0; ; ++i) {
+                const LineMeta* lm = m_editor->metaForLine(i);
+                if (!lm) return {};
+                if (lm->nodeIdx == fieldIdx && lm->lineKind == LineKind::Field && !lm->isMemberLine)
+                    return m_editor->scintilla()->text(i);
+            }
+        };
+        // 0xDEADBEEF is no member of Mode: the field shows the number, not hex.
+        QVERIFY2(fieldText().contains(QStringLiteral("Mode")), qPrintable(fieldText()));
+        QVERIFY2(fieldText().contains(QStringLiteral("3735928559")), qPrintable(fieldText()));
+        QVERIFY2(!fieldText().contains(QStringLiteral("0xDEADBEEF"), Qt::CaseInsensitive), qPrintable(fieldText()));
+
+        // Choosing the "Auto" member row writes 2.
+        emit m_editor->enumMemberChosen(fieldIdx, 2);
+        QCOMPARE(m_doc->provider->readU32(0), uint32_t(2));
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        QVERIFY2(fieldText().contains(QStringLiteral("Auto")), qPrintable(fieldText()));
+
+        // Typing a member's name works too, scoped or not, any case.
+        emit m_editor->inlineEditCommitted(fieldIdx, 0, EditTarget::Value, QStringLiteral("Mode::on"), 0);
+        QCOMPARE(m_doc->provider->readU32(0), uint32_t(1));
+    }
+
+    // A class shown in two places: a click marks the copy clicked, not every
+    // copy; a refresh keeps the mark there; Ctrl+click on the other copy moves
+    // it, and again unselects; a Shift range inside one copy stays inside it.
+    void testSelectionMarksTheClickedCopyOnly() {
+        const uint64_t rootId = m_doc->tree.nodes[0].id;
+        Node vec;
+        vec.kind = NodeKind::Struct;
+        vec.structTypeName = QStringLiteral("Vec");
+        vec.name = QStringLiteral("Vec");
+        vec.parentId = 0;
+        vec.collapsed = false;
+        const uint64_t vecId = m_doc->tree.nodes[m_doc->tree.addNode(vec)].id;
+        auto add = [&](NodeKind k, const QString& name, uint64_t parent, int off) {
+            Node n;
+            n.kind = k;
+            n.name = name;
+            n.parentId = parent;
+            n.offset = off;
+            n.collapsed = false;
+            return m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        };
+        const uint64_t x = add(NodeKind::Float, QStringLiteral("x"), vecId, 0);
+        const uint64_t y = add(NodeKind::Float, QStringLiteral("y"), vecId, 4);
+        const uint64_t a = add(NodeKind::Struct, QStringLiteral("a"), rootId, 16);
+        const uint64_t b = add(NodeKind::Struct, QStringLiteral("b"), rootId, 24);
+        m_doc->tree.nodes[m_doc->tree.indexOfId(a)].refId = vecId;
+        m_doc->tree.nodes[m_doc->tree.indexOfId(b)].refId = vecId;
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        auto rowsOf = [&](uint64_t id) {
+            QVector<int> out;
+            for (int i = 0; ; ++i) {
+                const LineMeta* lm = m_editor->metaForLine(i);
+                if (!lm) break;
+                if (lm->nodeId == id && lm->lineKind == LineKind::Field && !lm->isContinuation)
+                    out.append(i);
+            }
+            return out;
+        };
+        auto marked = [&]() {
+            QVector<int> out;
+            auto* sci = m_editor->scintilla();
+            for (int i = 0; i < sci->lines(); ++i)
+                if (sci->markersAtLine(i) & (1u << M_SELECTED)) out.append(i);
+            return out;
+        };
+
+        const QVector<int> xs = rowsOf(x);
+        QVERIFY2(xs.size() >= 2, qPrintable(QStringLiteral("Vec::x shown %1 times").arg(xs.size())));
+        const int second = xs[1];
+
+        m_ctrl->handleNodeClick(m_editor, second, x, Qt::NoModifier);
+        QApplication::processEvents();
+        QCOMPARE(marked(), QVector<int>{second});
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        QCOMPARE(marked(), QVector<int>{second});
+
+        m_ctrl->handleNodeClick(m_editor, xs[0], x, Qt::ControlModifier);
+        QApplication::processEvents();
+        QCOMPARE(marked(), QVector<int>{xs[0]});
+        QVERIFY(m_ctrl->selectedIds().contains(x));
+        m_ctrl->handleNodeClick(m_editor, xs[0], x, Qt::ControlModifier);
+        QApplication::processEvents();
+        QVERIFY(!m_ctrl->selectedIds().contains(x));
+        QVERIFY(marked().isEmpty());
+
+        int secondY = -1;
+        for (int ln : rowsOf(y))
+            if (ln > second) { secondY = ln; break; }
+        QVERIFY(secondY > second);
+        m_ctrl->handleNodeClick(m_editor, second, x, Qt::NoModifier);
+        m_ctrl->handleNodeClick(m_editor, secondY, y, Qt::ShiftModifier);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->selectedIds(), (QSet<uint64_t>{x, y}));
+        QCOMPARE(marked(), (QVector<int>{second, secondY}));
+    }
+
+    // The editor gestures on an enum field: editing its value opens the member
+    // picker; F2 on a member row opens nothing and writes nothing; Enter on one picks
+    // it; Ctrl+X on a member row never cuts the field.
+    void testEnumFieldEditGestures() {
+        Node en;
+        en.kind = NodeKind::Struct;
+        en.classKeyword = QStringLiteral("enum");
+        en.structTypeName = QStringLiteral("Mode");
+        en.name = QStringLiteral("Mode");
+        en.parentId = 0;
+        en.enumMembers = {{QStringLiteral("Off"), 0}, {QStringLiteral("On"), 1}, {QStringLiteral("Auto"), 2}};
+        const uint64_t enumId = m_doc->tree.nodes[m_doc->tree.addNode(en)].id;
+        int fieldIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); ++i)
+            if (m_doc->tree.nodes[i].name == QStringLiteral("field_u32")) fieldIdx = i;
+        QVERIFY(fieldIdx >= 0);
+        const uint64_t fieldId = m_doc->tree.nodes[fieldIdx].id;
+        m_doc->tree.nodes[fieldIdx].refId = enumId;
+        m_doc->tree.nodes[fieldIdx].collapsed = false;
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        auto rowOf = [&](bool member, int64_t value) {
+            for (int i = 0; ; ++i) {
+                const LineMeta* lm = m_editor->metaForLine(i);
+                if (!lm) return -1;
+                if (lm->nodeIdx != fieldIdx || lm->lineKind != LineKind::Field) continue;
+                if (!member && !lm->isMemberLine) return i;
+                if (member && lm->isMemberLine && lm->enumValue == value) return i;
+            }
+        };
+        const int fieldLine = rowOf(false, 0);
+        const int autoLine = rowOf(true, 2);
+        QVERIFY(fieldLine > 0 && autoLine > fieldLine);
+
+        QSignalSpy picker(m_editor, &RcxEditor::enumChipClicked);
+        QSignalSpy chosen(m_editor, &RcxEditor::enumMemberChosen);
+
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::Value, fieldLine));
+        QVERIFY(!m_editor->isEditing());
+        QCOMPARE(picker.count(), 1);
+        QCOMPARE(picker.at(0).at(0).toInt(), fieldIdx);
+
+        QVERIFY(!m_editor->beginInlineEdit(EditTarget::Name, autoLine));
+        QCOMPARE(chosen.count(), 0);
+        QCOMPARE(m_doc->provider->readU32(0), uint32_t(0xDEADBEEF));
+
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::Value, autoLine));
+        QCOMPARE(chosen.count(), 1);
+        QCOMPARE(m_doc->provider->readU32(0), uint32_t(2));
+
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        const int memberLine = rowOf(true, 1);
+        QVERIFY(memberLine > 0);
+        m_ctrl->handleNodeClick(m_editor, memberLine, fieldId, Qt::NoModifier);
+        emit m_editor->cutNodesRequested();
+        QApplication::processEvents();
+        QVERIFY2(m_doc->tree.indexOfId(fieldId) >= 0, "cutting a member row removed the enum field");
+    }
+
+    // A float's edit starts from every digit, and Enter on it unchanged writes
+    // nothing back; a real change still writes.
+    void testFloatEditKeepsEveryDigit() {
+        int floatIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); ++i)
+            if (m_doc->tree.nodes[i].name == QStringLiteral("field_float")) floatIdx = i;
+        QVERIFY(floatIdx >= 0);
+        m_ctrl->setNodeValue(floatIdx, 0, QStringLiteral("0.27777"));
+        QCOMPARE(m_doc->provider->readF32(4), 0.27777f);
+        m_ctrl->refresh();
+        QApplication::processEvents();
+
+        auto lineOfFloat = [&]() {
+            for (int i = 0; ; ++i) {
+                const LineMeta* lm = m_editor->metaForLine(i);
+                if (!lm) return -1;
+                if (lm->nodeIdx == floatIdx && lm->lineKind == LineKind::Field) return i;
+            }
+        };
+        int line = lineOfFloat();
+        QVERIFY(line > 0);
+        QVERIFY2(m_editor->scintilla()->text(line).contains(QStringLiteral("0.278f")),
+                 qPrintable(m_editor->scintilla()->text(line)));   // shown rounded
+        const QByteArray before = m_doc->provider->readBytes(4, 4);
+
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::Value, line));
+        QVERIFY(m_editor->isEditing());
+        QVERIFY2(m_editor->scintilla()->text(line).contains(QStringLiteral("0.27777")),
+                 qPrintable(m_editor->scintilla()->text(line)));   // edited in full
+        QSignalSpy committed(m_editor, &RcxEditor::inlineEditCommitted);
+        QSignalSpy cancelled(m_editor, &RcxEditor::inlineEditCancelled);
+        QTest::keyClick(m_editor->scintilla(), Qt::Key_Return);
+        QApplication::processEvents();
+        QCOMPARE(committed.count(), 0);
+        QCOMPARE(cancelled.count(), 1);
+        QCOMPARE(m_doc->provider->readBytes(4, 4), before);
     }
 
     void cleanup() {

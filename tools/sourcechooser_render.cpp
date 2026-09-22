@@ -103,7 +103,7 @@ static QVector<SourceEntry> buildEntries(bool many) {
                                   i, /*active*/ i == 0, /*stale*/ i == 3));
     } else {
         // The live session in build/issue.png: the app attached to itself.
-        entries.append(saved(QStringLiteral("REECLASS.exe"),
+        entries.append(saved(QStringLiteral("RC.exe"),
                               QStringLiteral("processmemory"),
                               QStringLiteral("34856"), QStringLiteral("x64"),
                               QStringLiteral("0x2665EACD160"), 0,
@@ -117,7 +117,7 @@ static QVector<SourceEntry> buildEntries(bool many) {
     entries.append(provider(QStringLiteral("Process Memory"), QStringLiteral("processmemory"),
                             QStringLiteral("libProcessMemoryPlugin.dll")));
     entries.append(provider(QStringLiteral("ReClass.NET Compat Layer"),
-                            QStringLiteral("REECLASS.netcompatlayer"),
+                            QStringLiteral("RC.netcompatlayer"),
                             QStringLiteral("libRcNetCompatPlugin.dll")));
     entries.append(provider(QStringLiteral("Remote Process Memory"),
                             QStringLiteral("remoteprocessmemory"),
@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
             << (id >= 0 ? QFontDatabase::applicationFontFamilies(id).join(", ") : QStringLiteral("FAILED"))
             << "\n";
     }
-    const QString fontSetting = QSettings(QStringLiteral("REECLASS"), QStringLiteral("REECLASS"))
+    const QString fontSetting = QSettings(QStringLiteral("RC"), QStringLiteral("RC"))
                                     .value(QStringLiteral("font"), QStringLiteral("JetBrains Mono")).toString();
     QFont font(fontSetting, 11);
     font.setFixedPitch(true);
