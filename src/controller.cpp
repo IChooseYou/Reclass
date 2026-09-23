@@ -10111,10 +10111,11 @@ void RcxController::restoreNav(const NavEntry& e, RcxEditor* from) {
     emit historyChanged(canGoBack(), canGoForward());
 }
 
-void RcxController::addBookmark(const QString& name, const QString& formula) {
+void RcxController::addBookmark(const QString& name, const QString& formula, const QString& note) {
     Bookmark b;
     b.name = name.trimmed();
     b.addressFormula = formula.trimmed();
+    b.note = note.trimmed();
     if (b.name.isEmpty() || b.addressFormula.isEmpty()) return;
     if (isBareAddressLiteral(b.addressFormula)) {
         const auto callbacks = makeAddressCallbacks(provider().get(), m_doc->tree.pointerSize);

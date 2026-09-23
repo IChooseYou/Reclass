@@ -377,7 +377,16 @@ QJsonObject McpBridge::handleInitialize(const QJsonValue& id, const QJsonObject&
             "- tree.apply operations are atomic (undo macro). Batch related changes into one call.\n"
             "- Use tree.search to quickly find nodes by name instead of paging through project.state.\n"
             "- project.state returns structure metadata only (kinds, names, offsets), NOT live values. "
-            "Use hex.read for actual memory values and node.history for tracking changes over time."
+            "Use hex.read for actual memory values and node.history for tracking changes over time.\n"
+            "- To explore a large address space, START WITH source.regions — the full committed region "
+            "list with permissions, filters and paging. source.modules collapses each module to a "
+            "single span and hides the heap/VirtualAlloc blocks between images, which is where "
+            "mutable state lives. Narrow with type/writable/module, then pass the ranges you care "
+            "about to scanner.scan or scanner.scan_pattern as 'regions' instead of scanning everything.\n"
+            "- Bookmarks are YOUR working memory. They persist with the project and survive rebases, "
+            "so record every candidate address with bookmarks.add and put your evidence in 'note' "
+            "('u32, 100->87 on damage, survived 3 rescans'). Re-read them with bookmarks.list rather "
+            "than re-deriving or re-scanning what you already worked out."
         }
     };
     return okReply(id, result);
@@ -502,6 +511,43 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
         }}
     });
 
+    // 3c. source.regions
+    tools.append(QJsonObject{
+        {"name", "source.regions"},
+        {"description", "List the target's raw memory regions — the full committed address space, "
+                        "not just modules. source.modules collapses every section of a module into "
+                        "one span; this shows each region with its permissions, so you can see the "
+                        "heap/VirtualAlloc blocks between images (where mutable game state lives). "
+                        "Use it to plan a scan: pick ranges, then pass them to scanner.scan/"
+                        "scanner.scan_pattern as 'regions'. Filters: module (substring), type "
+                        "(image|mapped|private), readable/writable/executable (omit = don't care), "
+                        "minSize. Paged: returns returned/matched/totalRegions/totalBytes/"
+                        "matchedBytes/regionsByType and nextOffset when more remain."},
+        {"inputSchema", QJsonObject{
+            {"type", "object"},
+            {"properties", QJsonObject{
+                {"tabIndex", QJsonObject{{"type", "integer"},
+                    {"description", "MDI tab index (0-based). Omit for active tab."}}},
+                {"module", QJsonObject{{"type", "string"},
+                    {"description", "Only regions whose owning module name contains this (case-insensitive)."}}},
+                {"type", QJsonObject{{"type", "string"},
+                    {"description", "image (a loaded module) | mapped (file/shared section) | private (heap, stack, VirtualAlloc)."}}},
+                {"readable", QJsonObject{{"type", "boolean"},
+                    {"description", "Filter on readability. Omit for don't-care."}}},
+                {"writable", QJsonObject{{"type", "boolean"},
+                    {"description", "Filter on writability. Omit for don't-care. true + type=private is where game state lives."}}},
+                {"executable", QJsonObject{{"type", "boolean"},
+                    {"description", "Filter on executability. Omit for don't-care."}}},
+                {"minSize", QJsonObject{{"type", "integer"},
+                    {"description", "Skip regions smaller than this many bytes."}}},
+                {"offset", QJsonObject{{"type", "integer"},
+                    {"description", "Page offset (default 0). Use nextOffset from the previous response."}}},
+                {"limit", QJsonObject{{"type", "integer"},
+                    {"description", "Page size (default 200, max 2000)."}}}
+            }}
+        }}
+    });
+
     // 4. hex.read
     tools.append(QJsonObject{
         {"name", "hex.read"},
@@ -566,13 +612,20 @@ QJsonObject McpBridge::handleToolsList(const QJsonValue& id) {
     tools.append(QJsonObject{
         {"name", "bookmarks.add"},
         {"description", "Add a bookmark to the active project. addressFormula is an AddressParser expression "
-                        "such as '<game.exe>+0x12340' or '0x7ff7e0001234'. Survives base-address rebases."},
+                        "such as '<game.exe>+0x12340' or '0x7ff7e0001234'. Survives base-address rebases. "
+                        "USE THIS AS YOUR OWN WORKING MEMORY while exploring: bookmarks persist with the "
+                        "project and survive rebases, so record every candidate address you are reasoning "
+                        "about (what you think it is, what evidence you have) in 'note', then re-read them "
+                        "later with bookmarks.list instead of re-deriving or re-scanning."},
         {"inputSchema", QJsonObject{
             {"type", "object"},
             {"properties", QJsonObject{
                 {"tabIndex", QJsonObject{{"type", "integer"}}},
                 {"name", QJsonObject{{"type", "string"}}},
-                {"addressFormula", QJsonObject{{"type", "string"}}}
+                {"addressFormula", QJsonObject{{"type", "string"}}},
+                {"note", QJsonObject{{"type", "string"},
+                    {"description", "Free-form reasoning to keep with the address, e.g. "
+                                    "'candidate health: u32, dropped 100->87 on damage, survived 3 rescans'."}}}
             }},
             {"required", QJsonArray{"name", "addressFormula"}}
         }}
@@ -1185,6 +1238,7 @@ QJsonObject McpBridge::handleToolsCall(const QJsonValue& id, const QJsonObject& 
     else if (toolName == "tree.apply")     result = toolTreeApply(args);
     else if (toolName == "source.switch")  result = toolSourceSwitch(args);
     else if (toolName == "source.modules") result = toolSourceModules(args);
+    else if (toolName == "source.regions") result = toolSourceRegions(args);
     else if (toolName == "hex.read")       result = toolHexRead(args);
     else if (toolName == "hex.write")      result = toolHexWrite(args);
     else if (toolName == "status.set")     result = toolStatusSet(args);
@@ -1974,6 +2028,102 @@ QJsonObject McpBridge::toolSourceModules(const QJsonObject& args) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// TOOL: source.regions
+//
+// source.modules collapses every section of a module into one min..max
+// span, which is the wrong resolution for exploring a large address
+// space: it hides the r/w heap blocks between images, and it cannot say
+// how much of the process is actually committed. This is the raw region
+// list, filtered and paged so a multi-GB target stays answerable.
+// ════════════════════════════════════════════════════════════════════
+
+QJsonObject McpBridge::toolSourceRegions(const QJsonObject& args) {
+    auto* tab = resolveTab(args);
+    if (!tab) return makeTextResult("No active tab", true);
+
+    auto* prov = tab->ctrl->provider().get();
+    if (!prov) return makeTextResult("No data source attached", true);
+
+    const QVector<MemoryRegion> all = prov->enumerateRegions();
+
+    auto typeName = [](RegionType t) -> QString {
+        switch (t) {
+            case RegionType::Image:  return QStringLiteral("image");
+            case RegionType::Mapped: return QStringLiteral("mapped");
+            default:                 return QStringLiteral("private");
+        }
+    };
+
+    // Filters. The r/w/x ones are tri-state on purpose: absent means "don't
+    // care", which is not the same as false.
+    const QString wantModule = args.value("module").toString().trimmed();
+    const QString wantType   = args.value("type").toString().trimmed().toLower();
+    const auto    wantR      = args.value("readable");
+    const auto    wantW      = args.value("writable");
+    const auto    wantX      = args.value("executable");
+    const uint64_t minSize   = (uint64_t)qMax<int64_t>(0, parseInteger(args.value("minSize"), 0));
+
+    QVector<MemoryRegion> hits;
+    hits.reserve(all.size());
+    // Totals describe the WHOLE address space, not the filtered page, so the
+    // caller can tell "nothing matched" from "nothing is mapped".
+    uint64_t totalBytes = 0, matchedBytes = 0;
+    QHash<QString, int> byType;
+    for (const auto& r : all) {
+        totalBytes += r.size;
+        byType[typeName(r.type)]++;
+        if (!wantModule.isEmpty() &&
+            !r.moduleName.contains(wantModule, Qt::CaseInsensitive)) continue;
+        if (!wantType.isEmpty() && typeName(r.type) != wantType) continue;
+        if (wantR.isBool() && r.readable   != wantR.toBool()) continue;
+        if (wantW.isBool() && r.writable   != wantW.toBool()) continue;
+        if (wantX.isBool() && r.executable != wantX.toBool()) continue;
+        if (r.size < minSize) continue;
+        hits.append(r);
+        matchedBytes += r.size;
+    }
+
+    std::sort(hits.begin(), hits.end(),
+              [](const MemoryRegion& a, const MemoryRegion& b) { return a.base < b.base; });
+
+    const int offset = qMax(0, (int)parseInteger(args.value("offset"), 0));
+    const int limit  = qBound(1, (int)parseInteger(args.value("limit"), 200), 2000);
+
+    QJsonArray arr;
+    for (int i = offset; i < hits.size() && i < offset + limit; ++i) {
+        const auto& r = hits[i];
+        QString prot;
+        prot += r.readable   ? QLatin1Char('r') : QLatin1Char('-');
+        prot += r.writable   ? QLatin1Char('w') : QLatin1Char('-');
+        prot += r.executable ? QLatin1Char('x') : QLatin1Char('-');
+        QJsonObject o{
+            {"base", "0x" + QString::number(r.base, 16).toUpper()},
+            {"end",  "0x" + QString::number(r.base + r.size, 16).toUpper()},
+            {"size", QJsonValue(static_cast<qint64>(r.size))},
+            {"prot", prot},
+            {"type", typeName(r.type)}
+        };
+        if (!r.moduleName.isEmpty()) o["module"] = r.moduleName;
+        arr.append(o);
+    }
+
+    QJsonObject out;
+    out["regions"] = arr;
+    out["returned"] = arr.size();
+    out["matched"] = hits.size();
+    out["totalRegions"] = all.size();
+    out["totalBytes"] = QJsonValue(static_cast<qint64>(totalBytes));
+    out["matchedBytes"] = QJsonValue(static_cast<qint64>(matchedBytes));
+    QJsonObject counts;
+    for (auto it = byType.constBegin(); it != byType.constEnd(); ++it)
+        counts[it.key()] = it.value();
+    out["regionsByType"] = counts;
+    if (offset + arr.size() < hits.size())
+        out["nextOffset"] = offset + arr.size();
+    return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
+}
+
+// ════════════════════════════════════════════════════════════════════
 // TOOL: hex.read
 // ════════════════════════════════════════════════════════════════════
 
@@ -2114,9 +2264,23 @@ QJsonObject McpBridge::toolHexWrite(const QJsonObject& args) {
     if (!prov->isReadable((uint64_t)offset, newBytes.size()))
         return makeTextResult("Offset out of range", true);
 
+    // Self-attach (and the tutorial) refuse byte writes outright, so say so
+    // instead of pushing a command that will be silently dropped.
+    if (ctrl->readOnlyOverride())
+        return makeTextResult("Writes are refused for this source (self-attach safety) — "
+                              "attach to a different process to write", true);
+
     QByteArray oldBytes = prov->readBytes((uint64_t)offset, newBytes.size());
     doc->undoStack.push(new RcxCommand(ctrl,
         cmd::WriteBytes{(uint64_t)offset, oldBytes, newBytes}));
+
+    // A refused write marks the command obsolete and leaves memory untouched;
+    // reporting "Wrote N bytes" regardless told callers a write had landed
+    // when it had not. Read it back and report what actually happened.
+    const QByteArray verify = prov->readBytes((uint64_t)offset, newBytes.size());
+    if (verify != newBytes)
+        return makeTextResult("Write REJECTED at 0x" + QString::number(offset, 16)
+                              + " — memory is unchanged", true);
 
     return makeTextResult("Wrote " + QString::number(newBytes.size()) + " bytes at offset 0x"
                           + QString::number(offset, 16));
@@ -3707,6 +3871,7 @@ QJsonObject McpBridge::toolBookmarksList(const QJsonObject& args) {
         QJsonObject o;
         o["name"] = b.name;
         o["addressFormula"] = b.addressFormula;
+        if (!b.note.isEmpty()) o["note"] = b.note;
         out.append(o);
     }
     return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
@@ -3717,10 +3882,13 @@ QJsonObject McpBridge::toolBookmarksAdd(const QJsonObject& args) {
     if (!tab || !tab->ctrl) return makeTextResult("No active project.");
     QString name = args.value("name").toString().trimmed();
     QString formula = args.value("addressFormula").toString().trimmed();
+    QString note = args.value("note").toString().trimmed();
     if (name.isEmpty() || formula.isEmpty())
         return makeTextResult("Both name and addressFormula are required.");
-    tab->ctrl->addBookmark(name, formula);
-    return makeTextResult(QStringLiteral("Bookmark added: %1 -> %2").arg(name, formula));
+    tab->ctrl->addBookmark(name, formula, note);
+    return makeTextResult(QStringLiteral("Bookmark added: %1 -> %2%3")
+                              .arg(name, formula,
+                                   note.isEmpty() ? QString() : QStringLiteral(" (note kept)")));
 }
 
 QJsonObject McpBridge::toolBookmarksRemove(const QJsonObject& args) {

@@ -431,7 +431,7 @@ public:
     bool rebaseTo(const QString& expr, QString* err = nullptr, bool recordHistory = true);
     // Bookmarks / Goto — a wrapper over rebaseTo, kept for its callers.
     bool navigateToFormula(const QString& formula, QString* errOut = nullptr);
-    void addBookmark(const QString& name, const QString& formula);
+    void addBookmark(const QString& name, const QString& formula, const QString& note = {});
     void removeBookmark(int idx);
 
     // ── Navigation history (the address bar's Back / Forward / Up) ──

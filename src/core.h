@@ -400,16 +400,23 @@ struct Node {
 struct Bookmark {
     QString  name;
     QString  addressFormula;  // e.g. "<game.exe>+0x12340" — survives rebases
+    // Free-form note. A bookmark is the only per-address store that persists
+    // with the project, so it doubles as the working memory an MCP client
+    // reasons with across calls ("candidate health, survived 3 rescans").
+    QString  note;
     QJsonObject toJson() const {
         QJsonObject o;
         o["name"] = name;
         o["addressFormula"] = addressFormula;
+        // Omitted when empty so existing projects round-trip byte-identical.
+        if (!note.isEmpty()) o["note"] = note;
         return o;
     }
     static Bookmark fromJson(const QJsonObject& o) {
         Bookmark b;
         b.name = o["name"].toString();
         b.addressFormula = o["addressFormula"].toString();
+        b.note = o["note"].toString();
         return b;
     }
 };
