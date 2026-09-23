@@ -6487,7 +6487,7 @@ void MainWindow::toggleMcp() {
     } else {
         m_mcp->start();
         m_mcpAction->setText("Stop &MCP Server");
-        setAppStatus("MCP server listening on pipe: RCMcpBridge");
+        setAppStatus("MCP server listening on pipe: RcMcpBridge");
     }
 }
 

@@ -114,9 +114,9 @@ void McpBridge::start() {
     m_server->setSocketOptions(QLocalServer::WorldAccessOption);
 
     // Remove stale socket (Linux/Mac leave files behind)
-    QLocalServer::removeServer("RCMcpBridge");
+    QLocalServer::removeServer("RcMcpBridge");
 
-    if (!m_server->listen("RCMcpBridge")) {
+    if (!m_server->listen("RcMcpBridge")) {
         qWarning() << "[MCP] Failed to start server:" << m_server->errorString();
         delete m_server;
         m_server = nullptr;
@@ -125,7 +125,7 @@ void McpBridge::start() {
 
     connect(m_server, &QLocalServer::newConnection,
             this, &McpBridge::onNewConnection);
-    qDebug() << "[MCP] Server listening on pipe: RCMcpBridge";
+    qDebug() << "[MCP] Server listening on pipe: RcMcpBridge";
 }
 
 void McpBridge::stop() {

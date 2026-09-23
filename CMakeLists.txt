@@ -300,14 +300,14 @@ if(WIN32)
     endforeach()
 endif()
 
-add_executable(RCMcpBridge tools/rcx-mcp-stdio.cpp)
-target_link_libraries(RCMcpBridge PRIVATE ${QT}::Core ${QT}::Network)
+add_executable(RcMcpBridge tools/rcx-mcp-stdio.cpp)
+target_link_libraries(RcMcpBridge PRIVATE ${QT}::Core ${QT}::Network)
 if(APPLE)
-    add_custom_command(TARGET RCMcpBridge POST_BUILD
+    add_custom_command(TARGET RcMcpBridge POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
-            $<TARGET_FILE:RCMcpBridge>
-            $<TARGET_FILE_DIR:RC>/RCMcpBridge
-        COMMENT "Bundling RCMcpBridge into RC.app"
+            $<TARGET_FILE:RcMcpBridge>
+            $<TARGET_FILE_DIR:RC>/RcMcpBridge
+        COMMENT "Bundling RcMcpBridge into RC.app"
     )
 endif()
 
