@@ -1,5 +1,6 @@
 #pragma once
 #include "provider.h"
+#include "watch_poll.h"
 #include <QFile>
 #include <QFileInfo>
 
@@ -58,8 +59,26 @@ public:
         return { r };
     }
 
+    // ── Watchpoints ──
+    // A buffer has no trap source of any kind, so it watches the same way an
+    // external process provider does: by diffing a shadow copy. Having it here
+    // means the watch contract is exercisable without a live target.
+    WatchCaps watchCapabilities() const override {
+        return PolledWatchSet::caps(QStringLiteral("polled-diff (buffer)"));
+    }
+    int addWatch(uint64_t addr, int size, WatchAccess access) override {
+        if (!isReadable(addr, size)) return -1;
+        return m_watches.add(addr, size, access, *this);
+    }
+    bool removeWatch(int id) override { return m_watches.remove(id); }
+    void clearWatches() override { m_watches.clear(); }
+    QVector<WatchHit> pollWatchHits() override { return m_watches.poll(*this); }
+
     const QByteArray& data() const { return m_data; }
     QByteArray& data() { return m_data; }
+
+private:
+    PolledWatchSet m_watches;
 };
 
 } // namespace rcx

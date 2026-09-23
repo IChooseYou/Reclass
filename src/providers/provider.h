@@ -35,6 +35,54 @@ struct VtopResult {
     bool     valid = false;
 };
 
+// ── Memory watchpoints (optional provider capability) ──
+//
+// What a provider can DETECT, not what it is asked for. The honest split:
+// a provider that only holds a read handle on the target can see writes by
+// re-reading (the effect), but never reads, because a read leaves no trace.
+// A provider with a real trap source — a hypervisor's EPT, a kernel driver,
+// an in-target payload — can report reads, the faulting PC and the thread.
+enum class WatchAccess : uint8_t {
+    None      = 0,
+    Read      = 1,
+    Write     = 2,
+    ReadWrite = 3,   // Read | Write
+    Execute   = 4,
+};
+
+inline WatchAccess operator|(WatchAccess a, WatchAccess b) {
+    return static_cast<WatchAccess>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+inline bool hasAccess(WatchAccess set, WatchAccess want) {
+    return (static_cast<uint8_t>(set) & static_cast<uint8_t>(want)) == static_cast<uint8_t>(want)
+           && want != WatchAccess::None;
+}
+
+// One observed touch of a watched range.
+struct WatchHit {
+    int         id          = 0;   // the watch that fired
+    uint64_t    address     = 0;   // exact address touched (may be inside the range)
+    int         size        = 0;   // bytes affected
+    WatchAccess access      = WatchAccess::Write;
+    uint64_t    pc          = 0;   // faulting instruction; 0 = unknown (sampled, not trapped)
+    uint32_t    threadId    = 0;   // 0 = unknown
+    qint64      timestampMs = 0;   // wall clock when observed
+    QByteArray  oldBytes, newBytes;  // populated when the provider knows them
+};
+
+// What a provider's watch implementation can actually do. A caller shows this
+// to the user rather than promising behaviour the backend cannot deliver.
+struct WatchCaps {
+    bool        supported     = false;
+    WatchAccess access        = WatchAccess::None;  // detectable accesses
+    int         maxWatches    = 0;   // 0 = unlimited
+    int         maxRangeBytes = 0;   // 0 = unlimited
+    bool        reportsPc     = false;
+    bool        reportsThread = false;
+    bool        sampled       = true;  // true = polled (can miss/merge); false = trapped
+    QString     method;                // "polled-diff", "hardware", "hypervisor", …
+};
+
 class Provider {
 public:
     virtual ~Provider() = default;
@@ -132,6 +180,37 @@ public:
         Q_UNUSED(physAddr); Q_UNUSED(startIdx); Q_UNUSED(count);
         return {};
     }
+
+    // --- Memory watchpoints (optional; default = unsupported) ---
+    //
+    // Watch an address or range for reads/writes. Every provider picks its own
+    // mechanism: shadow-copy polling (see watch_poll.h, the only thing that
+    // works from outside a target without being its debugger), a kernel
+    // driver, an in-target payload, or a hypervisor's EPT. Callers MUST consult
+    // watchCapabilities() first — a backend that cannot see reads says so
+    // rather than silently never firing.
+    //
+    // NOTE (ABI): these are virtuals on a fragile base class. Adding, removing
+    // or reordering any of them mis-routes every virtual call in a plugin built
+    // against a different provider.h, so RCX_PROVIDER_ABI_VERSION must be
+    // bumped alongside (see iplugin.h).
+
+    virtual WatchCaps watchCapabilities() const { return {}; }
+
+    // Arm a watch. Returns a positive id, or -1 if unsupported/refused
+    // (range too large, out of hardware slots, access not detectable).
+    virtual int addWatch(uint64_t addr, int size, WatchAccess access) {
+        Q_UNUSED(addr); Q_UNUSED(size); Q_UNUSED(access);
+        return -1;
+    }
+
+    virtual bool removeWatch(int id) { Q_UNUSED(id); return false; }
+    virtual void clearWatches() {}
+
+    // Drain everything observed since the last call. For a sampled backend
+    // this IS the sampling point, so call it on a regular tick; for a trapped
+    // backend it drains a queue filled asynchronously.
+    virtual QVector<WatchHit> pollWatchHits() { return {}; }
 
     // --- Derived convenience (non-virtual, never override) ---
 

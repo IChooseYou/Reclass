@@ -173,7 +173,11 @@ typedef IPlugin* (*CreatePluginFunc)();
 //
 // Place RCX_DEFINE_PLUGIN_ABI() once at file scope in each plugin's .cpp,
 // where providers/provider.h is fully included (alongside CreatePlugin()).
-#define RCX_PROVIDER_ABI_VERSION 1u
+// v2 (2026-09-23): Provider gained the memory-watchpoint virtuals
+// (watchCapabilities/addWatch/removeWatch/clearWatches/pollWatchHits).
+// sizeof(Provider) is unchanged — no data members were added — so only this
+// counter catches it.
+#define RCX_PROVIDER_ABI_VERSION 2u
 
 // Both sides MUST compute the token identically. Keep this in one place so the
 // plugin macro and the host check can't drift apart.

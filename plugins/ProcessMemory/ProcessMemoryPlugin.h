@@ -1,6 +1,7 @@
 #pragma once
 #include "../../src/iplugin.h"
 #include "../../src/core.h"
+#include "../../src/providers/watch_poll.h"
 
 #include <cstdint>
 
@@ -40,6 +41,17 @@ public:
 #endif
     }
 
+    // ── Watchpoints ──
+    // Shadow-diff only. We hold a VM_READ/VM_WRITE handle, not a debugger
+    // attachment, so a PAGE_GUARD or debug-register hit would be delivered to
+    // the target and never to us — see watch_poll.h. Writes are detected by
+    // re-reading; reads are not detectable and addWatch refuses them.
+    rcx::WatchCaps watchCapabilities() const override;
+    int addWatch(uint64_t addr, int size, rcx::WatchAccess access) override;
+    bool removeWatch(int id) override;
+    void clearWatches() override;
+    QVector<rcx::WatchHit> pollWatchHits() override;
+
     // Process-specific helpers
     uint32_t pid() const { return m_pid; }
     void refreshModules() { m_modules.clear(); cacheModules(); }
@@ -72,6 +84,10 @@ private:
         uint64_t size;
     };
     QVector<ModuleInfo> m_modules;
+
+    // Watch state lives HERE, never on rcx::Provider — that base class is
+    // fragile and a data member on it shifts every plugin's layout.
+    rcx::PolledWatchSet m_watches;
 };
 
 /**

@@ -5,6 +5,7 @@
 #include <QTemporaryFile>
 #include <QElapsedTimer>
 #include <future>
+#include <algorithm>
 #include <cstring>
 #include "providers/provider.h"
 #include "providers/buffer_provider.h"
@@ -18,6 +19,141 @@ class TestProvider : public QObject {
     Q_OBJECT
 
 private slots:
+
+    // ── Memory watchpoints ──
+    //
+    // The contract is "watch an address or range for r/w", but a provider that
+    // only reads a target can observe writes and nothing else. These pin the
+    // promises the contract actually makes, so a backend that can do better
+    // (hypervisor, driver) has something to differ from deliberately.
+
+    void watch_capabilitiesAdvertiseWhatTheBackendCanActuallyDetect() {
+        BufferProvider prov(QByteArray(64, '\0'));
+        const WatchCaps caps = prov.watchCapabilities();
+        QVERIFY(caps.supported);
+        // Writes are visible by re-reading; a read leaves no trace at all, so
+        // claiming Read here would promise something that can never fire.
+        QVERIFY(hasAccess(caps.access, WatchAccess::Write));
+        QVERIFY(!hasAccess(caps.access, WatchAccess::Read));
+        QVERIFY(caps.sampled);
+        QVERIFY(!caps.reportsPc);
+        QVERIFY(!caps.reportsThread);
+        QVERIFY(!caps.method.isEmpty());
+    }
+
+    // A provider with no watch implementation must refuse, not pretend.
+    void watch_unsupportedProviderRefusesInsteadOfSilentlyNeverFiring() {
+        NullProvider prov;
+        QVERIFY(!prov.watchCapabilities().supported);
+        QCOMPARE(prov.addWatch(0, 4, WatchAccess::Write), -1);
+        QVERIFY(!prov.removeWatch(1));
+        QVERIFY(prov.pollWatchHits().isEmpty());
+    }
+
+    void watch_reportsAWriteAndNarrowsItToTheChangedSpan() {
+        BufferProvider prov(QByteArray(4096, '\0'));
+        const int id = prov.addWatch(0, 4096, WatchAccess::Write);
+        QVERIFY(id > 0);
+        // Quiet range: nothing observed.
+        QVERIFY(prov.pollWatchHits().isEmpty());
+
+        // One byte changes deep inside a 4 KB watch.
+        QVERIFY(prov.writeBytes(1000, QByteArray(1, '\x41')));
+        const QVector<WatchHit> hits = prov.pollWatchHits();
+        QCOMPARE(hits.size(), 1);
+        QCOMPARE(hits[0].id, id);
+        // The whole range changed is useless; the caller wants the byte.
+        QCOMPARE(hits[0].address, uint64_t(1000));
+        QCOMPARE(hits[0].size, 1);
+        QCOMPARE(hits[0].access, WatchAccess::Write);
+        QCOMPARE(hits[0].oldBytes, QByteArray(1, '\0'));
+        QCOMPARE(hits[0].newBytes, QByteArray(1, '\x41'));
+        QVERIFY(hits[0].timestampMs > 0);
+        // Nothing trapped, so there is no faulting context to report.
+        QCOMPARE(hits[0].pc, uint64_t(0));
+        QCOMPARE(hits[0].threadId, uint32_t(0));
+
+        // The hit is drained: polling again with no further writes is quiet.
+        QVERIFY(prov.pollWatchHits().isEmpty());
+    }
+
+    void watch_baselineIsTakenWhenArmedSoAnEarlyWriteIsNotMissed() {
+        BufferProvider prov(QByteArray(16, '\x11'));
+        const int id = prov.addWatch(4, 8, WatchAccess::Write);
+        QVERIFY(id > 0);
+        // A write landing before the very first poll must still be caught.
+        QVERIFY(prov.writeBytes(4, QByteArray(8, '\x22')));
+        const QVector<WatchHit> hits = prov.pollWatchHits();
+        QCOMPARE(hits.size(), 1);
+        QCOMPARE(hits[0].address, uint64_t(4));
+        QCOMPARE(hits[0].size, 8);
+    }
+
+    void watch_onlyTheWatchedRangeIsReported() {
+        BufferProvider prov(QByteArray(256, '\0'));
+        QVERIFY(prov.addWatch(100, 4, WatchAccess::Write) > 0);
+        QVERIFY(prov.writeBytes(0, QByteArray(4, '\x7F')));    // before it
+        QVERIFY(prov.writeBytes(200, QByteArray(4, '\x7F')));  // after it
+        QVERIFY(prov.pollWatchHits().isEmpty());
+        QVERIFY(prov.writeBytes(102, QByteArray(1, '\x7F')));  // inside it
+        QCOMPARE(prov.pollWatchHits().size(), 1);
+    }
+
+    // Sampling, not trapping: this is a real limitation and is pinned so it
+    // cannot be mistaken for a regression later.
+    void watch_aValueRestoredBetweenPollsIsNotObserved() {
+        BufferProvider prov(QByteArray(8, '\x01'));
+        QVERIFY(prov.addWatch(0, 8, WatchAccess::Write) > 0);
+        QVERIFY(prov.writeBytes(0, QByteArray(8, '\x02')));
+        QVERIFY(prov.writeBytes(0, QByteArray(8, '\x01')));
+        QVERIFY(prov.pollWatchHits().isEmpty());
+    }
+
+    void watch_readOnlyWatchIsRefusedRatherThanNeverFiring() {
+        BufferProvider prov(QByteArray(32, '\0'));
+        QCOMPARE(prov.addWatch(0, 4, WatchAccess::Read), -1);
+        // Read|Write is fine — the write half is deliverable.
+        QVERIFY(prov.addWatch(0, 4, WatchAccess::ReadWrite) > 0);
+    }
+
+    void watch_refusesRangesOutsideTheProviderAndZeroSized() {
+        BufferProvider prov(QByteArray(32, '\0'));
+        QCOMPARE(prov.addWatch(64, 4, WatchAccess::Write), -1);
+        QCOMPARE(prov.addWatch(0, 0, WatchAccess::Write), -1);
+        QCOMPARE(prov.addWatch(0, -1, WatchAccess::Write), -1);
+    }
+
+    void watch_removeAndClearStopReporting() {
+        BufferProvider prov(QByteArray(64, '\0'));
+        const int a = prov.addWatch(0, 8, WatchAccess::Write);
+        const int b = prov.addWatch(32, 8, WatchAccess::Write);
+        QVERIFY(a > 0 && b > 0 && a != b);
+
+        QVERIFY(prov.removeWatch(a));
+        QVERIFY(!prov.removeWatch(a));        // already gone
+        QVERIFY(prov.writeBytes(0, QByteArray(8, '\x55')));
+        QVERIFY(prov.pollWatchHits().isEmpty());
+
+        QVERIFY(prov.writeBytes(32, QByteArray(8, '\x55')));
+        QCOMPARE(prov.pollWatchHits().size(), 1);
+
+        prov.clearWatches();
+        QVERIFY(prov.writeBytes(32, QByteArray(8, '\x66')));
+        QVERIFY(prov.pollWatchHits().isEmpty());
+    }
+
+    void watch_severalWatchesReportIndependently() {
+        BufferProvider prov(QByteArray(64, '\0'));
+        const int a = prov.addWatch(0, 8, WatchAccess::Write);
+        const int b = prov.addWatch(32, 8, WatchAccess::Write);
+        QVERIFY(prov.writeBytes(2, QByteArray(1, '\x01')));
+        QVERIFY(prov.writeBytes(33, QByteArray(1, '\x02')));
+        QVector<WatchHit> hits = prov.pollWatchHits();
+        QCOMPARE(hits.size(), 2);
+        QVector<int> ids{ hits[0].id, hits[1].id };
+        std::sort(ids.begin(), ids.end());
+        QCOMPARE(ids, (QVector<int>{ a, b }));
+    }
 
     void fileProvider_readsAndEditsAcrossPagesWithoutChangingOriginal() {
         QTemporaryFile file;

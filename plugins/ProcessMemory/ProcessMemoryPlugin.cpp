@@ -1197,6 +1197,35 @@ QVector<PluginProcessInfo> ProcessMemoryPlugin::enumerateProcesses()
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Watchpoints
+//
+// Deliberately NOT PAGE_GUARD or debug registers. Both raise their event
+// inside the target (STATUS_GUARD_PAGE_VIOLATION / #DB) and deliver it to the
+// target's debugger; this provider only holds a VM_READ/VM_WRITE handle, so it
+// would arm the guard page, never hear the hit, and have the first touch clear
+// the guard bit silently. Shadow-diff observes the effect of writes instead.
+// A hypervisor or driver-backed provider should override these directly and
+// report sampled=false.
+// ──────────────────────────────────────────────────────────────────────────
+
+rcx::WatchCaps ProcessMemoryProvider::watchCapabilities() const
+{
+    return rcx::PolledWatchSet::caps(QStringLiteral("polled-diff (process)"));
+}
+
+int ProcessMemoryProvider::addWatch(uint64_t addr, int size, rcx::WatchAccess access)
+{
+    if (!isReadable(addr, size)) return -1;
+    return m_watches.add(addr, size, access, *this);
+}
+
+bool ProcessMemoryProvider::removeWatch(int id) { return m_watches.remove(id); }
+
+void ProcessMemoryProvider::clearWatches() { m_watches.clear(); }
+
+QVector<rcx::WatchHit> ProcessMemoryProvider::pollWatchHits() { return m_watches.poll(*this); }
+
+// ──────────────────────────────────────────────────────────────────────────
 // Plugin factory
 // ──────────────────────────────────────────────────────────────────────────
 
