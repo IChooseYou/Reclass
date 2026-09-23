@@ -1,4 +1,5 @@
 #include <QtTest/QtTest>
+#include <QElapsedTimer>
 #include "core.h"
 #include "imports/import_pdb.h"
 

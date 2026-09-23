@@ -4,7 +4,7 @@ import subprocess, json, threading, time, sys
 def mcp_session(client_name, commands, results):
     """Run a series of MCP commands on a named pipe and collect results."""
     ps_lines = [
-        "$pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'ReclassMcpBridge', 'InOut')",
+        "$pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'RCMcpBridge', 'InOut')",
         "$pipe.Connect(5000)",
         "$writer = New-Object System.IO.StreamWriter($pipe)",
         "$reader = New-Object System.IO.StreamReader($pipe)",

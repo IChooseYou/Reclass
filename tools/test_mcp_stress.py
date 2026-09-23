@@ -16,7 +16,7 @@ def check(label, condition, detail=""):
 def mcp_session(commands):
     """Send MCP commands via PowerShell named pipe, return list of parsed responses."""
     ps_lines = [
-        "$pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'ReclassMcpBridge', 'InOut')",
+        "$pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'RCMcpBridge', 'InOut')",
         "$pipe.Connect(5000)",
         "$writer = New-Object System.IO.StreamWriter($pipe)",
         "$reader = New-Object System.IO.StreamReader($pipe)",

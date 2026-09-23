@@ -13,6 +13,7 @@
 #include <QtTest/QTest>
 #include <QtTest/QSignalSpy>
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QSplitter>
 #include <Qsci/qsciscintilla.h>
 #include <atomic>

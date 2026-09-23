@@ -6,6 +6,7 @@
 #include "typeselectorpopup.h"
 #include "providerregistry.h"
 #include "providers/file_provider.h"
+#include <QElapsedTimer>
 #include <QInputDialog>
 #include "generator.h"
 #include "imports/import_reclass_xml.h"
