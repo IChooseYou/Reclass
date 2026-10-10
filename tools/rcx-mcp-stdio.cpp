@@ -61,7 +61,7 @@ int main(int argc, char* argv[]) {
     });
 
     // Connect to the named pipe
-    socket->connectToServer("RcMcpBridge");
+    socket->connectToServer(qEnvironmentVariable("RCX_MCP_PIPE", QStringLiteral("RcMcpBridge")));
     if (!socket->waitForConnected(5000)) {
         fprintf(stderr, "[RcMcpBridge] Failed to connect to RcMcpBridge pipe: %s\n",
                 socket->errorString().toUtf8().constData());

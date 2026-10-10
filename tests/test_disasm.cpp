@@ -14,6 +14,22 @@ static QString mnemonic(const QString& line) {
 class TestDisasm : public QObject {
     Q_OBJECT
 private slots:
+    void structuredMemoryOperands() {
+        // mov rax, [rbx+rcx*4+0x10]
+        const auto decoded = decodeRange(QByteArray("\x48\x8b\x44\x8b\x10", 5), 0x1000, 64);
+        QCOMPARE(decoded.size(), 1);
+        QCOMPARE(decoded[0].memoryOperands.size(), 1);
+        const auto& operand = decoded[0].memoryOperands[0];
+        QCOMPARE(operand.width, 8);
+        QCOMPARE(operand.baseRegister, 3); QCOMPARE(operand.indexRegister, 1);
+        QCOMPARE(operand.scale, 4); QCOMPARE(operand.displacement, int64_t(16));
+        QVERIFY(!operand.instructionRelative);
+        // mov rax, gs:[rcx+0x10]
+        const auto segmented = decodeRange(QByteArray("\x65\x48\x8b\x41\x10", 5), 0, 64);
+        QCOMPARE(segmented[0].memoryOperands[0].segment, 5);
+        const auto relative = decodeRange(QByteArray("\x48\x8b\x05\x10\x00\x00\x00", 7), 0x1000, 64);
+        QVERIFY(relative[0].memoryOperands[0].instructionRelative);
+    }
     // ──────────────────────────────────────────────────
     //  disassemble() unit tests – exact mnemonic match
     // ──────────────────────────────────────────────────

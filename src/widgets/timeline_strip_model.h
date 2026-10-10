@@ -9,10 +9,8 @@
 // moment under the pointer still, how tall a column of changes is, and how
 // the hover readout's clock reads.
 //
-// The strip is the graph and one overflow button — nothing else. Record /
-// Stop, and Back to live while looking back, sit beside the address, where
-// the moment being shown is named; the strip only answers "when". The layout is a function of the
-// width alone, so no state change can move anything.
+// Capture controls and the graph share one strip. Geometry depends on width,
+// never on recording/playback state, so controls and the graph stay put.
 
 #include <QPoint>
 #include <QRect>
@@ -36,25 +34,24 @@ inline constexpr int kIconCellW    = 22;   // square hit area, as the address ba
 inline constexpr int kIconPx       = 14;
 inline constexpr int kCellGap      = 2;
 inline constexpr int kRightMargin  = 6;
+inline constexpr int kRecordW      = 78;
+inline constexpr int kAutoW        = 82;
+inline constexpr int kLiveW        = 58;
+inline constexpr int kControlGap   = 8;
 inline constexpr int kGraphTop     = 2;
 inline constexpr int kGraphBottom  = 41;   // exclusive; the strip's bottom seam is row 42
 // The graph's lanes, top to bottom (strip rows, bottom exclusive). The band
 // takes most of the extra height: it carries the data.
-inline constexpr int kPinTop       = 2;    // beads: a field started changing
-inline constexpr int kPinBottom    = 11;
-inline constexpr int kBandTop      = 12;   // the envelope over the recorded band
+inline constexpr int kPinTop       = 12;   // change onsets, below the time ruler
+inline constexpr int kPinBottom    = 16;
+inline constexpr int kBandTop      = 17;   // the envelope over the recorded band
 inline constexpr int kBandBottom   = 36;   // the baseline is the last row of the band
 inline constexpr int kSelTop       = 37;   // the selected fields
 inline constexpr int kSelBottom    = 41;
 inline constexpr int kSnapPx       = 4;
 inline constexpr int64_t kMinSpanMs = 2000;
-// The shortest span a FOLLOWING view will draw. kMinSpanMs is the floor for
-// zooming and for framing a range; a recording two seconds old must already
-// fill the bar, not sit in the last tenth of it.
-inline constexpr int64_t kMinFollowSpanMs = 1000;
-// Framing the whole recording: a little room before it, and room after it to
-// grow into while it records, so the scale steps now and then, not every
-// tick. The same room in every state: pressing Stop rescales nothing.
+// Explicitly fitting the recording leaves room at both ends. Following uses
+// a fixed span, so recording and stopping never stretch the horizontal scale.
 inline constexpr int kLeadPx       = 2;
 inline constexpr int kTailPx       = 16;   // room for the writing edge, no more
 // Two records join into one envelope when at most this far apart (a few
@@ -318,7 +315,7 @@ inline bool viewsDiffer(const View& a, const View& b, double graphLeft, double g
 // while before the picture must be drawn again.
 // How much history the graph keeps behind "now" while it follows: enough to
 // read a run of changes, short enough that records stay far apart on screen.
-inline constexpr int64_t kDefaultFollowMs = 60'000;
+inline constexpr int64_t kDefaultFollowMs = 30'000;
 // More records than this in view and they are binned into columns instead of
 // drawn one by one.
 inline constexpr int     kMaxDirectPoints = 4000;
@@ -417,14 +414,19 @@ struct Layout {
 // at the right margin. A function of the width alone.
 inline Layout layoutStrip(int width) {
     Layout L;
-    // The graph takes the WHOLE bar. Reserving a lane of chrome for the
-    // overflow button left the trace short of both edges, which is the first
-    // thing the eye catches; the button now floats over the graph's right end
-    // behind a scrim, and cellIdAt still tests cells before the graph, so
-    // hit-testing is unchanged.
+    // Narrow strips retain icon controls; labels disappear by width alone.
+    const bool compact = width < 480;
+    const int autoW = compact ? kIconCellW : kAutoW;
+    const int recW = compact ? kIconCellW : kRecordW;
+    const int liveW = compact ? kIconCellW : kLiveW;
+    L.cells.append({QStringLiteral("auto"), QRect(kGutter, kCellTop, autoW, kCellH)});
+    const int recLeft = kGutter + autoW + kControlGap;
+    L.cells.append({QStringLiteral("rec"), QRect(recLeft, kCellTop, recW, kCellH)});
+    L.cells.append({QStringLiteral("live"), QRect(recLeft + recW + kCellGap, kCellTop, liveW, kCellH)});
     const int moreLeft = std::max(0, width - kRightMargin - kIconCellW);
     L.cells.append({QStringLiteral("more"), QRect(moreLeft, kCellTop, kIconCellW, kCellH)});
-    L.graph = QRect(0, kGraphTop, std::max(0, width), kGraphBottom - kGraphTop);
+    const int left = recLeft + recW + kCellGap + liveW + kControlGap;
+    L.graph = QRect(left, kGraphTop, std::max(0, moreLeft - kControlGap - left), kGraphBottom - kGraphTop);
     return L;
 }
 

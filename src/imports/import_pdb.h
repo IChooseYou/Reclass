@@ -60,4 +60,10 @@ NodeTree importTypeForSymbol(const QString& pdbPath,
                              QString* typeName = nullptr,
                              QString* errorMsg = nullptr);
 
+// AUTO requires a direct global object and matching executable/PDB identity.
+// Unlike importTypeForSymbol, this NEVER peels pointer wrappers.
+NodeTree importVerifiedObjectType(const QString& pdbPath, uint32_t typeIndex,
+                                  const QString& expectedGuid, uint32_t expectedAge,
+                                  QString* errorMsg = nullptr);
+
 } // namespace rcx

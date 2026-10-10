@@ -26,6 +26,7 @@ plugins/RcNetPluginCompatLayer/bridge/bin
 
 # ── Crash dumps ──
 *.dmp
+*.stackdump
 
 # ── Scratch screenshots / captures (root-level + the two that leaked into src/).
 #    Root-only & src/*.png is non-recursive, so tracked assets in docs/,

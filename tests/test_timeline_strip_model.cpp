@@ -190,24 +190,25 @@ private slots:
 
     // The strip is the graph and one square overflow button at the right
     // margin; the graph takes everything else, at every width.
-    void layoutIsTheGraphAndOneButton() {
+    void controlsNeverOverlapTheGraph() {
         for (int w : {120, 240, 300, 480, 760, 1080, 1920}) {
             const Layout L = layoutStrip(w);
-            QCOMPARE(L.cells.size(), 1);
+            QCOMPARE(L.cells.size(), 4);
             const QRect more = L.rect(QStringLiteral("more"));
             QCOMPARE(more.width(), kIconCellW);
             QCOMPARE(more.height(), kCellH);
             QCOMPARE(more.width(), more.height());          // a square hit area
             QCOMPARE(more.top(), kCellTop);
             QCOMPARE(more.right() + 1 + kRightMargin, w);
-            // The graph is the whole bar; the button floats over its right end.
-            QCOMPARE(L.graph.left(), 0);
-            QCOMPARE(L.graph.right() + 1, w);
-            QVERIFY(more.left() > L.graph.left() && more.right() < L.graph.right());
+            QVERIFY(L.rect("rec").right() < L.rect("live").left());
+            QVERIFY(L.rect("live").right() < L.graph.left());
+            QVERIFY(L.graph.right() < more.left());
+            QVERIFY(L.graph.width() >= 0);
+            for (const auto& cell : L.cells) QVERIFY(!cell.rect.intersects(L.graph));
             QCOMPARE(L.graph.top(), kGraphTop);
             QCOMPARE(L.graph.bottom() + 1, kGraphBottom);
         }
-        QVERIFY(layoutStrip(1920).graph.width() > 1800);
+        QVERIFY(layoutStrip(1920).graph.width() > 1600);
     }
 
     void hitTesting() {
@@ -215,7 +216,9 @@ private slots:
         QCOMPARE(cellIdAt(L, L.rect(QStringLiteral("more")).center()), QStringLiteral("more"));
         QCOMPARE(cellIdAt(L, QPoint(L.graph.center().x(), 1)), QStringLiteral("graph"));
         QCOMPARE(cellIdAt(L, QPoint(L.graph.center().x(), 24)), QStringLiteral("graph"));
-        QCOMPARE(cellIdAt(L, QPoint(2, 13)), QStringLiteral("graph"));   // no dead gutter any more
+        QVERIFY(cellIdAt(L, QPoint(2, 13)).isEmpty());
+        QCOMPARE(cellIdAt(L, L.rect("rec").center()), QStringLiteral("rec"));
+        QCOMPARE(cellIdAt(L, L.rect("live").center()), QStringLiteral("live"));
     }
 
     // "Fit all" shows the whole retained span, on the grid.

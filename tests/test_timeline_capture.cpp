@@ -629,19 +629,16 @@ private slots:
         QVERIFY(!m_ctrl->isViewingPast());
     }
 
-    // What the address bar's buttons read: Record for a live source before
-    // anything is recorded, Stop while recording, Back to live only while
-    // looking back at a recording, and nothing with the timeline switched off.
-    void theAddressBarButtonsReadTheTimeline() {
+    // Capture controls live in the timeline. The address bar retains the
+    // source's history indicator while showing recorded values.
+    void theAddressBarRetainsOnlyTheHistoryIndicator() {
         setup(/*record=*/false);
         QTest::qWait(80);
         AddressBarState s = m_ctrl->addressBarStateForTest();
-        QVERIFY(s.timeline);
-        QVERIFY(s.canRecord);
         QVERIFY(!s.past);
-        QVERIFY(!s.recording);
+        QVERIFY(!m_ctrl->timelineRecording());
         m_ctrl->timelineToggleRecording();
-        QVERIFY(m_ctrl->addressBarStateForTest().recording);
+        QVERIFY(m_ctrl->timelineRecording());
         QVERIFY(waitForRecordAfter(tl::kNoRecord));
 
         const tl::TimelineModel& m = m_ctrl->timelineContext()->model();
@@ -651,7 +648,7 @@ private slots:
         QVERIFY(!m_ctrl->addressBarStateForTest().past);
 
         m_ctrl->setTimelineEnabled(false);
-        QVERIFY(!m_ctrl->addressBarStateForTest().timeline);
+        QVERIFY(!m_ctrl->addressBarStateForTest().past);
         m_ctrl->setTimelineEnabled(true);
     }
 

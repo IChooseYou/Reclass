@@ -2056,12 +2056,18 @@ void MainWindow::createMenus() {
     // it off hides the strip, stops capture and frees what was kept.
     {
         auto* tlMenu = view->addMenu(QStringLiteral("&Timeline"));
+        auto* autoAction = tlMenu->addAction(QStringLiteral("&Auto Resolve Types"));
+        autoAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F9));
+        connect(autoAction, &QAction::triggered, this, [this] {
+            if (auto* c = activeController()) emit c->autoResolutionRequested();
+        });
+        tlMenu->addSeparator();
         m_actTimeline = tlMenu->addAction(QStringLiteral("&Enable Timeline"));
         m_actTimeline->setCheckable(true);
         m_actTimeline->setChecked(settings.value("timeline/enabled", true).toBool());
         connect(m_actTimeline, &QAction::toggled, this, [this](bool on) { setTimelineEnabled(on); });
-        // Showing the strip is not capturing: hiding it keeps every tab's
-        // history, a recording, and the buttons beside the address.
+        // Hiding the strip preserves capture and history. Menu actions and
+        // shortcuts remain available; starting capture reveals the strip.
         m_actTlStrip = tlMenu->addAction(QStringLiteral("&Show Timeline"));
         m_actTlStrip->setCheckable(true);
         m_actTlStrip->setChecked(settings.value("timeline/stripVisible", true).toBool());
@@ -2076,7 +2082,7 @@ void MainWindow::createMenus() {
             });
             return a;
         };
-        // The same words as the buttons beside the address: Record / Stop
+        // The same words as the timeline controls: Record / Stop
         // Recording, and Back to Live while looking back at a recording.
         // Values are live otherwise — there is nothing to pause.
         m_actTlRecord = addTimelineAction(QStringLiteral("&Record"), QKeySequence(Qt::Key_F9),
@@ -4492,6 +4498,11 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
             });
     });
     // Notify MCP clients of tree changes
+    connect(ctrl, &RcxController::autoResolutionRequested, this, [this, ctrl]() {
+        if (m_actTimeline && !m_actTimeline->isChecked()) setTimelineEnabled(true);
+        setTimelineStripVisible(true);
+        if (m_mcp) m_mcp->requestAutoResolution(ctrl);
+    });
     connect(doc, &RcxDocument::documentChanged, this, [this]() {
         if (m_mcp) m_mcp->notifyTreeChanged();
     });
@@ -6389,9 +6400,10 @@ void MainWindow::showShortcutsDialog() {
 
         {QStringLiteral("Timeline"),           {}, true},
         {QStringLiteral("F9"),                  QStringLiteral("Record / stop recording this class")},
+        {QStringLiteral("Ctrl+F9"),             QStringLiteral("Auto resolve types / cancel analysis")},
         {QStringLiteral("Ctrl+, / Ctrl+."),     QStringLiteral("Previous / next recorded change")},
         {QStringLiteral("Ctrl+End"),            QStringLiteral("Back to live (leave the recording)")},
-        {QStringLiteral("Drag on the timeline"), QStringLiteral("Look back through the recording (Shift: don't snap to changes)")},
+        {QStringLiteral("Drag on the timeline"), QStringLiteral("Look back through the recording (Ctrl: snap to changes)")},
         {QStringLiteral("Wheel / Shift+Wheel"), QStringLiteral("Zoom / pan the timeline")},
 
         {QStringLiteral("Bookmarks & Window"), {}, true},
@@ -6790,6 +6802,12 @@ void MainWindow::editTheme() {
 void MainWindow::showOptionsDialog() { showOptionsDialog(-1); }
 
 void MainWindow::loadPluginsDeferred() {
+    if (qEnvironmentVariableIsSet("RCX_HEADLESS_MCP")) {
+        const QString plugin = qEnvironmentVariable("RCX_HEADLESS_PLUGIN");
+        if (!plugin.isEmpty()) m_pluginManager.LoadPluginFromPath(plugin);
+        if (m_mcp) m_mcp->start();
+        return;
+    }
     PROFILE_SCOPE("MainWindow::loadPluginsDeferred");
     if (m_pluginsLoaded) return;
     m_pluginsLoaded = true;
@@ -7165,6 +7183,9 @@ static rcx::TimelineStripState timelineStripStateFor(rcx::RcxController* ctrl) {
     using namespace rcx;
     TimelineStripState s;
     if (!ctrl) return s;
+    s.autoAvailable = ctrl->isViewingPast() || (ctrl->provider() && ctrl->provider()->isValid());
+    s.autoBusy = ctrl->autoResolutionBusy();
+    s.autoMessage = ctrl->autoResolutionMessage();
     s.nowMs = tl::CaptureClock::nowMs();
     s.epochAtZeroMs = tl::CaptureClock::toEpochMs(0);
     s.utcOffsetSeconds = QDateTime::currentDateTime().offsetFromUtc();
@@ -7176,6 +7197,7 @@ static rcx::TimelineStripState timelineStripStateFor(rcx::RcxController* ctrl) {
         return s;
     }
     const uint64_t cls = ctrl->timelineClassId();
+    s.trackKey = quint64(quintptr(ctx)) * 1000003u + cls;
     const tl::ClassTrack& track = hub->track(cls);
     switch (track.mode) {
     case tl::CaptureMode::Rolling:   s.capture = timeline::Capture::Rolling;   break;
@@ -7222,6 +7244,8 @@ void MainWindow::bindTimelineStrip(TabState& tab) {
     QPointer<RcxController> c(ctrl);
 
     TimelineStrip::Callbacks cb;
+    cb.onAuto         = [c]() { if (c) emit c->autoResolutionRequested(); };
+    cb.onRecord       = [c]() { if (c) c->timelineToggleRecording(); };
     cb.onClear        = [this, c]() { if (c) confirmTimelineClear(c); };
     cb.onReturnToLive = [c]() { if (c) c->returnToLive(); };
     cb.onHide         = [this]() { setTimelineStripVisible(false); };
@@ -7315,7 +7339,20 @@ void MainWindow::bindTimelineStrip(TabState& tab) {
     connect(ctrl, &RcxController::timelineChanged, strip, push);
     connect(ctrl, &RcxController::sourceStatusChanged, strip, push);
     connect(ctrl, &RcxController::selectionChanged, strip, push);
-    connect(ctrl, &RcxController::timelineChanged, this, [this]() { syncTimelineActions(); });
+    connect(ctrl, &RcxController::timelineChanged, this,
+            [this, c, wasRecording = ctrl->timelineRecording(), wasPast = ctrl->isViewingPast(),
+             wasAuto = ctrl->autoResolutionBusy()]() mutable {
+        if (!c) return;
+        const bool recording = c->timelineRecording(), past = c->isViewingPast();
+        const bool automatic = c->autoResolutionBusy();
+        if ((recording && !wasRecording) || (past && !wasPast) || (automatic && !wasAuto)) {
+            if (automatic && !m_actTimeline->isChecked()) setTimelineEnabled(true);
+            setTimelineStripVisible(true);
+        }
+        wasAuto = automatic;
+        wasRecording = recording; wasPast = past;
+        syncTimelineActions();
+    });
     connect(ctrl, &RcxController::timelineRevealRequested, strip, [this, sp, c](int64_t a, int64_t b) {
         if (!sp || !c) return;
         if (m_actTimeline && !m_actTimeline->isChecked()) setTimelineEnabled(true);
@@ -7357,7 +7394,7 @@ void MainWindow::setTimelineEnabled(bool on) {
 }
 
 // View ▸ Timeline ▸ Show Timeline, and the strip menu's Hide Timeline: only
-// the strip. Capture, history and the buttons beside the address stay.
+// the strip. Capture, history, menu actions and shortcuts stay available.
 void MainWindow::setTimelineStripVisible(bool on) {
     QSettings("RC", "RC").setValue("timeline/stripVisible", on);
     if (m_actTlStrip && m_actTlStrip->isChecked() != on) {
@@ -11863,6 +11900,14 @@ void MainWindow::dismissStartPage() {
 // ── Entry point ──
 
 int main(int argc, char* argv[]) {
+    // Isolated profiles and private pipes let integration tests start the real
+    // application without touching a user's session or opening desktop windows.
+    const QString settingsDir = qEnvironmentVariable("RCX_SETTINGS_DIR");
+    if (!settingsDir.isEmpty()) {
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir);
+    }
+    const bool headlessMcp = qEnvironmentVariableIsSet("RCX_HEADLESS_MCP");
 #ifdef _WIN32
     SetUnhandledExceptionFilter(crashHandler);
 #endif
@@ -11876,7 +11921,7 @@ int main(int argc, char* argv[]) {
     // GUI-subsystem build: no console at launch (no flash). If the user left
     // the console toggled on (View ▸ Show Console persists the choice),
     // summon one now. QSettings with explicit org/app works pre-QApplication.
-    if (QSettings("RC", "RC").value("showConsole", false).toBool())
+    if (!headlessMcp && QSettings("RC", "RC").value("showConsole", false).toBool())
         rcxSetConsoleVisible(true);
 #endif
 
@@ -11956,9 +12001,10 @@ int main(int argc, char* argv[]) {
     rcx::MainWindow window;
     window.setWindowIcon(QIcon(":/icons/class.png"));
 
-    window.show();
+    if (headlessMcp) app.setQuitOnLastWindowClosed(false);
+    else window.show();
 #ifdef __linux__
-    window.showMaximized();
+    if (!headlessMcp) window.showMaximized();
 #endif
 
     // ── Deferred startup work ──

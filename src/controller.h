@@ -532,7 +532,7 @@ public:
     // source to be discoverable. MCP / requestOpenProviderTab callers
     // leave it false to keep the saved-source list as a UI-owned thing.
     void attachViaPlugin(const QString& providerIdentifier, const QString& target,
-                         bool registerAsSavedSource = false);
+                         bool registerAsSavedSource = false, QString* errorOutput = nullptr);
     const QVector<SavedSourceEntry>& savedSources() const { return m_savedSources; }
     int activeSourceIndex() const { return m_activeSourceIdx; }
     void switchSource(int idx) { switchToSavedSource(idx); }
@@ -553,6 +553,7 @@ public:
     // a recorded moment, composed through the current structure). Recording
     // carries on underneath.
     tl::TimelineHub*    timelineHub() const;
+    std::shared_ptr<tl::TimelineHub> timelineHubHandle() const { return m_timelineHub; }
     tl::CaptureContext* timelineContext() const;
     // The class the strip speaks for: the view root, else the first root class.
     uint64_t timelineClassId() const;
@@ -571,6 +572,9 @@ public:
     void returnToLive();
     void timelineToggleRecording();
     bool timelineRecording() const;   // the class shown is recording
+    void setAutoResolutionStatus(const QString& text, bool busy);
+    QString autoResolutionMessage() const { return m_autoResolutionMessage; }
+    bool autoResolutionBusy() const { return m_autoResolutionBusy; }
     // Looking back at a recording, values are read-only: why a write was refused.
     QString viewingPastHint() const;
     // What the view shows — the recorded moment, else the snapshot, else the
@@ -643,6 +647,7 @@ signals:
     void nodeSelected(int nodeIdx);
     void selectionChanged(int count);
     void statusHint(const QString& text);  // brief status bar message
+    void autoResolutionRequested();
     void contextMenuAboutToShow(QMenu* menu, int line);
     void requestOpenProviderTab(const QString& pluginId, const QString& target,
                                 const QString& title);
@@ -875,6 +880,8 @@ private:
 
     // ── Class timeline state ──
     std::shared_ptr<tl::TimelineHub>    m_timelineHub;       // the doc's, or m_ownTimelineHub
+    QString m_autoResolutionMessage;
+    bool m_autoResolutionBusy = false;
     std::shared_ptr<tl::TimelineHub>    m_ownTimelineHub;    // instance tabs only
     std::shared_ptr<tl::CaptureContext> m_timelineCtx;       // this source's byte history
     int  m_timelineProducer = 0;
@@ -981,7 +988,7 @@ private:
     // m_refreshIntervalBaseMs (snappy) on the next observed change or
     // window focus-in.
     int m_idleTicks = 0;
-    int m_refreshIntervalBaseMs = 200;   // snappy default, focused
+    int m_refreshIntervalBaseMs = kDefaultRefreshMs; // snappy default, focused
     int m_refreshIntervalMaxMs  = 1500;  // backed-off cap
     int m_refreshIntervalBlurMs = 1500;  // unfocused cap (set on focusOut)
     static constexpr int kIdleBackoffTicks = 8;

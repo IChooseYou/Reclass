@@ -1,4 +1,5 @@
 #include "editor.h"
+#include <QToolButton>
 #include "disasm.h"
 #include "providerregistry.h"
 #include "rcxtooltip.h"
@@ -1710,7 +1711,7 @@ static constexpr int IND_HEX_DIM    = 9;   // theme.textFaint — FURNITURE ONLY
                                            // whole hex rows, which flattened the data
                                            // to 2.18:1 and inverted the hierarchy.
 static constexpr int IND_ZERO       = 10;  // theme.textMuted over the ASCII preview
-                                           // column and every "00" byte token. Above
+                                           // column, "00" bytes and footer tools. Above
                                            // IND_HEX_TYPE so it wins on the ASCII slot
                                            // (which is inside the type-column span),
                                            // below IND_HOVER_SPAN so hover still wins.
@@ -1884,8 +1885,6 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         cb.onUp          = [this] { emit navUpRequested(); };
         cb.onHistoryJump = [this](int i) { emit historyJumpRequested(i); };
         cb.onRefresh     = [this] { emit refreshRequested(); };
-        cb.onTimelineBackToLive = [this] { emit timelineBackToLiveRequested(); };
-        cb.onTimelineRecord = [this] { emit timelineRecordRequested(); };
         m_addressBar->setCallbacks(std::move(cb));
     }
     layout->addWidget(m_addressBar);
@@ -2282,8 +2281,7 @@ void RcxEditor::setupScintilla() {
     // Type column / name slot of a hex row + the command row's editable spans.
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HEX_TYPE, 17 /*INDIC_TEXTFORE*/);
-    // ASCII preview column + zero bytes — the hex-editor convention that a
-    // 00 is absence of data and should not read as loud as a real byte.
+    // Muted footer tools, ASCII preview and zero bytes stay below field types.
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_ZERO, 17 /*INDIC_TEXTFORE*/);
 
@@ -3521,7 +3519,7 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta,
         // Furniture: struct/array braces — the whole footer line ("};  +1 …
         // // 0x80 (128)") minus the pill glyphs, and the trailing "{" on
         // headers. The pills are affordances, not furniture: they get the
-        // type tone below so they read as clickable text inside a faint line.
+        // muted tone below so they stay quiet but readable in light and dark themes.
         if (meta[i].lineKind == LineKind::Footer) {
             const QString ft = (i < lineTexts.size()) ? lineTexts[i] : QString();
             const QVector<FooterPill> pills = footerPillsIn(ft);
@@ -3539,11 +3537,10 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta,
                     cursor = qMax(cursor, p.textStart + p.textLen);
                 }
                 fillIndicatorCols(IND_HEX_DIM, i, cursor, ft.size());
-                // …and give the glyphs themselves the type tone, so a pill
-                // reads as a control sitting in furniture rather than as more
-                // furniture. No outline: the pills carry tone only.
+                // Keep tools one step above the faint footer furniture, below
+                // field types. Hover still raises the active tool to link tone.
                 for (const FooterPill& p : pills)
-                    fillIndicatorCols(IND_HEX_TYPE, i, p.textStart,
+                    fillIndicatorCols(IND_ZERO, i, p.textStart,
                                       p.textStart + p.textLen);
                 m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
                                      IND_HEX_DIM);

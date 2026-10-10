@@ -12,11 +12,10 @@
 //   ━━━━━━━━━━━━━━━━━━━━━━━━━━┄┄┄┄┄┄━━━━━━━━━━━━━━━━          recorded · not recorded
 //    ▬       ▬   ▬▬                                          the selected fields
 //
-// The strip is the graph and one overflow button (⋯): Record / Stop, and
-// Back to live while looking back, sit beside the address. The graph shows the WHOLE recording,
-// starting at the left edge (it grows into room kept on the right while it
-// records) until the user zooms in. No time is written on it; hovering says
-// when.
+// Auto / Cancel, Record / Stop, Live, the graph and options share this strip.
+// Their geometry stays fixed across capture and playback states. The graph
+// follows a fixed 30-second span until the user zooms, pans or fits history.
+// A clock ruler gives context; hovering shows the exact time and changes.
 //
 // Four lanes, top to bottom:
 //   · beads — records where a field STARTED changing (one the record before
@@ -47,6 +46,7 @@
 #include "widgets/chrome_fallback_theme.h"
 #include "widgets/dock_header.h"
 #include "widgets/timeline_strip_model.h"
+#include "widgets/timeline_glyphs.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -67,6 +67,10 @@
 #include <QTimeZone>
 #include <QWheelEvent>
 #include <QWidget>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QPlainTextEdit>
+#include <QVBoxLayout>
 #include <functional>
 
 namespace rcx {
@@ -94,6 +98,8 @@ enum class TimelineMarkerKind : int { Rebase = 0, SourceAttached, SourceDetached
                                       RecordStart, RecordStop, Reset };
 
 struct TimelineStripState {
+    bool autoAvailable = false, autoBusy = false;
+    QString autoMessage;
     timeline::Capture capture = timeline::Capture::None;
     bool    past = false;
     bool    readsFailing = false;
@@ -109,6 +115,7 @@ struct TimelineStripState {
     qint64  byteBudget = 0;
     quint64 dataGeneration = 0;     // bumps with every commit: re-pull columns
     quint64 selectionKey = 0;       // the selected fields (0: none) — re-pull their ticks
+    quint64 trackKey = 0;           // a different class/source starts a fresh view
     QVector<timeline::Span> gaps;   // store gaps and this class's pauses
     struct Marker {
         int64_t tMs = 0;
@@ -122,13 +129,14 @@ struct TimelineStripState {
         if (gaps.size() != o.gaps.size()) return false;
         for (int i = 0; i < gaps.size(); ++i)
             if (gaps[i].startMs != o.gaps[i].startMs || gaps[i].endMs != o.gaps[i].endMs) return false;
-        return capture == o.capture && past == o.past && readsFailing == o.readsFailing
+        return autoAvailable == o.autoAvailable && autoBusy == o.autoBusy && autoMessage == o.autoMessage
+            && capture == o.capture && past == o.past && readsFailing == o.readsFailing
             && hasData == o.hasData && nowMs == o.nowMs && epochAtZeroMs == o.epochAtZeroMs
             && utcOffsetSeconds == o.utcOffsetSeconds && retainedBeginMs == o.retainedBeginMs
             && recordBeginMs == o.recordBeginMs && viewedMs == o.viewedMs
             && rollingWindowMs == o.rollingWindowMs && bytesUsed == o.bytesUsed
             && byteBudget == o.byteBudget && dataGeneration == o.dataGeneration
-            && selectionKey == o.selectionKey && markers == o.markers;
+            && selectionKey == o.selectionKey && trackKey == o.trackKey && markers == o.markers;
     }
     bool operator!=(const TimelineStripState& o) const { return !(*this == o); }
 
@@ -145,6 +153,8 @@ public:
     static constexpr int kSelectionTickPx = timeline::kSelBottom - timeline::kSelTop;
 
     struct Callbacks {
+        std::function<void()>               onAuto;
+        std::function<void()>               onRecord;
         std::function<void()>               onClear;         // "Clear Recording…"
         std::function<void()>               onReturnToLive;  // a scrub released at now, or cancelled from live
         std::function<void()>               onScrubBegin;    // a drag on the graph starts
@@ -172,7 +182,8 @@ public:
 
     explicit TimelineStrip(QWidget* parent = nullptr) : QWidget(parent) {
         setObjectName(QStringLiteral("rcxTimelineStrip"));
-        setFocusPolicy(Qt::NoFocus);
+        setFocusPolicy(Qt::StrongFocus);
+        setAccessibleName(QStringLiteral("Recording timeline"));
         setMouseTracking(true);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         setFixedHeight(kHeight);
@@ -219,12 +230,24 @@ public:
 
     void setState(const TimelineStripState& s) {
         if (s == m_state) return;
+        const bool reset = s.trackKey != m_state.trackKey || (m_state.hasData && !s.hasData);
+        if (reset) {
+            stopDragTracking();
+            m_panning = false;
+            m_frozen = false; m_follow = true; m_spanMs = 0; m_userFitted = false;
+            m_hasManualView = false;
+            m_domain = 4; m_domainShown = 0; m_domainAnimMs = -1;
+            m_animStartMs = -1; m_cmpView = {}; m_view = {};
+            m_points1 = -1; m_graphKey = {}; m_shownNowMs = s.nowMs;
+            m_stateClockMs = m_clock();
+            hideReadout();
+        }
         if (s.nowMs != m_state.nowMs) m_stateClockMs = m_clock();
         // Record pressed: hang the graph off now so what is being written
         // flows in at the right edge. Stop changes nothing — the window stays
         // where it is and simply stops moving, because now stops moving.
         const bool started = s.capture == timeline::Capture::Recording
-                          && m_state.capture != timeline::Capture::Recording;
+                          && (reset || m_state.capture != timeline::Capture::Recording);
         if (started && m_spanMs <= 0 && !m_userFitted) {
             m_spanMs = timeline::kDefaultFollowMs;
             m_follow = true;
@@ -234,10 +257,20 @@ public:
         // Back to live: the graph follows again, at whatever zoom it had —
         // there is no separate "follow" switch to remember to turn back on.
         const bool returnedLive = m_state.past && !s.past && !m_dragging;
+        if (!reset && !m_state.past && s.past && !m_dragging && m_state.hasData) {
+            ensureLayout();
+            beginFrame();
+            parkView(paintView());
+        }
         m_state = s;
+        if (m_autoDetails && m_autoDetails->toPlainText() != s.autoMessage)
+            m_autoDetails->setPlainText(s.autoMessage);
         if (returnedLive) {
             m_follow = true;
             m_frozen = false;
+            m_hasManualView = false;
+            m_animStartMs = -1;
+            m_userWindowChange = true;
             m_graphKey = {};
         }
         update();
@@ -288,8 +321,8 @@ public:
     QString emptyMessage() const {
         if (m_state.hasData) return QString();
         if (!m_state.canCapture())
-            return QStringLiteral("Static source — nothing changes to record. "
-                                  "Attach a process to record live data.");
+            return m_state.autoAvailable ? QStringLiteral("Auto analyzes these bytes. Recording requires a live source.")
+                                         : QStringLiteral("Open a file or attach a process to analyze memory.");
         if (m_state.capture == timeline::Capture::Recording)
             return QStringLiteral("Recording — changes show up here as they happen");
         return QStringLiteral("Press Record to capture changes over time");
@@ -338,6 +371,7 @@ protected:
 
         paintGraph(p);
         for (const timeline::LaidCell& c : m_layout.cells) paintCell(p, c);
+        updateFrameTimer();
 
         // PaneBox paints the line above; the strip closes its own box.
         const QRectF r(rect());
@@ -353,12 +387,41 @@ protected:
     }
 
     void showEvent(QShowEvent* e) override { QWidget::showEvent(e); updateFrameTimer(); }
-    void hideEvent(QHideEvent* e) override { QWidget::hideEvent(e); updateFrameTimer(); }
+    void hideEvent(QHideEvent* e) override {
+        if (m_dragging) cancelDrag();
+        m_panning = false;
+        hideReadout();
+        QWidget::hideEvent(e);
+        updateFrameTimer();
+    }
+
+    void keyPressEvent(QKeyEvent* e) override {
+        const QStringList controls{QStringLiteral("auto"), QStringLiteral("rec"), QStringLiteral("live"), QStringLiteral("more")};
+        if (e->key() == Qt::Key_Left || e->key() == Qt::Key_Right) {
+            m_keyboardCell = (m_keyboardCell + (e->key() == Qt::Key_Right ? 1 : controls.size() - 1)) % controls.size();
+            update(); e->accept(); return;
+        }
+        if (e->key() == Qt::Key_Space || e->key() == Qt::Key_Return) {
+            const auto id = controls[m_keyboardCell];
+            if (isEnabledCell(id)) activate(id, {});
+            e->accept(); return;
+        }
+        QWidget::keyPressEvent(e);
+    }
+
+    void focusInEvent(QFocusEvent* e) override { QWidget::focusInEvent(e); update(); }
+    void focusOutEvent(QFocusEvent* e) override { QWidget::focusOutEvent(e); update(); }
 
     // ── Pointer ──
     void mouseMoveEvent(QMouseEvent* e) override {
         ensureLayout();
         const QPoint pos = e->position().toPoint();
+        if (m_panning) {
+            const int64_t dt = int64_t(std::llround(double(m_panAnchorX - pos.x())
+                                / qMax(1e-9, m_panView.pxPerMs)));
+            panView(m_panView, dt);
+            return;
+        }
         if (m_dragging) {
             updateDrag(pos, e->modifiers());
             return;
@@ -402,7 +465,8 @@ protected:
         if (e->button() == Qt::MiddleButton && m_layout.graph.contains(QPoint(pos.x(), m_layout.graph.center().y()))) {
             m_panning = true;
             m_panAnchorX = pos.x();
-            m_panWindow = currentWindow();
+            beginFrame();
+            m_panView = paintView();
             return;
         }
         if (e->button() != Qt::LeftButton) return;
@@ -420,6 +484,7 @@ protected:
         const QPoint pos = e->position().toPoint();
         if (m_panning && e->button() == Qt::MiddleButton) { m_panning = false; return; }
         if (m_dragging && e->button() == Qt::LeftButton) {
+            updateDrag(pos, e->modifiers());
             endDrag(pos);
             return;
         }
@@ -462,8 +527,9 @@ protected:
             const int notches = m_wheelAccum / 120;
             if (notches == 0) { e->accept(); return; }
             m_wheelAccum -= notches * 120;
-            const int64_t dt = -int64_t(notches) * w.spanMs() / 10;
-            setWindow(timeline::panBy(w, dt, m_state.retainedBeginMs, m_state.nowMs));
+            const auto view = paintView();
+            const int64_t span = view.tOf(m_layout.graph.right() + 1) - view.tOf(m_layout.graph.left());
+            panView(view, -int64_t(notches) * span / 10);
         } else {
             m_wheelAccum += dy;
             const int notches = m_wheelAccum / 120;
@@ -485,9 +551,18 @@ protected:
                 else followWithSpan(std::clamp<int64_t>(span, timeline::kMinSpanMs, whole));
             } else {
                 // Parked: zoom about the pointer and stay put.
-                const int64_t anchor = timeline::timeForX(w, m_layout.graph.left(), m_layout.graph.width(), pos.x());
-                setWindow(timeline::zoomAround(w, anchor, std::pow(0.8, notches),
-                                               m_state.retainedBeginMs, m_state.nowMs));
+                const auto before = paintView();
+                const auto g = m_layout.graph;
+                const int64_t span = before.tOf(g.right() + 1) - before.tOf(g.left());
+                const int64_t whole = qMax(timeline::kMinSpanMs, m_state.nowMs - m_state.retainedBeginMs);
+                const int64_t nextSpan = int64_t(std::clamp(double(span) * std::pow(0.8, notches),
+                                                          double(timeline::kMinSpanMs), double(whole)));
+                timeline::View view{double(g.width()) / nextSpan, double(pos.x()), before.tOf(pos.x())};
+                const int64_t left = view.tOf(g.left());
+                const int64_t limit = m_state.nowMs - nextSpan;
+                view.tRef += std::clamp(left, qMin(m_state.retainedBeginMs, limit), limit) - left;
+                parkView(view);
+                update();
             }
         }
         e->accept();
@@ -498,8 +573,8 @@ protected:
         showMenu(e->globalPos());
     }
 
-    // Esc while scrubbing restores what was on screen before the press. The
-    // strip never takes focus, so it listens application-wide for the drag.
+    // Esc while scrubbing restores what was on screen before the press,
+    // even if keyboard focus has moved to another widget.
     bool eventFilter(QObject* obj, QEvent* e) override {
         if (m_dragging && e->type() == QEvent::KeyPress
             && static_cast<QKeyEvent*>(e)->key() == Qt::Key_Escape) {
@@ -510,6 +585,30 @@ protected:
     }
 
 private:
+    void paintRuler(QPainter& p) {
+        const QRect g = m_layout.graph;
+        if (!m_state.hasData || g.width() < 80) return;
+        const auto view = paintView();
+        const int64_t span = view.tOf(g.right() + 1) - view.tOf(g.left());
+        const int64_t step = qMax<int64_t>(1000, timeline::stepForSpan(span, qMax(1, g.width() / 92)));
+        const int64_t first = timeline::ceilTo(m_state.epochAtZeroMs + view.tOf(g.left()), step);
+        p.save();
+        p.setClipRect(g.adjusted(0, -g.top(), 0, 0));
+        QFont rulerFont = font(); rulerFont.setPixelSize(10); p.setFont(rulerFont);
+        p.setPen(m_theme.textDim);
+        const QFontMetrics metrics(rulerFont);
+        for (int64_t absolute = first; absolute <= m_state.epochAtZeroMs + view.tOf(g.right()); absolute += step) {
+            const int64_t time = absolute - m_state.epochAtZeroMs;
+            if (time > m_state.nowMs) break;
+            const int x = int(std::lround(view.xOf(time)));
+            const QString label = timeline::formatClock(absolute, m_state.utcOffsetSeconds).left(8);
+            const int textWidth = metrics.horizontalAdvance(label);
+            if (x + textWidth + 5 > g.right()) continue;
+            p.drawText(QRect(x + 3, 0, textWidth + 1, 12), Qt::AlignVCenter | Qt::AlignLeft, label);
+        }
+        p.restore();
+    }
+
     // ── Motion ──
     // Does "now" move by itself right now? Only a running recording writes
     // new data; every other mode pins nowMs to the end of what was recorded
@@ -517,7 +616,7 @@ private:
     // the graph away from its own data. A drag freezes it too.
     bool nowAdvances() const {
         return m_state.hasData && m_state.capture == timeline::Capture::Recording
-            && !m_dragging && !m_frozen;
+            && m_follow && !m_state.past && !m_dragging && !m_frozen;
     }
 
     // Once per frame: where "now" is, by the strip's own clock.
@@ -535,11 +634,9 @@ private:
         const timeline::Window w = currentWindow();
         const QRect g = m_layout.graph;
         if (!(w.follow && m_spanMs > 0)) return timeline::viewFor(w, g.left(), g.width());
-        // Referred to a fixed moment, and with the growing span left out: a
-        // following view is meant to move and to stretch as the recording
-        // fills it — neither is a rescale to animate.
+        // Referred to a fixed moment: following moves without changing scale.
         timeline::View v = timeline::followView(w, 0, g.left(), g.width());
-        v.pxPerMs = 0.0;
+        v.pxPerMs = double(g.width()) / double(m_spanMs);
         return v;
     }
 
@@ -547,21 +644,21 @@ private:
     // advancing now while a zoomed view follows, blended toward the target
     // while a rescale animates.
     timeline::View paintView() const {
-        const timeline::Window w = currentWindow();
+        if (m_frozen) return m_frozenView;
         const QRect g = m_layout.graph;
-        // Following: hang off now, over a span that GROWS with the recording
-        // until it reaches the window — so a young recording fills the strip
-        // instead of huddling at the right edge, and it grows continuously
-        // (a real span, not a ladder rung, which is what made it step).
+        if (!m_follow && m_hasManualView) {
+            auto view = m_manualView;
+            const double ratio = double(g.width()) / qMax(1, m_manualViewRect.width());
+            view.x0 = g.left() + (view.x0 - m_manualViewRect.left()) * ratio;
+            view.pxPerMs *= ratio;
+            return view;
+        }
+        const timeline::Window w = currentWindow();
+        // A recording has one time scale from its first sample. No automatic
+        // stretching, fitting, or zooming as more history arrives.
         timeline::View target;
         if (w.follow && m_spanMs > 0) {
-            // Exactly what was recorded, edge to edge: the left edge sits on
-            // the oldest moment kept, the right on now. No padding — the
-            // 2 s floor used here put a young recording in the last tenth of
-            // the bar with paper either side.
-            const int64_t held = std::max<int64_t>(m_shownNowMs - m_state.retainedBeginMs, 1);
-            const int64_t span = std::clamp<int64_t>(held, timeline::kMinFollowSpanMs, m_spanMs);
-            target.pxPerMs = double(g.width()) / double(span);
+            target.pxPerMs = double(g.width()) / double(m_spanMs);
             target.x0 = g.left() + g.width();
             target.tRef = m_shownNowMs;
         } else {
@@ -613,7 +710,7 @@ private:
         // frame with itself one tick later, at a whole pixel, meant the timer
         // never repainted at the settled span (one tick moves ~0.27 px), so
         // the trace only advanced on the 125 ms push — in 2 px jumps.
-        if (wasAnimating || m_view.pxPerMs <= 0
+        if (wasAnimating || m_domainAnimMs >= 0 || m_view.pxPerMs <= 0
             || timeline::viewsDiffer(m_view, now, m_layout.graph.left(), m_layout.graph.width(),
                                      0.25 / dpr))
             update();
@@ -633,6 +730,7 @@ private:
     timeline::Window currentWindow() const {
         const int columns = graphDeviceColumns();
         if (m_frozen && m_frozenWindow.columns == columns) return m_frozenWindow;
+        if (!m_follow && m_hasManualView) return windowForView(paintView());
         if (m_follow) {
             if (m_state.hasData && m_spanMs <= 0) {
                 // The whole recording, from the left edge — not a sliver
@@ -661,6 +759,10 @@ private:
         m_manualWindow = w;
         m_follow = w.follow;
         m_frozen = false;
+        m_animStartMs = -1;
+        m_hasManualView = !w.follow;
+        m_manualView = timeline::viewFor(w, m_layout.graph.left(), m_layout.graph.width());
+        m_manualViewRect = m_layout.graph;
         m_spanMs = w.spanMs();
         m_graphKey = {};
         m_userWindowChange = true;   // asked for: it happens at once
@@ -669,13 +771,12 @@ private:
 
     // The whole recording again ("Show Whole Recording", double-click).
     void fitAll() {
-        m_spanMs = 0;
-        m_follow = true;
-        m_frozen = false;
-        m_graphKey = {};
-        m_userWindowChange = true;
+        ensureLayout();
+        auto fitted = timeline::fitLeftWindow(m_state.retainedBeginMs, m_state.nowMs,
+                                              graphDeviceColumns(), timeline::kLeadPx, timeline::kTailPx);
+        fitted.follow = false;
+        setWindow(fitted);
         m_userFitted = true;   // asked for: a later Record leaves it alone
-        update();
     }
 
 public:
@@ -700,6 +801,8 @@ private:
         m_spanMs = qMax<int64_t>(spanMs, timeline::kMinSpanMs);
         m_follow = true;
         m_frozen = false;
+        m_animStartMs = -1;
+        m_hasManualView = false;
         m_graphKey = {};
         m_userWindowChange = true;
         m_userFitted = false;
@@ -707,11 +810,25 @@ private:
     }
 
     // ── The overflow button ──
-    bool isEnabledCell(const QString& id) const { return id == QStringLiteral("more"); }
+    bool isEnabledCell(const QString& id) const {
+        if (id == QStringLiteral("auto")) return m_state.autoBusy || m_state.autoAvailable;
+        if (id == QStringLiteral("rec")) return m_state.canCapture();
+        if (id == QStringLiteral("live")) return m_state.hasData && (m_state.past || !m_follow);
+        return id == QStringLiteral("more");
+    }
     bool isClickable(const QString& id) const { return isEnabledCell(id); }
 
     void activate(const QString& id, const QPoint& pos) {
         Q_UNUSED(pos);
+        if (!isEnabledCell(id)) return;
+        if (id == QStringLiteral("auto")) { if (m_cb.onAuto) m_cb.onAuto(); return; }
+        if (id == QStringLiteral("rec")) { if (m_cb.onRecord) m_cb.onRecord(); return; }
+        if (id == QStringLiteral("live")) {
+            followWithSpan(m_spanMs > 0 ? m_spanMs : timeline::kDefaultFollowMs);
+            if (m_cb.onReturnToLive) m_cb.onReturnToLive();
+            updateFrameTimer();
+            return;
+        }
         if (id != QStringLiteral("more")) return;
         const QRect r = m_layout.rect(id);
         showMenu(mapToGlobal(QPoint(r.left(), 0)));
@@ -730,24 +847,41 @@ private:
     // other chrome button, held while its menu is up.
     void paintCell(QPainter& p, const timeline::LaidCell& c) {
         const Theme& t = m_theme;
-        if (c.id != QStringLiteral("more")) return;
         const bool hovered = m_hoverId == c.id;
-        // The graph runs under the button now, so the glyph needs its own
-        // ground: paper fading in from the left, opaque under the icon.
-        {
-            const QRectF scrim(c.rect.left() - 8, 0, c.rect.width() + 8 + timeline::kRightMargin, kHeight);
-            QLinearGradient fade(scrim.left(), 0, c.rect.left(), 0);
-            QColor clear = editorPaperColor(t), solid = clear;
-            clear.setAlphaF(0.0);
-            solid.setAlphaF(0.92);
-            fade.setColorAt(0.0, clear);
-            fade.setColorAt(1.0, solid);
-            p.fillRect(scrim, fade);
-            p.fillRect(QRectF(c.rect.left(), 0, scrim.right() - c.rect.left(), kHeight), solid);
+        const bool enabled = isEnabledCell(c.id);
+        if (enabled && m_pressId == c.id) p.fillRect(c.rect, pressedFill(t));
+        else if (enabled && (hovered || (m_menuUp && c.id == "more"))) p.fillRect(c.rect, t.hover);
+        p.save();
+        if (!enabled) p.setOpacity(kDisabledOpacity);
+        if (c.id == "more") paintIcon(p, c.rect, QStringLiteral("ellipsis.svg"), t.textDim);
+        else {
+            const QRectF icon(c.rect.left() + 5, c.rect.top() + 6, 10, 10);
+            QString label;
+            const bool recording = m_state.capture == timeline::Capture::Recording;
+            if (c.id == "auto") {
+                paintIcon(p, QRect(c.rect.left() + 3, c.rect.top(), 14, c.rect.height()),
+                          m_state.autoBusy ? QStringLiteral("close.svg") : QStringLiteral("lightbulb-autofix.svg"),
+                          m_state.autoBusy ? t.focusGlow : t.textDim);
+                label = m_state.autoBusy ? QStringLiteral("Cancel") : QStringLiteral("Auto");
+            } else if (c.id == "rec") {
+                timeline::paintRecordGlyph(p, icon, recording, recording ? t.markerPtr : t.textDim);
+                label = recording ? QStringLiteral("Stop") : QStringLiteral("Record");
+            } else {
+                timeline::paintPlayGlyph(p, icon, m_state.past ? t.indHintGreen : t.textDim);
+                label = QStringLiteral("Live");
+            }
+            p.setPen(c.id == "rec" && recording ? t.markerPtr : t.text);
+            if (c.rect.width() > timeline::kIconCellW)
+                p.drawText(c.rect.adjusted(21, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft, label);
         }
-        if (m_pressId == c.id)       p.fillRect(c.rect, pressedFill(t));
-        else if (hovered || m_menuUp) p.fillRect(c.rect, t.hover);
-        paintIcon(p, c.rect, QStringLiteral("ellipsis.svg"), (hovered || m_menuUp) ? t.text : t.textDim);
+        p.restore();
+        if (hasFocus() && m_layout.cells[m_keyboardCell].id == c.id) {
+            const QRectF ring(c.rect);
+            fillTopDeviceRowOfRect(p, ring, t.borderFocused);
+            fillBottomDeviceRowOfRect(p, ring, t.borderFocused);
+            fillLeftDeviceColOfRect(p, ring, t.borderFocused);
+            fillRightDeviceColOfRect(p, ring, t.borderFocused);
+        }
     }
 
     // ── Inks ──
@@ -861,7 +995,7 @@ private:
             paintPointGraph(p, V);
             p.restore();
         } else {
-            if (!(key == m_graphKey) || m_graphImage.isNull()) {
+            if (!(key == m_graphKey) || m_graphImage.isNull() || m_domainAnimMs >= 0) {
                 renderGraphImage(w, dpr);
                 ++m_renderCount;
                 m_graphKey = key;
@@ -902,7 +1036,7 @@ private:
                               timeline::kBandBottom - timeline::kPinTop), fade);
         }
 
-        // No time is written on the graph: hovering it says when.
+        paintRuler(p);
 
         // Rebase, attach, detach, clear: a dashed hairline through the band.
         // Record start / stop need none — the band's ends are where they are.
@@ -966,7 +1100,7 @@ private:
         if (!m_cb.points || !m_state.hasData) { m_pointsOk = false; return; }
         const int64_t pad = w.spanMs() / 4 + w.stepMs;
         const int64_t want0 = w.t0Ms - pad, want1 = w.t1Ms() + pad;
-        if (m_pointsOk && m_pointsGen == m_state.dataGeneration
+        if (m_points1 >= 0 && m_pointsGen == m_state.dataGeneration
             && m_pointsSel == m_state.selectionKey
             && m_points0 <= w.t0Ms && m_points1 >= w.t1Ms())
             return;
@@ -1026,7 +1160,7 @@ private:
             if (px < left || px > right) continue;
             visibleMax = qMax(visibleMax, pt.changed);
         }
-        const double domain = blendedDomain(timeline::domainFor(visibleMax, m_domain));
+        const double domain = blendedDomain(qMax(m_domain, timeline::domainFor(visibleMax, m_domain)));
 
         struct Pt { double x, y; };
         QVector<Pt> pts;
@@ -1077,7 +1211,8 @@ private:
                 for (int i = m_points.size() - 1; i > 0 && n < 8; --i, ++n)
                     dt += double(m_points[i].tMs - m_points[i - 1].tMs);
                 dt = n > 0 ? dt / n : 0.0;
-                if (dt > 0 && V.pxPerMs * dt <= 8.0 && endX > pts.last().x + 0.25)
+                if (dt > 0 && V.pxPerMs * dt <= 8.0 && endX > pts.last().x + 0.25
+                    && m_shownNowMs - V.tOf(pts.last().x) <= timeline::kJoinMs)
                     pts.append(Pt{endX, pts.last().y});
             }
         }
@@ -1086,17 +1221,23 @@ private:
         if (!pts.isEmpty()) {
             QLinearGradient body(0, timeline::kBandTop, 0, baseline + 1);
             QColor top = ink.data, bottom = ink.data;
-            top.setAlphaF(0.46);
-            bottom.setAlphaF(0.08);
+            top.setAlphaF(0.24);
+            bottom.setAlphaF(0.04);
             body.setColorAt(0.0, top);
             body.setColorAt(1.0, bottom);
             const QPen edge(ink.line, 1.15, Qt::SolidLine, Qt::FlatCap, Qt::RoundJoin);
             const double joinPx = std::max(2.0, V.pxPerMs * double(timeline::kJoinMs));
+            auto joined = [&](const Pt& a, const Pt& b) {
+                if (b.x - a.x > joinPx) return false;
+                for (const auto& gap : m_state.gaps)
+                    if (gap.startMs < V.tOf(b.x) && (gap.endMs < 0 || gap.endMs > V.tOf(a.x))) return false;
+                return true;
+            };
             p.save();
             p.setRenderHint(QPainter::Antialiasing, true);
             int a = 0;
             for (int i = 1; i <= pts.size(); ++i) {
-                if (i < pts.size() && pts[i].x - pts[i - 1].x <= joinPx) continue;
+                if (i < pts.size() && joined(pts[i - 1], pts[i])) continue;
                 const int b = i - 1;
                 const double half = (a == b) ? 1.0 : 0.5;
                 QPainterPath shape, line;
@@ -1116,6 +1257,7 @@ private:
             // Where the edge is per device column: the hover dot rides on it.
             const qreal dpr = devicePixelRatioF();
             for (int i = 0; i < pts.size(); ++i) {
+                if (i > 0 && !joined(pts[i - 1], pts[i])) continue;
                 const int c0 = int(std::floor((pts[i == 0 ? 0 : i - 1].x - g.left()) * dpr));
                 const int c1 = int(std::ceil((pts[i].x - g.left()) * dpr));
                 for (int c = std::max(0, c0); c <= c1 && c < devW; ++c) {
@@ -1142,7 +1284,7 @@ private:
             const double x = V.xOf(pt.tMs);
             if (x < left || x > right || x - lastBead < 5.0) continue;
             lastBead = x;
-            const double r = pt.onset >= 3 ? 2.3 : 1.7;
+            const double r = pt.onset >= 3 ? 1.4 : 1.0;
             p.drawEllipse(QPointF(x, beadY), r, r);
         }
         p.restore();
@@ -1191,7 +1333,7 @@ private:
             bandRegions[x] = timeline::regionAt(mid, m_state.retainedBeginMs, INT64_MAX, m_state.gaps);
             if (regions[x] == timeline::Region::Captured) visibleMax = qMax(visibleMax, cols[x].maxChanged);
         }
-        m_domain = timeline::domainFor(visibleMax, m_domain);
+        const double domain = blendedDomain(qMax(m_domain, timeline::domainFor(visibleMax, m_domain)));
         m_envTopDev.fill(-1, n);
 
         QPainter ip(&m_graphImage);
@@ -1229,7 +1371,7 @@ private:
             const uint32_t v = cols[x].maxChanged;
             double h = 0;
             if (v > 0) {
-                const double frac = std::sqrt(double(std::min(v, m_domain)) / double(std::max<uint32_t>(m_domain, 1)));
+                const double frac = std::sqrt(std::min(double(v), domain) / std::max(domain, 1.0));
                 h = std::max(1.5, frac * maxRows);
             }
             segments.last().append(Pt{x + 0.5, baseline + 0.5 - h});
@@ -1245,8 +1387,8 @@ private:
         QLinearGradient body(0, bandTop, 0, baseline + 1);
         {
             QColor top = ink.data, bottom = ink.data;
-            top.setAlphaF(0.46);
-            bottom.setAlphaF(0.08);
+            top.setAlphaF(0.24);
+            bottom.setAlphaF(0.04);
             body.setColorAt(0.0, top);
             body.setColorAt(1.0, bottom);
         }
@@ -1309,7 +1451,7 @@ private:
                         && (best < 0 || started[c] > started[best]))
                         best = c;
                 if (best < 0) continue;
-                const double r = (started[best] >= 3 ? 2.3 : 1.7) * dpr;
+                const double r = (started[best] >= 3 ? 1.4 : 1.0) * dpr;
                 ip.drawEllipse(QPointF(best + 0.5, beadY + 0.5), r, r);
             }
         }
@@ -1354,10 +1496,44 @@ private:
         return tMs;
     }
 
+    timeline::Window windowForView(const timeline::View& view) const {
+        const QRect g = m_layout.graph;
+        auto w = timeline::fitWindow(view.tOf(g.left()), view.tOf(g.right() + 1), graphDeviceColumns());
+        w.follow = false;
+        return w;
+    }
+
+    void parkView(const timeline::View& view) {
+        m_manualWindow = windowForView(view);
+        m_manualView = view;
+        m_manualViewRect = m_layout.graph;
+        m_spanMs = qMax(timeline::kMinSpanMs,
+                       view.tOf(m_layout.graph.right() + 1) - view.tOf(m_layout.graph.left()));
+        m_hasManualView = true;
+        m_follow = false;
+        m_frozen = false;
+        m_animStartMs = -1;
+        m_userWindowChange = true;
+        m_graphKey = {};
+    }
+
+    void panView(timeline::View view, int64_t delta) {
+        const int64_t left = view.tOf(m_layout.graph.left());
+        const int64_t right = view.tOf(m_layout.graph.right() + 1);
+        if (left <= m_state.retainedBeginMs && right >= m_state.nowMs) return;
+        const int64_t span = right - left;
+        const int64_t limit = m_state.nowMs - span;
+        const int64_t next = std::clamp(left + delta, qMin(m_state.retainedBeginMs, limit), limit);
+        if (next == limit && !m_state.past) followWithSpan(span);
+        else { view.tRef += next - left; parkView(view); update(); }
+    }
+
     void beginDrag(const QPoint& pos, Qt::KeyboardModifiers mods) {
         hideReadout();
+        beginFrame();
+        m_frozenView = paintView();
+        m_frozenWindow = windowForView(m_frozenView);
         if (m_cb.onScrubBegin) m_cb.onScrubBegin();
-        m_frozenWindow = currentWindow();
         m_frozen = true;                  // the window must not slide under the pointer
         m_priorPast = m_state.past;
         m_priorMs = m_state.viewedMs;
@@ -1391,21 +1567,20 @@ private:
         // The live edge by time: released at or past where the recording
         // ends now — the frame keeps room on its right, so the graph's edge
         // is not "now" — or at the graph's right edge.
-        const int gw = qMax(1, m_layout.graph.width());
-        const int64_t tol = w.spanMs() * timeline::kSnapPx / gw;
-        const int64_t released = timeline::timeForX(w, m_layout.graph.left(), gw, pos.x());
-        const bool atLiveEdge = (w.follow || w.t1Ms() >= m_state.nowMs)
+        const int64_t tol = int64_t(timeline::kSnapPx / qMax(1e-9, m_frozenView.pxPerMs));
+        const int64_t released = m_frozenView.tOf(pos.x());
+        const bool atLiveEdge = m_frozenView.tOf(m_layout.graph.right() + 1) + tol >= m_state.nowMs
                              && (released + tol >= m_state.nowMs || pos.x() >= m_layout.graph.right() - 3);
         m_frozen = false;
         if (!m_follow) m_manualWindow = w;
         if (atLiveEdge) {
             m_follow = true;               // live again, so following — even if the
                                            // view went live during the drag
+            m_hasManualView = false;
             if (m_cb.onReturnToLive) m_cb.onReturnToLive();
         } else {
+            parkView(m_frozenView);
             flushScrub(true);
-            // Parking in the past stops following so the moment stays put.
-            if (m_follow) { m_manualWindow = w; m_manualWindow.follow = false; m_follow = false; }
         }
         update();
     }
@@ -1436,8 +1611,7 @@ private:
     void showReadout() {
         if (m_hoverX < 0 || !m_state.hasData || m_dragging) return;
         const int64_t tMs = timeAtX(m_hoverX, Qt::NoModifier);
-        // The one place a time is shown: the clock time of the moment under
-        // the pointer, asked for by hovering.
+        // Show the exact clock time and changes at the hovered moment.
         const QString title = timeline::formatClock(m_state.epochAtZeroMs + tMs, m_state.utcOffsetSeconds);
         QString body;
         const timeline::Region region = timeline::regionAt(tMs, m_state.retainedBeginMs, m_state.nowMs, m_state.gaps);
@@ -1458,15 +1632,39 @@ private:
     // The widget's own tooltip names the hovered CELL; the graph's readout is
     // the private tip above. Republished only when the hovered cell changes.
     void refreshCellToolTip() {
-        setToolTip(m_hoverId == QStringLiteral("more") ? QStringLiteral("Timeline options") : QString());
+        QString tip;
+        if (m_hoverId == "more") tip = QStringLiteral("Analysis and recording options");
+        else if (m_hoverId == "auto") {
+            tip = m_state.autoBusy ? QStringLiteral("Cancel Auto analysis")
+                                  : QStringLiteral("Auto: resolve unknown types (Ctrl+F9)");
+            if (m_state.autoMessage.isEmpty()) {
+                tip += QStringLiteral("\nAnalyze a snapshot or use recorded changes.");
+            } else {
+                const QString summary = m_state.autoMessage.section('\n', 0, 0).simplified();
+                tip += QStringLiteral("\n") + fontMetrics().elidedText(summary, Qt::ElideRight, 360);
+            }
+            tip += QStringLiteral("\nFull status: options → Auto details…");
+        }
+        else if (m_hoverId == "rec") {
+            tip = !m_state.canCapture() ? QStringLiteral("Attach a live source to record")
+                : m_state.capture == timeline::Capture::Recording
+                    ? QStringLiteral("Stop recording (F9). Captured history is kept.")
+                    : QStringLiteral("Record changes in this class (F9)");
+        } else if (m_hoverId == "live") {
+            tip = m_state.past ? QStringLiteral("Back to live values (Ctrl+End)")
+                : !m_follow ? QStringLiteral("Follow live values") : QStringLiteral("Showing live values");
+        }
+        setToolTip(tip);
     }
 
     // ── Menu ──
-    // Everything the strip does not show is either beside the address
-    // (Record / Stop, and Back to live while looking back) or here. Following now is not an
-    // option: the graph follows whenever the view is live.
+    // Secondary actions stay in the menu; Record / Stop and Live stay visible.
     void buildMenu(QMenu& menu) {
         menu.setObjectName(QStringLiteral("rcxTimelineMenu"));
+        QAction* details = menu.addAction(QStringLiteral("Auto details…"));
+        details->setEnabled(!m_state.autoMessage.isEmpty());
+        connect(details, &QAction::triggered, this, [this] { showAutoDetails(); });
+        menu.addSeparator();
         QAction* prev = menu.addAction(QStringLiteral("Previous Change\tCtrl+,"));
         prev->setEnabled(m_state.hasData);
         connect(prev, &QAction::triggered, this, [this] { if (m_cb.onStep) m_cb.onStep(-1); });
@@ -1498,7 +1696,35 @@ private:
         update();
     }
 
+    void showAutoDetails() {
+        if (m_autoDetails) {
+            auto* dialog = m_autoDetails->window();
+            dialog->show();
+            dialog->raise();
+            dialog->activateWindow();
+            return;
+        }
+        auto* dialog = new QDialog(this);
+        dialog->setObjectName(QStringLiteral("rcxAutoDetails"));
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("Auto analysis"));
+        auto* layout = new QVBoxLayout(dialog);
+        auto* text = new QPlainTextEdit(dialog);
+        text->setObjectName(QStringLiteral("autoAnalysisDetails"));
+        m_autoDetails = text;
+        text->setReadOnly(true);
+        text->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        text->setPlainText(m_state.autoMessage);
+        layout->addWidget(text);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+        layout->addWidget(buttons);
+        dialog->resize(480, 240);
+        dialog->show();
+    }
+
     Theme m_theme;
+    QPointer<QPlainTextEdit> m_autoDetails;
     TimelineStripState m_state;
     Callbacks m_cb;
     timeline::Layout m_layout;
@@ -1513,8 +1739,13 @@ private:
     bool    m_userFitted = false;   // an explicit fit is not overridden
     bool m_follow = true;
     timeline::Window m_manualWindow;
+    timeline::View m_manualView;
+    QRect m_manualViewRect;
+    bool m_hasManualView = false;
     bool m_frozen = false;
     timeline::Window m_frozenWindow;
+    timeline::View m_frozenView;
+    int m_keyboardCell = 0;
 
     QString m_hoverId, m_pressId;
     int m_hoverX = -1;
@@ -1525,7 +1756,7 @@ private:
     int64_t m_priorMs = 0;
     bool m_panning = false;
     int m_panAnchorX = 0;
-    timeline::Window m_panWindow;
+    timeline::View m_panView;
     int m_wheelAccum = 0;
     bool m_filterInstalled = false;
     QTimer m_scrubTimer;

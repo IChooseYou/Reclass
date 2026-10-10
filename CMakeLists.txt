@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.20)
 project(RC VERSION 0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -58,6 +58,26 @@ endif()
 find_package(QScintilla REQUIRED)
 
 # RawPDB — direct PDB file reader (no DIA SDK / msdia140.dll dependency)
+# Keep the local MinGW CRT compatibility fix reproducible without pointing the
+# submodule at an unpublished commit. Apply once; subsequent configure runs
+# accept the already-patched header.
+if(MINGW)
+    find_package(Git REQUIRED)
+    set(_raw_pdb_patch "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/raw_pdb_mingw_crt.patch")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${_raw_pdb_patch}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/raw_pdb"
+        RESULT_VARIABLE _raw_pdb_patched OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _raw_pdb_patched EQUAL 0)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" apply "${_raw_pdb_patch}"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/raw_pdb"
+            RESULT_VARIABLE _raw_pdb_patch_result ERROR_VARIABLE _raw_pdb_patch_error)
+        if(NOT _raw_pdb_patch_result EQUAL 0)
+            message(FATAL_ERROR "Cannot apply raw_pdb MinGW CRT fix: ${_raw_pdb_patch_error}")
+        endif()
+    endif()
+endif()
 file(GLOB RAW_PDB_SRCS third_party/raw_pdb/src/*.cpp)
 add_library(raw_pdb STATIC ${RAW_PDB_SRCS})
 target_include_directories(raw_pdb PUBLIC third_party/raw_pdb/src)
@@ -200,6 +220,9 @@ add_executable(RC
     $<$<PLATFORM_ID:Darwin>:src/macos_titlebar.mm>
     src/mcp/mcp_bridge.h
     src/mcp/mcp_bridge.cpp
+    src/mcp/type_resolution_service.cpp
+    src/mcp/auto_resolution.cpp
+    src/type_resolution.cpp
     src/addressparser.h
     src/addressparser.cpp
     src/symbolstore.h
@@ -411,6 +434,15 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(${QT} REQUIRED COMPONENTS Test)
     enable_testing()
+    if(WIN32 AND QT STREQUAL "Qt6")
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME test_auto_resolution_runtime
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_auto_resolution_runtime.py
+                        --build-dir ${CMAKE_BINARY_DIR})
+            set_tests_properties(test_auto_resolution_runtime PROPERTIES LABELS "integration" TIMEOUT 180)
+        endif()
+    endif()
 
     # Disasm/Fadec sources needed by any test that links editor.cpp
     # Disasm/Fadec sources. compose.cpp needs these directly now: the Asm node
@@ -440,6 +472,11 @@ if(BUILD_TESTING)
     target_include_directories(test_typeinfer PRIVATE src)
     target_link_libraries(test_typeinfer PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_typeinfer COMMAND test_typeinfer)
+
+    add_executable(test_type_resolution tests/test_type_resolution.cpp src/type_resolution.cpp)
+    target_include_directories(test_type_resolution PRIVATE src)
+    target_link_libraries(test_type_resolution PRIVATE ${QT}::Core ${QT}::Test)
+    add_test(NAME test_type_resolution COMMAND test_type_resolution)
 
     add_executable(test_dock_resize tests/test_dock_resize.cpp)
     target_link_libraries(test_dock_resize
@@ -1422,6 +1459,13 @@ if(BUILD_TESTING)
     endif() # BUILD_UI_TESTS
 endif()
 add_subdirectory(plugins/ProcessMemory)
+if(BUILD_TESTING AND WIN32)
+    add_executable(test_process_memory_read tests/test_process_memory_read.cpp)
+    target_include_directories(test_process_memory_read PRIVATE src)
+    target_link_libraries(test_process_memory_read PRIVATE ${QT}::Core ${QT}::Gui ${QT}::Test)
+    add_dependencies(test_process_memory_read ProcessMemoryPlugin)
+    add_test(NAME test_process_memory_read COMMAND test_process_memory_read)
+endif()
 if(NOT APPLE)
     add_subdirectory(plugins/RemoteProcessMemory)
 endif()

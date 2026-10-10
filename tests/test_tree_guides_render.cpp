@@ -744,8 +744,8 @@ private slots:
         const int typeNameX = treegeom::cellLineX(live.g, tc.cols[tc.firstCol(line)]);
         const int nameValueX = treegeom::cellLineX(live.g, tc.cols[tc.firstCol(line) + 1]);
         for (int y = y0; y < y1; ++y)
-            QVERIFY2(isColumn(img.pixel(typeNameX, y)),
-                     qPrintable(QStringLiteral("scale %1: the type|name line breaks at y %2").arg(g_scale).arg(y)));
+            QCOMPARE(isColumn(img.pixel(typeNameX, y)),
+                     (y - y0) % (3 * live.g.t) < live.g.t);
         QVERIFY2(isColumn(img.pixel(nameValueX, y1)), "the name|value line doesn't resume below the edit");
 
         m_editor->cancelInlineEdit();

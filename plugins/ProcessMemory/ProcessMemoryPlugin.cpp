@@ -140,13 +140,19 @@ ProcessMemoryProvider::ProcessMemoryProvider(uint32_t pid, const QString& proces
 
 bool ProcessMemoryProvider::read(uint64_t addr, void* buf, int len) const
 {
-    if (!m_handle || len <= 0) return false;
+    if (!m_handle || !buf || len <= 0) return false;
 
     SIZE_T bytesRead = 0;
-    ReadProcessMemory(m_handle, (LPCVOID)(addr), buf, (SIZE_T)len, &bytesRead);
-    if ((int)bytesRead < len)
-        memset((char*)buf + bytesRead, 0, len - bytesRead);
-    return bytesRead > 0;
+    const BOOL success = ReadProcessMemory(m_handle, (LPCVOID)(addr), buf, (SIZE_T)len, &bytesRead);
+    // A failed speculative read (including a noncanonical RTTI address) can
+    // leave an unusable byte count. Never use that count for buffer arithmetic.
+    // Zero only the caller's bounded destination and reject partial reads too:
+    // their missing bytes are not valid evidence for type recovery.
+    if (!success || bytesRead != (SIZE_T)len) {
+        memset(buf, 0, (size_t)len);
+        return false;
+    }
+    return true;
 }
 
 bool ProcessMemoryProvider::write(uint64_t addr, const void* buf, int len)

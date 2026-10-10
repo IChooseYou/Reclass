@@ -1263,10 +1263,10 @@ NodeTree importPdb(const QString& pdbPath, const QString& structFilter, QString*
 
 // ── Public API: importTypeForSymbol ──
 
-NodeTree importTypeForSymbol(const QString& pdbPath,
+static NodeTree importSymbolType(const QString& pdbPath,
                              uint32_t typeIndex,
                              QString* typeName,
-                             QString* errorMsg) {
+                             QString* errorMsg, const QString& expectedGuid = {}, uint32_t expectedAge = 0) {
     auto setErr = [&](const QString& msg) { if (errorMsg) *errorMsg = msg; };
 
     if (typeIndex == 0) {
@@ -1276,6 +1276,19 @@ NodeTree importTypeForSymbol(const QString& pdbPath,
 
     PdbFile pdb;
     if (!pdb.open(pdbPath, errorMsg)) return {};
+
+    if (!expectedGuid.isEmpty()) {
+        const PDB::InfoStream info(*pdb.rawFile);
+        const auto* header = info.GetHeader();
+        if (!header) { setErr("PDB identity is missing"); return {}; }
+        const auto& g = header->guid;
+        QString guid = QStringLiteral("%1%2%3").arg(g.Data1, 8, 16, QChar('0'))
+            .arg(g.Data2, 4, 16, QChar('0')).arg(g.Data3, 4, 16, QChar('0'));
+        for (auto b : g.Data4) guid += QStringLiteral("%1").arg(b, 2, 16, QChar('0'));
+        if (guid.compare(expectedGuid, Qt::CaseInsensitive) != 0 || header->age != expectedAge) {
+            setErr("PDB GUID/age does not match the executable"); return {};
+        }
+    }
 
     const TypeTable& tt = *pdb.typeTable;
 
@@ -1292,6 +1305,7 @@ NodeTree importTypeForSymbol(const QString& pdbPath,
             continue;
         }
         if (rec->header.kind == TRK::LF_POINTER) {
+            if (!expectedGuid.isEmpty()) { setErr("Symbol is a pointer, not a direct object"); return {}; }
             ti = rec->data.LF_POINTER.utype;
             depth++;
             continue;
@@ -1316,6 +1330,10 @@ NodeTree importTypeForSymbol(const QString& pdbPath,
                   rec->header.kind == TRK::LF_CLASS ||
                   rec->header.kind == TRK::LF_UNION);
     bool isEnum = (rec->header.kind == TRK::LF_ENUM);
+
+    if (!expectedGuid.isEmpty() && (!isUDT || rec->header.kind == TRK::LF_UNION)) {
+        setErr("AUTO requires a direct non-union object"); return {};
+    }
 
     if (!isUDT && !isEnum) {
         setErr(QStringLiteral("Symbol type is not a struct/class/union/enum (kind 0x%1)")
@@ -1362,6 +1380,13 @@ NodeTree importTypeForSymbol(const QString& pdbPath,
                     ti = defTi;
             }
         }
+        if (!expectedGuid.isEmpty()) {
+            const auto* concrete = tt.get(ti);
+            if (!concrete || (concrete->header.kind != TRK::LF_STRUCTURE && concrete->header.kind != TRK::LF_CLASS)
+                || concrete->data.LF_CLASS.property.fwdref) { setErr("Unresolved object definition"); return {}; }
+            const uint64_t size = leafValue(concrete->data.LF_CLASS.data, concrete->data.LF_CLASS.lfEasy.kind);
+            if (!size || size > 4096) { setErr("Object exceeds the verified AUTO layout limit"); return {}; }
+        }
         ctx.importUDT(ti);
     } else {
         ctx.importEnum(ti);
@@ -1374,11 +1399,26 @@ NodeTree importTypeForSymbol(const QString& pdbPath,
     return ctx.tree;
 }
 
+NodeTree importTypeForSymbol(const QString& path, uint32_t typeIndex, QString* name, QString* error) {
+    return importSymbolType(path, typeIndex, name, error);
+}
+
+NodeTree importVerifiedObjectType(const QString& path, uint32_t typeIndex,
+                                  const QString& guid, uint32_t age, QString* error) {
+    if (guid.isEmpty()) { if (error) *error = "Executable debug identity is missing"; return {}; }
+    return importSymbolType(path, typeIndex, nullptr, error, guid, age);
+}
+
 } // namespace rcx
 
 #else // !_WIN32
 
 namespace rcx {
+
+NodeTree importVerifiedObjectType(const QString&, uint32_t, const QString&, uint32_t, QString* error) {
+    if (error) *error = "PDB import requires Windows";
+    return {};
+}
 
 PdbSymbolResult extractPdbSymbols(const QString&, QString* errorMsg) {
     if (errorMsg) *errorMsg = QStringLiteral("PDB import requires Windows");

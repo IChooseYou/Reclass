@@ -8,8 +8,11 @@
 #include <QJsonDocument>
 #include <QByteArray>
 #include <QTimer>
+#include <QPointer>
 
 namespace rcx {
+
+class TypeResolutionService;
 
 class McpBridge : public QObject {
     Q_OBJECT
@@ -27,12 +30,16 @@ public:
     // Call from controller refresh / data change to notify MCP clients
     void notifyTreeChanged();
     void notifyDataChanged();
+    QJsonObject requestAutoResolution(RcxController* controller);
+    QJsonObject autoResolutionStatus(RcxController* controller) const;
 
 private:
     struct ClientState {
         QLocalSocket* socket = nullptr;
         QByteArray    readBuffer;
         bool          initialized = false;
+        bool          sampling = false;
+        qint64        initializedAt = 0;
     };
 
     MainWindow*    m_mainWindow;
@@ -40,6 +47,27 @@ private:
     QVector<ClientState> m_clients;
     QLocalSocket*  m_currentSender = nullptr;  // set during request processing
     bool           m_slowMode    = false;
+    std::unique_ptr<TypeResolutionService> m_typeResolution;
+    struct AutoRun {
+        QPointer<RcxController> controller;
+        QPointer<QLocalSocket> client;
+        QString jobId, revision, state, message, samplingId;
+        QJsonObject evidence;
+        QJsonArray modelHistory;
+        qint64 started = 0, modelRequestedAt = 0;
+        int modelRound = 0;
+        bool busy = true;
+    };
+    QHash<RcxController*, std::shared_ptr<AutoRun>> m_autoRuns;
+    QTimer m_autoTimer;
+    void pumpAutoResolution();
+    void finishAuto(const std::shared_ptr<AutoRun>& run, const QString& state, const QString& message);
+    void applyAutoFields(const std::shared_ptr<AutoRun>& run, const QJsonArray& fields);
+    void requestAutoModelTurn(const std::shared_ptr<AutoRun>& run, const QJsonObject& evidence,
+                              const QString& validationNote = {});
+    bool startAutoFollowup(const std::shared_ptr<AutoRun>& run, const QJsonObject& request,
+                           QString& error);
+    void handleSamplingReply(const QJsonObject& response);
     QTimer*        m_notifyTimer = nullptr;
 
     // Serial request queue. Some tool calls (scanner, tree.apply) spin nested

@@ -1,6 +1,7 @@
 #include <QtTest/QTest>
 #include <QtTest/QSignalSpy>
 #include <QApplication>
+#include <QFontDatabase>
 #include <QKeyEvent>
 #include <QFocusEvent>
 #include <QMouseEvent>
@@ -15,6 +16,7 @@
 #include <QMainWindow>
 #include <QStatusBar>
 #include <QPushButton>
+#include <QToolButton>
 #include <QButtonGroup>
 #include <QLabel>
 #include <QLayout>
@@ -514,6 +516,11 @@ private slots:
 
     void cleanupTestCase() {
         delete m_editor;
+    }
+
+    void testAutoDoesNotConsumeAddressBarWidth() {
+        QVERIFY(!m_editor->findChild<QToolButton*>("autoResolveButton"));
+        QVERIFY(!m_editor->findChild<QLabel*>("autoResolutionStatus"));
     }
 
     // ── Test: CommandRow at line 0 rejects non-ADDR edits ──
@@ -4082,10 +4089,10 @@ private slots:
 
         // Rest state: NO box of any kind (the outline was removed 2026-09-06 —
         // six outlined chips on every class footer read as a toolbar bolted to
-        // the document). The pill is tone alone: the type tone on the glyphs,
+        // the document). The pill is tone alone: the muted tone on the glyphs,
         // while the "};" and the "// 0x… (…)" comment around it stay furniture.
-        QVERIFY2(indAt(sci, kIndHexType, line, plus10),
-                 "pill glyphs are not painted at the type tone");
+        QVERIFY2(indAt(sci, kIndZero, line, plus10),
+                 "pill glyphs are not painted at the muted tone");
         QVERIFY2(!indAt(sci, kIndHexDim, line, plus10),
                  "pill glyphs are still swallowed by the footer's faint fill");
         const int brace = ft.indexOf(QLatin1Char('}'));

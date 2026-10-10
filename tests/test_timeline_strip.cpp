@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QImage>
 #include <QMouseEvent>
+#include <QDir>
 
 #include "themes/theme.h"
 #include "widgets/chrome_fallback_theme.h"
@@ -19,6 +20,7 @@ namespace {
 TimelineStripState rollingState(int64_t now = 600'000) {
     TimelineStripState s;
     s.capture = timeline::Capture::Rolling;
+    s.autoAvailable = true;
     s.hasData = true;
     s.nowMs = now;
     s.retainedBeginMs = now - 300'000;
@@ -61,7 +63,7 @@ private:
     QWidget* m_host = nullptr;
     TimelineStrip* m_strip = nullptr;
     Theme m_theme;
-    int m_clear = 0, m_live = 0, m_hide = 0;
+    int m_clear = 0, m_live = 0, m_hide = 0, m_record = 0;
     QVector<QPair<int64_t, bool>> m_scrubs;
     // The strip runs on its own clock between pushes; drive it by hand so no
     // frame depends on wall time.
@@ -74,7 +76,7 @@ private:
     // callback and the strip falls back to the binned picture — which is what
     // every older pixel test here exercises. Do not add points to the default.
     void make(int width = 1080, bool withPoints = false, int64_t tickMs = 200) {
-        m_clear = m_live = m_hide = 0;
+        m_clear = m_live = m_hide = m_record = 0;
         m_scrubs.clear();
         m_host = new QWidget;
         m_host->resize(width, TimelineStrip::kHeight);
@@ -86,6 +88,7 @@ private:
         m_tickMs = INT64_MIN;
         m_strip->setClockForTest([this] { return m_clockMs; });
         TimelineStrip::Callbacks cb;
+        cb.onRecord = [this] { ++m_record; };
         cb.onClear = [this] { ++m_clear; };
         cb.onReturnToLive = [this] { ++m_live; };
         cb.onHide = [this] { ++m_hide; };
@@ -146,7 +149,7 @@ private slots:
         TimelineStripState paused = rollingState(); paused.capture = timeline::Capture::Paused; states << paused;
         TimelineStripState past = rollingState(); past.past = true; past.viewedMs = 500'000; states << past;
         TimelineStripState stat; stat.capture = timeline::Capture::Static; states << stat;
-        const QStringList ids = {QStringLiteral("graph"), QStringLiteral("more")};
+        const QStringList ids = {QStringLiteral("auto"), QStringLiteral("graph"), QStringLiteral("rec"), QStringLiteral("live"), QStringLiteral("more")};
         QHash<QString, QRect> first;
         for (int i = 0; i < states.size(); ++i) {
             m_strip->setState(states[i]);
@@ -159,20 +162,31 @@ private slots:
         }
     }
 
-    // The strip is the graph and one square overflow button. Record, Pause
-    // and the rest live beside the address now.
-    void theStripIsTheGraphAndOneButton() {
+    // Record, Live and overflow share the strip without covering the graph.
+    void recordingAndPlaybackShareOneControlArea() {
         make();
         m_strip->setState(rollingState());
-        QCOMPARE(m_strip->layout().cells.size(), 1);
+        QCOMPARE(m_strip->layout().cells.size(), 4);
         const QRect more = m_strip->itemRect(QStringLiteral("more"));
         QCOMPARE(more.width(), more.height());
         QCOMPARE(more.right() + 1 + timeline::kRightMargin, m_strip->width());
-        for (const char* gone : {"rec", "pause", "reset", "state", "range.lo", "range.hi", "live"})
+        for (const char* gone : {"pause", "reset", "state", "range.lo", "range.hi"})
             QVERIFY2(m_strip->itemRect(QString::fromLatin1(gone)).isNull(), gone);
-        QCOMPARE(m_strip->graphRect().left(), 0);
-        QCOMPARE(m_strip->graphRect().right() + 1, m_strip->width());
-        QCOMPARE(timeline::cellIdAt(m_strip->layout(), QPoint(timeline::kGutter + 11, 13)), QStringLiteral("graph"));
+        QVERIFY(m_strip->itemRect("rec").right() < m_strip->itemRect("live").left());
+        QVERIFY(m_strip->itemRect("live").right() < m_strip->graphRect().left());
+        QVERIFY(m_strip->graphRect().right() < more.left());
+        click(m_strip->itemRect("rec").center());
+        QCOMPARE(m_record, 1);
+        click(m_strip->itemRect("live").center());
+        QCOMPARE(m_live, 0);
+        auto past = rollingState(); past.past = true; past.viewedMs = past.nowMs - 1000;
+        m_strip->setState(past);
+        click(m_strip->itemRect("live").center());
+        QCOMPARE(m_live, 1);
+        TimelineStripState stat; stat.capture = timeline::Capture::Static;
+        m_strip->setState(stat);
+        click(m_strip->itemRect("rec").center());
+        QCOMPARE(m_record, 1);
     }
 
     void aStaticSourceCannotBeScrubbed() {
@@ -183,6 +197,54 @@ private slots:
         click(m_strip->itemRect(QStringLiteral("graph")).center());
         QVERIFY(m_scrubs.isEmpty());
         QCOMPARE(m_live, 0);
+    }
+
+    void autoWorksForStaticSourcesWithoutGrowingTheStrip() {
+        make();
+        int requested = 0;
+        TimelineStrip::Callbacks cb; cb.onAuto = [&] { ++requested; };
+        m_strip->setCallbacks(cb);
+        TimelineStripState s; s.capture = timeline::Capture::Static; s.autoAvailable = true;
+        m_strip->setState(s);
+        const auto graph = m_strip->graphRect(), button = m_strip->itemRect("auto");
+        click(button.center()); QCOMPARE(requested, 1);
+        s.autoBusy = true;
+        s.autoMessage = QStringLiteral("A detailed explanation that should never consume graph space. ").repeated(200);
+        m_strip->setState(s);
+        QCOMPARE(m_strip->graphRect(), graph);
+        QCOMPARE(m_strip->itemRect("auto"), button);
+        QCOMPARE(m_strip->height(), TimelineStrip::kHeight);
+        send(QEvent::MouseMove, button.center(), Qt::NoButton, Qt::NoButton);
+        QVERIFY(m_strip->toolTip().contains(s.autoMessage.left(20)));
+        QVERIFY(m_strip->toolTip().size() < 500);
+        QVERIFY(m_strip->toolTip().contains(QStringLiteral("Auto details…")));
+        click(button.center()); QCOMPARE(requested, 2); // same action cancels
+        QTimer::singleShot(0, [this] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            QVERIFY(menu);
+            menu->actions().first()->trigger();
+            menu->close();
+        });
+        click(m_strip->itemRect("more").center());
+        auto* details = m_strip->findChild<QPlainTextEdit*>("autoAnalysisDetails");
+        QVERIFY(details);
+        QCOMPARE(details->toPlainText(), s.autoMessage);
+        QCOMPARE(details->lineWrapMode(), QPlainTextEdit::WidgetWidth);
+        const QString destination = qEnvironmentVariable("RCX_TIMELINE_PREVIEW_DIR");
+        if (!destination.isEmpty()) {
+            QDir().mkpath(destination);
+            QVERIFY(m_strip->grab().save(destination + "/auto-long-status.png"));
+            QVERIFY(details->window()->grab().save(destination + "/auto-details.png"));
+        }
+        s.autoBusy = false; s.autoMessage = QStringLiteral("3 fields resolved. Undo is available.");
+        m_strip->setState(s);
+        QCOMPARE(details->toPlainText(), s.autoMessage);
+        for (int width : {120, 240, 479, 480, 1080}) {
+            m_strip->resize(width, TimelineStrip::kHeight);
+            for (const auto& cell : m_strip->layout().cells)
+                QVERIFY(!cell.rect.intersects(m_strip->graphRect()));
+            QVERIFY(!m_strip->grab().isNull());
+        }
     }
 
     // Back to live, the graph follows now again however it was framed —
@@ -236,6 +298,7 @@ private slots:
         make();
         m_strip->setState(rollingState());
         const QStringList expected = {
+            QStringLiteral("Auto details…"),
             QStringLiteral("Previous Change\tCtrl+,"), QStringLiteral("Next Change\tCtrl+."),
             QStringLiteral("Show Whole Recording"),
             QStringLiteral("Clear Recording…"), QStringLiteral("Hide Timeline")};
@@ -269,7 +332,8 @@ private slots:
         m_strip->setState(s);
         QVERIFY(m_strip->emptyMessage().isEmpty());
         img = m_strip->grab().toImage();
-        QVERIFY2(!imageHasNear(img, g, m_theme.textDim, 60), "something is written on the graph");
+        const QRect ruler(m_strip->graphRect().left(), 0, m_strip->graphRect().width(), 12);
+        QVERIFY(imageHasNear(img, toDevice(ruler, dpr), m_theme.textDim, 60));
     }
 
     // A drag fires far more moves than can be served: the strip sends the
@@ -371,11 +435,9 @@ private slots:
         QVERIFY2(bare == 0, qPrintable(QStringLiteral("%1 of %2 columns without the envelope").arg(bare).arg(x1 - x0 + 1)));
     }
 
-    // The strip spends no accent colour, recording or not: red, green and
-    // amber belong to the buttons beside the address (amber also marks the
-    // past's playhead, which these states do not have). The envelope is data,
-    // in the number ink.
-    void theStripSpendsNoAccents() {
+    // Recording accents belong to the controls. The envelope uses number
+    // ink; amber marks the past's playhead, absent from these live states.
+    void onlyTheTransportUsesRecordingAccents() {
         make();
         for (timeline::Capture capture : {timeline::Capture::Rolling, timeline::Capture::Recording}) {
             TimelineStripState s = rollingState();
@@ -384,7 +446,7 @@ private slots:
             m_strip->setState(s);
             const QImage img = m_strip->grab().toImage();
             for (const QColor& c : {m_theme.markerPtr, m_theme.indHintGreen, m_theme.indHoverSpan, m_theme.focusGlow})
-                QVERIFY2(!imageHasColour(img, img.rect(), c), qPrintable(c.name()));
+                QVERIFY2(!imageHasColour(img, toDevice(m_strip->graphRect(), img.devicePixelRatio()), c), qPrintable(c.name()));
         }
     }
 
@@ -424,7 +486,7 @@ private slots:
                              Qt::NoButton, Qt::NoButton, Qt::NoModifier);
         qApp->notify(m_strip, &overMore);
         QCOMPARE(m_strip->hoverId(), QStringLiteral("more"));
-        QCOMPARE(m_strip->toolTip(), QStringLiteral("Timeline options"));
+        QCOMPARE(m_strip->toolTip(), QStringLiteral("Analysis and recording options"));
         const QPoint gp = m_strip->graphRect().center();
         QMouseEvent overGraph(QEvent::MouseMove, QPointF(gp), QPointF(m_strip->mapToGlobal(gp)),
                               Qt::NoButton, Qt::NoButton, Qt::NoModifier);
@@ -448,7 +510,9 @@ private slots:
         m_strip->setCallbacks(cb);
         m_strip->setState(s);
         QImage img = m_strip->grab().toImage();
-        QVERIFY2(!imageHasColour(img, img.rect(), m_theme.indHoverSpan), "ticks with nothing selected");
+        const QRect lane(m_strip->graphRect().left(), timeline::kSelTop, m_strip->graphRect().width(),
+                         timeline::kSelBottom - timeline::kSelTop);
+        QVERIFY2(!imageHasColour(img, toDevice(lane, img.devicePixelRatio()), m_theme.indHoverSpan), "ticks with nothing selected");
 
         s.selectionKey = 42;
         m_strip->setState(s);
@@ -698,65 +762,205 @@ private slots:
         QCOMPARE(m_strip->renderCountForTest(), renders);
     }
 
-    // A young recording FILLS the strip — it does not huddle at the right
-    // edge — and once it outgrows the window the span holds and the history
-    // scrolls out of the left instead.
-    void aYoungRecordingFillsTheStripThenScrolls() {
+    void youngRecordingsKeepOneScaleFromStartThroughScrolling() {
         make();
         TimelineStripState s = rollingState();
         s.capture = timeline::Capture::Recording;
-        s.retainedBeginMs = s.nowMs - 8'000;         // eight seconds in
-        m_strip->setState(s);
-        (void)m_strip->grab();
-        const QRect g = m_strip->graphRect();
-        {
-            const timeline::View v = m_strip->viewForTest();
-            const double begin = v.xOf(s.retainedBeginMs), end = v.xOf(s.nowMs);
-            QVERIFY2(end - begin > 0.80 * g.width(),
-                     qPrintable(QStringLiteral("8s of recording covers only %1 of %2 px")
-                                    .arg(end - begin).arg(g.width())));
-            QVERIFY(std::abs(end - double(g.right() + 1)) <= 2.0);   // now at the right edge
-        }
-        // Long past the window: the span holds, so the oldest part is off screen.
-        s.retainedBeginMs = s.nowMs - 600'000;
-        m_strip->setState(s);
-        (void)m_strip->grab();
-        {
-            const timeline::View v = m_strip->viewForTest();
-            QVERIFY2(v.xOf(s.retainedBeginMs) < g.left(), "the whole recording still fits: it never scrolls");
-            QVERIFY(std::abs(v.xOf(s.nowMs) - double(g.right() + 1)) <= 2.0);
-            // The window it settles at is the default, not something larger.
-            const double heldMs = double(g.width()) / v.pxPerMs;
-            QVERIFY2(std::abs(heldMs - double(timeline::kDefaultFollowMs)) < 1000.0,
-                     qPrintable(QStringLiteral("holds %1 ms").arg(heldMs)));
+        s.retainedBeginMs = s.nowMs - 200;
+        const int64_t start = s.retainedBeginMs;
+        double scale = 0;
+        for (int64_t age : {200, 1000, 8000, 29000, 30000, 31000, 120000}) {
+            s.nowMs = start + age;
+            m_strip->setState(s);
+            (void)m_strip->grab();
+            const auto view = m_strip->viewForTest();
+            if (!scale) scale = view.pxPerMs;
+            QCOMPARE(view.pxPerMs, scale);
+            QCOMPARE(m_strip->height(), TimelineStrip::kHeight);
+            QVERIFY(std::abs(view.xOf(s.nowMs) - m_strip->graphRect().right() - 1) < 1);
+            QCOMPARE(double(m_strip->graphRect().width()) / scale, double(timeline::kDefaultFollowMs));
         }
     }
 
-    // The trace reaches both ends of the bar: a young recording fills it,
-    // edge to edge, with no paper margin left or right.
-    void theTraceSpansTheWholeBar() {
-        make(1080, /*withPoints=*/true);
-        TimelineStripState s = rollingState();
-        s.capture = timeline::Capture::Recording;
-        s.retainedBeginMs = s.nowMs - 8'000;      // eight seconds in
+    void transportStaysClearOfGraphInkAtBothEdges() {
+        make(1080, true);
+        TimelineStripState s = rollingState(); s.capture = timeline::Capture::Recording;
         m_strip->setState(s);
+        const auto graph = m_strip->graphRect();
+        for (const auto& cell : m_strip->layout().cells) QVERIFY(!cell.rect.intersects(graph));
         const QImage img = m_strip->grab().toImage();
-        const qreal dpr = img.devicePixelRatio();
-        const QRect g = m_strip->graphRect();
-        QCOMPARE(g.left(), 0);
-        const QRgb paper = editorPaperColor(m_theme).rgb() & 0xFFFFFF;
-        auto inked = [&](int devX) {
-            for (int y = int(timeline::kBandTop * dpr); y < int(timeline::kBandBottom * dpr); ++y)
-                if ((img.pixelColor(devX, y).rgb() & 0xFFFFFF) != paper) return true;
-            return false;
+        const auto dpr = img.devicePixelRatio();
+        QVERIFY(imageHasColour(img, toDevice(m_strip->itemRect("rec"), dpr), m_theme.markerPtr));
+        QVERIFY(!imageHasColour(img, toDevice(graph, dpr), m_theme.markerPtr));
+    }
+
+    void aScrubFreezesThePaintedMappingAcrossIncomingSamples() {
+        make(1080, true);
+        TimelineStripState s = rollingState(); s.capture = timeline::Capture::Recording;
+        s.retainedBeginMs = s.nowMs - 8000;
+        m_strip->setState(s); (void)m_strip->grab();
+        m_clockMs += 71;
+        const auto before = m_strip->viewForTest();
+        const auto g = m_strip->graphRect();
+        const QPoint at(int(before.xOf(s.nowMs - 3000)), g.center().y());
+        send(QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+        s.nowMs += 500; s.dataGeneration++;
+        m_clockMs += 500; m_strip->setState(s);
+        const auto during = m_strip->viewForTest();
+        QCOMPARE(during.pxPerMs, before.pxPerMs);
+        QCOMPARE(during.tOf(at.x()), before.tOf(at.x()));
+        send(QEvent::MouseButtonRelease, at, Qt::LeftButton, Qt::NoButton);
+        QCOMPARE(m_live, 0);
+        QCOMPARE(m_scrubs.last().first, before.tOf(at.x()));
+        const auto after = m_strip->viewForTest();
+        QCOMPARE(after.tOf(at.x()), before.tOf(at.x()));
+        const auto left = after.tOf(g.left()), right = after.tOf(g.right() + 1);
+        m_host->resize(700, TimelineStrip::kHeight);
+        m_strip->resize(700, TimelineStrip::kHeight);
+        QApplication::processEvents();
+        const auto resized = m_strip->viewForTest();
+        QCOMPARE(resized.tOf(m_strip->graphRect().left()), left);
+        QCOMPARE(resized.tOf(m_strip->graphRect().right() + 1), right);
+    }
+
+    void middleDragActuallyPansAndDenseSamplesAreCached() {
+        make();
+        int calls = 0;
+        TimelineStrip::Callbacks cb;
+        cb.points = [&calls](int64_t, int64_t, int, QVector<TimelinePoint>& out) {
+            ++calls; out.clear(); return false;
         };
-        QVERIFY2(inked(0), "the bar is empty at its left edge");
-        const int rightMost = int((m_strip->itemRect(QStringLiteral("more")).left() - 10) * dpr);
-        QVERIFY2(inked(rightMost), "the bar is empty before the overflow button");
-        // And the mapping says the same thing.
-        const timeline::View v = m_strip->viewForTest();
-        QVERIFY(std::abs(v.xOf(s.retainedBeginMs) - double(g.left())) <= 2.0);
-        QVERIFY(std::abs(v.xOf(s.nowMs) - double(g.right() + 1)) <= 2.0);
+        m_strip->setCallbacks(cb);
+        auto s = rollingState(); s.capture = timeline::Capture::Recording;
+        m_strip->setState(s); (void)m_strip->grab();
+        const int beforeCalls = calls;
+        for (int i = 0; i < 5; ++i) { m_clockMs += 16; (void)m_strip->grab(); }
+        QCOMPARE(calls, beforeCalls);
+        const auto before = m_strip->window();
+        const auto beforeView = m_strip->viewForTest();
+        const auto at = m_strip->graphRect().center();
+        send(QEvent::MouseButtonPress, at, Qt::MiddleButton, Qt::MiddleButton);
+        send(QEvent::MouseMove, at + QPoint(80, 0), Qt::NoButton, Qt::MiddleButton);
+        send(QEvent::MouseButtonRelease, at + QPoint(80, 0), Qt::MiddleButton, Qt::NoButton);
+        QVERIFY(m_strip->window().t0Ms < before.t0Ms);
+        QVERIFY(!m_strip->window().follow);
+        QCOMPARE(m_strip->viewForTest().pxPerMs, beforeView.pxPerMs);
+    }
+
+    void changingTracksResetsOldScrubsAndZoom() {
+        make(); auto s = rollingState(); s.trackKey = 1;
+        m_strip->setState(s);
+        m_strip->showRange(s.nowMs - 200000, s.nowMs - 195000);
+        const auto at = m_strip->graphRect().center();
+        send(QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+        QVERIFY(m_strip->isDragging());
+        s.trackKey = 2; s.capture = timeline::Capture::Recording;
+        s.retainedBeginMs = s.nowMs - 1000; m_strip->setState(s);
+        QVERIFY(!m_strip->isDragging());
+        QVERIFY(m_strip->window().follow);
+        QCOMPARE(double(m_strip->graphRect().width()) / m_strip->viewForTest().pxPerMs,
+                 double(timeline::kDefaultFollowMs));
+        QApplication::processEvents();
+        QVERIFY(m_scrubs.isEmpty());
+    }
+
+    void parkedZoomKeepsTheTimeUnderThePointer() {
+        make(); auto s = rollingState();
+        m_strip->setState(s);
+        m_strip->showRange(s.nowMs - 180000, s.nowMs - 120000);
+        const auto g = m_strip->graphRect();
+        const QPoint at(g.left() + g.width() / 3, g.center().y());
+        const auto anchor = m_strip->viewForTest().tOf(at.x());
+        for (int i = 0; i < 6; ++i) {
+            const auto before = m_strip->viewForTest();
+            QWheelEvent e(QPointF(at), QPointF(m_strip->mapToGlobal(at)), QPoint(), QPoint(0, 120),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QApplication::sendEvent(m_strip, &e);
+            const auto after = m_strip->viewForTest();
+            QCOMPARE(after.tOf(at.x()), anchor);
+            QVERIFY(after.pxPerMs > before.pxPerMs);
+            QVERIFY(!m_strip->window().follow);
+        }
+    }
+
+    void fitIsExplicitAndLiveResumesFollowing() {
+        make(); auto s = rollingState(); s.capture = timeline::Capture::Recording;
+        m_strip->setState(s);
+        send(QEvent::MouseButtonDblClick, m_strip->graphRect().center(), Qt::LeftButton, Qt::LeftButton);
+        const auto fitted = m_strip->window();
+        QVERIFY(!fitted.follow);
+        s.nowMs += 10000; m_strip->setState(s);
+        QVERIFY(m_strip->window() == fitted);
+        click(m_strip->itemRect("live").center());
+        QVERIFY(m_strip->window().follow);
+        QCOMPARE(m_live, 1);
+    }
+
+    void transportWorksFromKeyboardAndHideCancelsPendingScrub() {
+        make(); auto s = rollingState(); m_strip->setState(s);
+        m_strip->setFocus();
+        QTest::keyClick(m_strip, Qt::Key_Right);
+        QTest::keyClick(m_strip, Qt::Key_Space);
+        QCOMPARE(m_record, 1);
+        s.past = true; s.viewedMs = s.nowMs - 1000; m_strip->setState(s);
+        QTest::keyClick(m_strip, Qt::Key_Right);
+        QTest::keyClick(m_strip, Qt::Key_Return);
+        QCOMPARE(m_live, 1);
+        const auto at = m_strip->graphRect().center();
+        send(QEvent::MouseButtonPress, at, Qt::LeftButton, Qt::LeftButton);
+        m_strip->hide();
+        QVERIFY(!m_strip->isDragging());
+        QVERIFY(!m_strip->frameTimerActiveForTest());
+        QApplication::processEvents();
+        QCOMPARE(m_scrubs.size(), 1); // restoration only, never the pending drag
+        QCOMPARE(m_scrubs.first().first, s.viewedMs);
+    }
+
+    void shortCaptureGapsHaveNoConnectingEnvelope() {
+        make(); auto s = rollingState(); s.retainedBeginMs = s.nowMs - 10000;
+        s.gaps = {{s.nowMs - 5900, s.nowMs - 5500}};
+        TimelineStrip::Callbacks cb;
+        cb.points = [s](int64_t, int64_t, int, QVector<TimelinePoint>& out) {
+            out = {{s.nowMs - 6000, 6, 0, false}, {s.nowMs - 5400, 6, 0, false}};
+            return true;
+        };
+        m_strip->setCallbacks(cb); m_strip->setState(s); (void)m_strip->grab();
+        const auto view = m_strip->viewForTest();
+        const int gapColumn = int((view.xOf(s.nowMs - 5700) - m_strip->graphRect().left()) * m_strip->devicePixelRatioF());
+        QCOMPARE(m_strip->envelopeTopForTest(gapColumn), -1);
+    }
+
+    void controlsAndGraphStaySeparateInLightAndDarkThemes() {
+        make(1080, true);
+        bool dark = false, light = false;
+        const QString destination = qEnvironmentVariable("RCX_TIMELINE_PREVIEW_DIR");
+        for (const auto& theme : ThemeManager::instance().themes()) {
+            const bool isDark = theme.background.lightness() < 128;
+            if ((isDark && dark) || (!isDark && light)) continue;
+            if (isDark) dark = true; else light = true;
+            m_strip->applyTheme(theme);
+            auto s = rollingState(); s.capture = timeline::Capture::Recording;
+            m_strip->setState(s);
+            const auto wideGraph = m_strip->graphRect();
+            auto capture = m_strip->grab();
+            QVERIFY2(imageHasNear(capture.toImage(), toDevice(wideGraph, capture.devicePixelRatioF()),
+                                  m_strip->envelopeLineColour(), 90), qPrintable(theme.name));
+            QVERIFY(qAbs(m_strip->viewForTest().xOf(s.nowMs) - (wideGraph.right() + 1)) < 1);
+            if (!destination.isEmpty()) {
+                QDir().mkpath(destination);
+                QVERIFY(capture.save(destination + (isDark ? "/timeline-dark.png" : "/timeline-light.png")));
+            }
+            s.past = true; s.viewedMs = s.nowMs - 5000; m_strip->setState(s);
+            QCOMPARE(m_strip->graphRect(), wideGraph);
+            for (int width : {120, 240, 359, 360, 720, 1080}) {
+                m_strip->resize(width, TimelineStrip::kHeight);
+                for (const auto& cell : m_strip->layout().cells)
+                    QVERIFY(!cell.rect.intersects(m_strip->graphRect()));
+                QCOMPARE(m_strip->height(), TimelineStrip::kHeight);
+                QVERIFY(!m_strip->grab().isNull());
+            }
+        }
+        QVERIFY(dark); QVERIFY(light);
     }
 
     // A trace that flows repaints every frame, not once per push. At the
@@ -810,7 +1014,7 @@ private slots:
         const timeline::View v = m_strip->viewForTest();
         const QRect g = m_strip->graphRect();
         const qreal dpr = m_strip->devicePixelRatioF();
-        const int probe = int((v.xOf(now - 60'000) - g.left()) * dpr);
+        const int probe = int((v.xOf(now - timeline::kDefaultFollowMs / 2) - g.left()) * dpr);
         const int before = m_strip->envelopeTopForTest(probe);
         QVERIFY(before >= 0);
 
@@ -833,6 +1037,31 @@ private slots:
         QVERIFY2(atStart == before, qPrintable(QStringLiteral("the scale jumped on arrival: ") + trail));
         QVERIFY2(mid > before && mid < after,
                  qPrintable(QStringLiteral("the scale snapped instead of blending: ") + trail));
+
+        // When the peak leaves the window, ordinary changes keep their height.
+        m_burst = false;
+        s.dataGeneration++;
+        s.capture = timeline::Capture::Rolling;
+        m_strip->setState(s);
+        (void)m_strip->grab();
+        m_clockMs += timeline::kScaleAnimMs;
+        (void)m_strip->grab();
+        const auto stoppedView = m_strip->viewForTest();
+        const int stoppedProbe = int((stoppedView.xOf(now - timeline::kDefaultFollowMs / 2) - g.left()) * dpr);
+        QCOMPARE(m_strip->envelopeTopForTest(stoppedProbe), after);
+        QVERIFY(!m_strip->frameTimerActiveForTest());
+
+        // A new peak can animate while capture is stopped, then go idle.
+        TimelineStrip::Callbacks taller;
+        taller.points = [now](int64_t, int64_t, int, QVector<TimelinePoint>& out) {
+            out = {{now - 1000, 200u, 0u, false}}; return true;
+        };
+        m_strip->setCallbacks(taller);
+        (void)m_strip->grab();
+        QVERIFY(m_strip->frameTimerActiveForTest());
+        m_clockMs += timeline::kScaleAnimMs;
+        (void)m_strip->grab();
+        QVERIFY(!m_strip->frameTimerActiveForTest());
     }
 
     // A quiet window is a complete answer, not "too dense": the strip must

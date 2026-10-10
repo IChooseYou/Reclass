@@ -880,138 +880,22 @@ private slots:
         QVERIFY(!bar.isEditing());
     }
 
-    // The timeline's buttons close the bar after a divider, pinned right, each
-    // named for what a click does: Record (a red dot) — Stop (a red square,
-    // red words) while recording — and, only while looking back at a
-    // recording, Back to live (a green play triangle). There is no Pause:
-    // values are live unless you look back. No time is written on either.
-    void testTimelineButtonsSayWhatTheyDo() {
+    void testTimelineControlsStayOffTheAddressBar() {
         AddressBar bar;
         bar.applyTheme(ThemeManager::instance().current());
         AddressBarState s = stateWith(twoLevel());
         bar.setState(s);
         showBar(bar, 1080);
-        // Timeline switched off: nothing there.
-        QVERIFY(bar.itemRect(QStringLiteral("tl.live")).isNull());
-        QVERIFY(bar.itemRect(QStringLiteral("tl.rec")).isNull());
-
-        s.timeline = true;
-        s.canRecord = true;
-        bar.setState(s);
-        QApplication::processEvents();
-        const QRect crumb = bar.itemRect(QStringLiteral("crumb:1"));
-        QRect rec = bar.itemRect(QStringLiteral("tl.rec"));
-        QVERIFY(!rec.isNull());
-        QVERIFY2(bar.itemRect(QStringLiteral("tl.live")).isNull(), "Back to live offered while live");
-        QCOMPARE(bar.cellText(QStringLiteral("tl.rec")), QStringLiteral("Record"));
-        QCOMPARE(rec.right() + 1 + AddressBar::kRightMargin, bar.width());
-        QVERIFY(bar.itemRect(QStringLiteral("recent")).right() + 2 * AddressBar::kDividerPad < rec.left());
-        QVERIFY(bar.traversalIds().contains(QStringLiteral("tl.rec")));
-        QImage img = grabOf(bar);
-        QVERIFY2(countColour(img, devRect(img, rec), bar.theme().markerPtr) > 0, "Record has no red dot");
-
-        int lives = 0, records = 0;
-        AddressBar::Callbacks cb;
-        cb.onTimelineBackToLive = [&lives]() { ++lives; };
-        cb.onTimelineRecord = [&records]() { ++records; };
-        bar.setCallbacks(cb);
-        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, rec.center());
-        QApplication::processEvents();
-        QCOMPARE(records, 1);
-
-        // Recording: "Stop", still pinned right, and nothing counts.
-        s.recording = true;
-        bar.setState(s);
-        QApplication::processEvents();
-        QCOMPARE(bar.cellText(QStringLiteral("tl.rec")), QStringLiteral("Stop"));
-        rec = bar.itemRect(QStringLiteral("tl.rec"));
-        QCOMPARE(rec.right() + 1 + AddressBar::kRightMargin, bar.width());
-        img = grabOf(bar);
-        QVERIFY(countColour(img, devRect(img, rec), bar.theme().markerPtr) > 0);
-        QVERIFY(bar.itemRect(QStringLiteral("tl.live")).isNull());
-
-        // Looking back at a recording: "Back to live" appears, green, beside
-        // Record; the crumbs stay where they were.
-        s.past = true;
-        bar.setState(s);
-        QApplication::processEvents();
-        const QRect live = bar.itemRect(QStringLiteral("tl.live"));
-        QVERIFY(!live.isNull());
-        QCOMPARE(bar.cellText(QStringLiteral("tl.live")), QStringLiteral("Back to live"));
-        QVERIFY(live.right() < bar.itemRect(QStringLiteral("tl.rec")).left());
-        QCOMPARE(bar.itemRect(QStringLiteral("crumb:1")), crumb);
-        img = grabOf(bar);
-        QVERIFY2(countColour(img, devRect(img, live), bar.theme().indHintGreen) > 0, "Back to live is not green");
-        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, live.center());
-        QApplication::processEvents();
-        QCOMPARE(lives, 1);
-
-        // Live again: it goes.
-        s.past = false;
-        bar.setState(s);
-        QApplication::processEvents();
-        QVERIFY(bar.itemRect(QStringLiteral("tl.live")).isNull());
-
-        // A narrow pane never lays a button past its right edge: the words go
-        // first (the glyphs stay), then one glyph is left — Back to live while
-        // looking back, Record while live — then none.
-        bool sawGlyphOnly = false;
-        for (int w : {520, 420, 320, 290, 260, 240}) {
-            bar.resize(w, bar.height());
-            bool shownLookingBack = false;
-            for (bool lookingBack : {true, false}) {
-                s.past = lookingBack;
+        for (int width : {300, 420, 720, 1080}) {
+            bar.resize(width, bar.height());
+            for (bool past : {false, true}) {
+                s.past = past;
                 bar.setState(s);
                 QApplication::processEvents();
-                for (const char* id : {"tl.live", "tl.rec", "recent"}) {
-                    const QRect r = bar.itemRect(QString::fromLatin1(id));
-                    QVERIFY2(r.isNull() || r.right() < bar.width(),
-                             qPrintable(QStringLiteral("%1 past the edge at %2 px").arg(QLatin1String(id)).arg(w)));
-                }
-                const bool live = !bar.itemRect(QStringLiteral("tl.live")).isNull();
-                const bool rec = !bar.itemRect(QStringLiteral("tl.rec")).isNull();
-                if (lookingBack) {
-                    if (rec) QVERIFY(live);                        // Back to live outlives Record
-                    shownLookingBack = live || rec;
-                    if (live && bar.cellText(QStringLiteral("tl.live")).isEmpty()) sawGlyphOnly = true;
-                } else {
-                    QVERIFY(!live);
-                    // Live, the slot Back to live would take holds Record.
-                    QVERIFY2(rec == shownLookingBack,
-                             qPrintable(QStringLiteral("Record %1 live at %2 px").arg(rec ? "shown" : "dropped").arg(w)));
-                }
-            }
-        }
-        QVERIFY2(sawGlyphOnly, "the buttons never went glyph-only before dropping");
-    }
-
-    // Record → Stop, and Back to live coming and going, never move the rest
-    // of the bar: at any width no crumb moves, folds or comes back.
-    void testTimelineButtonStatesNeverReflowTheBar() {
-        AddressBar bar;
-        bar.applyTheme(ThemeManager::instance().current());
-        AddressBarState s = stateWith(twoLevel());
-        s.timeline = true;
-        s.canRecord = true;
-        bar.setState(s);
-        showBar(bar, 1080);
-        for (int w : {300, 360, 420, 480, 560, 720}) {
-            bar.resize(w, bar.height());
-            QHash<QString, QRect> first;
-            for (int state = 0; state < 4; ++state) {
-                AddressBarState t = s;
-                t.past = state == 1 || state == 3;
-                t.recording = state >= 2;
-                bar.setState(t);
-                QApplication::processEvents();
-                for (const char* id : {"back", "fwd", "hist", "up", "src", "base", "overflow",
-                                       "crumb:0", "crumb:1", "chev:0", "chev:1"}) {
-                    const QString key = QString::fromLatin1(id);
-                    const QRect r = bar.itemRect(key);
-                    if (state == 0) first.insert(key, r);
-                    else QVERIFY2(r == first.value(key),
-                                  qPrintable(QStringLiteral("%1 moved at %2 px in state %3").arg(key).arg(w).arg(state)));
-                }
+                QVERIFY(bar.itemRect(QStringLiteral("tl.rec")).isNull());
+                QVERIFY(bar.itemRect(QStringLiteral("tl.live")).isNull());
+                QVERIFY(!bar.itemRect(QStringLiteral("base")).isNull());
+                QVERIFY(!bar.traversalIds().contains(QStringLiteral("tl.rec")));
             }
         }
     }
@@ -4143,8 +4027,15 @@ private slots:
         QApplication::processEvents();
         drillTwoLevels();
         QApplication::processEvents();
+        // The AUTO action beside each address bar consumes editor width too.
+        const int paneWidth = 700 + pane2->width() - pane2->addressBar()->width();
+        m_splitter->resize(2 * paneWidth + m_splitter->handleWidth(), 120);
+        m_splitter->setSizes({paneWidth, paneWidth});
+        QApplication::processEvents();
         AddressBar* bar1 = m_editor->addressBar();
         AddressBar* bar2 = pane2->addressBar();
+        QVERIFY(bar1->width() >= 700);
+        QVERIFY(bar2->width() >= 700);
         QVERIFY(bar1->state() == bar2->state());
         QCOMPARE(bar2->segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
                                                  QStringLiteral("QWidgetPrivate.parent"),

@@ -604,8 +604,8 @@ private slots:
             }
             QVERIFY2(all.size() == expected, qPrintable(ctx + QStringLiteral(": %1 rects, want %2").arg(all.size()).arg(expected)));
 
-            // Tree columns: one t-wide rect per run, unbroken from the top of its
-            // first row band to the bottom of its last, centred in its cell.
+            // Tree columns: square dots with two-dot gaps, centred in the cell
+            // and anchored to each row so scrolling preserves their phase.
             QVector<QRect> dashes;
             treeColumnDeviceRects(g, c.cols, 0, lines - 1, dashes);
             {
@@ -615,8 +615,11 @@ private slots:
                     QVERIFY2(x >= qFloor(treegeom::colX(g, cl.col)) && x + g.t <= qCeil(treegeom::colX(g, cl.col + 1)),
                              qPrintable(ctx + QStringLiteral(": column %1 leaves its cell").arg(cl.col)));
                     for (const TreeSpan& r : cl.runs) {
-                        const int top = treegeom::rowTop(g, r.topLine);
-                        want.append(RectKey{x, top, g.t, treegeom::rowTop(g, r.endLine + 1) - top});
+                        for (int line = r.topLine; line <= r.endLine; ++line) {
+                            const int bottom = treegeom::rowTop(g, line + 1);
+                            for (int y = treegeom::rowTop(g, line); y < bottom; y += 3 * g.t)
+                                want.append(RectKey{x, y, g.t, qMin(g.t, bottom - y)});
+                        }
                     }
                 }
                 std::sort(want.begin(), want.end());

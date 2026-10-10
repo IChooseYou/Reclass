@@ -95,6 +95,7 @@
         <file alias="color-mode.svg">vsicons/color-mode.svg</file>
         <file alias="console.svg">vsicons/console.svg</file>
         <file alias="ellipsis.svg">vsicons/ellipsis.svg</file>
+        <file alias="lightbulb-autofix.svg">vsicons/lightbulb-autofix.svg</file>
         <file alias="symbol-array.svg">vsicons/symbol-array.svg</file>
         <file alias="symbol-misc.svg">vsicons/symbol-misc.svg</file>
         <file alias="symbol-interface.svg">vsicons/symbol-interface.svg</file>

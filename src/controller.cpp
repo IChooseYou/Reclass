@@ -1337,8 +1337,6 @@ void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::navBackRequested,    this, [this, editor] { goBack(editor); });
     connect(editor, &RcxEditor::navForwardRequested, this, [this, editor] { goForward(editor); });
     connect(editor, &RcxEditor::navUpRequested,      this, [this, editor] { goUp(editor); });
-    connect(editor, &RcxEditor::timelineBackToLiveRequested, this, [this] { returnToLive(); });
-    connect(editor, &RcxEditor::timelineRecordRequested, this, [this] { timelineToggleRecording(); });
     connect(editor, &RcxEditor::historyJumpRequested, this,
             [this, editor](int delta) { jumpToHistory(delta, editor); });
     // The history menu's rows, pulled when it opens — and the label of the
@@ -2491,11 +2489,7 @@ AddressBarState RcxController::addressBarState() {
     s.canBack      = canGoBack();
     s.canForward   = canGoForward();
     s.canUp        = canGoUp();
-    // The timeline's buttons beside the address — only for a live source the
-    // timeline can record: a static file's bar keeps every pixel for the trail.
-    s.timeline  = m_timelineEnabled && m_timelineCtx != nullptr;
-    s.canRecord = m_timelineCtx != nullptr;
-    s.recording = timelineRecording();
+    // Capture controls live on the timeline; the address keeps its history indicator.
     s.past      = isViewingPast();
     return s;
 }
@@ -8077,9 +8071,11 @@ uint64_t RcxController::findOrCreateStructByName(const QString& typeName, int de
 }
 
 void RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target,
-                                    bool registerAsSavedSource) {
+                                    bool registerAsSavedSource, QString* errorOutput) {
+    if (errorOutput) errorOutput->clear();
     const auto* info = ProviderRegistry::instance().findProvider(providerIdentifier);
     if (!info || !info->plugin) {
+        if (errorOutput) { *errorOutput = QStringLiteral("Provider is not registered: ") + providerIdentifier; return; }
         ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
             QStringLiteral("Provider Unavailable"),
             QStringLiteral("Provider \"%1\" isn't registered. Make sure the plugin is loaded.")
@@ -8090,6 +8086,7 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
     QString errorMsg;
     auto provider = info->plugin->createProvider(target, &errorMsg);
     if (!provider) {
+        if (errorOutput) { *errorOutput = errorMsg.isEmpty() ? QStringLiteral("Provider could not attach") : errorMsg; return; }
         if (!errorMsg.isEmpty())
             ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
                 QStringLiteral("Couldn't Attach"), errorMsg);
@@ -8098,6 +8095,7 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
 
     if ((m_instance || m_doc->controllers.size() > 1)
         && provider->isLive() && provider->pointerSize() != m_doc->tree.pointerSize) {
+        if (errorOutput) *errorOutput = QStringLiteral("Source pointer size differs from the shared class definition");
         emit statusHint(QStringLiteral("Source pointer size differs from the shared class definition"));
         return;
     }
@@ -9380,6 +9378,13 @@ int64_t RcxController::pastTimeMs() const {
 bool RcxController::timelineRecording() const {
     return m_timelineCtx && m_timelineHub
         && m_timelineHub->mode(timelineClassId()) == tl::CaptureMode::Recording;
+}
+
+void RcxController::setAutoResolutionStatus(const QString& text, bool busy) {
+    if (m_autoResolutionMessage == text && m_autoResolutionBusy == busy) return;
+    m_autoResolutionMessage = text;
+    m_autoResolutionBusy = busy;
+    scheduleTimelineChanged();
 }
 
 QString RcxController::viewingPastHint() const {

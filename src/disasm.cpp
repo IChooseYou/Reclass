@@ -57,6 +57,22 @@ QVector<Instruction> decodeRange(const QByteArray& bytes, uint64_t baseAddr,
         ins.length = ret;
         ins.ok     = true;
         ins.text   = QString::fromLatin1(fmtBuf);
+        ins.mnemonic = QString::fromLatin1(fdi_name(FD_TYPE(&instr)));
+        for (int i = 0; i < 4; ++i) {
+            if (FD_OP_TYPE(&instr, i) != FD_OT_MEM
+                && FD_OP_TYPE(&instr, i) != FD_OT_MEMBCST) continue;
+            MemoryOperand operand;
+            operand.width = FD_OP_SIZE(&instr, i);
+            const int base = FD_OP_BASE(&instr, i);
+            const int index = FD_OP_INDEX(&instr, i);
+            operand.baseRegister = base == FD_REG_NONE ? -1 : base;
+            operand.indexRegister = index == FD_REG_NONE ? -1 : index;
+            operand.scale = 1 << FD_OP_SCALE(&instr, i);
+            operand.segment = FD_SEGMENT(&instr) == FD_REG_NONE ? -1 : int(FD_SEGMENT(&instr));
+            operand.displacement = FD_OP_DISP(&instr, i);
+            operand.instructionRelative = base == FD_REG_IP;
+            ins.memoryOperands.append(operand);
+        }
         // A relative branch or a RIP-relative reference stores its
         // displacement as an FD_OT_OFF operand, measured from the END of the
         // instruction — the same arithmetic the formatter does.

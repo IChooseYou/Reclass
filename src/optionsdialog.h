@@ -1,4 +1,5 @@
 #pragma once
+#include "core.h"
 #include "widgets/themed_dialog.h"
 #include <QLineEdit>
 #include <QTreeWidget>
@@ -16,7 +17,7 @@ struct OptionsResult {
     bool    menuBarTitleCase = true;
     bool    showIcon = false;
     bool    autoStartMcp = true;
-    int     refreshMs = 660;
+    int     refreshMs = kDefaultRefreshMs;
     bool    generatorAsserts = false;
     bool    braceWrap = false;
     int     floatDecimals = 3;   // fmt::kDefaultFloatDecimals

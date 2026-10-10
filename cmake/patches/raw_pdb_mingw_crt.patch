@@ -1,0 +1,14 @@
+diff --git a/src/Foundation/PDB_CRT.h b/src/Foundation/PDB_CRT.h
+index 539dab3..1ae4919 100644
+--- a/src/Foundation/PDB_CRT.h
++++ b/src/Foundation/PDB_CRT.h
+@@ -7,2 +7,6 @@
+ // avoid pulling in different headers just for a few declarations
++#ifdef __MINGW32__
++#include <cstdio>
++#include <cstring>
++#else
+ extern "C" int __cdecl printf(char const* const _Format, ...);
+@@ -14 +18,2 @@ extern "C" size_t __cdecl strlen(char const* _Str);
+ extern "C" int __cdecl strcmp(char const* _Str1, char const* _Str2);
++#endif

@@ -50,14 +50,7 @@ struct AddressBarState {
     bool           canBack = false;
     bool           canForward = false;
     bool           canUp = false;
-    // The timeline's buttons beside the address — Record / Stop, and Back to
-    // live while looking back at a recording — present only while the
-    // timeline is switched on for a live source. Values are live otherwise:
-    // there is no pausing them.
-    bool           timeline = false;
-    bool           canRecord = false;    // a live source the timeline can record
-    bool           recording = false;
-    // Looking back at a recording: "Back to live" appears.
+    // The source indicator still identifies read-only history.
     bool           past = false;
 
     bool operator==(const AddressBarState& o) const {
@@ -73,9 +66,6 @@ struct AddressBarState {
             && canBack == o.canBack
             && canForward == o.canForward
             && canUp == o.canUp
-            && timeline == o.timeline
-            && canRecord == o.canRecord
-            && recording == o.recording
             && past == o.past;
     }
     bool operator!=(const AddressBarState& o) const { return !(*this == o); }

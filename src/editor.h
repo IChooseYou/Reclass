@@ -17,6 +17,7 @@
 
 class QLabel;
 class QLineEdit;
+class QToolButton;
 class QPainter;
 class QsciScintilla;
 class QsciLexerCPP;
@@ -303,8 +304,6 @@ signals:
     void classRenameRequested(uint64_t classId, const QString& newName);
     void navBackRequested();
     void navForwardRequested();
-    void timelineBackToLiveRequested();   // the address bar's "Back to live"
-    void timelineRecordRequested();   // the address bar's Record / Stop
     void navUpRequested();
     void historyJumpRequested(int entry);
     void refreshRequested();                                  // source context menu
@@ -679,7 +678,7 @@ private:
     void reformatMargins(int firstLine = -1, int lastLine = -1);
     // The document-tone pass: assigns IND_HEX_BYTE (the hex value span, the
     // brightest ink), IND_HEX_DIM (furniture), IND_HEX_TYPE (hex type column
-    // + name slot) and IND_ZERO (ASCII column + 00 bytes).
+    // + name slot) and IND_ZERO (ASCII column + 00 bytes + footer tools).
     // Needs the composed line text to find the zero tokens and the footer
     // pill glyphs it must leave un-dimmed.
     void applyHexDimming(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,

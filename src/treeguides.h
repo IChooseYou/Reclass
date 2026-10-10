@@ -521,8 +521,9 @@ inline void treeGuideDeviceRects(const TreeGuideGeom& g, const TreeGuides& tg,
 }
 
 // Device-px rectangles for the column lines touching rows [firstLine,
-// lastLine], clipped to g.clipDev: one t-wide rect per run, from the top of its
-// first row band to the bottom of its last. A run through `skipLine` with a
+// lastLine], clipped to g.clipDev: t-square dots with a two-dot gap. Anchor
+// the pattern to each row so clipping and partial repaints keep it stable.
+// A run through `skipLine` with a
 // column at or right of `skipFromCol` leaves that row's band out — the row an
 // inline edit is shifting, whose text no longer matches its composed cells.
 inline void treeColumnDeviceRects(const TreeGuideGeom& g, const TreeColumns& tc,
@@ -537,11 +538,15 @@ inline void treeColumnDeviceRects(const TreeGuideGeom& g, const TreeColumns& tc,
         const int x = treegeom::cellLineX(g, cl.col);
         const bool skipping = skipLine >= 0 && cl.col >= skipFromCol;
         auto add = [&](int top, int end) {
-            if (end < top) return;
-            const int y0 = treegeom::rowTop(g, top);
-            const int y1 = treegeom::rowTop(g, end + 1);
-            const QRect r = QRect(x, y0, g.t, y1 - y0).intersected(g.clipDev);
-            if (!r.isEmpty()) out.append(r);
+            for (int line = qMax(top, firstLine); line <= qMin(end, lastLine); ++line) {
+                const int y0 = treegeom::rowTop(g, line);
+                const int y1 = treegeom::rowTop(g, line + 1);
+                for (int y = y0; y < y1; y += 3 * g.t) {
+                    const QRect r = QRect(x, y, g.t, qMin(g.t, y1 - y))
+                                        .intersected(g.clipDev);
+                    if (!r.isEmpty()) out.append(r);
+                }
+            }
         };
         // Disjoint and sorted, so endLine is sorted too.
         auto it = std::lower_bound(cl.runs.begin(), cl.runs.end(), firstLine,

@@ -6,6 +6,16 @@
 
 namespace rcx {
 
+struct MemoryOperand {
+    int width = 0;
+    int baseRegister = -1;   // x86 GPR number; 16 = instruction pointer
+    int indexRegister = -1;
+    int scale = 1;
+    int segment = -1;       // override: ES=0, CS=1, SS=2, DS=3, FS=4, GS=5; -1=default
+    int64_t displacement = 0;
+    bool instructionRelative = false;
+};
+
 // ── One decoded x86 instruction ──
 //
 // The structured form of what `disassemble()` used to flatten into a single
@@ -18,6 +28,8 @@ struct Instruction {
     QString  text;            // "mov rax, [rcx]", or "db 0xcc" when !ok
     uint64_t target = 0;      // absolute branch/call target; 0 = not a branch
     bool     ok     = false;  // false = a raw byte we could not decode
+    QString mnemonic;
+    QVector<MemoryOperand> memoryOperands;
 };
 
 // Decode a run of x86 code. `bitness` is 32 or 64; 16-bit is not supported by
