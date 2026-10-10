@@ -8,6 +8,8 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QDir>
+#include <QFile>
+#include <QJsonDocument>
 
 #include "themes/theme.h"
 #include "widgets/chrome_fallback_theme.h"
@@ -934,9 +936,16 @@ private slots:
         make(1080, true);
         bool dark = false, light = false;
         const QString destination = qEnvironmentVariable("RCX_TIMELINE_PREVIEW_DIR");
-        for (const auto& theme : ThemeManager::instance().themes()) {
+        // This standalone test has no macOS app bundle. Load the shipped
+        // fixtures directly, independent of deployment paths and user themes.
+        for (const QString& name : {QStringLiteral("vs"), QStringLiteral("tw")}) {
+            QFile file(QStringLiteral(RCX_SOURCE_DIR "/src/themes/defaults/") + name + ".json");
+            QVERIFY2(file.open(QIODevice::ReadOnly), qPrintable(file.fileName() + ": " + file.errorString()));
+            const auto document = QJsonDocument::fromJson(file.readAll());
+            QVERIFY2(document.isObject(), qPrintable(file.fileName()));
+            const Theme theme = Theme::fromJson(document.object());
+            QVERIFY2(theme.background.isValid(), qPrintable(file.fileName()));
             const bool isDark = theme.background.lightness() < 128;
-            if ((isDark && dark) || (!isDark && light)) continue;
             if (isDark) dark = true; else light = true;
             m_strip->applyTheme(theme);
             auto s = rollingState(); s.capture = timeline::Capture::Recording;

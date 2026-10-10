@@ -857,6 +857,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp
         src/resources.qrc)
     target_include_directories(test_timeline_strip PRIVATE src)
+    target_compile_definitions(test_timeline_strip PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_link_libraries(test_timeline_strip PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
     add_test(NAME test_timeline_strip COMMAND test_timeline_strip)
 
