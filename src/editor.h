@@ -373,6 +373,7 @@ private:
     friend class RcxSciView;
     void snapshotTreeGuideFrame();
     void paintTreeGuides(QPainter& p);
+    void paintRowSelectionAccents(QPainter& p);
     struct TreeGuideFrame {
         bool  valid = false;
         int   lineCount = 0, first = 0, lh = 1, ea = 0, ed = 0, xOrigin = 0, textStart = 0;
@@ -675,6 +676,9 @@ private:
     // Rebuild M_SELECTED/M_ACCENT + editable-span underlines for every line
     // of every selected id (delete-all + re-add; see the definition).
     void paintSelectionMarkers(const QSet<uint64_t>& selIds);
+    void updateSelectionMarginStyles();
+    QVector<int> m_selectedMarginLines;
+    QColor m_rowSelectionAccent;
     void reformatMargins(int firstLine = -1, int lastLine = -1);
     // The document-tone pass: assigns IND_HEX_BYTE (the hex value span, the
     // brightest ink), IND_HEX_DIM (furniture), IND_HEX_TYPE (hex type column

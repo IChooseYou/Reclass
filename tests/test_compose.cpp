@@ -3,6 +3,7 @@
 #include <QFile>
 #include "core.h"
 #include "treeguides.h"
+#include "tree_fixture.h"
 
 using namespace rcx;
 
@@ -1909,6 +1910,85 @@ private slots:
         // Standalone Heavy rendering adds lines at depth 1,
         // but pointer expansion at depth >= 2 should be zero
         QCOMPARE(expandedLines, 0);
+    }
+
+    void testPointerColumnsStayLocal_data() {
+        QTest::addColumn<bool>("pointer64");
+        QTest::addColumn<bool>("compact");
+        QTest::addColumn<bool>("materialized");
+        for (bool pointer64 : {false, true})
+            for (bool compact : {false, true})
+                for (bool materialized : {false, true}) {
+                    const QByteArray tag = QStringLiteral("%1-%2-%3")
+                        .arg(pointer64 ? "64" : "32", compact ? "compact" : "wide",
+                             materialized ? "materialized" : "virtual").toLatin1();
+                    QTest::newRow(tag.constData()) << pointer64 << compact << materialized;
+                }
+    }
+
+    void testPointerColumnsStayLocal() {
+        QFETCH(bool, pointer64);
+        QFETCH(bool, compact);
+        QFETCH(bool, materialized);
+        const NodeKind kind = pointer64 ? NodeKind::Pointer64 : NodeKind::Pointer32;
+        const auto isolated = treefix::pointerColumnsTree(kind, materialized, false);
+        const auto crowded = treefix::pointerColumnsTree(kind, materialized, true);
+        NullProvider prov;
+        const auto before = compose(isolated.tree, prov, isolated.rootId, compact, true);
+        const auto result = compose(crowded.tree, prov, crowded.rootId, compact, true);
+
+        // Opening/importing a different class cannot move this view's columns
+        // or create horizontal overflow. This also covers the no-source view.
+        QCOMPARE(result.text, before.text);
+        QCOMPARE(result.maxLineLen, before.maxLineLen);
+        const QStringList lines = result.text.split('\n');
+        int parentLine = -1;
+        int childLine = -1;
+        int pointerFooter = -1;
+        for (int i = 0; i < result.meta.size(); ++i) {
+            const auto& lm = result.meta[i];
+            if (lm.depth == 1 && lm.lineKind == LineKind::Header && lm.nodeKind == kind)
+                parentLine = i;
+            if (childLine < 0 && lm.depth == 2 && lm.nodeKind == kind)
+                childLine = i;
+            if (lm.lineKind == LineKind::Footer && lm.nodeKind == kind)
+                pointerFooter = i;
+        }
+        QVERIFY(parentLine >= 0);
+        QVERIFY(childLine >= 0);
+        QVERIFY(pointerFooter >= 0);
+        const auto parent = LineGeometry::forLine(result.meta[parentLine]);
+        const auto child = LineGeometry::forLine(result.meta[childLine]);
+        QCOMPARE(child.nameStart() - parent.nameStart(), kTreeIndent);
+        QCOMPARE(child.valueStart() - parent.valueStart(), kTreeIndent);
+        QCOMPARE(lines[childLine].indexOf(QStringLiteral("Flink"))
+                 - lines[parentLine].indexOf(QStringLiteral("Flink")), kTreeIndent);
+
+        // A locally grown pointer displays its own span, while virtual
+        // expansion still displays the referenced class's span.
+        const int rootSize = pointer64 ? 16 : 8;
+        const int shownSize = rootSize + (materialized ? 16 : 0);
+        QVERIFY(lines[pointerFooter].endsWith(QStringLiteral("// 0x%1 (%2)")
+            .arg(QString::number(shownSize, 16).toUpper()).arg(shownSize)));
+        QVERIFY(result.text.contains(QStringLiteral("// 0x%1 (%2)")
+            .arg(QString::number(rootSize, 16).toUpper()).arg(rootSize)));
+    }
+
+    void testPointerFooterCanBeSmallerThanPointer() {
+        auto fx = treefix::pointerColumnsTree(NodeKind::Pointer64, false, false);
+        const uint64_t ptrId = fx.tree.nodes[fx.tree.childrenOf(fx.rootId).first()].id;
+        treefix::add(fx.tree, NodeKind::Hex8, QString(), ptrId, 0);
+        NullProvider prov;
+        const auto result = compose(fx.tree, prov, fx.rootId);
+        const auto lines = result.text.split('\n');
+        bool found = false;
+        for (int i = 0; i < result.meta.size(); ++i) {
+            if (result.meta[i].nodeId == ptrId && result.meta[i].lineKind == LineKind::Footer) {
+                QVERIFY(lines[i].endsWith(QStringLiteral("// 0x1 (1)")));
+                found = true;
+            }
+        }
+        QVERIFY(found);
     }
 
     void testPointerWidthComputation() {

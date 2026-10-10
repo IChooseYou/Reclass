@@ -1451,7 +1451,21 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 lm.markerMask = 0;
                 QString footerText = fmt::indent(depth)
                     + QStringLiteral("}  +1 +10h +100h +1000h Trim Top");
-                int refSz = tree.structSpan(node.refId, &state.childMap);
+                int refSz = 0;
+                if (hasMaterialized) {
+                    // Local edits can grow or trim the pointee independently
+                    // of its template. Measure the children, not the pointer's
+                    // own byte size (a pointee may be smaller than a pointer).
+                    for (int ci : ptrChildren) {
+                        const Node& child = tree.nodes[ci];
+                        int sz = isContainerKind(child.kind)
+                            ? tree.structSpan(child.id, &state.childMap) : child.byteSize();
+                        int64_t end = int64_t(child.offset) + sz;
+                        refSz = qMax(refSz, int(qMin(end, int64_t(INT_MAX))));
+                    }
+                } else {
+                    refSz = tree.structSpan(node.refId, &state.childMap);
+                }
                 if (refSz > 0)
                     footerText += QStringLiteral("  // 0x%1 (%2)")
                         .arg(QString::number(refSz, 16).toUpper()).arg(refSz);
@@ -1597,10 +1611,13 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     state.typeW = qBound(kMinTypeW, maxTypeLen, typeCap);
     state.nameW = qBound(kMinNameW, maxNameLen, kMaxNameW);
 
-    // Pre-compute per-scope widths (each container gets widths based on direct children only)
+    // Each container, including an expanded pointer with local children,
+    // gets widths based on its direct children only.
     for (int i = 0; i < tree.nodes.size(); i++) {
         const Node& container = tree.nodes[i];
-        if (container.kind != NodeKind::Struct && container.kind != NodeKind::Array)
+        const bool pointerScope = isPointerKind(container.kind)
+                               && state.childMap.contains(container.id);
+        if (!isContainerKind(container.kind) && !pointerScope)
             continue;
 
         int scopeMaxType = kMinTypeW;

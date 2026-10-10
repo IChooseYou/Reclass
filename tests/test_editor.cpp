@@ -31,6 +31,7 @@
 #include <Qsci/qsciscintillabase.h>
 #include "editor.h"
 #include "core.h"
+#include "tree_fixture.h"
 
 using namespace rcx;
 
@@ -4122,20 +4123,32 @@ private slots:
     // value-preview popups on the rows above). Pinned so it cannot creep back
     // in unnoticed — hovering every pill must leave the viewport tooltip empty.
     void testFooterPillsHaveNoTooltip() {
-        m_editor->applyDocument(m_result);
+        const auto fx = treefix::pointerColumnsTree();
+        NullProvider prov;
+        const auto result = compose(fx.tree, prov, fx.rootId, true, true);
+        m_editor->applyDocument(result);
         auto* sci = m_editor->scintilla();
-        const int line = firstPillFooterLine(m_editor);
-        QVERIFY(line >= 0);
-        const QString ft = sci->text(line);
-        scrollLineIntoView(sci, line);
-        for (const char* token : { " +1 ", "+10h", "+100h", "+1000h", "Trim", "Top" }) {
-            const int at = ft.indexOf(QString::fromLatin1(token));
-            QVERIFY2(at >= 0, token);
-            const int col = at + (QString::fromLatin1(token).startsWith(' ') ? 1 : 0);
-            sendMouseMove(sci->viewport(), colToViewport(sci, line, col));
-            QApplication::processEvents();
-            QVERIFY2(sci->viewport()->toolTip().isEmpty(), token);
+        int footers = 0;
+        for (int line = 0; line < result.meta.size(); ++line) {
+            const auto& lm = result.meta[line];
+            if (lm.lineKind != LineKind::Footer) continue;
+            ++footers;
+            const QString ft = sci->text(line);
+            scrollLineIntoView(sci, line);
+            QStringList tokens = { QStringLiteral(" +1 "), QStringLiteral("+10h"),
+                                   QStringLiteral("Trim"), QStringLiteral("Top") };
+            if (isPointerKind(lm.nodeKind))
+                tokens << QStringLiteral("+100h") << QStringLiteral("+1000h");
+            for (const QString& token : tokens) {
+                const int at = ft.indexOf(token);
+                QVERIFY2(at >= 0, qPrintable(token));
+                const int col = at + (token.startsWith(' ') ? 1 : 0);
+                sendMouseMove(sci->viewport(), colToViewport(sci, line, col));
+                QApplication::processEvents();
+                QVERIFY2(sci->viewport()->toolTip().isEmpty(), qPrintable(token));
+            }
         }
+        QCOMPARE(footers, 2);
     }
 
     // ══ documentApplied (P0 #5) ═════════════════════════════════════════

@@ -1810,8 +1810,8 @@ protected:
     void paintEvent(QPaintEvent* e) override {
         QsciScintilla::paintEvent(e);
         m_owner->snapshotTreeGuideFrame();
-        if (!m_owner->m_guideFrame.valid) return;
         QPainter p(viewport());
+        m_owner->paintRowSelectionAccents(p);
         m_owner->paintTreeGuides(p);
     }
 
@@ -2413,9 +2413,14 @@ void RcxEditor::setupMargins() {
     m_sci->setMarginWidth(0, "  00000000  ");  // default 8-digit; resized dynamically in applyDocument()
     m_sci->setMarginSensitivity(0, true);
 
-    // Margin 1: 2px accent bar (selection indicator)
+    // Margin 1 bridges the address and text selection backgrounds. The
+    // selection accent is painted at the viewport's left edge instead.
     m_sci->setMarginType(1, QsciScintilla::SymbolMargin);
-    m_sci->setMarginWidth(1, 2);
+    const int textPadding = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINLEFT);
+    m_sci->setMarginWidth(1, 2 + textPadding);
+    // Fold Scintilla's unstyled text padding into the bridge so it cannot
+    // leave a paper-colored seam through a selected row.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINLEFT, 0UL, 0L);
     m_sci->setMarginSensitivity(1, false);
     m_sci->setMarginMarkerMask(1, 1 << M_ACCENT);
 }
@@ -2463,7 +2468,8 @@ void RcxEditor::setupMarkers() {
     // M_CMD_ROW (8): distinct background for CommandRow bar
     m_sci->markerDefine(QsciScintilla::Background, M_CMD_ROW);
 
-    // M_ACCENT (9): 2px accent bar in margin 1 (selection indicator)
+    // M_ACCENT (9): selection bridge in margin 1; also marks the rows whose
+    // accent is painted at the editor's left edge.
     m_sci->markerDefine(QsciScintilla::FullRectangle, M_ACCENT);
 
     // M_FOCUS (10): presentation mode AI focus glow
@@ -2488,14 +2494,16 @@ void RcxEditor::allocateMarginStyles() {
     static constexpr int MSTYLE_CONT   = 1;  // continuation rows
     static constexpr int MSTYLE_BRIGHT = 2;  // innermost-depth rows (bright)
 
-    long base = m_sci->SendScintilla(QsciScintillaBase::SCI_ALLOCATEEXTENDEDSTYLES, (long)3);
+    static constexpr int MSTYLE_SELECTED = 3;  // full-row selection in address gutter
+
+    long base = m_sci->SendScintilla(QsciScintillaBase::SCI_ALLOCATEEXTENDEDSTYLES, (long)4);
     m_marginStyleBase = (int)base;
     m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLEOFFSET, base);
 
     QByteArray fontName = editorFont().family().toUtf8();
     int fontSize = editorFont().pointSize();
 
-    for (int s = MSTYLE_NORMAL; s <= MSTYLE_BRIGHT; s++) {
+    for (int s = MSTYLE_NORMAL; s <= MSTYLE_SELECTED; s++) {
         unsigned long abs = (unsigned long)(base + s);
         m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFONT,
                              (uintptr_t)abs, fontName.constData());
@@ -2651,7 +2659,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->setMarkerBackgroundColor(theme.hover, M_HOVER);
     m_sci->setMarkerBackgroundColor(theme.selected, M_SELECTED);
     m_sci->setMarkerBackgroundColor(editorBg, M_CMD_ROW);
-    m_sci->setMarkerBackgroundColor(theme.indHoverSpan, M_ACCENT);
+    m_sci->setMarkerBackgroundColor(theme.selected, M_ACCENT);
+    m_rowSelectionAccent = theme.indHoverSpan;
     m_sci->setMarkerBackgroundColor(theme.focusGlow, M_FOCUS);
     m_focusGlowColor = theme.focusGlow;
 
@@ -2676,6 +2685,10 @@ void RcxEditor::applyTheme(const Theme& theme) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
                                  abs, editorBg);
         }
+        m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE,
+                             (unsigned long)(base + 3), theme.text);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
+                             (unsigned long)(base + 3), theme.selected);
     }
 
     // Find bar
@@ -3315,6 +3328,7 @@ void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta, int firstLine
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETFOLDLEVEL,
                              (unsigned long)i, (long)lm.foldLevel);
     }
+    updateSelectionMarginStyles();
 }
 
 void RcxEditor::reformatMargins(int firstLine, int lastLine) {
@@ -3379,6 +3393,8 @@ void RcxEditor::reformatMargins(int firstLine, int lastLine) {
         m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLES,
                              (uintptr_t)i, styles.constData());
     }
+
+    updateSelectionMarginStyles();
 
     // ── Pass 2: inline local offsets in the text indent area ──
     // Skip when tree lines are on: they are drawn over the indent
@@ -3753,6 +3769,45 @@ void RcxEditor::paintSelectionMarkers(const QSet<uint64_t>& selIds) {
             if (m_meta[ln].lineKind != LineKind::Footer)
                 paintEditableSpans(ln);
         }
+    }
+    updateSelectionMarginStyles();
+}
+
+void RcxEditor::updateSelectionMarginStyles() {
+    // Style the displayed rows, including blank footer/continuation gutters.
+    // Keep Scintilla responsible for the address glyphs and their metrics.
+    for (int line : std::as_const(m_selectedMarginLines)) {
+        if (line < m_meta.size())
+            m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLE,
+                                 (unsigned long)line, 0L);
+    }
+    m_selectedMarginLines.clear();
+    for (long line = m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERNEXT,
+                                          0UL, 1L << M_SELECTED);
+         line >= 0 && line < m_meta.size();
+         line = m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERNEXT,
+                                     (unsigned long)(line + 1), 1L << M_SELECTED)) {
+        if (m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINGETTEXT,
+                                (uintptr_t)line, static_cast<char*>(nullptr)) == 0)
+            m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETTEXT,
+                                 (uintptr_t)line, " ");
+        m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETSTYLE,
+                             (unsigned long)line, 3L);
+        m_selectedMarginLines.append((int)line);
+    }
+}
+
+void RcxEditor::paintRowSelectionAccents(QPainter& p) {
+    const int first = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+    const int lh = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+    if (lh <= 0 || !m_rowSelectionAccent.isValid()) return;
+    const int last = first + m_sci->viewport()->height() / lh + 1;
+    for (long line = m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERNEXT,
+                                          (unsigned long)first, 1L << M_ACCENT);
+         line >= 0 && line <= last;
+         line = m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERNEXT,
+                                     (unsigned long)(line + 1), 1L << M_ACCENT)) {
+        p.fillRect(QRect(0, ((int)line - first) * lh, 2, lh), m_rowSelectionAccent);
     }
 }
 

@@ -37,6 +37,40 @@ struct Rich {
     uint64_t rootId = 0;
 };
 
+// The expanded, locally edited pointer from issue.png. An unrelated class
+// deliberately has wide columns: it must not affect this pointer's children.
+inline Rich pointerColumnsTree(NodeKind pointerKind = NodeKind::Pointer64,
+                               bool materialized = true, bool wideNeighbor = true) {
+    Rich r;
+    NodeTree& t = r.tree;
+    t.baseAddress = 0xFFFFCA8010000000ULL;
+    r.rootId = add(t, NodeKind::Struct, QStringLiteral("_LIST_ENTRY"), 0, 0);
+    node(t, r.rootId).structTypeName = QStringLiteral("_LIST_ENTRY");
+    const int ptrSize = pointerKind == NodeKind::Pointer64 ? 8 : 4;
+    const uint64_t flink = add(t, pointerKind, QStringLiteral("Flink"), r.rootId, 0);
+    node(t, flink).refId = r.rootId;
+    const uint64_t blink = add(t, pointerKind, QStringLiteral("Blink"), r.rootId, ptrSize, true);
+    node(t, blink).refId = r.rootId;
+    if (materialized) {
+        for (int i = 0; i < 2; ++i) {
+            const uint64_t child = add(t, pointerKind, i == 0 ? QStringLiteral("Flink")
+                                                            : QStringLiteral("Blink"),
+                                       flink, i * ptrSize, true);
+            node(t, child).refId = r.rootId;
+        }
+        add(t, NodeKind::Hex64, QString(), flink, 2 * ptrSize);
+        add(t, NodeKind::Hex64, QString(), flink, 2 * ptrSize + 8);
+    }
+    if (wideNeighbor) {
+        const uint64_t other = add(t, NodeKind::Struct,
+                                  QStringLiteral("UnrelatedClassWithALongTypeName"), 0, 0);
+        node(t, other).structTypeName = node(t, other).name;
+        const uint64_t field = add(t, pointerKind, QString(80, QLatin1Char('x')), other, 0, true);
+        node(t, field).refId = other;
+    }
+    return r;
+}
+
 // Every child kind in one class. Offsets are real so values decode; the
 // pointers aim at 0x200, inside the buffer.
 inline Rich richTree(bool lastChildIsMatrix = true) {

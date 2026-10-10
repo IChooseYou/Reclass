@@ -241,6 +241,39 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (mode == QStringLiteral("columns")) {
+        // Reproduce issue.png, including a separate class with wide names.
+        // editor_render <out.png> columns [zoom] [width] [selectedLine]
+        QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/JetBrainsMono.ttf"));
+        const auto fx = treefix::pointerColumnsTree();
+        doc->tree = fx.tree;
+        doc->provider = std::make_shared<NullProvider>();
+        ctrl->setEditorFont(QStringLiteral("JetBrains Mono"));
+        ctrl->setCompactColumns(true);
+        ctrl->setTreeLines(true);
+        ctrl->setTreeColumns(true);
+        ctrl->setViewRootId(fx.rootId);
+        splitter->resize(argc > 4 ? std::atoi(argv[4]) : 1312, 530);
+        ctrl->refresh();
+        editor->scintilla()->zoomTo(argc > 3 ? std::atoi(argv[3]) : 1);
+        editor->setRelativeOffsets(false);
+        if (argc > 5) {
+            const int line = std::atoi(argv[5]);
+            const auto& meta = ctrl->lastResult().meta;
+            if (line >= 0 && line < meta.size()) {
+                const uint64_t id = selIdForLine(meta[line]);
+                editor->applySelectionOverlay({id}, {{id, anchorForLine(meta, line)}});
+            }
+        }
+        app.processEvents();
+        editor->grab().save(out);
+        std::printf("columns: longest line %d, scroll width %ld -> %s\n",
+                    ctrl->lastResult().maxLineLen,
+                    editor->scintilla()->SendScintilla(QsciScintillaBase::SCI_GETSCROLLWIDTH),
+                    qPrintable(out));
+        return 0;
+    }
+
     if (mode == QStringLiteral("tree")) {
         // Drawn tree lines: editor_render <out.png> tree <zoom> <firstLine> <xOffset> [brace]
         // over the rich fixture (every kind of child row), in the app's font,

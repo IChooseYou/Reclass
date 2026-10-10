@@ -34,6 +34,7 @@
 #include "treeguides.h"
 #include "providers/buffer_provider.h"
 #include "tree_fixture.h"
+#include "themes/thememanager.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -827,6 +828,62 @@ private slots:
         QCOMPARE(copied.mid(kFoldCol, 2 * kTreeIndent), m_editor->treePrefixForLine(row));
         QVERIFY(copied.contains(QChar(0x251C)) || copied.contains(QChar(0x2514)));
         QVERIFY(m_editor->textWithMargins().contains(copied));
+    }
+
+    void selectionSpansTheEditorIncludingAddresses() {
+        // Check real pixels, including the gutter/text seam, at every display
+        // scale this executable runs. Nesting must not move the band's edge.
+        Theme theme = ThemeManager::instance().current();
+        theme.selected = QColor::fromRgb(kBand);
+        theme.indHoverSpan = QColor(64, 160, 255);
+        m_editor->applyTheme(theme);
+        m_fx = treefix::pointerColumnsTree();
+        apply(false);
+        QCOMPARE(m_meta.size(), 9);
+
+        for (bool relative : {false, true}) {
+            for (int zoom : {0, 3}) {
+                setView(zoom, 0, 0);
+                m_editor->setRelativeOffsets(relative);
+                // Include a nested field, an expanded parent and a footer
+                // with no address text, both at rest and scrolled sideways.
+                for (int line : {1, 2, 6}) {
+                    for (int xOffset : {0, 29}) {
+                        sci(s(), Sci::SCI_SETSCROLLWIDTH, 2400);
+                        setView(zoom, 0, xOffset);
+                        const uint64_t id = selIdForLine(m_meta[line]);
+                        m_editor->applySelectionOverlay({id}, {{id, anchorForLine(m_meta, line)}});
+                        const QImage img = frame();
+                        const Live live = liveGeometry();
+                        const int y = treegeom::snapEdge(live.g.oy
+                            + live.g.sy * ((line - live.g.first) * live.g.lh + 1));
+                        const int left = live.viewportDev.left();
+                        const int seam = live.g.clipDev.left();
+                        const QVector<int> probes = {
+                            left + qRound(8 * g_scale), (left + seam) / 2,
+                            seam - 1, seam + 1, live.viewportDev.right() - 4
+                        };
+                        const QString context = QStringLiteral("scale %1 relative %2 zoom %3 line %4 scroll %5")
+                            .arg(g_scale).arg(relative).arg(zoom).arg(line).arg(xOffset);
+                        for (int x : probes)
+                            QVERIFY2(isBand(img.pixel(x, y)), qPrintable(context + QStringLiteral(" x %1").arg(x)));
+                        QCOMPARE(img.pixel(left, y) & 0xFFFFFF, theme.indHoverSpan.rgb() & 0xFFFFFF);
+
+                        // Changing the gutter's format while selected must
+                        // preserve the fill; clearing selection must erase it.
+                        m_editor->setRelativeOffsets(!relative);
+                        QImage reformatted = frame();
+                        QCOMPARE(reformatted.pixel(left, y) & 0xFFFFFF, theme.indHoverSpan.rgb() & 0xFFFFFF);
+                        QVERIFY(isBand(reformatted.pixel(left + qRound(8 * g_scale), y)));
+                        m_editor->applySelectionOverlay({});
+                        const QImage cleared = frame();
+                        QVERIFY(!isBand(cleared.pixel(left + qRound(8 * g_scale), y)));
+                        QVERIFY((cleared.pixel(left, y) & 0xFFFFFF) != (theme.indHoverSpan.rgb() & 0xFFFFFF));
+                        m_editor->setRelativeOffsets(relative);
+                    }
+                }
+            }
+        }
     }
 };
 
