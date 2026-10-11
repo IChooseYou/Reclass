@@ -4630,6 +4630,17 @@ void RcxEditor::scrollToNodeId(uint64_t nodeId) {
     }
 }
 
+bool RcxEditor::selectNodeId(uint64_t nodeId) {
+    for (int i = 0; i < m_meta.size(); ++i) {
+        if (m_meta[i].nodeId == nodeId && m_meta[i].lineKind != LineKind::Footer) {
+            m_sci->setCursorPosition(i, 0);
+            m_sci->ensureLineVisible(i);
+            return true;
+        }
+    }
+    return false;
+}
+
 void RcxEditor::setAddressBarTreeQueries(AddressBarTreeQueries q) {
     // A straight hand-off: the bar pulls these itself when a menu opens or
     // a path key is typed. Out of line because editor.h only forward-

@@ -364,6 +364,7 @@ public:
     void pickViewRoot(uint64_t id, RcxEditor* from = nullptr);
     uint64_t viewRootId() const { return m_viewRootId; }
     void scrollToNodeId(uint64_t nodeId);
+    void selectNodeFromCode(uint64_t nodeId);
 
     // ── Drill-down trail (inline-expansion focus path) ──
     // The trail the address bar renders is CLICK-driven: handleNodeClick sets

@@ -75,6 +75,7 @@
 #include <QWindow>
 #include <QMouseEvent>
 #include <QScrollBar>
+
 #include <QTemporaryFile>
 #include <QShortcut>
 #include "themes/thememanager.h"
@@ -108,6 +109,36 @@
 #include "names/pdb_type_provider.h"
 #include "names/rtti_name_provider.h"
 #include "names/bookmark_name_provider.h"
+
+// QScintilla's cursorPositionChanged signal does not fire when a user clicks
+// the line that already owns the caret. Observe the actual click as well so
+// Code → Structure navigation works for every line click.
+class CodeLineClickFilter final : public QObject {
+public:
+    CodeLineClickFilter(QsciScintilla* editor, std::function<void(int)> callback)
+        : QObject(editor), m_editor(editor), m_callback(std::move(callback)) {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == m_editor && event->type() == QEvent::MouseButtonRelease) {
+            auto* mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() == Qt::LeftButton) {
+                QTimer::singleShot(0, m_editor, [this]() {
+                    if (!m_editor) return;
+                    int line = 0, index = 0;
+                    m_editor->getCursorPosition(&line, &index);
+                    if (m_callback) m_callback(line);
+                });
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QsciScintilla* m_editor = nullptr;
+    std::function<void(int)> m_callback;
+};
+
 #ifdef _WIN32
 #include <windows.h>
 #include <windowsx.h>
@@ -3614,6 +3645,51 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     setupRenderedSci(pane.rendered);
     rvLayout->addWidget(pane.rendered);
 
+    // In Both mode, clicking generated code reveals the corresponding node
+    // in Structure without changing its selection or opening folded parents.
+    auto syncCodeLineToStructure = [this, ctrl = tab.ctrl, doc = tab.doc,
+                                    code = pane.rendered](int line) {
+        bool inBoth = false;
+        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+            if (it->ctrl != ctrl) continue;
+            for (const auto& candidate : it->panes)
+                if (candidate.rendered == code && candidate.viewMode == VM_Both) {
+                    inBoth = true;
+                    break;
+                }
+            break;
+        }
+        if (!inBoth || !code->hasFocus() || line < 0 || line >= code->lines()) return;
+        const QString text = code->text(line);
+        const auto identifier = [](QString name) {
+            for (QChar& ch : name)
+                if (!ch.isLetterOrNumber() && ch != QChar('_')) ch = QChar('_');
+            if (!name.isEmpty() && name.front().isDigit()) name.prepend(QChar('_'));
+            return name;
+        };
+        const NodeTree& tree = doc->tree;
+        int best = -1;
+        int bestLength = 0;
+        for (int i = 0; i < tree.nodes.size(); ++i) {
+            const Node& node = tree.nodes[i];
+            QStringList names{node.name};
+            if (!node.structTypeName.isEmpty()) names.prepend(node.structTypeName);
+            for (const QString& raw : names) {
+                const QString name = identifier(raw);
+                if (name.size() <= bestLength) continue;
+                const int at = text.indexOf(name);
+                if (at < 0) continue;
+                const bool left = at == 0 || !(text[at - 1].isLetterOrNumber() || text[at - 1] == QChar('_'));
+                const int end = at + name.size();
+                const bool right = end == text.size() || !(text[end].isLetterOrNumber() || text[end] == QChar('_'));
+                if (left && right) { best = i; bestLength = name.size(); }
+            }
+        }
+        if (best >= 0) ctrl->selectNodeFromCode(tree.nodes[best].id);
+    };
+    pane.rendered->installEventFilter(
+        new CodeLineClickFilter(pane.rendered, syncCodeLineToStructure));
+
     // Find bar with prev/next buttons (hidden by default)
     pane.findContainer = new QWidget;
     auto* fcLayout = new QHBoxLayout(pane.findContainer);
@@ -3783,7 +3859,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         pane.scopeCombo = new QComboBox;
         for (int si = 0; si < static_cast<int>(CodeScope::_Count); ++si)
             pane.scopeCombo->addItem(codeScopeName(static_cast<CodeScope>(si)));
-        pane.scopeCombo->setCurrentIndex(cs.value("codeScope", 0).toInt());
+        pane.scopeCombo->setCurrentIndex(cs.value("codeScope", 1).toInt());
         pane.scopeCombo->setFixedHeight(22);
         pane.scopeCombo->setStyleSheet(pane.fmtCombo->styleSheet());
 
@@ -4395,6 +4471,30 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         if (it != m_tabs.end()) {
             updateAllRenderedPanes(*it);
             updateAllDebugPanes(*it);
+            if (nodeIdx >= 0 && nodeIdx < it->doc->tree.nodes.size()) {
+                const Node& node = it->doc->tree.nodes[nodeIdx];
+                QString name = !node.structTypeName.isEmpty() ? node.structTypeName : node.name;
+                for (QChar& ch : name)
+                    if (!ch.isLetterOrNumber() && ch != QChar('_')) ch = QChar('_');
+                if (!name.isEmpty() && name.front().isDigit()) name.prepend(QChar('_'));
+                if (!name.isEmpty()) {
+                    for (auto& pane : it->panes) {
+                        if (pane.viewMode != VM_Both || !pane.rendered) continue;
+                        for (int line = 0; line < pane.rendered->lines(); ++line) {
+                            const QString codeLine = pane.rendered->text(line);
+                            const int at = codeLine.indexOf(name);
+                            if (at < 0) continue;
+                            const bool left = at == 0 || !(codeLine[at - 1].isLetterOrNumber() || codeLine[at - 1] == QChar('_'));
+                            const int end = at + name.size();
+                            const bool right = end == codeLine.size() || !(codeLine[end].isLetterOrNumber() || codeLine[end] == QChar('_'));
+                            if (!left || !right) continue;
+                            pane.rendered->SendScintilla(QsciScintillaBase::SCI_ENSUREVISIBLE, line);
+                            pane.rendered->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, line);
+                            break;
+                        }
+                    }
+                }
+            }
         }
     });
     connect(ctrl, &RcxController::selectionChanged,
@@ -8004,7 +8104,7 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     CodeFormat fmt = static_cast<CodeFormat>(
         QSettings("RC", "RC").value("codeFormat", 0).toInt());
     CodeScope scope = static_cast<CodeScope>(
-        QSettings("RC", "RC").value("codeScope", 0).toInt());
+        QSettings("RC", "RC").value("codeScope", 1).toInt());
     quint64 treeGen = tab.doc->tree.generation();
     bool cacheHit = (!pane.lastRenderedText.isEmpty()
                      && pane.lastRenderedTreeGen == treeGen

@@ -60,6 +60,8 @@ public:
     const LineMeta* metaForLine(int line) const;
     int currentNodeIndex() const;
     void scrollToNodeId(uint64_t nodeId);
+    // Select a node if it is currently rendered in the Structure view.
+    bool selectNodeId(uint64_t nodeId);
     // Scroll a node's first display line flush to the TOP of the viewport
     // (SCI_SETFIRSTVISIBLELINE) — used by the address bar's crumb click,
     // sibling switch and history restore so the focused class header lands

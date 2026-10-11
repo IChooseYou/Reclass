@@ -2506,6 +2506,23 @@ void RcxController::scrollToNodeId(uint64_t nodeId) {
         editor->scrollToNodeId(nodeId);
 }
 
+void RcxController::selectNodeFromCode(uint64_t nodeId) {
+    // A Code line can refer to a child hidden under a collapsed container.
+    // Scroll to the nearest ancestor that is already present in Structure;
+    // never expand it or move the Structure caret.
+    uint64_t id = nodeId;
+    while (id != 0) {
+        bool found = false;
+        for (auto* editor : m_editors) {
+            if (editor && editor->selectNodeId(id)) { found = true; break; }
+        }
+        if (found) return;
+        const int idx = m_doc ? m_doc->tree.indexOfId(id) : -1;
+        if (idx < 0) return;
+        id = m_doc->tree.nodes[idx].parentId;
+    }
+}
+
 void RcxController::setTrackValues(bool on) {
     m_trackValues = on;
     if (!on) {
