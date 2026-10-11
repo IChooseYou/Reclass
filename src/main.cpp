@@ -75,6 +75,7 @@
 #include <QWindow>
 #include <QMouseEvent>
 #include <QScrollBar>
+#include <QTemporaryFile>
 #include <QShortcut>
 #include "themes/thememanager.h"
 #include "svgicon.h"
@@ -97,7 +98,9 @@
 #include "demo_simulation.h"
 #include "widgets/font_choices.h"
 #include "widgets/selection_status.h"
+#include "widgets/zoom_slider.h"
 #include "widgets/dock_header.h"
+#include "widgets/address_bar.h"
 #include "widgets/panel_search_field.h"
 #include "widgets/section_header.h"
 #include "names/name_registry.h"
@@ -3803,29 +3806,16 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         zoomCap->setFont(tabFont);
         zoomCap->setStyleSheet(QStringLiteral(
             "color: %1; padding-right: 2px;").arg(ct.textMuted.name()));
-        pane.zoomSlider = new QSlider(Qt::Horizontal);
-        pane.zoomSlider->setRange(-8, 24);   // ~4pt..36pt over the 12pt base
-        pane.zoomSlider->setFixedWidth(90);
-        pane.zoomSlider->setFixedHeight(18);   // fit within the 26px tab strip
-        // Nudge the slider groove ~3px lower than its row neighbours. A styled
-        // QSlider centres the groove in its contents rect, so a 6px top inset
-        // moves the centre down by half = 3px. Only the slider shifts.
-        pane.zoomSlider->setContentsMargins(0, 6, 0, 0);
-        pane.zoomSlider->setToolTip(QStringLiteral("Zoom (also Ctrl+scroll)"));
-        // Square corners, and a 3x11 bar for the handle instead of a 9px
-        // puck: the strip has no other rounded shape on it.
-        pane.zoomSlider->setStyleSheet(QStringLiteral(
-            "QSlider::groove:horizontal { height: 3px; background: %1; border-radius: 0px; }"
-            "QSlider::handle:horizontal { background: %2; width: 3px; height: 11px;"
-            " margin: -4px 0; border-radius: 0px; }"
-            "QSlider::handle:horizontal:hover { background: %3; }")
-            .arg(ct.border.name(), ct.textMuted.name(), ct.text.name()));
+        auto* zoomSlider = new rcx::ZoomSlider;
+        zoomSlider->applyTheme(ct);
+        pane.zoomSlider = zoomSlider;
         pane.zoomLabel = new QLabel(QStringLiteral("100%"), cornerWidget);
         pane.zoomLabel->setFont(tabFont);
         pane.zoomLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
         pane.zoomLabel->setStyleSheet(QStringLiteral(
             "color: %1; padding-left: 4px;").arg(ct.textMuted.name()));
-        pane.zoomLabel->setMinimumWidth(34);
+        // Keep the slider stationary when the readout crosses 100%.
+        pane.zoomLabel->setFixedWidth(QFontMetrics(tabFont).horizontalAdvance(QStringLiteral("100%")) + 4);
         cornerLayout->addWidget(zoomCap, 0, Qt::AlignVCenter);
         cornerLayout->addWidget(pane.zoomSlider, 0, Qt::AlignVCenter);
         cornerLayout->addWidget(pane.zoomLabel, 0, Qt::AlignVCenter);
@@ -4133,6 +4123,13 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     auto* splitter = new QSplitter(Qt::Horizontal);
     splitter->setHandleWidth(1);
     auto* ctrl = new RcxController(doc, splitter);
+    if (doc == m_demoDocument) {
+        RcxController* source = nullptr;
+        for (auto* peer : doc->controllers)
+            if (peer != ctrl && !peer->isInstanceView()) { source = peer; break; }
+        if (source) ctrl->copySavedSources(source->savedSources(), source->activeSourceIndex());
+        else ctrl->copySavedSources(m_demoSavedSources, m_demoActiveSource);
+    }
 
     QString title = rootName(doc->tree);
     auto* dock = new QDockWidget(title, this);
@@ -4316,7 +4313,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         if (m_borderOverlay) m_borderOverlay->raise();
     });
     // Refresh bookmarks on document changes (e.g. add/remove)
-    connect(doc, &RcxDocument::documentChanged, this, [this, dock]() {
+    connect(doc, &RcxDocument::documentChanged, dock, [this, dock]() {
         if (m_activeDocDock == dock) refreshBookmarksDock();
         refreshDocTabSourceIcon(dock);
     });
@@ -4338,14 +4335,24 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         auto it = m_tabs.find(dock);
         if (it != m_tabs.end()) {
             RcxDocument* doc = it->doc;
+            if (doc == m_demoDocument && !it->ctrl->isInstanceView()) {
+                m_demoSavedSources = it->ctrl->savedSources();
+                m_demoActiveSource = it->ctrl->activeSourceIndex();
+            }
             m_tabs.erase(it);
-            // Only delete the doc if no other tab references it
+            // The built-in example remains in Project when its last view
+            // closes. Ordinary projects retain their existing close behavior.
             bool docStillUsed = false;
             for (auto jt = m_tabs.begin(); jt != m_tabs.end(); ++jt) {
                 if (jt->doc == doc) { docStillUsed = true; break; }
             }
-            if (!docStillUsed)
+            if (!docStillUsed && doc != m_demoDocument) {
+                for (auto pin = m_pinnedIds.begin(); pin != m_pinnedIds.end(); ) {
+                    if (pin->first == &doc->tree) pin = m_pinnedIds.erase(pin);
+                    else ++pin;
+                }
                 doc->deleteLater();
+            }
         }
         m_docDocks.removeOne(dock);
         if (m_activeDocDock == dock) {
@@ -4480,7 +4487,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     // Use QPointer to guard against dock being destroyed before deferred timer fires
     QPointer<QDockWidget> dockGuard = dock;
     connect(doc, &RcxDocument::documentChanged,
-            this, [this, dockGuard]() {
+            dock, [this, dockGuard]() {
         if (!dockGuard) return;
         auto it = m_tabs.find(dockGuard);
         if (it != m_tabs.end())
@@ -4503,11 +4510,11 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         setTimelineStripVisible(true);
         if (m_mcp) m_mcp->requestAutoResolution(ctrl);
     });
-    connect(doc, &RcxDocument::documentChanged, this, [this]() {
+    connect(doc, &RcxDocument::documentChanged, dock, [this]() {
         if (m_mcp) m_mcp->notifyTreeChanged();
     });
     connect(&doc->undoStack, &QUndoStack::indexChanged,
-            this, [this, dockGuard](int) {
+            dock, [this, dockGuard](int) {
         if (!dockGuard) return;
         auto it = m_tabs.find(dockGuard);
         if (it != m_tabs.end())
@@ -5470,12 +5477,9 @@ MainWindow::~MainWindow() {
     // Scan results and undoable writes also retain their originating provider.
     delete m_scannerPanel;
     m_scannerPanel = nullptr;
-    QSet<RcxDocument*> clearedDocs;
-    for (const auto& tab : m_tabs) {
-        if (clearedDocs.contains(tab.doc)) continue;
-        const QSignalBlocker blocker(&tab.doc->undoStack);
-        tab.doc->undoStack.clear();
-        clearedDocs.insert(tab.doc);
+    for (auto* doc : m_allDocs) {
+        const QSignalBlocker blocker(&doc->undoStack);
+        doc->undoStack.clear();
     }
 
     // Disconnect all signals before members are torn down,
@@ -5489,6 +5493,9 @@ MainWindow::~MainWindow() {
         it->doc->provider.reset();
     }
     m_tabs.clear();
+    // The example can outlive its last tab. Release its plugin provider before
+    // PluginManager unloads the DLL, just like the providers of open tabs.
+    if (m_demoDocument) m_demoDocument->provider.reset();
 }
 
 void MainWindow::newClass() {
@@ -5826,6 +5833,189 @@ void MainWindow::previewBothSplit() {
     auto* tab = activeTab();
     if (!tab || tab->panes.isEmpty()) return;
     tab->panes.first().tabWidget->setCurrentIndex(3);  // select the "Both" view
+}
+
+bool MainWindow::previewZoomInteraction() {
+    auto* tab = activeTab();
+    if (!tab || tab->panes.isEmpty()) return false;
+    auto& pane = tab->panes.first();
+    auto* slider = pane.zoomSlider;
+    if (!slider) return false;
+    QSettings settings("RC", "RC");
+    const QVariant savedZoom = settings.value("viewZoomLevel");
+    bool ok = true;
+    int clicks = 0;
+    int blocked = 0, shifted = 0, unsynced = 0, unreachable = 0;
+    for (int mode = 0; mode < kPaneTabCount; ++mode) {
+        pane.tabWidget->setCurrentIndex(mode);
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        const QRect anchor(slider->mapTo(this, QPoint()), slider->size());
+        for (int y : {1, slider->height() / 2, slider->height() - 2}) {
+            QSet<int> reached;
+            applyPaneZoom(pane, slider->maximum());
+            int previous = slider->minimum();
+            for (int x = 0; x < slider->width(); ++x) {
+                const QPoint at(x, y);
+                const QPoint global = slider->mapToGlobal(at);
+                // Route through the actual child under the pointer, so an
+                // overlapping corner/resize widget cannot silently pass.
+                QWidget* hit = childAt(mapFromGlobal(global));
+                if (hit != slider) { ++blocked; ok = false; continue; }
+                QMouseEvent press(QEvent::MouseButtonPress, at, global,
+                                  Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QMouseEvent release(QEvent::MouseButtonRelease, at, global,
+                                    Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(hit, &press);
+                QApplication::sendEvent(hit, &release);
+                QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                ++clicks;
+                const int level = slider->value();
+                reached.insert(level);
+                ok = level >= previous && ok;
+                previous = level;
+                if (QRect(slider->mapTo(this, QPoint()), slider->size()) != anchor) {
+                    ++shifted;
+                    ok = false;
+                }
+                for (auto* view : {pane.editor->scintilla(), pane.rendered, pane.debugView})
+                    if (view->SendScintilla(QsciScintillaBase::SCI_GETZOOM) != level) {
+                        ++unsynced;
+                        ok = false;
+                    }
+            }
+            for (int level = slider->minimum(); level <= slider->maximum(); ++level)
+                if (!reached.contains(level)) { ++unreachable; ok = false; }
+        }
+    }
+    // Leave the capture in Both at 100%, without changing the saved preference.
+    applyPaneZoom(pane, 0);
+    if (savedZoom.isValid()) settings.setValue("viewZoomLevel", savedZoom);
+    else settings.remove("viewZoomLevel");
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    fprintf(stderr, "ZOOM_RESULT %s clicks=%d modes=%d blocked=%d shifted=%d unsynced=%d unreachable=%d\n",
+        ok ? "PASS" : "FAIL", clicks, kPaneTabCount, blocked, shifted, unsynced, unreachable);
+    fflush(stderr);
+    return ok;
+}
+
+bool MainWindow::previewDemoProject() {
+    if (!m_demoDocument) return false;
+    auto* demoDoc = m_demoDocument.data();
+    auto* provider = demoDoc->provider.get();
+    QMap<QString, uint64_t> types;
+    for (const auto& n : demoDoc->tree.nodes)
+        if (n.parentId == 0 && n.kind == NodeKind::Struct)
+            types.insert(n.structTypeName, n.id);
+    auto settle = [] {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QEventLoop loop;
+        QTimer::singleShot(100, &loop, &QEventLoop::quit);
+        loop.exec();
+    };
+    auto entry = [&](uint64_t id) {
+        for (int row = 0; row < m_workspaceProxy->rowCount(); ++row) {
+            const auto index = m_workspaceProxy->index(row, 0);
+            if (workspaceDocument(index) == demoDoc
+                && index.data(Qt::UserRole + 1).toULongLong() == id)
+                return index;
+        }
+        return QModelIndex();
+    };
+    auto checkTypes = [&] {
+        bool ok = m_demoDocument == demoDoc && types.size() == 3;
+        for (auto id : types) ok = entry(id).isValid() && ok;
+        return ok;
+    };
+    applyLayoutPreset(Layout_Workspace);
+    settle();
+    bool ok = checkTypes();
+    closeAllDocDocks();
+    settle();
+    ok = checkTypes() && !workspaceOwner(demoDoc) && ok;
+    fprintf(stderr, "PROJECT_AFTER_CLOSE %s\n", ok ? "PASS" : "FAIL");
+    if (!ok) return false;
+
+    // Opening a file uses the same batch-close path as replacing the welcome
+    // demo. Its local node IDs overlap the demo's IDs deliberately.
+    QTemporaryFile file(QDir::tempPath() + "/rcx-project-preview-XXXXXX.rcx");
+    if (!file.open()) return false;
+    NodeTree otherTree;
+    Node other;
+    other.kind = NodeKind::Struct;
+    other.structTypeName = "OtherProject";
+    otherTree.addNode(other);
+    file.write(QJsonDocument(otherTree.toJson()).toJson());
+    file.flush();
+    const QString path = file.fileName();
+    file.close();
+    auto* otherDock = project_open(path);
+    settle();
+    ok = otherDock && checkTypes() && ok;
+    fprintf(stderr, "PROJECT_AFTER_OPEN %s\n", ok ? "PASS" : "FAIL");
+    if (!ok) return false;
+
+    for (const auto& name : {QString("World"), QString("BallState"), QString("BouncingBall")}) {
+        const auto index = entry(types.value(name));
+        if (!index.isValid()) return false;
+        m_workspaceTree->doubleClicked(index);
+        settle();
+        auto* tab = activeTab();
+        const bool opened = tab && tab->doc == demoDoc
+            && tab->ctrl->viewRootId() == types.value(name)
+            && tab->ctrl->provider().get() == provider;
+        ok = opened && ok;
+        fprintf(stderr, "PROJECT_REOPEN %s %s\n", qPrintable(name), opened ? "PASS" : "FAIL");
+    }
+    // Hide/show must preserve both documents and avoid adding duplicate types.
+    applyLayoutPreset(Layout_NoWorkspace);
+    settle();
+    applyLayoutPreset(Layout_Workspace);
+    settle();
+    ok = checkTypes() && m_workspaceModel->rowCount() == 5 && ok;
+    fprintf(stderr, "PROJECT_RESULT %s\n", ok ? "PASS" : "FAIL");
+
+    // Real asynchronous process reads while the simulation runs, including
+    // the resized Both view where the shorter editor makes the bar visible.
+    const QSize originalSize = size();
+    auto* tab = activeTab();
+    if (!tab || tab->panes.isEmpty()) return false;
+    auto& pane = tab->panes.first();
+    auto* sci = pane.editor->scintilla();
+    auto* bar = sci->verticalScrollBar();
+    const int originalMode = pane.tabWidget->currentIndex();
+    const int originalInterval = tab->ctrl->refreshIntervalMs();
+    tab->ctrl->setRefreshInterval(33);
+    tab->ctrl->setWindowState(true, true);
+    int rangeChanges = 0, scrollFailures = 0;
+    for (int mode : {0, 3}) {
+        pane.tabWidget->setCurrentIndex(mode);
+        for (const QSize size : {QSize(800, 600), QSize(1350, 900), QSize(1600, 1100)}) {
+            resize(size);
+            settle();
+            sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                                 (unsigned long)(bar->maximum() / 2));
+            const int top = sci->firstVisibleLine();
+            const int maximum = bar->maximum();
+            const auto connection = connect(bar, &QScrollBar::rangeChanged, this,
+                [&](int, int) { ++rangeChanges; });
+            QEventLoop loop;
+            QTimer::singleShot(400, &loop, &QEventLoop::quit);
+            loop.exec();
+            disconnect(connection);
+            if (sci->firstVisibleLine() != top || bar->value() != top || bar->maximum() != maximum)
+                ++scrollFailures;
+        }
+    }
+    tab->ctrl->setRefreshInterval(originalInterval);
+    pane.tabWidget->setCurrentIndex(originalMode);
+    resize(originalSize);
+    settle();
+    sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, 0UL);
+    ok = !rangeChanges && !scrollFailures && ok;
+    fprintf(stderr, "LIVE_SCROLL_RESULT %s rangeChanges=%d shifted=%d\n",
+            !rangeChanges && !scrollFailures ? "PASS" : "FAIL", rangeChanges, scrollFailures);
+    fflush(stderr);
+    return ok;
 }
 
 // --screenshot code: exercise the SAME path the ribbon's Code button uses, so
@@ -6629,6 +6819,8 @@ void MainWindow::applyTheme(const Theme& theme) {
                     pane.scopeCombo->setStyleSheet(comboStyle);
                 if (pane.fmtGear)
                     pane.fmtGear->setStyleSheet(gearStyle);
+                if (pane.zoomSlider)
+                    pane.zoomSlider->applyTheme(theme);
                 // Refresh the dynamic property the custom
                 // EditorContainer::paintEvent reads, then trigger a repaint.
                 // Do NOT install a QSS border here — Qt would draw it as a
@@ -7731,7 +7923,7 @@ uint64_t MainWindow::findRootStructForNode(const NodeTree& tree, uint64_t nodeId
 }
 
 void MainWindow::applyPaneZoom(SplitPane& p, int level) {
-    level = qBound(-8, level, 24);
+    level = qBound(ZoomSlider::kMinimum, level, ZoomSlider::kMaximum);
     QSettings("RC", "RC").setValue("viewZoomLevel", level);
     // Drive Scintilla's own zoom (the same SCI_SETZOOM that Ctrl+wheel uses) on
     // all three views so the pane stays consistent across tab switches. Block
@@ -8559,11 +8751,21 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword,
 // first second. Values typed into it feed back into the simulation.
 QDockWidget* MainWindow::project_newSimulation() {
 #ifdef Q_OS_WIN
+    if (m_demoDocument) {
+        if (auto* dock = workspaceOwner(m_demoDocument)) {
+            dock->show();
+            dock->raise();
+            setActiveDocDock(dock);
+            return dock;
+        }
+        return createTab(m_demoDocument);
+    }
     if (!ProviderRegistry::instance().findProvider(QStringLiteral("processmemory")))
         return project_new(QStringLiteral("class"), /*forceFreshDoc=*/true);
 
     auto* doc = new RcxDocument(this);
     doc->setProperty("rcxDemoSimulation", true);   // project_new never stacks a struct on it
+    m_demoDocument = doc;
     constexpr size_t kBufSize = 64 * 1024;
     doc->m_ownedBuffer = std::unique_ptr<uint8_t[]>(new uint8_t[kBufSize]());
     doc->m_ownedBufferSize = kBufSize;
@@ -9406,9 +9608,9 @@ void MainWindow::createWorkspaceDock() {
         m_wsRenaming = false;
         auto idVar = item->data(Qt::UserRole + 1);
         uint64_t sid = idVar.isValid() ? idVar.toULongLong() : 0;
-        auto subVar = item->data(Qt::UserRole);
-        auto* dk = subVar.isValid()
-            ? static_cast<QDockWidget*>(subVar.value<void*>()) : nullptr;
+        auto* doc = workspaceDocument(item->index());
+        auto* dk = workspaceOwner(doc);
+        if (!dk && doc) dk = createTab(doc);
         if (sid == 0 || !dk || !m_tabs.contains(dk)) { rebuildWorkspaceModel(); return; }
         auto& tab = m_tabs[dk];
         int ni = tab.doc->tree.indexOfId(sid);
@@ -9521,6 +9723,7 @@ void MainWindow::createWorkspaceDock() {
         struct SelItem {
             uint64_t structId;
             QDockWidget* dock;
+            RcxDocument* doc;
             int nodeIdx;
             QString keyword;
             QString typeName;
@@ -9532,16 +9735,15 @@ void MainWindow::createWorkspaceDock() {
             auto idVar = idx.data(Qt::UserRole + 1);
             uint64_t sid = idVar.isValid() ? idVar.toULongLong() : 0;
             if (sid == 0) continue;
-            auto subVar = idx.data(Qt::UserRole);
-            if (!subVar.isValid()) continue;
-            auto* dk = static_cast<QDockWidget*>(subVar.value<void*>());
-            if (!dk || !m_tabs.contains(dk)) continue;
-            int ni = m_tabs[dk].doc->tree.indexOfId(sid);
+            auto* doc = workspaceDocument(idx);
+            if (!doc) continue;
+            auto* dk = workspaceOwner(doc);
+            int ni = doc->tree.indexOfId(sid);
             if (ni < 0) continue;
-            const auto& nd = m_tabs[dk].doc->tree.nodes[ni];
+            const auto& nd = doc->tree.nodes[ni];
             QString tn = nd.structTypeName.isEmpty() ? nd.name : nd.structTypeName;
             if (tn.isEmpty()) tn = QStringLiteral("(unnamed)");
-            items.push_back(SelItem{sid, dk, ni, nd.resolvedClassKeyword(), tn});
+            items.push_back(SelItem{sid, dk, doc, ni, nd.resolvedClassKeyword(), tn});
         }
         if (items.isEmpty()) return;
 
@@ -9598,7 +9800,7 @@ void MainWindow::createWorkspaceDock() {
         // Pin/Unpin
         bool allPinned = true;
         for (const auto& item : items)
-            if (!m_pinnedIds.contains(item.structId)) { allPinned = false; break; }
+            if (!m_pinnedIds.contains({&item.doc->tree, item.structId})) { allPinned = false; break; }
         auto* actPin = menu.addAction(
             menuIcon(QStringLiteral(":/vsicons/pin.svg")),
             allPinned ? QStringLiteral("Unpin") : QStringLiteral("Pin"));
@@ -9613,6 +9815,15 @@ void MainWindow::createWorkspaceDock() {
         actDelete->setProperty("rcxDestructive", true);
 
         QAction* chosen = menu.exec(m_workspaceTree->viewport()->mapToGlobal(pos));
+        if (!chosen) return;
+        // Resolve a view only after an action is chosen. Project entries also
+        // exist while the example has no open tabs; opening the menu alone
+        // should not create a view.
+        if (chosen != actPin && chosen != actOpenNew && chosen != actRename) {
+            for (auto& item : items) {
+                if (!item.dock) item.dock = createTab(item.doc);
+            }
+        }
 
         if (chosen == actDelete) {
             // Collect reference info across all selected items
@@ -9727,8 +9938,7 @@ void MainWindow::createWorkspaceDock() {
         } else if (chosen && chosen == actOpenNew && items.size() == 1) {
             // Open in a brand new tab (sharing the same document)
             const auto& item = items[0];
-            if (!m_tabs.contains(item.dock)) return;
-            RcxDocument* doc = m_tabs[item.dock].doc;
+            RcxDocument* doc = item.doc;
             int ni = doc->tree.indexOfId(item.structId);
             if (ni < 0) return;
             doc->tree.nodes[ni].collapsed = false;
@@ -9825,9 +10035,9 @@ void MainWindow::createWorkspaceDock() {
         } else if (chosen && chosen == actPin) {
             for (const auto& item : items) {
                 if (allPinned)
-                    m_pinnedIds.remove(item.structId);
+                    m_pinnedIds.remove({&item.doc->tree, item.structId});
                 else
-                    m_pinnedIds.insert(item.structId);
+                    m_pinnedIds.insert({&item.doc->tree, item.structId});
             }
             // Full rebuild to reorder pinned items to top
             m_workspaceModel->removeRows(0, m_workspaceModel->rowCount());
@@ -9931,12 +10141,9 @@ void MainWindow::createWorkspaceDock() {
         auto structIdVar = index.data(Qt::UserRole + 1);
         uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
 
-        auto subVar = index.data(Qt::UserRole);
-        if (!subVar.isValid()) return;
-        auto* ownerDock = static_cast<QDockWidget*>(subVar.value<void*>());
-        if (!ownerDock || !m_tabs.contains(ownerDock)) return;
-
-        RcxDocument* doc = m_tabs[ownerDock].doc;
+        RcxDocument* doc = workspaceDocument(index);
+        if (!doc) return;
+        auto* ownerDock = workspaceOwner(doc);
         auto& tree = doc->tree;
         int ni = tree.indexOfId(structId);
         if (ni < 0) return;
@@ -9944,6 +10151,7 @@ void MainWindow::createWorkspaceDock() {
         // For child members: navigate within the owner tab and scroll
         uint64_t parentId = tree.nodes[ni].parentId;
         if (parentId != 0) {
+            if (!ownerDock) ownerDock = createTab(doc);
             ownerDock->raise();
             ownerDock->show();
             setActiveDocDock(ownerDock);
@@ -10004,12 +10212,9 @@ void MainWindow::createWorkspaceDock() {
         uint64_t structId = structIdVar.isValid() ? structIdVar.toULongLong() : 0;
         if (structId == 0) return;
 
-        auto subVar = index.data(Qt::UserRole);
-        if (!subVar.isValid()) return;
-        auto* ownerDock = static_cast<QDockWidget*>(subVar.value<void*>());
-        if (!ownerDock || !m_tabs.contains(ownerDock)) return;
-
-        RcxDocument* doc = m_tabs[ownerDock].doc;
+        RcxDocument* doc = workspaceDocument(index);
+        if (!doc) return;
+        auto* ownerDock = workspaceOwner(doc);
         auto& tree = doc->tree;
         int ni = tree.indexOfId(structId);
         if (ni < 0) return;
@@ -10017,6 +10222,7 @@ void MainWindow::createWorkspaceDock() {
         uint64_t parentId = tree.nodes[ni].parentId;
         if (parentId != 0) {
             // Child member: navigate within owner tab, scroll to member
+            if (!ownerDock) ownerDock = createTab(doc);
             ownerDock->raise();
             ownerDock->show();
             setActiveDocDock(ownerDock);
@@ -10821,6 +11027,7 @@ void MainWindow::downloadSymbolsForProcess() {
 
 void MainWindow::rebuildAllDocs() {
     m_allDocs.clear();
+    if (m_demoDocument) m_allDocs.append(m_demoDocument);
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         if (!m_allDocs.contains(it.value().doc))
             m_allDocs.append(it.value().doc);
@@ -10837,6 +11044,17 @@ void MainWindow::rebuildWorkspaceModel() {
                 this, &MainWindow::rebuildWorkspaceModelNow);
     }
     m_workspaceRebuildTimer->start();
+}
+
+RcxDocument* MainWindow::workspaceDocument(const QModelIndex& index) const {
+    auto* doc = static_cast<RcxDocument*>(index.data(rcx::RoleDocument).value<void*>());
+    return m_allDocs.contains(doc) ? doc : nullptr;
+}
+
+QDockWidget* MainWindow::workspaceOwner(RcxDocument* doc) const {
+    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it)
+        if (it->doc == doc) return it.key();
+    return nullptr;
 }
 
 void MainWindow::rebuildWorkspaceModelNow() {
@@ -10859,19 +11077,20 @@ void MainWindow::rebuildWorkspaceModelNow() {
     auto mix = [&](quint64 v) {
         gen ^= v + 0x9E3779B97F4A7C15ULL + (gen << 6) + (gen >> 2);
     };
-    QSet<RcxDocument*> seen;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         mix(reinterpret_cast<quintptr>(it.key()));
         mix(it->ctrl->viewRootId());
-        if (seen.contains(it->doc)) continue;
-        seen.insert(it->doc);
-        for (const auto& n : it->doc->tree.nodes) {
+    }
+    for (auto* doc : m_allDocs) {
+        mix(reinterpret_cast<quintptr>(doc));
+        mix(doc->tree.generation());
+        for (const auto& n : doc->tree.nodes) {
             if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
             mix(n.id);
             mix(qHash(n.structTypeName));
             mix(qHash(n.name));
             mix(qHash(n.classKeyword));
-            mix(m_pinnedIds.contains(n.id) ? 1 : 0);
+            mix(m_pinnedIds.contains({&doc->tree, n.id}) ? 1 : 0);
         }
     }
     if (gen == m_workspaceGen) return;
@@ -10882,14 +11101,19 @@ void MainWindow::rebuildWorkspaceModelNow() {
     if (m_workspaceTree && m_workspaceTree->verticalScrollBar())
         savedScroll = m_workspaceTree->verticalScrollBar()->value();
 
-    // Capture expansion state + current selection keyed by node id. The
+    // Capture expansion state + current selection keyed by document and node. The
     // subsequent model->clear() destroys all QModelIndex objects, so we must
     // translate "which row is expanded / selected" into something stable
-    // (node id) and re-apply after the rebuild. Without this, any refresh
+    // (document, node id) and re-apply after the rebuild. Without this, any refresh
     // collapses every expanded type and loses the user's selection — which
     // is visibly jumpy on large projects.
-    QSet<uint64_t> expandedIds;
-    uint64_t selectedId = 0;
+    auto itemKey = [this](QStandardItem* item) -> rcx::WorkspaceTypeKey {
+        auto* doc = item ? workspaceDocument(item->index()) : nullptr;
+        return {doc ? &doc->tree : nullptr,
+                item ? item->data(Qt::UserRole + 1).toULongLong() : 0};
+    };
+    QSet<rcx::WorkspaceTypeKey> expandedIds;
+    rcx::WorkspaceTypeKey selectedId;
     if (m_workspaceTree && m_workspaceProxy) {
         for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
             auto* item = m_workspaceModel->item(i);
@@ -10899,44 +11123,40 @@ void MainWindow::rebuildWorkspaceModelNow() {
             QModelIndex src = m_workspaceModel->indexFromItem(item);
             QModelIndex proxy = m_workspaceProxy->mapFromSource(src);
             if (m_workspaceTree->isExpanded(proxy))
-                expandedIds.insert(id);
+                expandedIds.insert(itemKey(item));
         }
         QModelIndexList sel = m_workspaceTree->selectionModel()->selectedIndexes();
         if (!sel.isEmpty()) {
             QModelIndex src = m_workspaceProxy->mapToSource(sel.first());
             auto* item = m_workspaceModel->itemFromIndex(src);
-            if (item) selectedId = item->data(Qt::UserRole + 1).toULongLong();
+            if (item) selectedId = itemKey(item);
         }
     }
 
     QVector<rcx::TabInfo> tabs;
-    QSet<RcxDocument*> seenDocs;
-    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-        TabState& tab = it.value();
-        if (seenDocs.contains(tab.doc)) continue;
-        seenDocs.insert(tab.doc);
-        QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
-        tabs.push_back(rcx::TabInfo{ &tab.doc->tree, name, static_cast<void*>(it.key()) });
+    for (auto* doc : m_allDocs) {
+        tabs.push_back(rcx::TabInfo{ &doc->tree, rootName(doc->tree),
+            static_cast<void*>(workspaceOwner(doc)), static_cast<void*>(doc) });
     }
     rcx::syncProjectExplorer(m_workspaceModel, tabs, m_pinnedIds);
 
     // Mark items that are currently viewed in a tab + pinned/dirty state
-    QSet<uint64_t> viewedIds;
+    QSet<rcx::WorkspaceTypeKey> viewedIds;
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
-        viewedIds.insert(it->ctrl->viewRootId());
+        viewedIds.insert({&it->doc->tree, it->ctrl->viewRootId()});
     for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
         auto* item = m_workspaceModel->item(i);
         if (!item) continue;
         if (!item->data(rcx::RoleSectionHeader).toString().isEmpty()) continue;
-        uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
-        item->setData(viewedIds.contains(id), Qt::UserRole + 3);
-        item->setData(m_pinnedIds.contains(id), Qt::UserRole + 4);
+        const auto key = itemKey(item);
+        item->setData(viewedIds.contains(key), Qt::UserRole + 3);
+        item->setData(m_pinnedIds.contains(key), Qt::UserRole + 4);
     }
 
     if (m_dockTitleLabel) {
         bool anyDirty = false;
-        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
-            if (it->doc->modified) { anyDirty = true; break; }
+        for (auto* doc : m_allDocs)
+            if (doc->modified) { anyDirty = true; break; }
         // Just "Project" (+ dirty dot) \u2014 no struct/enum tallies; the tree is
         // rarely tall enough for the counts to be worth the header noise.
         QString title;
@@ -10955,9 +11175,9 @@ void MainWindow::rebuildWorkspaceModelNow() {
             if (id == 0) continue;
             QModelIndex src = m_workspaceModel->indexFromItem(item);
             QModelIndex proxy = m_workspaceProxy->mapFromSource(src);
-            if (expandedIds.contains(id))
+            if (expandedIds.contains(itemKey(item)))
                 m_workspaceTree->setExpanded(proxy, true);
-            if (selectedId != 0 && id == selectedId)
+            if (selectedId.second != 0 && itemKey(item) == selectedId)
                 m_workspaceTree->selectionModel()->setCurrentIndex(
                     proxy, QItemSelectionModel::ClearAndSelect);
         }
@@ -11090,12 +11310,8 @@ void MainWindow::autosaveAllModifiedDocs() {
     // shadow-save any that have unsaved changes AND a known filePath. We
     // do NOT clear doc->modified — this is a recovery snapshot, not a real
     // save. A real saveFile / saveFileAs removes the .autosave file.
-    QSet<RcxDocument*> seen;
     int wrote = 0;
-    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it) {
-        RcxDocument* doc = it.value().doc;
-        if (seen.contains(doc)) continue;
-        seen.insert(doc);
+    for (auto* doc : m_allDocs) {
         if (!doc->modified) continue;
         if (doc->filePath.isEmpty()) continue;
         if (doc->save(doc->filePath + QStringLiteral(".autosave")))
@@ -11159,7 +11375,7 @@ void MainWindow::populateSourceMenu() {
         const auto& ss = ctrl->savedSources();
         for (int i = 0; i < ss.size(); i++) {
             SavedSourceDisplay d;
-            d.text = QStringLiteral("%1 '%2'").arg(ss[i].kind, ss[i].displayName);
+            d.text = QStringLiteral("%1  -  %2").arg(ss[i].displayName, rcx::kindLabelFor(ss[i].kind));
             d.active = (i == ctrl->activeSourceIndex());
             saved.append(d);
         }
@@ -11384,16 +11600,16 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // hid the other classes in a multi-class document.
     QSet<RcxDocument*> dirtyDocs;
     QStringList dirtyNames;
-    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-        if (!it->doc->modified || dirtyDocs.contains(it->doc)) continue;
-        dirtyDocs.insert(it->doc);
+    for (auto* doc : m_allDocs) {
+        if (!doc->modified) continue;
+        dirtyDocs.insert(doc);
         // No cross-doc dedup of names — two unsaved projects with the
         // default class name "UnnamedClass0" SHOULD show two entries so
         // the user can see exactly how many are dirty. The
         // dirtyDocs.contains(it->doc) guard above already handles the
         // multi-tab-shares-one-doc case, which was the original dedup's
         // real purpose.
-        dirtyNames.append(collectDirtyDocLabels(it->doc));
+        dirtyNames.append(collectDirtyDocLabels(doc));
     }
     if (dirtyDocs.isEmpty()) { event->accept(); return; }
 
@@ -11430,11 +11646,10 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     }
     if (choice == ThemedMessageBox::UnsavedChoice::Save) {
         // Save each unique dirty doc via the tab that owns it.
-        QSet<RcxDocument*> saved;
-        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-            if (!it->doc->modified || saved.contains(it->doc)) continue;
-            saved.insert(it->doc);
-            if (!project_save(it.key(), false)) {
+        for (auto* doc : dirtyDocs) {
+            auto* dock = workspaceOwner(doc);
+            if (!dock) dock = createTab(doc);
+            if (!project_save(dock, false)) {
                 event->ignore();
                 return;
             }
@@ -12064,7 +12279,7 @@ int main(int argc, char* argv[]) {
     }
 
     // --screenshot <path> [scanner|workspace|both|closetest|code|splash|
-    //                      symbols|home|modify|collapsed]: open the default
+    //                      symbols|sources|zoom|home|modify|collapsed]: open the default
     // project (optionally also show the scanner dock, expand the Project
     // workspace dock, lay out the "Both" Reclass|Code split, or force a
     // ribbon tab / the collapsed ribbon), grab the window, save, exit.
@@ -12097,9 +12312,14 @@ int main(int argc, char* argv[]) {
                                    && args[ssIdx + 2] == "largefile");
             bool showTimeline = (ssIdx + 2 < args.size()
                                   && args[ssIdx + 2] == "timeline");
+            bool showSources = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "sources");
+            bool checkZoom = (ssIdx + 2 < args.size()
+                               && args[ssIdx + 2] == "zoom");
             // The example a first launch opens on, after it has run a while.
             bool showSim = (ssIdx + 2 < args.size()
-                             && (args[ssIdx + 2] == "sim" || args[ssIdx + 2] == "simtimeline"));
+                             && (args[ssIdx + 2] == "sim" || args[ssIdx + 2] == "simtimeline"
+                                 || args[ssIdx + 2] == "simworkspace" || showSources));
             // Ribbon captures: force a tab / the collapsed state for the shot.
             // The pre-existing settings are restored before quitting so a
             // screenshot run never rewrites the user's ribbon preferences.
@@ -12119,7 +12339,7 @@ int main(int argc, char* argv[]) {
                 // below, same as the ribbon keys.
                 if (showCode) savedScope = rs.value("codeScope");
             }
-            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, showFontMenu, showNodeMenu, showInstances, showLargeFile, showTimeline, showSim, ribbonMode, ribbonShot, savedTab, savedState, savedScope]() {
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, showFontMenu, showNodeMenu, showInstances, showLargeFile, showTimeline, showSim, showSources, checkZoom, ribbonMode, ribbonShot, savedTab, savedState, savedScope]() {
                 if (showSplash) {
                     // Capture the start page itself — skip project_new so it
                     // shows the no-tabs landing.
@@ -12132,9 +12352,38 @@ int main(int argc, char* argv[]) {
                     }
                     if (showSim) {
                         window.project_newSimulation();
-                        QTimer::singleShot(3500, &window, [&window, ssPath]() {
-                            window.grab().save(ssPath);
-                            QApplication::quit();
+                        if (ribbonMode == QLatin1String("simworkspace"))
+                            window.applyLayoutPreset(rcx::Layout_Workspace);
+                        QTimer::singleShot(3500, &window, [&window, ssPath, showSources, ribbonMode]() {
+                            const bool projectOk = ribbonMode != QLatin1String("simworkspace")
+                                || window.previewDemoProject();
+                            if (showSources) {
+                                // Exercise the real chip/controller path after
+                                // popup warm-up, plugin loading and app styling.
+                                auto* editor = window.findChild<rcx::RcxEditor*>();
+                                if (!editor) { QApplication::exit(1); return; }
+                                auto* bar = editor->addressBar();
+                                const QPointF at = bar->itemRect(QStringLiteral("src")).center();
+                                QMouseEvent press(QEvent::MouseButtonPress, at, bar->mapToGlobal(at.toPoint()),
+                                                  Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                                QMouseEvent release(QEvent::MouseButtonRelease, at, bar->mapToGlobal(at.toPoint()),
+                                                    Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                                QApplication::sendEvent(bar, &press);
+                                QApplication::sendEvent(bar, &release);
+                                auto* popup = editor->findChild<rcx::SourceChooserPopup*>();
+                                if (!popup || !popup->isVisible()) { QApplication::exit(1); return; }
+                                QApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+                                // Native popups are separate windows, so include
+                                // their render explicitly in the app capture.
+                                QPixmap shot = window.grab();
+                                QPainter p(&shot);
+                                p.drawPixmap(window.mapFromGlobal(popup->pos()), popup->grab());
+                                p.end();
+                                shot.save(ssPath);
+                            } else {
+                                window.grab().save(ssPath);
+                            }
+                            QApplication::exit(projectOk ? 0 : 1);
                         });
                         return;
                     }
@@ -12186,7 +12435,8 @@ int main(int argc, char* argv[]) {
                 }
                 // Defer the grab so the dock layout settles + the panel
                 // paints its initial state before we capture.
-                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash, showFontMenu, ribbonShot, savedTab, savedState, showCode, savedScope]() {
+                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash, showFontMenu, ribbonShot, savedTab, savedState, showCode, savedScope, checkZoom]() {
+                    const bool zoomOk = !checkZoom || window.previewZoomInteraction();
                     QPixmap px;
                     if (showSplash) {
                         if (auto* sp = window.findChild<rcx::StartPageWidget*>())
@@ -12239,7 +12489,7 @@ int main(int argc, char* argv[]) {
                     // recorded (no-op if profiling wasn't enabled).
                     if (rcx::Profiler::instance().isEnabled())
                         rcx::Profiler::instance().dumpToStderr();
-                    qApp->quit();
+                    qApp->exit(zoomOk ? 0 : 1);
                 });
             }, Qt::QueuedConnection);
             return app.exec();

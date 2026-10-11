@@ -23,14 +23,18 @@ namespace rcx {
 // Qt::UserRole + 4  → bool isPinned
 // Qt::UserRole + 5  → QString sectionLabel (non-empty = section header item)
 // Qt::UserRole + 6  → bool isDirty (document modified)
+// Qt::UserRole + 7  → void* documentPtr (RcxDocument*, independent of a view)
 
 static constexpr int RoleSectionHeader = Qt::UserRole + 5;
+static constexpr int RoleDocument = Qt::UserRole + 7;
+using WorkspaceTypeKey = QPair<const NodeTree*, uint64_t>;
 //TODO-DELETE(RoleDirty) static constexpr int RoleDirty         = Qt::UserRole + 6;
 
 struct TabInfo {
     const NodeTree* tree;
     QString         name;
     void*           subPtr;   // QDockWidget* as void*
+    void*           documentPtr = nullptr; // owner survives a closed view
 };
 
 // Helper: is a Hex padding node
@@ -42,7 +46,7 @@ inline bool isHexPad(NodeKind k) {
 // Build child rows for a struct item.
 inline void buildStructChildren(QStandardItem* item,
                                 const NodeTree* tree, uint64_t structId,
-                                void* subPtr) {
+                                void* subPtr, void* documentPtr = nullptr) {
     item->removeRows(0, item->rowCount());
 
     QVector<int> members = tree->childrenOf(structId);
@@ -67,6 +71,7 @@ inline void buildStructChildren(QStandardItem* item,
         auto* childItem = new QStandardItem(childDisplay);
         childItem->setData(QVariant::fromValue(subPtr), Qt::UserRole);
         childItem->setData(QVariant::fromValue(m.id), Qt::UserRole + 1);
+        childItem->setData(QVariant::fromValue(documentPtr), RoleDocument);
         item->appendRow(childItem);
     }
 }
@@ -91,7 +96,7 @@ inline QString typeDisplayString(const Node* node, const NodeTree* tree) {
 
 // Build a new item for a type entry.
 inline QStandardItem* makeTypeItem(const Node* node, const NodeTree* tree,
-                                   void* subPtr) {
+                                   void* subPtr, void* documentPtr = nullptr) {
     static const QIcon enumIcon(":/vsicons/symbol-enum.svg");
     static const QIcon structIcon(":/vsicons/symbol-structure.svg");
     bool isEnum = node->resolvedClassKeyword() == QStringLiteral("enum");
@@ -101,9 +106,10 @@ inline QStandardItem* makeTypeItem(const Node* node, const NodeTree* tree,
     item->setData(QVariant::fromValue(subPtr), Qt::UserRole);
     item->setData(QVariant::fromValue(node->id), Qt::UserRole + 1);
     item->setData(isEnum, Qt::UserRole + 2);
+    item->setData(QVariant::fromValue(documentPtr), RoleDocument);
 
     if (!isEnum)
-        buildStructChildren(item, tree, node->id, subPtr);
+        buildStructChildren(item, tree, node->id, subPtr, documentPtr);
 
     return item;
 }
@@ -119,11 +125,11 @@ inline QStandardItem* makeSectionItem(const QString& label) {
 // Full rebuild with two sections: PINNED (if any) + ALL TYPES.
 inline void buildProjectExplorer(QStandardItemModel* model,
                                  const QVector<TabInfo>& tabs,
-                                 const QSet<uint64_t>& pinnedIds = {}) {
+                                 const QSet<WorkspaceTypeKey>& pinnedIds = {}) {
     model->clear();
     model->setHorizontalHeaderLabels({QStringLiteral("Name")});
 
-    struct Entry { const Node* node; void* subPtr; const NodeTree* tree; };
+    struct Entry { const Node* node; void* subPtr; const NodeTree* tree; void* documentPtr; };
     QVector<Entry> allEntries;
 
     for (const auto& tab : tabs) {
@@ -131,19 +137,19 @@ inline void buildProjectExplorer(QStandardItemModel* model,
         for (int idx : topLevel) {
             const Node& n = tab.tree->nodes[idx];
             if (n.kind != NodeKind::Struct) continue;
-            allEntries.push_back(Entry{&n, tab.subPtr, tab.tree});
+            allEntries.push_back(Entry{&n, tab.subPtr, tab.tree, tab.documentPtr});
         }
     }
 
     // ── PINNED section (only if any pinned) ──
     QVector<const Entry*> pinned;
     for (const auto& e : allEntries)
-        if (pinnedIds.contains(e.node->id))
+        if (pinnedIds.contains({e.tree, e.node->id}))
             pinned.append(&e);
     if (!pinned.isEmpty()) {
         model->appendRow(makeSectionItem(QStringLiteral("PINNED")));
         for (const auto* e : pinned)
-            model->appendRow(makeTypeItem(e->node, e->tree, e->subPtr));
+            model->appendRow(makeTypeItem(e->node, e->tree, e->subPtr, e->documentPtr));
     }
 
     // ── ALL TYPES section ──
@@ -162,16 +168,16 @@ inline void buildProjectExplorer(QStandardItemModel* model,
     if (!types.isEmpty() || !enums.isEmpty()) {
         model->appendRow(makeSectionItem(QStringLiteral("ALL TYPES")));
         for (const auto& e : types)
-            model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
+            model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr, e.documentPtr));
         for (const auto& e : enums)
-            model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr));
+            model->appendRow(makeTypeItem(e.node, e.tree, e.subPtr, e.documentPtr));
     }
 }
 
 // Full rebuild (debounced at 50ms).
 inline void syncProjectExplorer(QStandardItemModel* model,
                                 const QVector<TabInfo>& tabs,
-                                const QSet<uint64_t>& pinnedIds = {}) {
+                                const QSet<WorkspaceTypeKey>& pinnedIds = {}) {
     buildProjectExplorer(model, tabs, pinnedIds);
 }
 

@@ -1522,6 +1522,8 @@ private slots:
         // explicit hide() both leave through hideEvent → dismissed().
         QApplication::processEvents();
         AddressBar* bar = m_editor->addressBar();
+        // Distinct hover/pressed/accent colors, independent of user settings.
+        bar->applyTheme(loadTheme(QStringLiteral("tw")));
         const Theme& t = bar->theme();
         QSignalSpy spy(m_editor, &RcxEditor::sourcePopupRequested);
         const QRect src = bar->itemRect(QStringLiteral("src"));
@@ -3758,7 +3760,9 @@ private slots:
         // cell — its top and bottom device rows, its left and right device
         // columns — and none of it outside keyboard mode. No accent.
         AddressBar bar;
-        bar.applyTheme(ThemeManager::instance().current());
+        // VS2022 uses the same color for borderFocused and indHoverSpan;
+        // this pixel assertion needs distinct tokens to identify the ring.
+        bar.applyTheme(loadTheme(QStringLiteral("tw")));
         const Theme& t = bar.theme();
         bar.setState(stateWith(twoLevel()));
         showBar(bar, 800);

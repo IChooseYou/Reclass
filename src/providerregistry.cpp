@@ -3,6 +3,7 @@
 #include <QMenu>
 #include <QIcon>
 #include <QHash>
+#include <algorithm>
 #include "svgicon.h"
 #include "themes/thememanager.h"
 
@@ -62,69 +63,68 @@ void ProviderRegistry::clear() {
     m_providers.clear();
 }
 
-void ProviderRegistry::populateSourceMenu(QMenu* menu,
-                                          const QVector<SavedSourceDisplay>& savedSources)
-{
-    static const QHash<QString, QString> s_providerIcons = {
-        {QStringLiteral("processmemory"),          QStringLiteral(":/vsicons/server-process.svg")},
-        {QStringLiteral("remoteprocessmemory"),    QStringLiteral(":/vsicons/remote.svg")},
-        {QStringLiteral("windbgmemory"),           QStringLiteral(":/vsicons/debug.svg")},
-        {QStringLiteral("RC.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
+QVector<rcx::SourceEntry> ProviderRegistry::sourceActions() {
+    QVector<rcx::SourceEntry> entries;
+    auto append = [&entries](const QString& id, const QString& name, const QString& dll, const QString& description) {
+        rcx::SourceEntry entry;
+        entry.entryKind = rcx::SourceEntry::ProviderAction;
+        entry.providerIdentifier = id;
+        entry.displayName = rcx::providerLabel(id, name);
+        entry.kindLabel = rcx::kindLabelFor(id);
+        entry.iconPath = rcx::iconForProvider(id);
+        entry.description = rcx::providerDescription(id, description);
+        entry.searchAliases = name;
+        entry.dllFileName = dll;
+        entries.append(entry);
     };
-
-    // The :/vsicons Codicons bake a light-grey #C5C5C5 ink, chosen for dark
-    // chrome. A plain QIcon(path) renders that ink verbatim, so on the light
-    // theme these glyphs were near-invisible on a near-white menu while the
-    // item TEXT (which comes from the palette) was correctly black. Tint them
-    // to the live menu-text colour. populateSourceMenu re-runs on every
-    // aboutToShow, so this follows a theme switch with no extra wiring, and
-    // themedVsIcon caches on (path, tint, size, dpr) so the rebuild is free.
-    const QColor ink = rcx::ThemeManager::instance().current().text;
-    const qreal  dpr = menu ? menu->devicePixelRatioF() : qreal(1);
-    auto themed = [&ink, dpr](const QString& path) {
-        return rcx::themedVsIcon(path, ink, 16, dpr);
-    };
-
-    // File source
-    auto* fileAct = menu->addAction(themed(QStringLiteral(":/vsicons/file-binary.svg")),
-                                    QStringLiteral("File"));
-    fileAct->setIconVisibleInMenu(true);
-    fileAct->setData(QStringLiteral("File"));
-
-    // Registered providers
-    const auto& providers = instance().providers();
-    for (const auto& prov : providers) {
-        auto it = s_providerIcons.constFind(prov.identifier);
-        const QIcon icon = themed(it != s_providerIcons.constEnd() ? *it
-                                  : QStringLiteral(":/vsicons/extensions.svg"));
-
-        QString label = prov.dllFileName.isEmpty()
-            ? prov.name
-            : QStringLiteral("%1  (%2)").arg(prov.name, prov.dllFileName);
-
-        auto* act = menu->addAction(icon, label);
-        act->setIconVisibleInMenu(true);
-        act->setData(prov.name);  // routing key for selectSource()
-
-        // Plugin-specific actions (e.g. "Unload Driver" when loaded)
-        if (prov.plugin)
-            prov.plugin->populatePluginMenu(menu);
+    append(QStringLiteral("File"), QStringLiteral("Open File"), {}, {});
+    for (const auto& p : instance().providers()) {
+        if (p.identifier == QStringLiteral("File")) continue;
+        append(p.identifier, p.name, p.dllFileName,
+               p.plugin ? QString::fromStdString(p.plugin->Description()) : QString());
     }
+    std::stable_sort(entries.begin(), entries.end(), [](const rcx::SourceEntry& a, const rcx::SourceEntry& b) {
+        const int ao = rcx::providerOrder(a.providerIdentifier), bo = rcx::providerOrder(b.providerIdentifier);
+        if (ao != bo) return ao < bo;
+        return QString::compare(a.displayName, b.displayName, Qt::CaseInsensitive) < 0;
+    });
+    return entries;
+}
 
-    // Saved sources
+void ProviderRegistry::populateSourceMenu(QMenu* menu,
+                                         const QVector<SavedSourceDisplay>& savedSources) {
+    if (!menu) return;
+    const auto& theme = rcx::ThemeManager::instance().current();
+    menu->addSection(QStringLiteral("Add source"));
+    QMenu* management = nullptr;
+    for (const auto& entry : sourceActions()) {
+        auto* action = menu->addAction(rcx::themedVsIcon(entry.iconPath, theme.text, 16, menu->devicePixelRatioF()),
+                                       entry.displayName + QStringLiteral("\u2026"));
+        action->setIconVisibleInMenu(true);
+        action->setData(entry.providerIdentifier);
+        action->setToolTip(entry.details());
+    }
     if (!savedSources.isEmpty()) {
-        menu->addSeparator();
-        for (int i = 0; i < savedSources.size(); i++) {
-            auto* act = menu->addAction(savedSources[i].text);
-            act->setCheckable(true);
-            act->setChecked(savedSources[i].active);
-            act->setData(QStringLiteral("#saved:%1").arg(i));
+        menu->addSection(QStringLiteral("Saved sources"));
+        for (int i = 0; i < savedSources.size(); ++i) {
+            auto* action = menu->addAction(savedSources[i].text);
+            action->setCheckable(true);
+            action->setChecked(savedSources[i].active);
+            action->setData(QStringLiteral("#saved:%1").arg(i));
         }
         menu->addSeparator();
-        auto* clearAct = menu->addAction(
-            themed(QStringLiteral(":/vsicons/clear-all.svg")),
-            QStringLiteral("Clear All"));
-        clearAct->setIconVisibleInMenu(true);
-        clearAct->setData(QStringLiteral("#clear"));
+        management = menu->addMenu(QStringLiteral("Manage sources"));
+        auto* clear = management->addAction(QStringLiteral("Disconnect and clear sources"));
+        clear->setData(QStringLiteral("#clear"));
+    }
+    // Keep each plugin's commands under its own name, separate from selection.
+    for (const auto& entry : sourceActions()) {
+        const auto* info = instance().findProvider(entry.providerIdentifier);
+        if (!info || !info->plugin) continue;
+        auto* sub = new QMenu(entry.displayName, menu);
+        info->plugin->populatePluginMenu(sub);
+        if (sub->isEmpty()) { delete sub; continue; }
+        if (!management) management = menu->addMenu(QStringLiteral("Manage sources"));
+        management->addMenu(sub);
     }
 }

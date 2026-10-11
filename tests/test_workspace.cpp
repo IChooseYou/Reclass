@@ -2,6 +2,7 @@
 // specifically the empty-state row count that drives the EmptyHintTreeView
 // "No types yet" overlay in the workspace dock.
 #include "workspace_model.h"
+#include "demo_simulation.h"
 #include <QtTest/QtTest>
 #include <QStandardItemModel>
 #include <QStyleOptionViewItem>
@@ -11,6 +12,42 @@ using namespace rcx;
 class TestWorkspace : public QObject {
     Q_OBJECT
 private slots:
+    void testDemoTypesKeepTheirOwnerWithoutAnOpenTab() {
+        NodeTree tree;
+        const auto demo = demo::buildBouncingBall(tree);
+        void* owner = &tree;
+        QStandardItemModel model;
+        buildProjectExplorer(&model, {{&tree, "Demo", nullptr, owner}});
+        QCOMPARE(model.rowCount(), 4);
+        QSet<uint64_t> ids;
+        for (int row = 1; row < model.rowCount(); ++row) {
+            auto* item = model.item(row);
+            ids.insert(item->data(Qt::UserRole + 1).toULongLong());
+            QCOMPARE(item->data(RoleDocument).value<void*>(), owner);
+            QVERIFY(item->data(Qt::UserRole).value<void*>() == nullptr);
+            for (int child = 0; child < item->rowCount(); ++child)
+                QCOMPARE(item->child(child)->data(RoleDocument).value<void*>(), owner);
+        }
+        QCOMPARE(ids, (QSet<uint64_t>{demo.ballClassId, demo.worldClassId, demo.stateEnumId}));
+    }
+
+    void testPinsBelongToTheirDocument() {
+        NodeTree demoTree, otherTree;
+        const auto demo = demo::buildBouncingBall(demoTree);
+        Node other;
+        other.kind = NodeKind::Struct;
+        other.id = demo.ballClassId; // IDs are only unique within a document.
+        other.structTypeName = "Other";
+        otherTree.addNode(other);
+        QStandardItemModel model;
+        buildProjectExplorer(&model, {{&demoTree, "Demo", nullptr, &demoTree},
+                                      {&otherTree, "Other", nullptr, &otherTree}},
+                             {{&demoTree, demo.ballClassId}});
+        QCOMPARE(model.item(0)->data(RoleSectionHeader).toString(), QString("PINNED"));
+        QCOMPARE(model.item(1)->data(RoleDocument).value<void*>(), static_cast<void*>(&demoTree));
+        QCOMPARE(model.item(2)->data(RoleSectionHeader).toString(), QString("ALL TYPES"));
+    }
+
     // An empty project (no tabs) must yield ZERO rows so the tree's empty-state
     // overlay can fire. Regression: buildProjectExplorer used to append an
     // UNCONDITIONAL "ALL TYPES" section header, leaving the model permanently at

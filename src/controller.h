@@ -531,7 +531,7 @@ public:
     // self-attached "New Class" flow where the user expects the chosen
     // source to be discoverable. MCP / requestOpenProviderTab callers
     // leave it false to keep the saved-source list as a UI-owned thing.
-    void attachViaPlugin(const QString& providerIdentifier, const QString& target,
+    bool attachViaPlugin(const QString& providerIdentifier, const QString& target,
                          bool registerAsSavedSource = false, QString* errorOutput = nullptr);
     const QVector<SavedSourceEntry>& savedSources() const { return m_savedSources; }
     int activeSourceIndex() const { return m_activeSourceIdx; }

@@ -1,28 +1,6 @@
-// Tests for the SourceChooserPopup.
-//
-// Interaction: the per-row × delete button added so users can remove a
-// single bound source instead of only "Clear All" — the click/key actually
-// *fires* removeRequested and, critically, clicking elsewhere on a saved row
-// does NOT delete it (guards against the paint rect and the hit-test rect
-// drifting apart, since both come from the shared deleteBtnRect()).
-//
-// Chrome: the popup family rule (the comment above
-// SourceChooserPopup::paintEvent) pinned in pixels, under both theme
-// polarities and at dpr 1.0 and 1.25 — the popup rendered through
-// QWidget::render onto a scaled QImage, the way test_breadcrumb's
-// testKeyboardFocusRingIsOneDeviceRowAt125Percent does. The frame is
-// exactly one device row / column on every side and nothing else is painted
-// on those rows (build/issue.png had the active row's accent bar on the left
-// border and the scrollbar over the right one); the body is one surface
-// (the filter was a backgroundAlt strip); the accent is spent on the one
-// word "active"; the scrollbar lives inside the frame and appears only when
-// the list truly cannot fit below the anchor; the section hairlines and the
-// Clear All divider run under the scroll track to the right frame; a
-// disabled Clear All never lights t.hover; setSources() while up re-fits the
-// height in place — keeping the bottom edge when the popup is flipped above
-// the bar; a flipped popup ends above the bar, not on its bottom edge; and
-// every seam reaches the frame at every width (the popup paints them under
-// its children, whose 1-logical inset is not device-exact).
+// Source chooser interaction and rendered geometry. Popups are driven
+// synchronously so the hidden Windows test desktop does not dismiss them
+// between show() and input. Pixel checks retain the shared popup frame rule.
 #include <QtTest/QTest>
 #include <QSignalSpy>
 #include <QApplication>
@@ -33,18 +11,19 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
-#include <QAbstractItemModel>
+#include <QMenu>
+#include <QToolButton>
 #include <QMouseEvent>
-#include <QKeyEvent>
 #include <QPainter>
+#include <QPointer>
 #include <QScreen>
+#include <QScopeGuard>
 #include <QScrollBar>
 #include <QtMath>
 #include "sourcechooserpopup.h"
 #include "paintutil.h"
 #include "themes/theme.h"
 #include "themes/thememanager.h"
-
 using namespace rcx;
 
 namespace {
@@ -98,194 +77,481 @@ QRect colAlong(const Edges& e, int x)  { return QRect(x, e.top, 1, e.bottom - e.
 
 }  // namespace
 
+
 class TestSourceChooser : public QObject {
     Q_OBJECT
-private:
     SourceChooserPopup* m_popup = nullptr;
     QListView* m_list = nullptr;
+    QLineEdit* m_search = nullptr;
 
-    static SourceEntry header(const QString& name) {
-        SourceEntry h;
-        h.entryKind = SourceEntry::SectionHeader;
-        h.displayName = name;
-        h.enabled = false;
-        return h;
-    }
-    static SourceEntry saved(const QString& name, int savedIndex, bool active) {
+    static SourceEntry saved(const QString& name, int index, bool active = false) {
         SourceEntry e;
-        e.entryKind = SourceEntry::SavedSource;
         e.displayName = name;
         e.providerIdentifier = QStringLiteral("processmemory");
-        e.kindLabel = QStringLiteral("Process");
+        e.kindLabel = kindLabelFor(e.providerIdentifier);
         e.iconPath = iconForProvider(e.providerIdentifier);
-        e.pid = QString::number(1000 + savedIndex);
-        e.arch = QStringLiteral("x64");
-        e.baseAddress = QStringLiteral("0x140000000");
-        e.savedIndex = savedIndex;
+        e.pid = QString::number(1000 + index);
+        e.providerTarget = e.pid + ':' + name;
+        e.savedIndex = index;
         e.isActive = active;
         return e;
     }
-    static SourceEntry provider(const QString& name, const QString& id, const QString& dll) {
-        SourceEntry p;
-        p.entryKind = SourceEntry::ProviderAction;
-        p.displayName = name;
-        p.providerIdentifier = id;
-        p.kindLabel = kindLabelFor(id);
-        p.dllFileName = dll;
-        p.iconPath = iconForProvider(id);
-        return p;
+    static SourceEntry provider(const QString& name, const QString& id) {
+        SourceEntry e;
+        e.entryKind = SourceEntry::ProviderAction;
+        e.displayName = name;
+        e.providerIdentifier = id;
+        e.kindLabel = kindLabelFor(id);
+        e.iconPath = iconForProvider(id);
+        e.dllFileName = QStringLiteral("provider.dll");
+        return e;
     }
-    static SourceEntry clearAll(bool enabled) {
-        SourceEntry c;
-        c.entryKind = SourceEntry::ClearAction;
-        c.displayName = QStringLiteral("Clear All");
-        c.iconPath = QStringLiteral(":/vsicons/clear-all.svg");
-        c.enabled = enabled;
-        return c;
-    }
-
-    // The list the controller builds for a live session: one attached
-    // process, the six providers the app ships, Clear All. `savedCount` > 1
-    // adds more processes (the scroll case).
-    static QVector<SourceEntry> liveEntries(int savedCount = 1) {
+    static QVector<SourceEntry> liveEntries(int count = 1) {
         QVector<SourceEntry> entries;
-        entries.append(header(QStringLiteral("Connected")));
-        for (int i = 0; i < savedCount; ++i)
+        for (int i = 0; i < count; ++i)
             entries.append(saved(QStringLiteral("process_%1.exe").arg(i), i, i == 0));
-        entries.append(header(QStringLiteral("Add Source")));
-        entries.append(provider(QStringLiteral("Open File"), QStringLiteral("File"), QStringLiteral("built-in")));
-        entries.append(provider(QStringLiteral("Kernel Memory"), QStringLiteral("kernelmemory"), QStringLiteral("libKernelMemoryPlugin.dll")));
-        entries.append(provider(QStringLiteral("Process Memory"), QStringLiteral("processmemory"), QStringLiteral("libProcessMemoryPlugin.dll")));
-        entries.append(provider(QStringLiteral("ReClass.NET Compat Layer"), QStringLiteral("RC.netcompatlayer"), QStringLiteral("libRcNetCompatPlugin.dll")));
-        entries.append(provider(QStringLiteral("Remote Process Memory"), QStringLiteral("remoteprocessmemory"), QStringLiteral("libRemoteProcessMemoryPlugin.dll")));
-        entries.append(provider(QStringLiteral("WinDbg Memory"), QStringLiteral("windbgmemory"), QStringLiteral("libWinDbgMemoryPlugin.dll")));
-        entries.append(clearAll(true));
+        entries.append(provider(QStringLiteral("Open File"), QStringLiteral("File")));
+        entries.append(provider(QStringLiteral("Kernel Memory"), QStringLiteral("kernelmemory")));
+        entries.append(provider(QStringLiteral("Process Memory"), QStringLiteral("processmemory")));
+        entries.append(provider(QStringLiteral("ReClass.NET Compat Layer"), QStringLiteral("reclass.netcompatlayer")));
+        entries.append(provider(QStringLiteral("Remote Process Memory"), QStringLiteral("remoteprocessmemory")));
+        entries.append(provider(QStringLiteral("WinDbg Memory"), QStringLiteral("windbgmemory")));
         return entries;
     }
-
-    // popup() sizes the frame and shows it; then qWait + processEvents,
-    // never qWaitForWindowExposed: the hidden test desktop
-    // (tools/run_tests_hidden.py) never composites, so an exposure wait
-    // times out there — and its platform closes a Qt::Popup at the first
-    // event pump, so from here on the popup may be hidden again. Every test
-    // drives the list synchronously (sendEvent on its viewport, the key on
-    // the list, currentIndex set by hand) or renders the laid-out widget
-    // through QWidget::render — none of which needs a mapped window. The
-    // same rule test_breadcrumb's menu tests follow.
     static void open(SourceChooserPopup& popup, const QPoint& at) {
         popup.popup(at);
-        QTest::qWait(30);
-        QApplication::processEvents();
+        popup.layout()->activate();
+        popup.findChild<QListView*>()->doItemsLayout();
     }
-
-    // The popup's entry order: [Connected hdr, saved0, saved1, Add Source hdr,
-    // provider, Clear All]. Saved rows live at model rows 1 and 2.
-    int savedRow(int savedIndex) const { return 1 + savedIndex; }
-
+    void reset(const QVector<SourceEntry>& entries) {
+        m_popup->hide();
+        m_popup->setSources(entries);
+        open(*m_popup, QPoint(100, 100));
+    }
+    int rowNamed(const QString& name) {
+        for (int i = 0; i < m_list->model()->rowCount(); ++i)
+            if (m_list->model()->index(i, 0).data().toString() == name) return i;
+        return -1;
+    }
     static void chromeData() {
         QTest::addColumn<QString>("themeName");
         QTest::addColumn<double>("dpr");
-        QTest::newRow("tw@1.0")  << QStringLiteral("tw") << 1.0;
-        QTest::newRow("tw@1.25") << QStringLiteral("tw") << 1.25;
-        QTest::newRow("vs@1.0")  << QStringLiteral("vs") << 1.0;
-        QTest::newRow("vs@1.25") << QStringLiteral("vs") << 1.25;
+        for (const char* theme : {"tw", "vs"})
+            for (double scale : {1.0, 1.25, 1.5, 1.75, 2.0})
+                QTest::newRow(qPrintable(QStringLiteral("%1@%2").arg(theme).arg(scale)))
+                    << QString::fromLatin1(theme) << scale;
     }
-
 private slots:
     void init() {
-        m_popup = new SourceChooserPopup();
-        m_popup->applyTheme(ThemeManager::instance().current());
-        m_popup->setFont(QFont(QStringLiteral("Consolas"), 11));
-
-        QVector<SourceEntry> entries;
-        entries.append(header(QStringLiteral("Connected")));
-        entries.append(saved(QStringLiteral("notepad.exe"), 0, true));
-        entries.append(saved(QStringLiteral("game.exe"),    1, false));
-        entries.append(header(QStringLiteral("Add Source")));
-        entries.append(provider(QStringLiteral("Open File"), QStringLiteral("File"), QStringLiteral("built-in")));
-        entries.append(clearAll(true));
-        m_popup->setSources(entries);
-        open(*m_popup, QPoint(100, 100));
-
+        m_popup = new SourceChooserPopup;
+        m_popup->applyTheme(loadTheme(QStringLiteral("vs")));
+        m_popup->setFont(QFont(QStringLiteral("Consolas"), 10));
         m_list = m_popup->findChild<QListView*>();
-        QVERIFY(m_list != nullptr);
-        QVERIFY(m_list->model() != nullptr);
+        m_search = m_popup->findChild<QLineEdit*>();
+        reset(liveEntries(2));
+    }
+    void cleanup() { delete m_popup; }
+
+    void cachedProviderGridDoesNotOverlap_data() {
+        QTest::addColumn<int>("providerCount");
+        QTest::addColumn<QString>("themeName");
+        QTest::addColumn<int>("fontPoints");
+        for (int count : {1, 6, 7, 8, 12})
+            for (const char* theme : {"vs", "tw"})
+                for (int points : {10, 18})
+                    QTest::newRow(qPrintable(QStringLiteral("%1-%2-%3pt").arg(count).arg(theme).arg(points)))
+                        << count << QString::fromLatin1(theme) << points;
     }
 
-    void cleanup() {
-        delete m_popup;  m_popup = nullptr;  m_list = nullptr;
+    void cachedProviderGridDoesNotOverlap() {
+        QFETCH(int, providerCount);
+        QFETCH(QString, themeName);
+        QFETCH(int, fontPoints);
+        // Exercise the controller's actual lifecycle: create and warm an
+        // empty popup, then populate it when the source chip is first clicked.
+        m_popup->hide();
+        const QString oldStyle = qApp->styleSheet();
+        const auto restoreStyle = qScopeGuard([oldStyle] { qApp->setStyleSheet(oldStyle); });
+        // The real application has a global style sheet. Its style polish
+        // also affects when a newly parented button contributes to size hints.
+        qApp->setStyleSheet(QStringLiteral("QScrollBar:vertical { width: 8px; border: none; }"));
+        SourceChooserPopup cached;
+        cached.warmUp();
+        cached.setFont(QFont(QStringLiteral("Consolas"), fontPoints));
+        cached.applyTheme(loadTheme(themeName));
+        // First open, reuse after search, then a changed provider catalog.
+        for (int pass = 0; pass < 3; ++pass) {
+            cached.hide();
+            const int count = pass == 2 ? 2 : providerCount;
+            auto entries = liveEntries(1);
+            entries.resize(qMin(count, 6) + 1);
+            for (int i = 6; i < count; ++i)
+                entries.append(provider(QStringLiteral("Example %1").arg(i), QStringLiteral("example%1").arg(i)));
+            cached.setSources(entries);
+            cached.popup(QPoint(100, 200));
+            const QRect opened = cached.geometry();
+            // Child layout requests are deferred. Inspect the settled layout,
+            // including on desktops where Qt dismisses native popups on a pump.
+            QApplication::processEvents();
+
+            QCOMPARE(cached.geometry(), opened);
+            QVERIFY(QApplication::primaryScreen()->availableGeometry().contains(opened));
+            auto* area = cached.findChild<QWidget*>(QStringLiteral("providerActions"));
+            auto* heading = cached.findChild<QWidget*>(QStringLiteral("sourceListHeading"));
+            QVERIFY(cached.rect().contains(area->geometry()));
+            QList<QRect> buttons;
+            for (auto* button : area->findChildren<QToolButton*>()) {
+                if (button->property("providerId").toString().isEmpty()) continue;
+                QVERIFY(!button->isHidden());
+                const QRect rect(button->mapTo(area, QPoint()), button->size());
+                QVERIFY2(area->rect().contains(rect), "Provider button is clipped by its container");
+                for (const auto& previous : buttons)
+                    QVERIFY2(!previous.intersects(rect), "Provider buttons overlap");
+                buttons.append(rect);
+            }
+            QCOMPARE(buttons.size(), qMin(count, 8));
+            QVERIFY(area->geometry().bottom() < heading->geometry().top());
+            auto* list = cached.findChild<QListView*>();
+            QVERIFY(cached.rect().contains(list->geometry()));
+            QVERIFY(list->viewport()->height() >= list->sizeHintForRow(0));
+            cached.findChild<QLineEdit*>()->setText(QStringLiteral("process"));
+            QApplication::processEvents();
+            QCOMPARE(cached.geometry(), opened);
+        }
     }
 
-    // ── Interaction ──
-
-    // Clicking the × on a saved row removes exactly that source.
-    void testDeleteButtonClickEmitsRemove() {
-        QSignalSpy removeSpy(m_popup, &SourceChooserPopup::removeRequested);
-        QSignalSpy selectSpy(m_popup, &SourceChooserPopup::sourceSelected);
-
-        QRect vr = m_list->visualRect(m_list->model()->index(savedRow(1), 0));
-        QVERIFY(vr.isValid() && vr.width() > 30);
-        // deleteBtnRect = 16px wide, right edge at itemRect.right()-6, centred.
-        QPoint xCentre(vr.right() - 14, vr.center().y());
-
-        QMouseEvent rel(QEvent::MouseButtonRelease, xCentre,
-                        m_list->viewport()->mapToGlobal(xCentre),
-                        Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        QApplication::sendEvent(m_list->viewport(), &rel);
-        QApplication::processEvents();
-
-        QCOMPARE(removeSpy.count(), 1);
-        QCOMPARE(removeSpy.takeFirst().at(0).toInt(), 1);   // game.exe = savedIndex 1
-        QCOMPARE(selectSpy.count(), 0);                     // not a row activation
+    void fixedActionsAndBoundedHistory() {
+        reset(liveEntries(100));
+        const QRect before = m_popup->geometry();
+        auto* actions = m_popup->findChild<QWidget*>(QStringLiteral("providerActions"));
+        const QRect actionRect = actions->geometry();
+        QCOMPARE(actions->findChildren<QToolButton*>().size(), 7); // six providers + catalog link
+        QCOMPARE(m_list->model()->rowCount(), 100);
+        QVERIFY(m_list->verticalScrollBar()->maximum() > 0);
+        QVERIFY(m_popup->height() < 520);
+        m_list->verticalScrollBar()->setValue(m_list->verticalScrollBar()->maximum());
+        QCOMPARE(actions->geometry(), actionRect);
+        QCOMPARE(m_popup->geometry(), before);
+        for (auto* button : actions->findChildren<QToolButton*>())
+            if (!button->property("providerId").toString().isEmpty())
+                QVERIFY(!button->isHidden());
     }
 
-    // Clicking the row body (over the name, far from the ×) must NOT delete —
-    // this is the regression guard for the two rects drifting apart.
-    void testBodyClickDoesNotDelete() {
-        QSignalSpy removeSpy(m_popup, &SourceChooserPopup::removeRequested);
-
-        QRect vr = m_list->visualRect(m_list->model()->index(savedRow(0), 0));
-        QPoint body(vr.left() + 30, vr.center().y());
-
-        QMouseEvent rel(QEvent::MouseButtonRelease, body,
-                        m_list->viewport()->mapToGlobal(body),
-                        Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        QApplication::sendEvent(m_list->viewport(), &rel);
-        QApplication::processEvents();
-
-        QCOMPARE(removeSpy.count(), 0);
+    void shortHistoriesOpenCompactAndLargeFontHintsFit() {
+        reset(liveEntries(100));
+        const int tall = m_popup->height();
+        reset(liveEntries(1));
+        QVERIFY(m_popup->height() < tall);
+        for (int points : {10, 18, 24}) {
+            m_popup->setFont(QFont(QStringLiteral("Consolas"), points));
+            reset(liveEntries(1));
+            auto* footer = m_popup->findChild<QLabel*>(QStringLiteral("sourceFooter"));
+            QVERIFY(QFontMetrics(footer->font()).horizontalAdvance(footer->text()) <= footer->contentsRect().width());
+            QVERIFY(QApplication::primaryScreen()->availableGeometry().contains(m_popup->geometry()));
+        }
     }
 
-    // Delete key on a focused saved row removes that source.
-    void testDeleteKeyEmitsRemove() {
-        QSignalSpy removeSpy(m_popup, &SourceChooserPopup::removeRequested);
-
-        m_list->setFocus();
-        m_list->setCurrentIndex(m_list->model()->index(savedRow(0), 0));
-        QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
-        QApplication::sendEvent(m_list, &del);
-        QApplication::processEvents();
-
-        QCOMPARE(removeSpy.count(), 1);
-        QCOMPARE(removeSpy.takeFirst().at(0).toInt(), 0);   // notepad.exe = savedIndex 0
+    void removingThroughMenuPreservesOpenSearch() {
+        auto entries = liveEntries(3);
+        reset(entries);
+        m_search->setText(QStringLiteral("process_"));
+        const QRect geometry = m_popup->geometry();
+        connect(m_popup, &SourceChooserPopup::removeRequested, this, [&](int index) {
+            entries.removeAt(index);
+            for (auto& e : entries) if (e.savedIndex > index) --e.savedIndex;
+            m_popup->setSources(entries);
+        });
+        const int row = rowNamed(QStringLiteral("process_1.exe"));
+        const QRect rect = m_list->visualRect(m_list->model()->index(row, 0));
+        QTest::mouseClick(m_list->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(rect.right() - 16, rect.center().y()));
+        auto* menu = m_popup->findChild<QMenu*>(QStringLiteral("sourceRowMenu"));
+        QVERIFY(menu);
+        QVERIFY(m_popup->isVisible());
+        menu->actions().first()->trigger();
+        menu->hide();
+        QCOMPARE(m_search->text(), QStringLiteral("process_"));
+        QCOMPARE(m_popup->geometry(), geometry);
+        QCOMPARE(rowNamed(QStringLiteral("process_1.exe")), -1);
+        QVERIFY(m_list->currentIndex().isValid());
+        QVERIFY(m_popup->isVisible());
     }
 
-    // Delete key on a non-saved row (the Clear All action) is a no-op.
-    void testDeleteKeyOnActionNoOp() {
-        QSignalSpy removeSpy(m_popup, &SourceChooserPopup::removeRequested);
-
-        m_list->setFocus();
-        // Last row is "Clear All" (ClearAction, not a saved source).
-        int lastRow = m_list->model()->rowCount() - 1;
-        m_list->setCurrentIndex(m_list->model()->index(lastRow, 0));
-        QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
-        QApplication::sendEvent(m_list, &del);
-        QApplication::processEvents();
-
-        QCOMPARE(removeSpy.count(), 0);
+    void providerButtonsRouteStableIds() {
+        QSignalSpy spy(m_popup, &SourceChooserPopup::providerSelected);
+        auto* button = m_popup->findChild<QToolButton*>(QStringLiteral("provider_remoteprocessmemory"));
+        QVERIFY(button);
+        QVERIFY(button->text().startsWith(QStringLiteral("Process via IPC")));
+        QVERIFY(button->toolTip().contains(QStringLiteral("shared memory")));
+        button->click();
+        QCOMPARE(spy.size(), 1);
+        QCOMPARE(spy.first().first().toString(), QStringLiteral("remoteprocessmemory"));
+        QVERIFY(!m_popup->isVisible());
     }
 
-    // ── Chrome ──
+    void currentFirstAndClickDoesNotReconnect() {
+        auto entries = liveEntries(3);
+        entries[0].isActive = false;
+        entries[2].isActive = true;
+        reset(entries);
+        QCOMPARE(m_list->model()->index(0, 0).data().toString(), QStringLiteral("process_2.exe"));
+        QSignalSpy selected(m_popup, &SourceChooserPopup::sourceSelected);
+        QSignalSpy removed(m_popup, &SourceChooserPopup::removeRequested);
+        QTest::mouseClick(m_list->viewport(), Qt::LeftButton, Qt::NoModifier,
+                          m_list->visualRect(m_list->model()->index(0, 0)).center());
+        QCOMPARE(selected.size(), 0);
+        QCOMPARE(removed.size(), 0);
+        QVERIFY(!m_popup->isVisible());
+    }
+
+    void bodyClickSwitchesWithoutDeleting() {
+        QSignalSpy selected(m_popup, &SourceChooserPopup::sourceSelected);
+        QSignalSpy removed(m_popup, &SourceChooserPopup::removeRequested);
+        QTest::mouseClick(m_list->viewport(), Qt::LeftButton, Qt::NoModifier,
+                          m_list->visualRect(m_list->model()->index(1, 0)).center());
+        QCOMPARE(selected.size(), 1);
+        QCOMPARE(selected.first().first().toInt(), 1);
+        QCOMPARE(removed.size(), 0);
+    }
+
+    void rowMenuSeparatesRemovalFromSelection() {
+        QSignalSpy selected(m_popup, &SourceChooserPopup::sourceSelected);
+        QSignalSpy removed(m_popup, &SourceChooserPopup::removeRequested);
+        const QRect row = m_list->visualRect(m_list->model()->index(1, 0));
+        QTest::mouseClick(m_list->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(row.right() - 16, row.center().y()));
+        QCOMPARE(selected.size(), 0);
+        QCOMPARE(removed.size(), 0);
+        auto* menu = m_popup->findChild<QMenu*>(QStringLiteral("sourceRowMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions().first()->text(), QStringLiteral("Remove from list"));
+        menu->actions().first()->trigger();
+        QCOMPARE(removed.size(), 1);
+        QCOMPARE(removed.first().first().toInt(), 1);
+        menu->hide();
+    }
+
+    void activeRemovalIsExplicitAndKeyboardAccessible() {
+        m_list->setCurrentIndex(m_list->model()->index(0, 0));
+        QTest::keyClick(m_list, Qt::Key_F10, Qt::ShiftModifier);
+        auto* menu = m_popup->findChild<QMenu*>(QStringLiteral("sourceRowMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions().first()->text(), QStringLiteral("Disconnect and remove"));
+        menu->hide();
+    }
+
+    void searchFindsPidLongPathAndOldProviderName() {
+        auto entries = liveEntries(2);
+        SourceEntry file = saved(QStringLiteral("capture.bin"), 2);
+        file.providerIdentifier = QStringLiteral("File");
+        file.filePath = QStringLiteral("C:/") + QString(320, 'a') + QStringLiteral("/unique-capture.bin");
+        file.pid.clear();
+        entries.append(file);
+        reset(entries);
+        const QRect geometry = m_popup->geometry();
+        m_search->setText(QStringLiteral("1001"));
+        QVERIFY(rowNamed(QStringLiteral("process_1.exe")) >= 0);
+        m_search->setText(QStringLiteral("unique-capture"));
+        QVERIFY(rowNamed(QStringLiteral("capture.bin")) >= 0);
+        m_search->setText(QStringLiteral("Remote Process Memory"));
+        const int row = rowNamed(QStringLiteral("Process via IPC"));
+        QVERIFY(row >= 0);
+        QSignalSpy picked(m_popup, &SourceChooserPopup::providerSelected);
+        QTest::keyClick(m_search, Qt::Key_Return);
+        QCOMPARE(picked.size(), 1);
+        QCOMPARE(picked.first().first().toString(), QStringLiteral("remoteprocessmemory"));
+        QCOMPARE(m_popup->geometry(), geometry);
+    }
+
+    void searchExcludesManagementAndCountsOnlyResults() {
+        m_search->setText(QStringLiteral("clear"));
+        QCOMPARE(m_list->model()->rowCount(), 0);
+        QVERIFY(!m_popup->findChild<QLabel*>(QStringLiteral("emptySources"))->isHidden());
+        QVERIFY(m_popup->findChild<QLabel*>(QStringLiteral("sourceFooter"))->text().contains(QStringLiteral("Esc")));
+        m_search->setText(QStringLiteral("File"));
+        QVERIFY(rowNamed(QStringLiteral("File")) >= 0);
+        auto* heading = m_popup->findChild<QWidget*>(QStringLiteral("sourceListHeading"));
+        QCOMPARE(heading->findChild<QLabel*>()->text(), QStringLiteral("Results (1)"));
+    }
+
+    void deletionPreservesQueryIdentityScrollAndGeometry() {
+        auto entries = liveEntries(30);
+        reset(entries);
+        m_search->setText(QStringLiteral("process_"));
+        const int selected = rowNamed(QStringLiteral("process_15.exe"));
+        m_list->setCurrentIndex(m_list->model()->index(selected, 0));
+        m_list->verticalScrollBar()->setValue(140);
+        const int scroll = m_list->verticalScrollBar()->value();
+        const QRect geometry = m_popup->geometry();
+        // Delete an earlier entry, renumbering the controller indices.
+        entries.removeAt(1);
+        for (auto& e : entries) if (e.savedIndex > 1) --e.savedIndex;
+        m_popup->setSources(entries);
+        QCOMPARE(m_search->text(), QStringLiteral("process_"));
+        QCOMPARE(m_list->currentIndex().data().toString(), QStringLiteral("process_15.exe"));
+        QCOMPARE(m_list->verticalScrollBar()->value(), scroll);
+        QCOMPARE(m_popup->geometry(), geometry);
+        QSignalSpy removed(m_popup, &SourceChooserPopup::removeRequested);
+        QTest::keyClick(m_list, Qt::Key_Delete);
+        QCOMPARE(removed.size(), 1);
+        QCOMPARE(removed.first().first().toInt(), 14);
+    }
+
+    void livenessUpdatesDoNotMoveSelection() {
+        reset(liveEntries(30));
+        m_search->setText(QStringLiteral("process_"));
+        m_list->setCurrentIndex(m_list->model()->index(rowNamed(QStringLiteral("process_15.exe")), 0));
+        m_list->verticalScrollBar()->setValue(140);
+        const int scroll = m_list->verticalScrollBar()->value();
+        const QModelIndex current = m_list->currentIndex();
+        QVector<bool> alive(30, true);
+        alive[15] = false;
+        m_popup->setLivenessResults(alive);
+        QCOMPARE(m_list->currentIndex(), current);
+        QCOMPARE(m_list->verticalScrollBar()->value(), scroll);
+        QVERIFY(current.data(Qt::AccessibleDescriptionRole).toString().contains(QStringLiteral("Exited")));
+    }
+
+    void fileStatusIsNotAnExitedProcess() {
+        auto e = saved(QStringLiteral("missing.bin"), 0);
+        e.providerIdentifier = QStringLiteral("File");
+        e.pid.clear();
+        reset({e});
+        m_popup->setLivenessResults({false});
+        const auto details = m_list->model()->index(0, 0).data(Qt::AccessibleDescriptionRole).toString();
+        QVERIFY(details.contains(QStringLiteral("Missing file")));
+        QVERIFY(!details.contains(QStringLiteral("Exited")));
+    }
+
+    void futureProvidersFitAndOverflowRemainsSearchable() {
+        auto entries = liveEntries();
+        for (int i = 0; i < 6; ++i)
+            entries.append(provider(QStringLiteral("Transport %1").arg(i), QStringLiteral("transport%1").arg(i)));
+        reset(entries);
+        auto* area = m_popup->findChild<QWidget*>(QStringLiteral("providerActions"));
+        int buttons = 0;
+        for (auto* b : area->findChildren<QToolButton*>())
+            if (!b->property("providerId").toString().isEmpty()) ++buttons;
+        QCOMPARE(buttons, 8);
+        const QRect geometry = m_popup->geometry();
+        auto* all = m_popup->findChild<QToolButton*>(QStringLiteral("allSources"));
+        QVERIFY(!all->isHidden());
+        all->click();
+        QCOMPARE(m_list->model()->rowCount(), 12);
+        QCOMPARE(m_popup->geometry(), geometry);
+        QVERIFY(area->isHidden());
+        m_search->setText(QStringLiteral("Transport 5"));
+        QVERIFY(rowNamed(QStringLiteral("Transport 5")) >= 0);
+        m_popup->findChild<QToolButton*>(QStringLiteral("backToSources"))->click();
+        QVERIFY(m_search->text().isEmpty());
+        QVERIFY(!area->isHidden());
+        QCOMPARE(m_list->model()->rowCount(), 1);
+        QCOMPARE(m_popup->geometry(), geometry);
+    }
+
+    void providerActionsAreAvailableFromManagement() {
+        int invoked = 0;
+        connect(m_popup, &SourceChooserPopup::populateProviderMenu, this, [&invoked](const QString& id, QMenu* menu) {
+            if (id == QStringLiteral("kernelmemory"))
+                QObject::connect(menu->addAction(QStringLiteral("Unload driver")), &QAction::triggered,
+                                 menu, [&invoked] { ++invoked; });
+        });
+        m_popup->findChild<QToolButton*>(QStringLiteral("sourceManagement"))->click();
+        auto* menu = m_popup->findChild<QMenu*>(QStringLiteral("sourceManagementMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions().first()->text(), QStringLiteral("Disconnect and clear sources"));
+        QMenu* providerMenu = nullptr;
+        for (auto* action : menu->actions()) if (action->menu()) providerMenu = action->menu();
+        QVERIFY(providerMenu);
+        QCOMPARE(providerMenu->title(), QStringLiteral("Kernel"));
+        providerMenu->actions().first()->trigger();
+        QCOMPARE(invoked, 1);
+        menu->hide();
+    }
+
+    void emptyHistoryKeepsActionsAndDisablesClear() {
+        reset(liveEntries(0));
+        QCOMPARE(m_list->model()->rowCount(), 0);
+        QVERIFY(!m_popup->findChild<QLabel*>(QStringLiteral("emptySources"))->isHidden());
+        m_popup->findChild<QToolButton*>(QStringLiteral("sourceManagement"))->click();
+        auto* menu = m_popup->findChild<QMenu*>(QStringLiteral("sourceManagementMenu"));
+        QVERIFY(menu);
+        QVERIFY(!menu->actions().first()->isEnabled());
+        menu->hide();
+    }
+
+    void dismissedManagementMenuIsReleased() {
+        m_popup->findChild<QToolButton*>(QStringLiteral("sourceManagement"))->click();
+        QPointer<QMenu> menu = m_popup->findChild<QMenu*>(QStringLiteral("sourceManagementMenu"));
+        QVERIFY(menu);
+        menu->hide();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QVERIFY(menu.isNull());
+    }
+
+    void keyboardSkipsHeadingsAndDoesNotDeleteProviders() {
+        m_search->setText(QStringLiteral("File"));
+        QSignalSpy removed(m_popup, &SourceChooserPopup::removeRequested);
+        QTest::keyClick(m_search, Qt::Key_Down);
+        QCOMPARE(m_list->currentIndex().data().toString(), QStringLiteral("File"));
+        QTest::keyClick(m_list, Qt::Key_Delete);
+        QCOMPARE(removed.size(), 0);
+        QSignalSpy picked(m_popup, &SourceChooserPopup::providerSelected);
+        QTest::keyClick(m_list, Qt::Key_Return);
+        QCOMPARE(picked.size(), 1);
+        QCOMPARE(picked.first().first().toString(), QStringLiteral("File"));
+    }
+
+    void longNamesCannotPaintUnderMenu() {
+        reset(liveEntries(2));
+        m_list->clearFocus();
+        const QRect row = m_list->visualRect(m_list->model()->index(1, 0));
+        const QPoint origin = m_list->viewport()->mapTo(m_popup, QPoint());
+        const QRect menuRegion(origin.x() + row.right() - 30, origin.y() + row.top(), 24, row.height());
+        const QImage before = renderAt(*m_popup, 1);
+        auto entries = liveEntries(2);
+        entries[1].displayName = QString(400, QLatin1Char('W'));
+        m_popup->setSources(entries);
+        const QImage after = renderAt(*m_popup, 1);
+        QCOMPARE(after.copy(menuRegion), before.copy(menuRegion));
+        QVERIFY(m_list->model()->index(1, 0).data(Qt::ToolTipRole).toString().contains(QString(400, QLatin1Char('W'))));
+    }
+
+    void pidParsingUsesProviderFormat() {
+        QCOMPARE(sourcePid(QStringLiteral("processmemory"), QStringLiteral("123:game.exe")), QStringLiteral("123"));
+        QCOMPARE(sourcePid(QStringLiteral("remoteprocessmemory"), QStringLiteral("rpm:456:game.exe")), QStringLiteral("456"));
+        QCOMPARE(sourcePid(QStringLiteral("kernelmemory"), QStringLiteral("km:789:game.exe")), QStringLiteral("789"));
+        QCOMPARE(sourcePid(QStringLiteral("reclass.netcompatlayer"), QStringLiteral("C:/plugin.dll|42:game.exe")), QStringLiteral("42"));
+        QVERIFY(sourcePid(QStringLiteral("socket"), QStringLiteral("123:9000")).isEmpty());
+    }
+
+    void compatProviderUsesRegisteredId() {
+        const QString name = QStringLiteral("ReClass.NET Compat Layer");
+        // PluginManager derives routing IDs from the plugin's declared name.
+        const QString id = name.toLower().remove(' ');
+        reset({provider(name, id)});
+        auto* button = m_popup->findChild<QToolButton*>(QStringLiteral("provider_") + id);
+        QVERIFY(button);
+        QCOMPARE(button->text(), QStringLiteral("ReClass.NET\u2026"));
+        QCOMPARE(iconForProvider(id), QStringLiteral(":/vsicons/plug.svg"));
+        QVERIFY(providerOrder(id) < providerOrder(QStringLiteral("example")));
+        QSignalSpy picked(m_popup, &SourceChooserPopup::providerSelected);
+        button->click();
+        QCOMPARE(picked.size(), 1);
+        QCOMPARE(picked.first().first().toString(), id);
+    }
+
+    void flippingAndUpdatingKeepPopupAttached() {
+        const QRect screen = QApplication::primaryScreen()->availableGeometry();
+        m_popup->hide();
+        const QPoint anchor(screen.right() - 5, screen.bottom() - 20);
+        const int barTop = anchor.y() - 28;
+        m_popup->popup(anchor, barTop);
+        const QRect geometry = m_popup->geometry();
+        QCOMPARE(m_popup->y() + m_popup->height(), barTop);
+        QVERIFY(screen.contains(geometry));
+        m_popup->setSources(liveEntries(100));
+        m_search->setText(QStringLiteral("File"));
+        QCOMPARE(m_popup->geometry(), geometry);
+    }
 
     void testFrameIsOneDeviceRowOnEverySide_data() { chromeData(); }
     void testFrameIsOneDeviceRowOnEverySide() {
@@ -352,7 +618,8 @@ private slots:
                                    QRect(pe.right - 4, pe.top + 1, 4, pe.bottom - pe.top - 1) }) {
             const int ground = countColour(img, strip, t.background);
             const int seams  = countColour(img, strip, containerBorderColor(t));
-            QVERIFY2(ground + seams == strip.width() * strip.height(),
+            const int focusSeam = countColour(img, strip, t.borderFocused);
+            QVERIFY2(ground + seams + focusSeam == strip.width() * strip.height(),
                      qPrintable(QStringLiteral("edge strip at x=%1: %2 ground + %3 seam of %4")
                                     .arg(strip.left()).arg(ground).arg(seams)
                                     .arg(strip.width() * strip.height())));
@@ -375,357 +642,27 @@ private slots:
                 > fw * (f.bottom - f.top) / 2);
     }
 
-    void testAccentIsSpentOnTheActiveWordOnly_data() { chromeData(); }
-    void testAccentIsSpentOnTheActiveWordOnly() {
-        // The accent (indHoverSpan) is budgeted: the one place it appears is
-        // the word "active" on the active source's second line — inside
-        // that row, right of its icon, clear of the × gutter. No side bar,
-        // no arch pill, nothing on any other row or on the frame.
-        QFETCH(QString, themeName);
-        QFETCH(double, dpr);
-        const Theme t = loadTheme(themeName);
-        SourceChooserPopup popup;
-        popup.applyTheme(t);
-        const QFont font(QStringLiteral("Consolas"), 11);
-        popup.setFont(font);
-        popup.setSources(liveEntries(2));
-        open(popup, QPoint(100, 100));
-        const QImage img = renderAt(popup, dpr);
-        auto* list = popup.findChild<QListView*>();
-        QVERIFY(list);
-        const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
-        const QRect active = list->visualRect(list->model()->index(1, 0)).translated(vp);
-        QVERIFY(active.isValid());
-        const Edges a = edgesOf(active, dpr);
-        // Every near-accent pixel, anywhere.
-        int minX = img.width(), maxX = -1, minY = img.height(), maxY = -1, n = 0;
-        for (int y = 0; y < img.height(); ++y)
-            for (int x = 0; x < img.width(); ++x)
-                if (sameColour(img.pixel(x, y), t.indHoverSpan, 40)) {
-                    ++n;
-                    minX = qMin(minX, x); maxX = qMax(maxX, x);
-                    minY = qMin(minY, y); maxY = qMax(maxY, y);
+
+    void seamsReachFrameAtFractionalScales() {
+        for (double dpr : {1.0, 1.25, 1.5, 1.75, 2.0}) {
+            reset(liveEntries(100));
+            const Theme t = m_popup->theme();
+            for (int width : {480, 481, 482, 483}) {
+                m_popup->setFixedWidth(width);
+                m_popup->layout()->activate();
+                const QImage img = renderAt(*m_popup, dpr);
+                const Edges edges = edgesOf(m_popup->rect(), dpr);
+                for (const char* name : {"sourceListHeading", "sourceFooter"}) {
+                    auto* w = m_popup->findChild<QWidget*>(QString::fromLatin1(name));
+                    QVERIFY(w);
+                    const QRect r(w->mapTo(m_popup, QPoint()), w->size());
+                    const Edges child = edgesOf(r, dpr);
+                    const int y = QByteArray(name) == "sourceFooter" ? child.top : child.bottom;
+                    QCOMPARE(countColour(img, QRect(edges.left + 1, y, edges.right - edges.left - 1, 1),
+                                         containerBorderColor(t)), edges.right - edges.left - 1);
                 }
-        QVERIFY2(n > 0, "the word \"active\" should be in the accent");
-        // The two-line card's icon is fm.height() + 4 wide after the gutter;
-        // the text starts a gutter after it.
-        const int textX = active.left() + kGutter + QFontMetrics(font).height() + 4 + kGutter;
-        QVERIFY2(minX >= qFloor(textX * dpr), qPrintable(QStringLiteral("accent at x=%1 < text x=%2").arg(minX).arg(qFloor(textX * dpr))));
-        QVERIFY2(maxX < qFloor((active.right() - 28) * dpr), "accent under the x gutter");
-        QVERIFY2(minY > a.top && maxY < a.bottom,
-                 qPrintable(QStringLiteral("accent rows %1..%2 outside the active row %3..%4").arg(minY).arg(maxY).arg(a.top).arg(a.bottom)));
-        // In particular: none on the frame, none in the row's first columns.
-        const Edges e = edgesOf(popup.rect(), dpr);
-        QCOMPARE(countColour(img, colAlong(e, e.left), t.indHoverSpan, 40), 0);
-        QCOMPARE(countColour(img, QRect(a.left, a.top, 4, a.bottom - a.top + 1), t.indHoverSpan, 40), 0);
-    }
-
-    void testSizesToTheListWhenItFits() {
-        // Height comes from the real row hints, not a 520-px cap: with room
-        // below the anchor the default list gets exactly its height and no
-        // scrollbar (build/issue.png had a 90 % handle for a 3-px overflow).
-        const QRect screen = QApplication::primaryScreen()->availableGeometry();
-        SourceChooserPopup popup;
-        popup.applyTheme(loadTheme(QStringLiteral("tw")));
-        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-        popup.setSources(liveEntries());
-        const QPoint anchor(screen.left() + 40, screen.top() + 20);
-        open(popup, anchor);
-        QCOMPARE(popup.pos(), anchor);
-        QCOMPARE(popup.height(), popup.layout()->sizeHint().height());
-        auto* list = popup.findChild<QListView*>();
-        QVERIFY(list);
-        QCOMPARE(list->verticalScrollBar()->maximum(), 0);
-        const int last = list->model()->rowCount() - 1;
-        const QRect lastRow = list->visualRect(list->model()->index(last, 0));
-        QVERIFY2(lastRow.bottom() <= list->viewport()->height(), "the last row is cut off");
-    }
-
-    void testScrollbarStaysInsideTheFrame() {
-        // The scroll case: more rows than the screen has room for below (or
-        // above) the anchor. The popup caps at the screen, the list scrolls,
-        // and the bar sits INSIDE the right frame column — the frame is
-        // still unbroken, and the handle is the popup's own blend, not the
-        // app-wide solid textFaint rod.
-        const QRect screen = QApplication::primaryScreen()->availableGeometry();
-        const Theme t = loadTheme(QStringLiteral("tw"));
-        SourceChooserPopup popup;
-        popup.applyTheme(t);
-        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-        popup.setSources(liveEntries(24));
-        open(popup, screen.center());
-        auto* list = popup.findChild<QListView*>();
-        QVERIFY(list);
-        QVERIFY2(popup.height() < popup.layout()->sizeHint().height(), "the screen should cap the popup");
-        QVERIFY2(list->verticalScrollBar()->maximum() > 0, "the list should scroll");
-        QVERIFY(popup.y() + popup.height() <= screen.bottom() + 1);
-        QVERIFY(popup.y() >= screen.top());
-        const qreal dpr = 1.25;
-        const QImage img = renderAt(popup, dpr);
-        const Edges e = edgesOf(popup.rect(), dpr);
-        const int h = e.bottom - e.top + 1;
-        QCOMPARE(countColour(img, colAlong(e, e.right), t.border), h);
-        QCOMPARE(countColour(img, colAlong(e, e.left), t.border), h);
-        QCOMPARE(countColour(img, colAlong(e, e.right), t.textFaint), 0);
-        // The handle is drawn, inside the frame, and it is not solid textFaint.
-        const QRect barCols(e.right - 10, e.top + 1, 10, h - 2);
-        QCOMPARE(countColour(img, barCols, t.textFaint), 0);
-        QVERIFY2(countColour(img, barCols, t.background) < barCols.width() * barCols.height(),
-                 "no scrollbar handle rendered beside the list");
-    }
-
-    void testSeamsCrossTheScrollTrack() {
-        // The section hairlines and the Clear All divider run from the left
-        // frame column to the right one — under the 6-px scroll track too.
-        // The delegate's rows end at the viewport, so while the list
-        // scrolled those seams stopped 8 device px short of the right frame
-        // and the track sat on them as a bare strip; the scrollbar now
-        // continues them (SeamScrollBar, widgets/popup_chrome.h).
-        const QRect screen = QApplication::primaryScreen()->availableGeometry();
-        const Theme t = loadTheme(QStringLiteral("tw"));
-        SourceChooserPopup popup;
-        popup.applyTheme(t);
-        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-        popup.setSources(liveEntries(24));
-        open(popup, screen.center());
-        auto* list = popup.findChild<QListView*>();
-        QVERIFY(list);
-        QVERIFY2(list->verticalScrollBar()->maximum() > 0, "the list should scroll");
-        const QColor seam = containerBorderColor(t);
-        const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
-        for (const qreal dpr : { 1.0, 1.25 }) {
-            // At the top: the Connected header (row 0) and its hairline.
-            list->scrollToTop();
-            QApplication::processEvents();
-            QImage img = renderAt(popup, dpr);
-            const Edges e = edgesOf(popup.rect(), dpr);
-            const int w = e.right - e.left - 1;   // the interior columns
-            const QRect hdr = list->visualRect(list->model()->index(0, 0)).translated(vp);
-            QVERIFY(hdr.isValid());
-            const Edges h = edgesOf(hdr, dpr);
-            QCOMPARE(countColour(img, QRect(e.left + 1, h.bottom, w, 1), seam), w);
-            // At the bottom: the Clear All divider, the top row of the 4-px
-            // gap above its card.
-            list->scrollToBottom();
-            QApplication::processEvents();
-            img = renderAt(popup, dpr);
-            const int last = list->model()->rowCount() - 1;
-            const QRect clr = list->visualRect(list->model()->index(last, 0))
-                                  .translated(vp).adjusted(0, 4, 0, 0);
-            QVERIFY(clr.isValid());
-            const Edges c = edgesOf(clr, dpr);
-            QCOMPARE(countColour(img, QRect(e.left + 1, c.top, w, 1), seam), w);
-        }
-    }
-
-    void testDisabledClearAllDoesNotLightHover() {
-        // A disabled Clear All (nothing to clear) under the mouse stays on
-        // the surface: the hover ground is gated on enabled, like the bar's
-        // disabled cells. An enabled row under the same mouse move DOES
-        // light t.hover, so the probe is not vacuous.
-        const Theme t = loadTheme(QStringLiteral("tw"));
-        QVERIFY(t.hover != t.background);
-        SourceChooserPopup popup;
-        popup.applyTheme(t);
-        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-        QVector<SourceEntry> entries;
-        entries.append(header(QStringLiteral("Add Source")));
-        entries.append(provider(QStringLiteral("Open File"), QStringLiteral("File"), QStringLiteral("built-in")));
-        entries.append(clearAll(false));
-        popup.setSources(entries);
-        open(popup, QPoint(100, 100));
-        auto* list = popup.findChild<QListView*>();
-        QVERIFY(list);
-        const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
-        auto rowRect = [&](int row) {
-            return list->visualRect(list->model()->index(row, 0)).translated(vp);
-        };
-        auto hoverRow = [&](int row) {
-            const QPoint c = list->visualRect(list->model()->index(row, 0)).center();
-            QMouseEvent mv(QEvent::MouseMove, c, list->viewport()->mapToGlobal(c),
-                           Qt::NoButton, Qt::NoButton, Qt::NoModifier);
-            QApplication::sendEvent(list->viewport(), &mv);
-            QApplication::processEvents();
-        };
-        hoverRow(1);
-        QImage img = renderAt(popup, 1.0);
-        const QRect live = rowRect(1);
-        QVERIFY2(countColour(img, live, t.hover) > live.width() * live.height() / 2,
-                 "an enabled row under the mouse should be t.hover");
-        hoverRow(2);
-        img = renderAt(popup, 1.0);
-        // Below its divider gap, the disabled card is the surface only.
-        const QRect body = rowRect(2).adjusted(0, 6, 0, 0);
-        QCOMPARE(countColour(img, body, t.hover), 0);
-        QVERIFY(countColour(img, body, t.background) > body.width() * body.height() / 2);
-    }
-
-    void testSetSourcesWhileUpRefitsInPlace() {
-        // A per-row x delete rebuilds the list while the popup is up. The
-        // popup used to keep the height the old list needed, and the list's
-        // stretch turned the difference into bare ground between the last
-        // row and the footer; now it re-fits to the new rows with its top
-        // edge where it was. No event pump between popup() and the probes:
-        // the hidden desktop's platform would close the popup at the first
-        // one, and the re-fit is gated on it being up.
-        const QRect screen = QApplication::primaryScreen()->availableGeometry();
-        SourceChooserPopup popup;
-        popup.applyTheme(loadTheme(QStringLiteral("tw")));
-        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-        popup.setSources(liveEntries(4));
-        const QPoint anchor(screen.left() + 40, screen.top() + 20);
-        popup.popup(anchor);
-        QVERIFY(popup.isVisible());
-        const int tall = popup.height();
-        QCOMPARE(tall, popup.layout()->sizeHint().height());
-        popup.setSources(liveEntries(1));
-        QCOMPARE(popup.pos(), anchor);
-        QVERIFY2(popup.height() < tall,
-                 qPrintable(QStringLiteral("three rows fewer should shrink the popup: %1 (was %2), "
-                                           "layout hint %3, list hint %4, visible %5")
-                                .arg(popup.height()).arg(tall)
-                                .arg(popup.layout()->sizeHint().height())
-                                .arg(popup.findChild<QListView*>()->sizeHint().height())
-                                .arg(popup.isVisible())));
-        QCOMPARE(popup.height(), popup.layout()->sizeHint().height());
-        auto* list = popup.findChild<QListView*>();
-        QVERIFY(list);
-        const int last = list->model()->rowCount() - 1;
-        const QRect lastRow = list->visualRect(list->model()->index(last, 0));
-        QCOMPARE(lastRow.bottom() + 1, list->viewport()->height());   // no bare ground under it
-        popup.hide();
-    }
-
-    void testSetSourcesWhileFlippedKeepsTheBottomEdge() {
-        // Flipped above the bar, the popup's BOTTOM edge is the one on the
-        // bar. The in-place re-fit after a per-row x delete always kept the
-        // top edge, so a flipped popup shrank upward and left a gap between
-        // its bottom frame and the bar it hung from, the removed rows'
-        // height tall. Now the bottom edge stays. No event pump between
-        // popup() and the probes (the hidden desktop would close the popup;
-        // the re-fit is gated on it being up).
-        const QRect screen = QApplication::primaryScreen()->availableGeometry();
-        SourceChooserPopup popup;
-        popup.applyTheme(loadTheme(QStringLiteral("tw")));
-        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-        popup.setSources(liveEntries(4));
-        constexpr int kBarH = 28;
-        const QPoint anchor(screen.left() + 40, screen.bottom() - 40);
-        const int barTop = anchor.y() - kBarH;
-        popup.popup(anchor, barTop);
-        QVERIFY(popup.isVisible());
-        QVERIFY2(popup.y() < anchor.y(), "the popup should flip above the anchor");
-        QCOMPARE(popup.y() + popup.height(), barTop);
-        const int tall = popup.height();
-        popup.setSources(liveEntries(1));
-        QVERIFY2(popup.height() < tall, "three rows fewer should shrink the popup");
-        QCOMPARE(popup.height(), popup.layout()->sizeHint().height());
-        QCOMPARE(popup.y() + popup.height(), barTop);
-        popup.hide();
-    }
-
-    void testSeamsReachTheFrameAtEveryWidth() {
-        // At 125 % the layout's 1-logical inset is 1.25 device px, so at the
-        // widths where W * dpr has a .5 or .75 fraction the children ended
-        // one device column short of the right frame — the field's seam,
-        // the section hairlines, the Clear All divider and the footer's
-        // seam all stopped with a notch of ground before it (the default
-        // 432 just happened to snap clean). The popup paints every seam
-        // itself across its whole width now, the frame last. Four
-        // consecutive widths cover every phase; the list scrolls, so the
-        // track is under the probe too.
-        const QRect screen = QApplication::primaryScreen()->availableGeometry();
-        const qreal dpr = 1.25;
-        for (const QString& name : {QStringLiteral("tw"), QStringLiteral("vs")}) {
-            const Theme t = loadTheme(name);
-            QVERIFY(t.background.isValid());
-            const QColor seam = containerBorderColor(t);
-            for (int w = 430; w <= 433; ++w) {
-                SourceChooserPopup popup;
-                popup.applyTheme(t);
-                popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-                popup.setSources(liveEntries(24));
-                open(popup, screen.center());
-                popup.setFixedSize(w, popup.height());
-                QApplication::processEvents();
-                popup.layout()->activate();
-                auto* list = popup.findChild<QListView*>();
-                QVERIFY(list);
-                QVERIFY2(list->verticalScrollBar()->maximum() > 0, "the list should scroll");
-                const QString tag = QStringLiteral("%1 w=%2: ").arg(name).arg(w);
-                // The interior of device row `y` is the seam (or `alt`, the
-                // field's focused colour) from frame to frame.
-                auto seamRow = [&](const QImage& img, const Edges& e, int y, const QColor& alt,
-                                   const char* what, QString* why) {
-                    const int inner = e.right - e.left - 1;
-                    const QRect row(e.left + 1, y, inner, 1);
-                    const int n = countColour(img, row, seam);
-                    const int m = alt.isValid() ? countColour(img, row, alt) : 0;
-                    if (n == inner || m == inner) return true;
-                    *why = tag + QStringLiteral("%1: %2 of %3 seam px on device row %4")
-                                     .arg(QLatin1String(what)).arg(qMax(n, m)).arg(inner).arg(y);
-                    return false;
-                };
-                QString why;
-                list->scrollToTop();
-                QApplication::processEvents();
-                QImage img = renderAt(popup, dpr);
-                const Edges e = edgesOf(popup.rect(), dpr);
-                QCOMPARE(e.right, img.width() - 1);
-                QCOMPARE(countColour(img, colAlong(e, e.right), t.border), e.bottom - e.top + 1);
-                // The field's seam (in whichever colour the field is in).
-                auto* field = popup.findChild<QLineEdit*>();
-                QVERIFY(field);
-                const Edges f = edgesOf(QRect(field->mapTo(&popup, QPoint(0, 0)), field->size()), dpr);
-                QVERIFY2(seamRow(img, e, f.bottom, t.borderFocused, "field seam", &why), qPrintable(why));
-                // The Connected header's hairline.
-                const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
-                const Edges h = edgesOf(list->visualRect(list->model()->index(0, 0)).translated(vp), dpr);
-                QVERIFY2(seamRow(img, e, h.bottom, QColor(), "section hairline", &why), qPrintable(why));
-                // The footer's seam.
-                QLabel* footer = nullptr;
-                for (QLabel* l : popup.findChildren<QLabel*>())
-                    if (l->text().contains(QStringLiteral("navigate"))) footer = l;
-                QVERIFY(footer);
-                const Edges fo = edgesOf(QRect(footer->mapTo(&popup, QPoint(0, 0)), footer->size()), dpr);
-                QVERIFY2(seamRow(img, e, fo.top, QColor(), "footer seam", &why), qPrintable(why));
-                // The Clear All divider, at the bottom.
-                list->scrollToBottom();
-                QApplication::processEvents();
-                img = renderAt(popup, dpr);
-                const int last = list->model()->rowCount() - 1;
-                const Edges c = edgesOf(list->visualRect(list->model()->index(last, 0))
-                                            .translated(vp).adjusted(0, 4, 0, 0), dpr);
-                QVERIFY2(seamRow(img, e, c.top, QColor(), "Clear All divider", &why), qPrintable(why));
-                popup.hide();
             }
         }
-    }
-
-    void testFlipsAboveTheBarNotOverIt() {
-        // Near the bottom of the screen the popup flips above the anchor.
-        // The anchor is the bar's BOTTOM edge, so a popup that ended there
-        // covered the bar and the chip that opened it; given the bar's top
-        // edge (anchorTop) the flipped popup ends one device row above the
-        // bar. Without it (no bar) it ends on the anchor, as before.
-        const QRect screen = QApplication::primaryScreen()->availableGeometry();
-        SourceChooserPopup popup;
-        popup.applyTheme(loadTheme(QStringLiteral("tw")));
-        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
-        popup.setSources(liveEntries());
-        constexpr int kBarH = 28;
-        const QPoint anchor(screen.left() + 40, screen.bottom() - 40);
-        const int barTop = anchor.y() - kBarH;
-        popup.popup(anchor, barTop);
-        QTest::qWait(30);
-        QApplication::processEvents();
-        QVERIFY2(popup.y() < anchor.y(), "the popup should flip above the anchor");
-        QCOMPARE(popup.y() + popup.height(), barTop);
-        QVERIFY(popup.y() >= screen.top());
-        popup.popup(anchor);
-        QTest::qWait(30);
-        QApplication::processEvents();
-        QCOMPARE(popup.y() + popup.height(), anchor.y());
     }
 };
 

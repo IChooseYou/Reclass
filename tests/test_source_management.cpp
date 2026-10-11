@@ -1,5 +1,7 @@
 #include <QtTest/QTest>
 #include <QApplication>
+#include <QSignalSpy>
+#include <QMenu>
 #include <QSplitter>
 #include <QDir>
 #include <QFile>
@@ -40,14 +42,20 @@ public:
     std::string Version()     const override { return "0.0"; }
     std::string Author()      const override { return "test"; }
     k_ELoadType LoadType()    const override { return k_ELoadTypeManual; }
+    bool acceptTarget = true;
+    bool failCreation = false;
     bool canHandle(const QString&) const override { return true; }
     std::unique_ptr<rcx::Provider> createProvider(const QString&,
-                                                   QString* /*errorMsg*/ = nullptr) override {
+                                                   QString* errorMsg = nullptr) override {
+        if (failCreation) {
+            if (errorMsg) *errorMsg = QStringLiteral("Target unavailable");
+            return {};
+        }
         return std::make_unique<FakeBasedProvider>(QByteArray(64, '\x00'), m_base);
     }
     bool selectTarget(QWidget* /*parent*/, QString* target) override {
         *target = m_target;
-        return true;
+        return acceptTarget;
     }
 private:
     uint64_t m_base;
@@ -372,6 +380,96 @@ private slots:
 
         ProviderRegistry::instance().unregisterProvider(QStringLiteral("fakea"));
         ProviderRegistry::instance().unregisterProvider(QStringLiteral("fakeb"));
+    }
+
+    void testStableProviderIdAndCancellation() {
+        auto& registry = ProviderRegistry::instance();
+        const QString id = QStringLiteral("Example.Socket-v2");
+        FakeProviderPlugin plugin(0x4000, QStringLiteral("127.0.0.1:9000"));
+        registry.registerProvider(QStringLiteral("Socket connection"), id, &plugin);
+        m_ctrl->selectSource(id);
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_ctrl->savedSources().first().kind, id);
+        auto* previous = m_doc->provider.get();
+        m_doc->tree.baseAddress = 0x4800;
+        plugin.acceptTarget = false;
+        m_ctrl->selectSource(id);
+        QCOMPARE(m_doc->provider.get(), previous);
+        QCOMPARE(m_doc->tree.baseAddress, uint64_t(0x4800));
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_ctrl->savedSources().size(), 1);
+        registry.unregisterProvider(id);
+    }
+
+    void testFailedSavedAttachKeepsCurrentSourceAndFormula() {
+        auto& registry = ProviderRegistry::instance();
+        FakeProviderPlugin a(0x1000, QStringLiteral("1:a.exe"));
+        FakeProviderPlugin b(0x2000, QStringLiteral("2:b.exe"));
+        registry.registerProvider(QStringLiteral("A"), QStringLiteral("test.a"), &a);
+        registry.registerProvider(QStringLiteral("B"), QStringLiteral("test.b"), &b);
+        m_ctrl->selectSource(QStringLiteral("test.a"));
+        m_ctrl->selectSource(QStringLiteral("test.b"));
+        auto* previous = m_doc->provider.get();
+        m_doc->tree.baseAddress = 0x2800;
+        m_doc->tree.baseAddressFormula = QStringLiteral("0x2800");
+        a.failCreation = true;
+        QSignalSpy errors(m_ctrl, &RcxController::statusHint);
+        m_ctrl->switchSource(0);
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);
+        QCOMPARE(m_doc->provider.get(), previous);
+        QCOMPARE(m_doc->tree.baseAddress, uint64_t(0x2800));
+        QCOMPARE(m_doc->tree.baseAddressFormula, QStringLiteral("0x2800"));
+        QVERIFY(!errors.isEmpty());
+        QVERIFY(errors.last().first().toString().contains(QStringLiteral("Target unavailable")));
+        a.failCreation = false;
+        m_ctrl->switchSource(0);
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_doc->tree.baseAddress, uint64_t(0x1000));
+        registry.unregisterProvider(QStringLiteral("test.a"));
+        registry.unregisterProvider(QStringLiteral("test.b"));
+    }
+
+    void testUnavailableSavedProviderKeepsCurrentSource() {
+        FakeProviderPlugin a(0x1000, QStringLiteral("1:a.exe"));
+        ProviderRegistry::instance().registerProvider(QStringLiteral("A"), QStringLiteral("test.a"), &a);
+        m_ctrl->selectSource(QStringLiteral("test.a"));
+        const auto* previous = m_doc->provider.get();
+        auto sources = m_ctrl->savedSources();
+        SavedSourceEntry missing;
+        missing.kind = QStringLiteral("unloaded.plugin");
+        missing.providerTarget = QStringLiteral("2:b.exe");
+        missing.displayName = QStringLiteral("b.exe");
+        sources.append(missing);
+        m_ctrl->copySavedSources(sources, 0);
+        m_ctrl->switchSource(1);
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_doc->provider.get(), previous);
+        ProviderRegistry::instance().unregisterProvider(QStringLiteral("test.a"));
+    }
+
+    void testMenuAndPopupCatalogShareLabelsAndRouting() {
+        auto& registry = ProviderRegistry::instance();
+        FakeProviderPlugin plugin(0x1000, QStringLiteral("payload"));
+        registry.registerProvider(QStringLiteral("Remote Process Memory"), QStringLiteral("remoteprocessmemory"), &plugin,
+                                  QStringLiteral("RemotePlugin.dll"));
+        QMenu menu;
+        registry.populateSourceMenu(&menu);
+        const auto actions = registry.sourceActions();
+        for (const auto& entry : actions) {
+            QAction* found = nullptr;
+            for (auto* action : menu.actions())
+                if (action->data().toString() == entry.providerIdentifier) found = action;
+            QVERIFY(found);
+            QVERIFY(found->text().startsWith(entry.displayName));
+            QVERIFY(!found->text().contains(QStringLiteral(".dll")));
+        }
+        QAction* ipc = nullptr;
+        for (auto* action : menu.actions())
+            if (action->data().toString() == QStringLiteral("remoteprocessmemory")) ipc = action;
+        QVERIFY(ipc);
+        QVERIFY(ipc->text().startsWith(QStringLiteral("Process via IPC")));
+        QVERIFY(ipc->toolTip().contains(QStringLiteral("shared memory")));
+        registry.unregisterProvider(QStringLiteral("remoteprocessmemory"));
     }
 
     // ── removeSavedSource with an out-of-range index is a safe no-op ──

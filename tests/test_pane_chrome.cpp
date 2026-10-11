@@ -7,13 +7,25 @@
 
 #include <QtTest/QTest>
 #include <QApplication>
+#include <QSignalSpy>
+#include <QStyleOptionSlider>
 
 #include "core.h"
 #include "themes/theme.h"
 #include "widgets/pane_tabs.h"
 #include "widgets/selection_status.h"
+#include "widgets/zoom_slider.h"
 
 using namespace rcx;
+
+class ZoomProbe : public ZoomSlider {
+public:
+    QRect handleRect() const {
+        QStyleOptionSlider opt;
+        initStyleOption(&opt);
+        return style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
+    }
+};
 
 static Theme makeTheme() {
     Theme t;
@@ -55,6 +67,118 @@ static Built buildClass(NodeTree& tree, const char* typeName) {
 class TestPaneChrome : public QObject {
     Q_OBJECT
 private slots:
+
+    void zoomClicksReachEveryPositionAcrossItsHeight_data() {
+        QTest::addColumn<bool>("rtl");
+        QTest::addColumn<bool>("inverted");
+        QTest::newRow("normal") << false << false;
+        QTest::newRow("rtl") << true << false;
+        QTest::newRow("inverted") << false << true;
+        QTest::newRow("rtl-inverted") << true << true;
+    }
+
+    void zoomClicksReachEveryPositionAcrossItsHeight() {
+        QFETCH(bool, rtl);
+        QFETCH(bool, inverted);
+        ZoomProbe slider;
+        slider.applyTheme(makeTheme());
+        slider.setLayoutDirection(rtl ? Qt::RightToLeft : Qt::LeftToRight);
+        slider.setInvertedAppearance(inverted);
+        slider.show();
+        QApplication::processEvents();
+        // A click should select the value beneath it, including in the empty
+        // space above and below the thin painted track.
+        for (int y : {1, slider.height() / 2, slider.height() - 2}) {
+            for (int level = slider.minimum(); level <= slider.maximum(); ++level) {
+                slider.setValue(level);
+                const QRect thumb = slider.handleRect();
+                // Start at the other end, so a missed click cannot pass.
+                slider.setValue(level < (slider.minimum() + slider.maximum()) / 2 ? slider.maximum() : slider.minimum());
+                QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, QPoint(thumb.center().x(), y));
+                QVERIFY2(slider.value() == level,
+                         qPrintable(QStringLiteral("click (%1,%2): expected %3, got %4")
+                             .arg(thumb.center().x()).arg(y).arg(level).arg(slider.value())));
+            }
+        }
+    }
+
+    void zoomDragCanStartOffTheTrackAndContinueOutside() {
+        ZoomProbe slider;
+        slider.applyTheme(makeTheme());
+        slider.show();
+        QApplication::processEvents();
+        slider.setValue(5);
+        const int startX = slider.handleRect().center().x();
+        slider.setValue(-8);
+        QSignalSpy pressed(&slider, &QSlider::sliderPressed);
+        QSignalSpy released(&slider, &QSlider::sliderReleased);
+        QTest::mousePress(&slider, Qt::LeftButton, Qt::NoModifier, QPoint(startX, 1));
+        QCOMPARE(slider.value(), 5);
+        QVERIFY(slider.isSliderDown());
+        int previous = slider.value();
+        for (int x = startX; x <= slider.width() + 20; ++x) {
+            const QPoint p(x, -20);
+            QMouseEvent move(QEvent::MouseMove, p, slider.mapToGlobal(p), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&slider, &move);
+            QVERIFY(slider.value() >= previous);
+            previous = slider.value();
+        }
+        QCOMPARE(slider.value(), slider.maximum());
+        const QPoint outside(-20, slider.height() + 20);
+        QMouseEvent move(QEvent::MouseMove, outside, slider.mapToGlobal(outside), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&slider, &move);
+        QCOMPARE(slider.value(), slider.minimum());
+        QTest::mouseRelease(&slider, Qt::LeftButton, Qt::NoModifier, outside);
+        QVERIFY(!slider.isSliderDown());
+        QCOMPARE(pressed.size(), 1);
+        QCOMPARE(released.size(), 1);
+    }
+
+    void zoomThumbGrabDoesNotJump() {
+        ZoomProbe slider;
+        slider.applyTheme(makeTheme());
+        slider.show();
+        QApplication::processEvents();
+        slider.setValue(0);
+        const QRect handle = slider.handleRect();
+        for (int x = handle.left(); x <= handle.right(); ++x) {
+            QTest::mousePress(&slider, Qt::LeftButton, Qt::NoModifier, QPoint(x, 1));
+            QCOMPARE(slider.value(), 0);
+            const QPoint below(x, slider.height() + 20);
+            QMouseEvent move(QEvent::MouseMove, below, slider.mapToGlobal(below), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&slider, &move);
+            QCOMPARE(slider.value(), 0);
+            QTest::mouseRelease(&slider, Qt::LeftButton, Qt::NoModifier, below);
+            QCOMPARE(slider.value(), 0);
+        }
+    }
+
+    void zoomKeepsKeyboardWheelAndDisabledBehavior() {
+        ZoomSlider slider;
+        slider.applyTheme(makeTheme());
+        slider.show();
+        QApplication::processEvents();
+        slider.setValue(0);
+        QTest::keyClick(&slider, Qt::Key_Right);
+        QCOMPARE(slider.value(), 1);
+        QTest::keyClick(&slider, Qt::Key_Home);
+        QCOMPARE(slider.value(), slider.minimum());
+        QTest::keyClick(&slider, Qt::Key_End);
+        QCOMPARE(slider.value(), slider.maximum());
+        slider.setValue(0);
+        const QPoint at = slider.rect().center();
+        QWheelEvent wheel(at, slider.mapToGlobal(at), QPoint(), QPoint(0, 120),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(&slider, &wheel);
+        QVERIFY(slider.value() > 0);
+        const int before = slider.value();
+        QTest::mouseClick(&slider, Qt::RightButton, Qt::NoModifier, QPoint(1, 1));
+        QCOMPARE(slider.value(), before);
+        slider.setEnabled(false);
+        QTest::mouseClick(&slider, Qt::LeftButton, Qt::NoModifier, QPoint(1, 1));
+        QCOMPARE(slider.value(), before);
+        QVERIFY(!slider.isSliderDown());
+    }
 
     // ── Pane tabs ────────────────────────────────────────────────────────
     void testTabZeroIsStructureNotTheAppName() {

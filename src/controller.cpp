@@ -24,6 +24,7 @@
 #include "widgets/themed_messagebox.h"
 #include "widgets/themed_inputdialog.h"
 #include "widgets/dialog_button.h"
+#include "widgets/dock_header.h"
 #include "widgets/enum_picker_popup.h"
 #include "gotoaddressdialog.h"
 #include <Qsci/qsciscintilla.h>
@@ -7153,115 +7154,39 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
     }
     auto* popup = ensureSourcePopup(editor);
 
-    // Build entries from saved sources + registered providers. Wrapped in a
-    // lambda so the per-source delete can rebuild the list in place without
-    // closing the popup.
-    auto buildEntries = [this]() -> QVector<SourceEntry> {
-    QVector<SourceEntry> entries;
-
-    // Section: bound sources (if any)
-    if (!m_savedSources.isEmpty()) {
-        SourceEntry hdr;
-        hdr.entryKind = SourceEntry::SectionHeader;
-        hdr.displayName = QStringLiteral("Connected");
-        hdr.enabled = false;
-        entries.append(hdr);
-
-        for (int i = 0; i < m_savedSources.size(); i++) {
-            const auto& ss = m_savedSources[i];
+    auto buildEntries = [this]() {
+        QVector<SourceEntry> entries;
+        for (int i = 0; i < m_savedSources.size(); ++i) {
+            const auto& saved = m_savedSources[i];
             SourceEntry e;
-            e.entryKind = SourceEntry::SavedSource;
-            e.displayName = ss.displayName;
-            e.providerIdentifier = ss.kind;
-            e.providerTarget = ss.providerTarget;
-            e.filePath = ss.filePath;
+            e.displayName = saved.displayName;
+            e.providerIdentifier = saved.kind;
+            e.providerTarget = saved.providerTarget;
+            e.filePath = saved.filePath;
             e.savedIndex = i;
-            e.isActive = (i == m_activeSourceIdx);
-            e.kindLabel = kindLabelFor(ss.kind);
-            e.iconPath = iconForProvider(ss.kind);
-
-            // Extract PID from providerTarget "1234:processname"
-            if (!ss.providerTarget.isEmpty() && ss.providerTarget.contains(':'))
-                e.pid = ss.providerTarget.section(':', 0, 0);
-
-            // Base address
-            if (!ss.baseAddressFormula.isEmpty())
-                e.baseAddress = ss.baseAddressFormula;
-            else if (ss.baseAddress != 0)
-                e.baseAddress = QStringLiteral("0x") +
-                    QString::number(ss.baseAddress, 16).toUpper();
-
-            // Architecture (from active provider if this is the active source)
-            if (e.isActive && this->provider())
-                e.arch = (m_doc->tree.pointerSize >= 8)
-                    ? QStringLiteral("x64") : QStringLiteral("x86");
-
+            e.isActive = i == m_activeSourceIdx;
+            e.kindLabel = kindLabelFor(saved.kind);
+            e.iconPath = iconForProvider(saved.kind);
+            e.pid = sourcePid(saved.kind, saved.providerTarget);
+            e.baseAddress = !saved.baseAddressFormula.isEmpty() ? saved.baseAddressFormula
+                : saved.baseAddress ? QStringLiteral("0x") + QString::number(saved.baseAddress, 16).toUpper() : QString();
+            if (e.isActive && provider())
+                e.arch = provider()->pointerSize() >= 8 ? QStringLiteral("x64") : QStringLiteral("x86");
+            // Inactive process entries have unknown availability. Do not
+            // present them as connected or create providers just to probe.
+            if (saved.kind != QStringLiteral("File")
+                && !ProviderRegistry::instance().findProvider(saved.kind)) {
+                e.unavailableReason = QStringLiteral("Provider unavailable");
+                e.isStale = true;
+            }
             entries.append(e);
         }
-    }
-
-    // Section: available providers
-    {
-        SourceEntry hdr;
-        hdr.entryKind = SourceEntry::SectionHeader;
-        hdr.displayName = QStringLiteral("Add Source");
-        hdr.enabled = false;
-        entries.append(hdr);
-
-        // File provider (always available — built into the binary, no
-        // plugin DLL). Set kindLabel + a "built-in" subtext so the row
-        // has the same two-line shape as plugin-loaded providers
-        // (Process / Kernel / etc) below it.
-        {
-            SourceEntry e;
-            e.entryKind = SourceEntry::ProviderAction;
-            e.displayName = QStringLiteral("Open File");
-            e.providerIdentifier = QStringLiteral("File");
-            e.kindLabel = kindLabelFor(QStringLiteral("File"));
-            e.dllFileName = QStringLiteral("built-in");
-            e.iconPath = iconForProvider(QStringLiteral("File"));
-            entries.append(e);
-        }
-
-        // Registered plugin providers
-        const auto& providers = ProviderRegistry::instance().providers();
-        for (const auto& prov : providers) {
-            SourceEntry e;
-            e.entryKind = SourceEntry::ProviderAction;
-            e.displayName = prov.name;
-            e.providerIdentifier = prov.name;
-            e.dllFileName = prov.dllFileName;
-            e.kindLabel = kindLabelFor(prov.identifier);
-            e.iconPath = iconForProvider(prov.identifier);
-            entries.append(e);
-        }
-    }
-
-    // Clear All action — always present so the user has a visible
-    // "reset" affordance even before any sources are saved.
-    {
-        SourceEntry e;
-        e.entryKind = SourceEntry::ClearAction;
-        e.displayName = QStringLiteral("Clear All");
-        e.iconPath = QStringLiteral(":/vsicons/clear-all.svg");
-        e.enabled = !m_savedSources.isEmpty();
-        entries.append(e);
-    }
-
-    return entries;
+        entries += ProviderRegistry::sourceActions();
+        return entries;
     };
 
-    // Configure and show popup
-    QSettings settings("RC", "RC");
-    QString fontName = settings.value("font", "JetBrains Mono").toString();
-    QFont font(fontName, 12);
-    font.setFixedPitch(true);
-    auto* sci = editor->scintilla();
-    int zoom = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
-    font.setPointSize(font.pointSize() + zoom);
-
-    font.setPointSize(font.pointSize() - 1);  // slightly smaller than editor
-    popup->setFont(font);
+    // Chrome follows the chosen app face and OS DPI, independently of editor zoom.
+    popup->setFont(chromeFont());
     popup->applyTheme(ThemeManager::instance().current());
     popup->setSources(buildEntries());
 
@@ -7269,6 +7194,11 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
             this, [this](int idx) { switchToSavedSource(idx); });
     connect(popup, &SourceChooserPopup::providerSelected,
             this, [this](const QString& id) { selectSource(id); });
+    connect(popup, &SourceChooserPopup::populateProviderMenu,
+            this, [](const QString& id, QMenu* menu) {
+                const auto* info = ProviderRegistry::instance().findProvider(id);
+                if (info && info->plugin) info->plugin->populatePluginMenu(menu);
+            });
     connect(popup, &SourceChooserPopup::removeRequested,
             this, [this, popup, buildEntries](int savedIdx) {
                 removeSavedSource(savedIdx);
@@ -7306,8 +7236,8 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
             } else if (ss.kind == QStringLiteral("File")) {
                 alive.append(QFile::exists(ss.filePath));
             } else {
-                // For non-active process sources, assume alive
-                // (probing would require creating a temporary provider)
+                // Unknown status: leave neutral. Only false results mark a
+                // source unavailable; true does not advertise a live connection.
                 alive.append(true);
             }
         }
@@ -8070,34 +8000,34 @@ uint64_t RcxController::findOrCreateStructByName(const QString& typeName, int de
     return root.id;
 }
 
-void RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target,
+bool RcxController::attachViaPlugin(const QString& providerIdentifier, const QString& target,
                                     bool registerAsSavedSource, QString* errorOutput) {
     if (errorOutput) errorOutput->clear();
     const auto* info = ProviderRegistry::instance().findProvider(providerIdentifier);
     if (!info || !info->plugin) {
-        if (errorOutput) { *errorOutput = QStringLiteral("Provider is not registered: ") + providerIdentifier; return; }
+        if (errorOutput) { *errorOutput = QStringLiteral("Provider is not registered: ") + providerIdentifier; return false; }
         ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
             QStringLiteral("Provider Unavailable"),
             QStringLiteral("Provider \"%1\" isn't registered. Make sure the plugin is loaded.")
                 .arg(providerIdentifier));
-        return;
+        return false;
     }
 
     QString errorMsg;
     auto provider = info->plugin->createProvider(target, &errorMsg);
     if (!provider) {
-        if (errorOutput) { *errorOutput = errorMsg.isEmpty() ? QStringLiteral("Provider could not attach") : errorMsg; return; }
+        if (errorOutput) { *errorOutput = errorMsg.isEmpty() ? QStringLiteral("Provider could not attach") : errorMsg; return false; }
         if (!errorMsg.isEmpty())
             ThemedMessageBox::warn(qobject_cast<QWidget*>(parent()),
                 QStringLiteral("Couldn't Attach"), errorMsg);
-        return;
+        return false;
     }
 
     if ((m_instance || m_doc->controllers.size() > 1)
         && provider->isLive() && provider->pointerSize() != m_doc->tree.pointerSize) {
         if (errorOutput) *errorOutput = QStringLiteral("Source pointer size differs from the shared class definition");
         emit statusHint(QStringLiteral("Source pointer size differs from the shared class definition"));
-        return;
+        return false;
     }
     if (!m_instance && m_doc->controllers.size() == 1) m_doc->undoStack.clear();
     this->provider() = std::move(provider);
@@ -8151,6 +8081,7 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
 
     emit m_doc->documentChanged();
     refresh();
+    return true;
 }
 
 void RcxController::switchToSavedSource(int idx) {
@@ -8182,14 +8113,18 @@ void RcxController::switchToSavedSource(int idx) {
         resetSnapshot();
         refresh();
     } else if (!entry.providerTarget.isEmpty()) {
-        m_activeSourceIdx = idx;
-        // Plugin-based provider (e.g. "processmemory" with target "pid:name")
-        // Restore formula before attach so it can be re-evaluated against the new provider
+        const QString previousFormula = baseAddressFormula();
         baseAddressFormula() = entry.baseAddressFormula;
-        attachViaPlugin(entry.kind, entry.providerTarget);
-        // Restore saved base address — always override with saved value on source switch
+        QString error;
+        if (!attachViaPlugin(entry.kind, entry.providerTarget, false, &error)) {
+            baseAddressFormula() = previousFormula;
+            emit statusHint(QStringLiteral("Couldn't switch source: ") + error);
+            return;
+        }
+        m_activeSourceIdx = idx;
         if (entry.baseAddressFormula.isEmpty())
             baseAddress() = entry.baseAddress;
+        refresh();
     }
     // Notify listeners that the active source changed — used by the
     // doc tab's source-icon to swap to the new provider's icon.
@@ -8240,7 +8175,16 @@ void RcxController::selectSource(const QString& text) {
             refresh();
         }
     } else {
-        const auto* providerInfo = ProviderRegistry::instance().findProvider(text.toLower().replace(" ", ""));
+        const auto& registry = ProviderRegistry::instance();
+        const auto* providerInfo = registry.findProvider(text);
+        // Compatibility with automation passing the original full name.
+        // UI actions always pass the stable, case-sensitive identifier.
+        if (!providerInfo) {
+            for (const auto& candidate : registry.providers())
+                if (candidate.name == text) { providerInfo = &candidate; break; }
+        }
+        if (!providerInfo)
+            providerInfo = registry.findProvider(text.toLower().remove(' '));
         if (providerInfo) {
             QString target;
             bool selected = false;

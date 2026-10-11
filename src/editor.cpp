@@ -2788,12 +2788,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     int patchLineLo = -1, patchLineHi = -1;
     {
         PROFILE_SCOPE("applyDocument.setText");
-        // Diff-and-patch: when the previous-frame text exists and the new
-        // text shares a common head/tail, replace only the differing
-        // middle. Common case during rapid editing (append at end, value
-        // tick, single-field mutation) is one or two changed lines.
-        // Falls back to full setText only when the diff covers >50% of
-        // the document or the previous text was empty.
+        // Preserve existing lines for value updates. When the row count
+        // changes, replace the differing middle if it covers <=50% of the
+        // document; otherwise use a full replacement.
         // Diff against the command row Scintilla ACTUALLY holds. compose
         // emits a constant placeholder for line 0 that setCommandRowText
         // overwrites (and mirrors into m_prevText), so diffing the raw
@@ -2815,7 +2812,40 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             newTextPtr = &newTextAdj;
         }
         const QString& newText = *newTextPtr;
+        // Value refreshes keep the rows but can change almost every line.
+        // Deleting/reinserting their newlines (or calling setText) temporarily
+        // shrinks the document, resets the scrollbar and clamps its position.
+        // Patch inside each line instead, leaving the line table intact.
         if (!m_prevText.isEmpty()
+            && m_prevText.count(QLatin1Char('\n')) == newText.count(QLatin1Char('\n'))) {
+            const auto oldLines = m_prevText.toUtf8().split('\n');
+            const auto newLines = newText.toUtf8().split('\n');
+            m_sci->setReadOnly(false);
+            for (int line = newLines.size() - 1; line >= 0; --line) {
+                if (oldLines[line] == newLines[line]) continue;
+                const long start = m_sci->SendScintilla(
+                    QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)line);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, start);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND,
+                                     (unsigned long)(start + oldLines[line].size()));
+                m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
+                                     (uintptr_t)newLines[line].size(), newLines[line].constData());
+                m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERDELETE,
+                                     (unsigned long)line, (long)-1);
+                patchLineLo = line;
+                if (patchLineHi < 0) patchLineHi = line;
+            }
+            m_sci->setReadOnly(true);
+            if (patchLineLo >= 0) {
+                patchByteStart = m_sci->SendScintilla(
+                    QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)patchLineLo);
+                patchByteLen = m_sci->SendScintilla(
+                    QsciScintillaBase::SCI_GETLINEENDPOSITION, (unsigned long)patchLineHi)
+                    - patchByteStart;
+            }
+            didPatch = true;
+        }
+        if (!didPatch && !m_prevText.isEmpty()
             && m_prevText.size() > 0 && newText.size() > 0) {
             PROFILE_SCOPE("applyDocument.diff");
             const int oldN = m_prevText.size();
@@ -4488,7 +4518,9 @@ void RcxEditor::restoreViewState(const ViewState& vs) {
     long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
                                     (unsigned long)line,
                                     (long)std::max(0, vs.cursorCol));
-    m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, (unsigned long)pos);
+    // Restoring a caret is not navigation: GOTOPOS scrolls to an off-screen
+    // caret before we restore the viewport, making the thumb jump twice.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETEMPTYSELECTION, (unsigned long)pos);
 
     // During smooth scroll animation, keep the animation's current position
     // instead of snapping to the saved ViewState (which is pre-animation).

@@ -2777,6 +2777,71 @@ private slots:
     // regardless of font, and runs the check at two different font sizes to prove
     // font independence.
     // ── Test: horizontal scrollbar after long name rename ──
+    void testLiveRefreshKeepsScrollbarsStable_data() {
+        QTest::addColumn<int>("zoom");
+        QTest::newRow("small") << -8;
+        QTest::newRow("normal") << 0;
+        QTest::newRow("large") << 8;
+    }
+
+    void testLiveRefreshKeepsScrollbarsStable() {
+        QFETCH(int, zoom);
+        RcxEditor editor;
+        editor.resize(900, 300);
+        editor.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&editor));
+        auto* sci = editor.scintilla();
+        sci->zoomTo(zoom);
+        auto* bar = sci->verticalScrollBar();
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "MovingValues";
+        root.collapsed = false;
+        const uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+        for (int i = 0; i < 60; ++i) {
+            Node n;
+            n.kind = NodeKind::Float;
+            n.name = QString::fromUtf8("value_\xc3\xa9_%1").arg(i);
+            n.offset = i * 4;
+            n.parentId = rootId;
+            tree.addNode(n);
+        }
+        auto frame = [&](float value) {
+            QByteArray bytes(60 * 4, '\0');
+            for (int i = 0; i < 60; ++i)
+                std::memcpy(bytes.data() + i * 4, &value, sizeof(value));
+            return compose(tree, BufferProvider(bytes), rootId);
+        };
+        editor.applyDocument(frame(1.0f));
+        QApplication::processEvents();
+        for (const QSize size : {QSize(900, 300), QSize(500, 240), QSize(1200, 1400), QSize(900, 300)}) {
+            editor.resize(size);
+            QApplication::processEvents();
+            sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                                 (unsigned long)qMin(20, bar->maximum()));
+            QApplication::processEvents();
+            const int top = sci->firstVisibleLine();
+            const int maximum = bar->maximum();
+            const QRect viewport = sci->viewport()->geometry();
+            QSignalSpy rangeChanges(bar, &QScrollBar::rangeChanged);
+            for (int i = 0; i < 10; ++i) {
+                auto state = editor.saveViewState();
+                const auto result = frame(2.0f + i);
+                editor.applyDocument(result);
+                editor.restoreViewState(state);
+                QApplication::processEvents();
+                QCOMPARE(sci->text(), result.text);
+                QCOMPARE(sci->firstVisibleLine(), top);
+                QCOMPARE(bar->value(), top);
+                QCOMPARE(bar->maximum(), maximum);
+                QCOMPARE(sci->viewport()->geometry(), viewport);
+            }
+            QCOMPARE(rangeChanges.size(), 0);
+        }
+    }
+
     void testHScrollResetAfterNameShrink() {
         // Use a dedicated narrow editor so content easily overflows the viewport
         auto* editor = new RcxEditor();

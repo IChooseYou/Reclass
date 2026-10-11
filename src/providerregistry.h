@@ -1,5 +1,6 @@
 #pragma once
 #include "iplugin.h"
+#include "sourceentry.h"
 #include <QList>
 #include <QString>
 #include <functional>
@@ -64,9 +65,12 @@ public:
     // Clear all providers
     void clear();
 
-    // Populate a QMenu with source items (File, providers with icons/dll names,
-    // plugin actions, saved sources). Used by both the main window Data Source
-    // menu and the RcxEditor inline source picker.
+    // Shared labels, descriptions, icons, and stable routing IDs for every
+    // source entry point. File is available even without loaded plugins.
+    static QVector<rcx::SourceEntry> sourceActions();
+
+    // Native-menu fallback using the same provider catalog as the popup.
+    // Provider management commands stay separate from source selection.
     static void populateSourceMenu(QMenu* menu,
                                    const QVector<SavedSourceDisplay>& savedSources = {});
 

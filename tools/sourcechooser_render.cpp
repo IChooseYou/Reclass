@@ -1,33 +1,6 @@
-// Offscreen render harness for the SourceChooserPopup. Builds the list the
-// controller builds for a live session — a "Connected" section with the
-// attached process (PID + arch badges, "active"), the "Add Source" section
-// with the built-in File provider and every plugin provider the app ships,
-// and Clear All — and grabs the popup to a PNG per theme so the frame, the
-// surfaces, the section labels and the two-line cards can be pixel-scanned
-// deterministically instead of eyeballed in a live screenshot.
-//
-// Runs on the default windows platform (the offscreen plugin isn't installed;
-// the popup is a transient real window) — drive it on the hidden desktop via
-// tools/run_tests_hidden.py's run_hidden(), which is at 125 %, so the grabs
-// come back at dpr 1.25 like the user's window.
-//
-// Usage: sourcechooser_render <out-prefix> [theme ...] [many]
-//   theme  a built-in theme's "name" or JSON basename (tw, vs, ...); one PNG
-//          per theme at <out-prefix>_<theme>.png. Default: tw vs.
-//   many   12 saved sources instead of one, to confirm the list scrolls
-//          inside the capped popup height rather than breaking.
-//
-// The theme is handed to applyTheme() straight from ThemeManager's list —
-// never through setCurrent(), which PERSISTS the choice to the QSettings the
-// real app reads at startup. The popup paints everything (chrome, frame,
-// field seam, rows) from the Theme it was given, so a harness run neither
-// needs nor touches the user's app theme.
-//
-// Stdout, per theme: the popup's logical size, the dpr and the grab's device
-// size, then every child's logical rect in popup coordinates (title, Esc,
-// filter, list viewport, the vertical scrollbar with its range, footer) and
-// each list row's rect, so a pixel scan can crop any part exactly (multiply
-// by the dpr).
+// Render the compact source chooser on the hidden desktop.
+// Usage: sourcechooser_render <prefix> [vs tw] [many|empty|overflow|search|large|cached]
+// Images use the same chrome font and source metadata as the real chooser.
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -45,16 +18,9 @@
 #include <QToolButton>
 #include "sourcechooserpopup.h"
 #include "themes/thememanager.h"
+#include "widgets/dock_header.h"
 
 using namespace rcx;
-
-static SourceEntry header(const QString& name) {
-    SourceEntry h;
-    h.entryKind   = SourceEntry::SectionHeader;
-    h.displayName = name;
-    h.enabled     = false;
-    return h;
-}
 
 static SourceEntry saved(const QString& name, const QString& providerId,
                          const QString& pid, const QString& arch,
@@ -67,6 +33,7 @@ static SourceEntry saved(const QString& name, const QString& providerId,
     e.kindLabel          = kindLabelFor(providerId);
     e.iconPath           = iconForProvider(providerId);
     e.pid                = pid;
+    e.providerTarget     = pid + QChar(':') + name;
     e.arch               = arch;
     e.baseAddress        = baseAddr;
     e.savedIndex         = savedIndex;
@@ -92,7 +59,6 @@ static SourceEntry provider(const QString& name, const QString& identifier,
 
 static QVector<SourceEntry> buildEntries(bool many) {
     QVector<SourceEntry> entries;
-    entries.append(header(QStringLiteral("Connected")));
     if (many) {
         for (int i = 0; i < 12; ++i)
             entries.append(saved(QStringLiteral("process_%1.exe").arg(i),
@@ -109,7 +75,6 @@ static QVector<SourceEntry> buildEntries(bool many) {
                               QStringLiteral("0x2665EACD160"), 0,
                               /*active*/ true, /*stale*/ false));
     }
-    entries.append(header(QStringLiteral("Add Source")));
     entries.append(provider(QStringLiteral("Open File"), QStringLiteral("File"),
                             QStringLiteral("built-in")));
     entries.append(provider(QStringLiteral("Kernel Memory"), QStringLiteral("kernelmemory"),
@@ -117,21 +82,13 @@ static QVector<SourceEntry> buildEntries(bool many) {
     entries.append(provider(QStringLiteral("Process Memory"), QStringLiteral("processmemory"),
                             QStringLiteral("libProcessMemoryPlugin.dll")));
     entries.append(provider(QStringLiteral("ReClass.NET Compat Layer"),
-                            QStringLiteral("RC.netcompatlayer"),
+                            QStringLiteral("reclass.netcompatlayer"),
                             QStringLiteral("libRcNetCompatPlugin.dll")));
     entries.append(provider(QStringLiteral("Remote Process Memory"),
                             QStringLiteral("remoteprocessmemory"),
                             QStringLiteral("libRemoteProcessMemoryPlugin.dll")));
     entries.append(provider(QStringLiteral("WinDbg Memory"), QStringLiteral("windbgmemory"),
                             QStringLiteral("libWinDbgMemoryPlugin.dll")));
-    {
-        SourceEntry c;
-        c.entryKind   = SourceEntry::ClearAction;
-        c.displayName = QStringLiteral("Clear All");
-        c.iconPath    = QStringLiteral(":/vsicons/clear-all.svg");
-        c.enabled     = true;
-        entries.append(c);
-    }
     return entries;
 }
 
@@ -166,31 +123,23 @@ int main(int argc, char** argv) {
     const QString prefix = (argc > 1) ? QString::fromLocal8Bit(argv[1])
                                       : QStringLiteral("sourcechooser_render");
     QStringList themeArgs;
-    bool many = false;
+    bool many = false, empty = false, overflow = false, search = false, large = false, cached = false;
     for (int i = 2; i < argc; ++i) {
         const QString a = QString::fromLocal8Bit(argv[i]);
         if (a == QStringLiteral("many")) many = true;
+        else if (a == QStringLiteral("empty")) empty = true;
+        else if (a == QStringLiteral("overflow")) overflow = true;
+        else if (a == QStringLiteral("search")) search = true;
+        else if (a == QStringLiteral("large")) large = true;
+        else if (a == QStringLiteral("cached")) cached = true;
         else themeArgs << a;
     }
     if (themeArgs.isEmpty()) themeArgs << QStringLiteral("tw") << QStringLiteral("vs");
 
-    // The controller's font: the app's editor face (QSettings "font",
-    // JetBrains Mono by default) at 12 pt, one point smaller for the popup.
-    // The app registers its bundled faces at startup (main.cpp); without
-    // them the saved name falls back to Courier New, whose shorter line
-    // height hides the sizing the user sees (the bundled faces' taller
-    // cards push the default list past the popup's height cap).
-    for (const char* face : {":/fonts/JetBrainsMono.ttf", ":/fonts/IBMPlexMono.ttf"}) {
-        const int id = QFontDatabase::addApplicationFont(QString::fromLatin1(face));
-        out << "bundled " << face << " -> "
-            << (id >= 0 ? QFontDatabase::applicationFontFamilies(id).join(", ") : QStringLiteral("FAILED"))
-            << "\n";
-    }
-    const QString fontSetting = QSettings(QStringLiteral("RC"), QStringLiteral("RC"))
-                                    .value(QStringLiteral("font"), QStringLiteral("JetBrains Mono")).toString();
-    QFont font(fontSetting, 11);
-    font.setFixedPitch(true);
-    out << "font setting: \"" << fontSetting << "\"\n";
+    QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/JetBrainsMono.ttf"));
+    QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/IBMPlexMono.ttf"));
+    QFont font = chromeFont();
+    if (large) font.setPointSize(18);
 
     // The app's global scrollbar rule (MainWindow::applyGlobalTheme): the
     // popup's list would inherit it in the app, so the harness wears it too
@@ -214,10 +163,25 @@ int main(int argc, char** argv) {
         applyScrollbarQss(theme);
 
         SourceChooserPopup popup;
+        // RcxController warms an empty popup before its first real use.
+        if (cached) popup.warmUp();
         popup.applyTheme(theme);
         popup.setFont(font);
-        popup.setSources(buildEntries(many));
+        auto entries = buildEntries(many);
+        if (cached)
+            entries.append(provider(QStringLiteral("Example provider"), QStringLiteral("example"),
+                                    QStringLiteral("example.dll")));
+        if (empty) {
+            for (int i = entries.size() - 1; i >= 0; --i)
+                if (entries[i].entryKind == SourceEntry::SavedSource) entries.removeAt(i);
+        }
+        if (overflow)
+            for (int i = 0; i < 8; ++i)
+                entries.append(provider(QStringLiteral("Transport %1").arg(i),
+                                        QStringLiteral("transport%1").arg(i), QStringLiteral("transport.dll")));
+        popup.setSources(entries);
         popup.popup(QPoint(120, 120));
+        if (search) popup.findChild<QLineEdit*>()->setText(QStringLiteral("process"));
         app.processEvents();
         app.processEvents();
 
@@ -235,6 +199,9 @@ int main(int argc, char** argv) {
             out << "  label \"" << l->text().left(24) << "\" " << rectStr(inPopup(l, &popup)) << "\n";
         if (auto* esc = popup.findChild<QToolButton*>())
             out << "  esc " << rectStr(inPopup(esc, &popup)) << "\n";
+        for (auto* button : popup.findChildren<QToolButton*>())
+            if (!button->property("providerId").toString().isEmpty())
+                out << "  provider " << button->text() << " " << rectStr(inPopup(button, &popup)) << "\n";
         if (auto* edit = popup.findChild<QLineEdit*>())
             out << "  filter " << rectStr(inPopup(edit, &popup)) << "\n";
         if (auto* view = popup.findChild<QListView*>()) {

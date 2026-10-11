@@ -879,11 +879,11 @@ bool RemoteProcessMemoryPlugin::selectTarget(QWidget* parent, QString* target)
 
     /* ── 2. ask inject or connect ── */
     QMessageBox box(parent);
-    box.setWindowTitle(QStringLiteral("Remote Process Memory"));
+    box.setWindowTitle(QStringLiteral("Process via IPC"));
     box.setText(QStringLiteral("Connect to %1 (PID %2)").arg(name).arg(pid));
-    box.setInformativeText(QStringLiteral("Choose how to connect to the target:"));
+    box.setInformativeText(QStringLiteral("Read/write through a payload in the target process using shared memory."));
     QAbstractButton* injectBtn  = box.addButton(QStringLiteral("Inject Payload"),   QMessageBox::ActionRole);
-    QAbstractButton* connectBtn = box.addButton(QStringLiteral("Already Injected"), QMessageBox::ActionRole);
+    QAbstractButton* connectBtn = box.addButton(QStringLiteral("Connect to Existing Payload"), QMessageBox::ActionRole);
     box.addButton(QMessageBox::Cancel);
     box.exec();
 

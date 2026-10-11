@@ -11,7 +11,7 @@
 #include "widgets/panel_search_field.h"
 #include "names/name_provider.h"
 namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class UnifiedSymbolPanel; class TimelineStrip; }
-namespace rcx { class RibbonBar; class RibbonActions; }
+namespace rcx { class RibbonBar; class RibbonActions; class ZoomSlider; }
 class QToolBar;
 class QActionGroup;
 #include <QMainWindow>
@@ -99,6 +99,8 @@ public:
     // active tab's first pane. Used by `--screenshot <png> both` to capture
     // the split layout headlessly (mirrors the scanner/workspace args).
     void previewBothSplit();
+    bool previewZoomInteraction(); // --screenshot zoom: click coverage and view sync
+    bool previewDemoProject(); // --screenshot simworkspace: close/reopen demo types
     void previewCodeView();   // select the single "Code" view (test/preview)
     void previewInstances(); // --screenshot instances: shared layout at two addresses
     void previewLargeFile(); // --screenshot largefile, RCX_LARGE_FILE supplies the fixture
@@ -285,7 +287,7 @@ private:
         QComboBox*     fmtCombo   = nullptr;
         QComboBox*     scopeCombo = nullptr;
         QToolButton*   fmtGear    = nullptr;
-        QSlider*       zoomSlider = nullptr;  // drives Scintilla zoom; always shown
+        ZoomSlider*    zoomSlider = nullptr;  // drives Scintilla zoom; always shown
         QLabel*        zoomLabel  = nullptr;  // "%" readout next to the slider
         ViewMode       viewMode  = VM_Reclass;
         uint64_t       lastRenderedRootId = 0;
@@ -330,7 +332,10 @@ private:
     // over freed memory. Automatically nulls when the dock is destroyed.
     QPointer<QDockWidget> m_activeDocDock;  // tracks active document dock
     QVector<QDockWidget*> m_sentinelDocks;    // permanent sentinels for always-visible tab bars
-    QVector<RcxDocument*> m_allDocs;  // all open docs, shared with controllers
+    QVector<RcxDocument*> m_allDocs;  // project documents, shared with controllers
+    QPointer<RcxDocument> m_demoDocument; // built-in example remains available after its tabs close
+    QVector<SavedSourceEntry> m_demoSavedSources;
+    int m_demoActiveSource = -1;
     bool m_closingAll = false;        // guards spurious project_new during batch close
     struct ClosingGuard {
         bool& flag;
@@ -456,7 +461,7 @@ private:
     WorkspaceDelegate*    m_workspaceDelegate = nullptr;
     rcx::DockHeader*      m_workspaceHeader = nullptr;
     QLabel*               m_dockTitleLabel  = nullptr;   // owned by m_workspaceHeader
-    QSet<uint64_t>        m_pinnedIds;
+    QSet<rcx::WorkspaceTypeKey> m_pinnedIds;
     // Collapsed left-edge rail shown while the workspace dock is hidden — a
     // discoverable handle to re-open it. A thin, fixed-width, feature-less dock
     // in the LEFT area so it RESERVES its own column outside the editor (the
@@ -474,6 +479,8 @@ private:
     void updateWorkspaceDockEdge();     // docked-only right hairline (header + panel)
     void rebuildWorkspaceModel();       // debounced — safe to call frequently
     void rebuildWorkspaceModelNow();    // immediate rebuild
+    RcxDocument* workspaceDocument(const QModelIndex& index) const;
+    QDockWidget* workspaceOwner(RcxDocument* doc) const;
     int  computeWorkspaceDockWidth() const;  // fit to longest type name
     QTimer*               m_workspaceRebuildTimer = nullptr;
     QTimer*               m_workspaceSearchTimer  = nullptr;
